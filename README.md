@@ -50,7 +50,7 @@ Without any keys, the server starts on PGlite (no database to install), the Draw
 ## Security model
 
 - **Customers sign once, not per purchase.** The server's NEAR key is a function-call key that can only call `purchase`, `confirm_delivery` and `fail_purchase`. Raising limits, changing settings and withdrawing need the customer's own full-access signature.
-- **A compromised server or agent can spend at most your limits.** The contract checks the per-purchase and daily Spending Limits on every purchase, whoever submits it.
+- **A compromised server or agent can spend at most your limits.** The contract checks the per-purchase and daily Spending Limits on every purchase, whoever submits it. `apps/server/scripts/attack.ts` demonstrates it on testnet: holding the operator's key, it tries to overspend, withdraw a customer's balance, raise their limits, drain the reserve, pause the shop and move tokens, and every attempt is refused by NEAR or the contract.
 - **The agent can't buy on its own.** The model can only prepare a purchase; you tap Confirm. Voucher codes never enter the model's context, and the bot only talks in private chats.
 - **No result shopping.** The draw runs inside the confirmation call, using the randomness of a block that didn't exist when the call was signed, so the operator can't see an outcome and then fail the purchase instead. A purchase the operator neither confirms nor fails can be reclaimed in full after 24 hours.
 - **Every refund is covered before the purchase starts.** Each Lucky Buy locks its largest possible discount from the Refund Reserve, and one purchase can never win more than 20% of the free reserve.

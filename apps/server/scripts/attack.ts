@@ -1,0 +1,48 @@
+// "What if the server or the AI agent is fully compromised?"
+// This script holds the operator's key (from .env), skips our server entirely, and tries
+// what an attacker would. Each attempt is refused by NEAR or by the contract.
+// Usage: node --env-file=../../.env scripts/attack.ts [victim.testnet]
+import { actions, Account, JsonRpcProvider, type KeyPairString, teraToGas } from "near-api-js"
+
+const victim = process.argv[2] ?? "alice.luckout.testnet"
+const contract = process.env.LUCKOUT_CONTRACT_ID ?? "app.luckout.testnet"
+const operatorId = process.env.OPERATOR_ACCOUNT_ID!
+const key = process.env.OPERATOR_PRIVATE_KEY as KeyPairString
+if (!operatorId || !key) throw new Error("Set OPERATOR_ACCOUNT_ID and OPERATOR_PRIVATE_KEY")
+
+const provider = new JsonRpcProvider({ url: process.env.NEAR_RPC_URL || "https://test.rpc.fastnear.com" })
+const operator = new Account(operatorId, provider, key)
+const view = (method: string, args: object = {}) => provider.callFunction({ contractId: contract, method, args })
+
+const attempt = async (title: string, receiverId: string, method: string, args: object, deposit = 0n) => {
+  try {
+    await operator.signAndSendTransaction({
+      receiverId,
+      actions: [actions.functionCall(method, args, teraToGas("50"), deposit)]
+    })
+    console.log(`✗ ${title}: IT WORKED (this should never happen)`)
+    process.exitCode = 1
+  } catch (e) {
+    const msg = String((e as Error).message ?? e)
+    const why = /Smart contract panicked: ([^"\\]+)/.exec(msg)?.[1] ?? msg.split("\n")[0]
+    console.log(`✓ ${title}\n    refused: ${why}`)
+  }
+}
+
+const account = (await view("get_account", { account_id: victim })) as Record<string, string> | null
+if (!account) throw new Error(`${victim} has no Luckout balance`)
+const usd = (micro: string | number) => `$${(Number(micro) / 1e6).toFixed(2)}`
+console.log(`Attacker holds ${operatorId}'s key. Victim ${victim}: balance ${usd(account.balance)}, limit ${usd(account.per_purchase_limit)} per purchase, ${usd(account.daily_limit)} per day.\n`)
+
+await attempt(
+  `Buy ${usd(Number(account.per_purchase_limit) + 1_000_000)} in one purchase (over the per-purchase limit)`,
+  contract, "purchase",
+  { customer: victim, reference_price: String(Number(account.per_purchase_limit) + 1_000_000), mode: "normal" }
+)
+await attempt("Withdraw the victim's balance to the attacker", contract, "withdraw", { amount: account.balance }, 1n)
+await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
+await attempt("Drain the Refund Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)
+await attempt("Pause the shop", contract, "set_paused", { paused: true })
+await attempt("Move test USDC out of the contract directly", process.env.USDC_CONTRACT_ID ?? "usdc.luckout.testnet", "ft_transfer", { receiver_id: operatorId, amount: "1000000" }, 1n)
+
+console.log(`\nThe most a compromised server or agent can ever do is buy vouchers for ${victim}, within the limits they set.`)
