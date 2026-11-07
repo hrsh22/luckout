@@ -15,7 +15,9 @@ const live = { skip: !process.env.BITREFILL_API_KEY && "BITREFILL_API_KEY not se
 const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>) =>
   Effect.runPromise(Bitrefill.use(f).pipe(Effect.provide(Bitrefill.layer)))
 
-test("test card is delivered with Redemption Data", live, async () => {
+// Bitrefill caps free test deliveries per account (they began failing after ~15 on 7 Nov), so this one is opt-in.
+const liveBuy = { skip: !process.env.BITREFILL_LIVE_BUY && "set BITREFILL_LIVE_BUY=1 to spend a free test delivery" }
+test("test card is delivered with Redemption Data", liveBuy, async () => {
   const d = await run((b) =>
     Effect.flatMap(b.order("test-gift-card-code", "10"), (o) =>
       o._tag === "Ordered" ? b.delivery(o.invoiceId) : Effect.die(o.reason)))

@@ -56,6 +56,7 @@ export class Purchases extends Context.Service<Purchases, {
       const near = yield* Near
       const bitrefill = yield* Bitrefill
       const keyHex = yield* Config.option(Config.Redacted("REDEMPTION_KEY"))
+      const testnet = (yield* Config.String("NEAR_NETWORK").pipe(Config.withDefault("testnet"))) === "testnet"
       const key = Option.map(keyHex, (k) => Buffer.from(Redacted.value(k), "hex")).pipe(Option.filter((k) => k.length === 32))
 
       // Redemption Data is encrypted at rest (AES-256-GCM), bound to its purchase id.
@@ -241,6 +242,10 @@ export class Purchases extends Context.Service<Purchases, {
 
       const create = Effect.fn("Purchases.create")(function*(accountId: string, input: NewPurchase) {
         if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
+        // Testnet balances are test money: never let them buy a real voucher paid from our real Bitrefill balance.
+        if (testnet && !input.voucherId.startsWith("test-")) {
+          return yield* new PurchaseInvalid({ message: "On testnet only Bitrefill test vouchers can be bought" })
+        }
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
         const inserted = yield* sql<{ id: string }>`
           INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, step)

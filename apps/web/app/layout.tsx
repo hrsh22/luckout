@@ -1,3 +1,5 @@
+import { Header } from "@/components/header"
+import { SessionProvider } from "@/lib/session"
 import type { Metadata } from "next"
 import { Inter, Space_Grotesk } from "next/font/google"
 import "./globals.css"
@@ -13,7 +15,14 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${inter.variable} ${grotesk.variable}`}>
-      <body className="min-h-dvh antialiased">{children}</body>
+      <body className="min-h-dvh antialiased">
+        <SessionProvider>
+          <div className="mx-auto flex max-w-3xl flex-col gap-10 px-4 py-6">
+            <Header />
+            {children}
+          </div>
+        </SessionProvider>
+      </body>
     </html>
   )
 }
