@@ -46,7 +46,7 @@ jobs:
           docker run -d --name s -p 8787:8787 luckout-server
           for i in $(seq 1 30); do curl -fs localhost:8787/health && exit 0; sleep 1; done
           docker logs s; exit 1
-      - run: docker compose -f deploy/compose.yml config --quiet
+      - run: touch deploy/.env && docker compose -f deploy/compose.yml config --quiet
         env:
           POSTGRES_PASSWORD: ci
           API_DOMAIN: api.example.com
