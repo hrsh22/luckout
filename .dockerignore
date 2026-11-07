@@ -1,0 +1,9 @@
+**/node_modules
+**/.next
+**/.data
+.git
+.env
+.env.*
+!.env.example
+contract/target
+deploy/backups
