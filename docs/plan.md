@@ -107,6 +107,7 @@ Each of these is a quick check against an API or the docs while building.
 - **NEAR AI Cloud:** which models it offers, and whether they support tool calling.
 - **NEAR Connect:** whether HOT Wallet sign-in works inside Telegram.
 - ~~**Bitrefill:** whether test products exist.~~ Checked 7 Nov: they do. `test-gift-card-code` and `test-gift-card-link` deliver in under a second for free, even with a zero balance, so the testnet demo uses real Bitrefill fulfillment. The `-fail` products become `not_available` after one use, so the failure path is tested with a stub. REST prices come in satoshis, so the Reference Price instead comes from MCP `get-product-details` in USD, and test products are priced at face value.
+- **Bitrefill test-card quota:** after about 15 free test deliveries on 7 Nov, `test-gift-card-code` and `test-gift-card-link` began returning `permanent_failure`. If it doesn't reset, the testnet demo needs a clearly labelled simulated fulfilment (and so would a fresh clone without a Bitrefill key). Check on 8 Nov.
 - **Bitrefill USD charge:** whether the USD balance pays MCP's quoted price or the about 1% lower balance price. Settle it with the first funded purchase.
 - **1Click:** whether it can deliver USDC into the customer's account so that a single deposit follows.
 - **Testnet USDC:** use our own test token with a faucet instead of hunting for a testnet USDC.

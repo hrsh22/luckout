@@ -1,12 +1,17 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { Api } from "@luckout/api"
-import { Config, Effect, Layer } from "effect"
+import { Api, Authorization, CurrentAccount, NotFound } from "@luckout/api"
+import { Config, Effect, Layer, Redacted } from "effect"
 import { HttpRouter } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
+import { Auth } from "./Auth.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
+import { Near } from "./Near.ts"
+import { Purchases } from "./Purchases.ts"
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
@@ -18,16 +23,59 @@ const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
 const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
+    const purchases = yield* Purchases
     return handlers.handleAll({
       search: ({ query }) => bitrefill.search(query.q),
-      voucher: ({ params }) => bitrefill.voucher(params.id)
+      voucher: ({ params }) => bitrefill.voucher(params.id),
+      quote: ({ query }) => purchases.quote(query.voucherId, query.value, query.game)
     })
   })
 )
 
+const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return handlers.handleAll({
+      challenge: () => auth.challenge,
+      verify: ({ payload }) => auth.verify(payload)
+    })
+  })
+)
+
+const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
+  Effect.gen(function*() {
+    const purchases = yield* Purchases
+    return handlers.handleAll({
+      create: ({ payload }) => CurrentAccount.use((a) => purchases.create(a.accountId, payload)),
+      list: () => CurrentAccount.use((a) => purchases.list(a.accountId)),
+      get: ({ params }) =>
+        UUID.test(params.id)
+          ? CurrentAccount.use((a) => purchases.get(a.accountId, params.id))
+          : Effect.fail(new NotFound())
+    })
+  })
+)
+
+const AuthorizationLive = Layer.effect(
+  Authorization,
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return Authorization.of({
+      bearer: (httpEffect, { credential }) =>
+        Effect.flatMap(auth.authenticate(Redacted.value(credential)), (accountId) =>
+          Effect.provideService(httpEffect, CurrentAccount, { accountId }))
+    })
+  })
+)
+
+const Services = Layer.mergeAll(Auth.layer, Purchases.layer).pipe(
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, DbLive))
+)
+
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers]),
-  Layer.provide([Bitrefill.layer, DbLive])
+  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers]),
+  Layer.provide(AuthorizationLive),
+  Layer.provide(Services)
 )
 
 const Server = Layer.unwrap(

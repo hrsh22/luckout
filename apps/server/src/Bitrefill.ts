@@ -45,6 +45,11 @@ export type Delivery =
   /** Bitrefill definitely did not deliver, so the purchase can be failed and refunded. */
   | { readonly _tag: "Failed"; readonly reason: string }
 
+export type Order =
+  | { readonly _tag: "Ordered"; readonly invoiceId: string }
+  /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
+  | { readonly _tag: "Refused"; readonly reason: string }
+
 /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
 class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }> {}
 // MCP codes that may hide a payment: never treat them as a refusal.
@@ -61,8 +66,10 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
   /** Packages with their current USD price, the Reference Price. */
   voucher(id: string): Effect.Effect<Voucher, BitrefillUnavailable>
-  /** Buys one package from the USD balance and waits for the outcome. */
-  buy(id: string, value: string): Effect.Effect<Delivery, BitrefillUnavailable>
+  /** Places a paid order from the USD balance. Save the invoice id before awaiting delivery. */
+  order(id: string, value: string): Effect.Effect<Order, BitrefillUnavailable>
+  /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). */
+  delivery(invoiceId: string): Effect.Effect<Delivery, BitrefillUnavailable>
 }>()("luckout/Bitrefill") {
   static readonly layer = Layer.effect(
     Bitrefill,
@@ -187,15 +194,15 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             balance_currency: "USD"
           }, McpPurchase).pipe(Effect.map((r) => r.response.invoice_id))
 
-      const buy = Effect.fn("Bitrefill.buy")(function*(id: string, value: string) {
-        const created = yield* createInvoice(id, value).pipe(
-          Effect.map((invoiceId) => ({ invoiceId })),
-          Effect.catchTag("Rejected", (e) => Effect.succeed({ rejected: e.reason }))
+      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string) {
+        return yield* createInvoice(id, value).pipe(
+          Effect.map((invoiceId): Order => ({ _tag: "Ordered", invoiceId })),
+          Effect.catchTag("Rejected", (e) => Effect.succeed<Order>({ _tag: "Refused", reason: e.reason }))
         )
-        if ("rejected" in created) return { _tag: "Failed", reason: created.rejected } as const
-        const { invoiceId } = created
+      })
+
+      const delivery = Effect.fn("Bitrefill.delivery")(function*(invoiceId: string) {
         // Delivery normally takes well under a second; poll for up to ~1 minute.
-        // Still pending after that = unknown, left to the reconciler (never "failed").
         const invoice = yield* get(`/invoices/${invoiceId}`, Invoice).pipe(
           Effect.repeat({
             schedule: Schedule.spaced("1 second"),
@@ -203,15 +210,15 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             times: 60
           })
         )
-        const order = invoice.orders[0]
-        if (invoice.status === "all_delivered" && order?.redemption_info) {
-          return { _tag: "Delivered", invoiceId, orderId: order.id, redemption: order.redemption_info } as const
+        const o = invoice.orders[0]
+        if (invoice.status === "all_delivered" && o?.redemption_info) {
+          return { _tag: "Delivered", invoiceId, orderId: o.id, redemption: o.redemption_info } as const
         }
         if (invoice.status === "all_error") return { _tag: "Failed", reason: `invoice ${invoiceId} is all_error` } as const
         return yield* Effect.fail(unavailable(`invoice ${invoiceId} is still ${invoice.status}`))
       })
 
-      return Bitrefill.of({ search, voucher, buy })
+      return Bitrefill.of({ search, voucher, order, delivery })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

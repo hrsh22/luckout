@@ -15,7 +15,8 @@
     "@electric-sql/pglite": "0.5.15",
     "@luckout/api": "workspace:*",
     "@toon-format/toon": "4.4.0",
-    "effect": "4.1.2"
+    "effect": "4.1.2",
+    "near-api-js": "7.4.0"
   },
   "devDependencies": {
     "@types/node": "24",

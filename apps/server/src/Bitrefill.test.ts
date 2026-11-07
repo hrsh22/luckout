@@ -16,7 +16,9 @@ const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>) =>
   Effect.runPromise(Bitrefill.use(f).pipe(Effect.provide(Bitrefill.layer)))
 
 test("test card is delivered with Redemption Data", live, async () => {
-  const d = await run((b) => b.buy("test-gift-card-code", "10"))
+  const d = await run((b) =>
+    Effect.flatMap(b.order("test-gift-card-code", "10"), (o) =>
+      o._tag === "Ordered" ? b.delivery(o.invoiceId) : Effect.die(o.reason)))
   assert.equal(d._tag, "Delivered")
   assert.ok(d._tag === "Delivered" && typeof d.redemption.code === "string")
 })
@@ -34,7 +36,7 @@ test("test vouchers are priced at face value", live, async () => {
 })
 
 // A package that doesn't exist is refused before any invoice, whatever the balance.
-test("a refusal from Bitrefill is a definite Failed, not an unknown", live, async () => {
-  const d = await run((b) => b.buy("swiggy-money-india", "999999"))
-  assert.equal(d._tag, "Failed", JSON.stringify(d))
+test("a refusal from Bitrefill is a definite Refused, not an unknown", live, async () => {
+  const o = await run((b) => b.order("swiggy-money-india", "999999"))
+  assert.equal(o._tag, "Refused", JSON.stringify(o))
 })
