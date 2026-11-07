@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Luckout: buy vouchers at the Bitrefill price, or pay a bounded premium for a fair chance to pay much less"
 
+[workspace]
+members = ["test-usdc"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

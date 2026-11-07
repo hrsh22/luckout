@@ -1,0 +1,15 @@
+[package]
+name = "test-usdc"
+version = "0.1.0"
+edition = "2021"
+description = "Testnet-only USDC stand-in (6 decimals) with a public faucet, for the Luckout demo"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5"
+near-contract-standards = "5"
+
+[dev-dependencies]
+near-sdk = { version = "5", features = ["unit-testing"] }

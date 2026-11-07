@@ -40,9 +40,9 @@ fn setup(reserve: u128, deposit: u128) -> Contract {
     let mut c = Contract::new(owner(), operator(), usdc());
     as_(usdc());
     if reserve > 0 {
-        c.ft_on_transfer(owner(), U128(reserve), "reserve".into());
+        let _ = c.ft_on_transfer(owner(), U128(reserve), "reserve".into());
     }
-    c.ft_on_transfer(alice(), U128(deposit), "".into());
+    let _ = c.ft_on_transfer(alice(), U128(deposit), "".into());
     c
 }
 
@@ -65,7 +65,7 @@ fn default_tables_sum_to_100_and_average_exactly_106() {
 }
 
 #[test]
-fn chance_to_pay_less_matches_adr_0026() {
+fn chance_to_pay_less_matches_adr_0002() {
     let less: Vec<u32> = default_game_versions()
         .iter()
         .map(|v| v.outcomes.iter().filter(|o| o.final_bps < 10_000).map(|o| o.chance_bps).sum())
@@ -127,7 +127,8 @@ fn lucky_buy_needs_a_reserve() {
 #[test]
 fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
     let reserve = 500 * USDC;
-    let deposit = 10_000 * USDC;
+    // 400 purchases of up to 100 USDC, mostly paid to proceeds.
+    let deposit = 100_000 * USDC;
     let mut c = setup(reserve, deposit);
     raise_limits(&mut c);
 
@@ -287,5 +288,5 @@ fn pause_stops_new_purchases() {
 fn rejects_other_tokens() {
     let mut c = setup(0, 100 * USDC);
     as_(id("fake.near"));
-    c.ft_on_transfer(alice(), U128(100 * USDC), "".into());
+    let _ = c.ft_on_transfer(alice(), U128(100 * USDC), "".into());
 }

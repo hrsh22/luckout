@@ -1,6 +1,6 @@
 //! Luckout: one contract holding customer Balances in USDC, their Spending
 //! Limits and Default Mode, immutable Game Versions, the Refund Reserve and
-//! every Draw. See CONTEXT.md and ADR-0025..0028 for the domain language.
+//! every Draw. See CONTEXT.md and docs/adr/0001..0005 for the domain language.
 //!
 //! All amounts are USDC base units (6 decimals) and all rates are basis points.
 
@@ -13,7 +13,7 @@ use near_sdk::{
 };
 
 pub const BPS: u128 = 10_000;
-/// Every Game Version averages 106% of the Lucky Amount (ADR-0026).
+/// Every Game Version averages 106% of the Lucky Amount (ADR-0002).
 pub const TARGET_FINAL_BPS: u128 = 10_600;
 /// The Discount Cap: 20% of Free Reserve.
 pub const DISCOUNT_CAP_BPS: u128 = 2_000;
