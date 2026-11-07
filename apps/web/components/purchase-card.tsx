@@ -1,6 +1,7 @@
 import type { Purchase } from "@luckout/api"
 import { modeName, usd } from "@/lib/format"
 import { explorer } from "@/lib/near"
+import Link from "next/link"
 
 /** One purchase: the voucher, what it cost, the Draw, and the code (owner only). */
 export function PurchaseCard({ p }: { p: Purchase }) {
@@ -48,7 +49,7 @@ export function PurchaseCard({ p }: { p: Purchase }) {
         <p className="text-muted-foreground flex flex-wrap gap-x-4 text-xs">
           {p.admitTx && <a className="underline" href={explorer(p.admitTx)} target="_blank" rel="noreferrer">Purchase transaction</a>}
           {p.settleTx && <a className="underline" href={explorer(p.settleTx)} target="_blank" rel="noreferrer">{lucky ? "Draw transaction" : "Delivery transaction"}</a>}
-          {p.draw && <span>roll {p.draw.roll} of 10,000</span>}
+          {p.draw && p.settleTx && <Link className="underline" href={`/draw/${p.settleTx}`}>Draw Proof (roll {p.draw.roll})</Link>}
         </p>
       )}
     </article>

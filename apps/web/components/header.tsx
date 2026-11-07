@@ -23,6 +23,7 @@ export function Header() {
     <header className="flex flex-wrap items-center justify-between gap-3">
       <nav className="flex items-center gap-5">
         <Link href="/" className="font-heading text-xl font-bold">Luckout</Link>
+        <Link href="/fair" className="text-muted-foreground hover:text-foreground text-sm">Is it fair?</Link>
         {token && (
           <>
             <Link href="/purchases" className="text-muted-foreground hover:text-foreground text-sm">Purchases</Link>
