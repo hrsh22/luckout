@@ -38,13 +38,14 @@ jobs:
 
   server-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f apps/server/Dockerfile -t luckout-server .
       # Without env the server falls back to PGlite and reports healthy.
       - run: |
           docker run -d --name luckout -p 8787:8787 luckout-server
-          for i in $(seq 1 30); do curl -fs localhost:8787/health && exit 0; sleep 1; done
+          for i in $(seq 1 30); do curl -fs --max-time 3 localhost:8787/health && exit 0; sleep 1; done
           docker logs luckout; exit 1
       - run: touch deploy/.env && docker compose -f deploy/compose.yml config --quiet
         env:
