@@ -1,0 +1,9 @@
+# Earn only from the Lucky Buy margin
+
+The only revenue is the 6% Target Gross Margin built into every Game Version (ADR-0002). There is no Top-Up fee, no per-purchase service fee, and nothing hidden in the Reference Price. Running costs are model calls for the Agent, swap fees for refilling the operator's Bitrefill balance, NEAR gas for server-submitted purchases, and hosting; at a 6% margin a ₹500 Lucky Buy is expected to earn about ₹30, which covers them.
+
+Standard Purchases (the Normal mode) are kept at zero margin. Each one costs the operator a model conversation, a fulfillment, and a share of the Bitrefill float while earning nothing; they are accepted as the cost of letting customers use one Balance and one Agent for everything, and of giving risk-averse customers a reason to stay.
+
+The margin is an expectation, not a per-purchase guarantee. For 100 Draws, the operator still loses money about 0% of the time on Classic, 1% on Bold, and 12% on Jackpot; over 1,000 Draws it practically never does. The Refund Reserve absorbs that early variance, so it is funded before launch.
+
+The margin is not split per purchase. A fixed cut, such as 1% to the operator and 5% to the reserve, would pay the operator during losing streaks and drain the reserve when it most needs the money. Instead, all of the margin stays in the Refund Reserve until Free Reserve reaches a target, initially 500 USDC: a Discount Cap of 100 USDC, enough for every Game Version to apply in full to a 100 USDC voucher. The operator withdraws only Free Reserve above the target, monthly, to pay running costs, and keeps the rest as profit. The target is raised as customers buy larger vouchers. It is an operating policy, not a contract rule: customer safety comes from each Lucky Buy's locked liability, not from the reserve's size.

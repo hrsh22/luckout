@@ -1,0 +1,291 @@
+use super::*;
+use near_sdk::test_utils::{get_logs, VMContextBuilder};
+use near_sdk::testing_env;
+
+const USDC: u128 = 1_000_000;
+const DAY: u64 = DAY_NS;
+
+fn id(s: &str) -> AccountId {
+    s.parse().unwrap()
+}
+fn owner() -> AccountId {
+    id("owner.near")
+}
+fn operator() -> AccountId {
+    id("server.near")
+}
+fn usdc() -> AccountId {
+    id("usdc.near")
+}
+fn alice() -> AccountId {
+    id("alice.near")
+}
+
+fn call(who: AccountId, ts: u64, seed: [u8; 32], yocto: u128) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(id("luckout.near"))
+        .predecessor_account_id(who)
+        .block_timestamp(ts)
+        .random_seed(seed)
+        .attached_deposit(NearToken::from_yoctonear(yocto))
+        .build());
+}
+fn as_(who: AccountId) {
+    call(who, DAY, [0; 32], 0);
+}
+
+/// Fresh contract with `reserve` USDC of Free Reserve and Alice holding `deposit`.
+fn setup(reserve: u128, deposit: u128) -> Contract {
+    as_(owner());
+    let mut c = Contract::new(owner(), operator(), usdc());
+    as_(usdc());
+    if reserve > 0 {
+        c.ft_on_transfer(owner(), U128(reserve), "reserve".into());
+    }
+    c.ft_on_transfer(alice(), U128(deposit), "".into());
+    c
+}
+
+fn raise_limits(c: &mut Contract) {
+    call(alice(), DAY, [0; 32], 1);
+    c.set_limits(U128(u128::MAX / 4), U128(u128::MAX / 4));
+}
+
+fn balance(c: &Contract) -> u128 {
+    c.get_account(alice()).unwrap().balance.0
+}
+
+#[test]
+fn default_tables_sum_to_100_and_average_exactly_106() {
+    for v in default_game_versions() {
+        validate_game_version(&v);
+        let total: u128 = (0..10_000).map(|r| final_bps_for_roll(&v.outcomes, r) as u128).sum();
+        assert_eq!(total, TARGET_FINAL_BPS * BPS, "{}", v.name);
+    }
+}
+
+#[test]
+fn chance_to_pay_less_matches_adr_0026() {
+    let less: Vec<u32> = default_game_versions()
+        .iter()
+        .map(|v| v.outcomes.iter().filter(|o| o.final_bps < 10_000).map(|o| o.chance_bps).sum())
+        .collect();
+    assert_eq!(less, vec![400, 1_800, 2_500]);
+}
+
+#[test]
+#[should_panic(expected = "Average must be exactly 106%")]
+fn rejects_a_table_with_a_bigger_edge() {
+    validate_game_version(&GameVersion {
+        name: "Greedy".into(),
+        premium_bps: 1_000,
+        outcomes: vec![
+            Outcome { final_bps: 5_000, chance_bps: 100 },
+            Outcome { final_bps: 11_000, chance_bps: 9_900 },
+        ],
+    });
+}
+
+#[test]
+#[should_panic(expected = "Outcome above maximum price")]
+fn rejects_an_outcome_above_maximum_price() {
+    validate_game_version(&GameVersion {
+        name: "Bad".into(),
+        premium_bps: 1_000,
+        outcomes: vec![Outcome { final_bps: 12_000, chance_bps: 10_000 }],
+    });
+}
+
+#[test]
+fn small_purchases_get_the_full_game_version() {
+    let c = setup(30 * USDC, 100 * USDC);
+    let q = |v| c.quote(U128(6 * USDC), Mode::Lucky(v));
+    assert_eq!((q(0).lucky_amount.0, q(0).max_price.0), (6 * USDC, 6_600_000));
+    assert_eq!((q(1).lucky_amount.0, q(1).max_price.0), (6 * USDC, 7_500_000));
+    assert_eq!((q(2).lucky_amount.0, q(2).max_price.0), (6 * USDC, 9 * USDC));
+    let n = c.quote(U128(6 * USDC), Mode::Normal);
+    assert_eq!((n.lucky_amount.0, n.max_price.0), (0, 6 * USDC));
+}
+
+#[test]
+fn big_purchases_only_play_the_lucky_amount() {
+    let c = setup(200 * USDC, 100 * USDC);
+    // Discount Cap = 40 USDC.
+    let jackpot = c.quote(U128(1_000 * USDC), Mode::Lucky(2));
+    assert_eq!((jackpot.lucky_amount.0, jackpot.max_price.0), (40 * USDC, 1_020 * USDC));
+    let classic = c.quote(U128(1_000 * USDC), Mode::Lucky(0));
+    assert_eq!((classic.lucky_amount.0, classic.max_price.0), (80 * USDC, 1_008 * USDC));
+}
+
+#[test]
+#[should_panic(expected = "Reserve too small")]
+fn lucky_buy_needs_a_reserve() {
+    let c = setup(0, 100 * USDC);
+    c.quote(U128(6 * USDC), Mode::Lucky(0));
+}
+
+#[test]
+fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
+    let reserve = 500 * USDC;
+    let deposit = 10_000 * USDC;
+    let mut c = setup(reserve, deposit);
+    raise_limits(&mut c);
+
+    for i in 0..400u64 {
+        let seed = env::sha256_array(&i.to_le_bytes());
+        let mode = match i % 4 {
+            0 => Mode::Normal,
+            n => Mode::Lucky(n as u32 - 1),
+        };
+        let r = (1 + (seed[0] as u128 % 200)) * USDC / 2;
+        call(operator(), DAY, seed, 0);
+        let pid = c.purchase(alice(), U128(r), Some(mode));
+        let p = c.get_purchase(pid).unwrap();
+        // The lock covers the largest possible discount and never exceeds the cap it was admitted under.
+        assert!(c.locked_reserve >= p.locked.0);
+
+        call(operator(), DAY, seed, 0);
+        if i % 9 == 0 {
+            c.fail_purchase(pid);
+            assert_eq!(c.get_purchase(pid).unwrap().refund.0, 0);
+        } else {
+            let p = c.confirm_delivery(pid);
+            assert!(p.refund.0 <= p.max_price.0 - p.reference_price.0 + p.locked.0);
+        }
+        assert_eq!(c.locked_reserve, 0);
+        assert_eq!(balance(&c) + c.free_reserve + c.locked_reserve + c.proceeds, reserve + deposit);
+    }
+    assert!(c.lucky_settled > 250);
+}
+
+#[test]
+fn draw_is_recomputable_from_the_event() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let seed = [7u8; 32];
+    call(operator(), DAY, seed, 0);
+    let pid = c.purchase(alice(), U128(6 * USDC), Some(Mode::Lucky(2)));
+    call(operator(), DAY, seed, 0);
+    let p = c.confirm_delivery(pid);
+
+    let log = get_logs().into_iter().find(|l| l.contains("\"draw\"")).unwrap();
+    let random = draw_random(&seed, pid);
+    assert!(log.contains(&hex(&random)));
+    let f = final_bps_for_roll(&default_game_versions()[2].outcomes, roll_from_random(&random));
+    assert_eq!(p.refund.0, 9 * USDC - final_price(6 * USDC, 6 * USDC, 9 * USDC, f));
+}
+
+#[test]
+fn default_mode_is_used_when_no_mode_is_given() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(alice());
+    c.set_default_mode(Mode::Lucky(1));
+    as_(operator());
+    let pid = c.purchase(alice(), U128(4 * USDC), None);
+    assert_eq!(c.get_purchase(pid).unwrap().mode, Mode::Lucky(1));
+    assert_eq!(balance(&c), 95 * USDC);
+}
+
+#[test]
+fn failed_purchase_returns_everything() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)));
+    assert_eq!(balance(&c), 85 * USDC);
+    c.fail_purchase(pid);
+    assert_eq!(balance(&c), 100 * USDC);
+    assert_eq!(c.free_reserve, 500 * USDC);
+}
+
+#[test]
+fn reclaim_opens_after_24_hours() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)));
+    call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(pid);
+    assert_eq!(balance(&c), 100 * USDC);
+    assert_eq!(c.get_purchase(pid).unwrap().status, Status::Reclaimed);
+}
+
+#[test]
+#[should_panic(expected = "Reclaim opens 24 hours after purchase")]
+fn reclaim_too_early_fails() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)));
+    as_(alice());
+    c.reclaim(pid);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn cannot_fail_after_the_draw() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)));
+    c.confirm_delivery(pid);
+    c.fail_purchase(pid);
+}
+
+#[test]
+#[should_panic(expected = "Over the per-purchase spending limit")]
+fn per_purchase_limit_counts_the_maximum_price() {
+    let mut c = setup(500 * USDC, 200 * USDC);
+    as_(operator());
+    // 40 USDC on Jackpot can cost 60, above the default 50 USDC limit.
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Lucky(2)));
+}
+
+#[test]
+#[should_panic(expected = "Over the daily spending limit")]
+fn daily_limit_is_enforced() {
+    let mut c = setup(0, 200 * USDC);
+    as_(operator());
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
+}
+
+#[test]
+fn daily_limit_resets_the_next_day() {
+    let mut c = setup(0, 200 * USDC);
+    as_(operator());
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
+    call(operator(), 2 * DAY, [0; 32], 0);
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
+}
+
+#[test]
+#[should_panic(expected = "Only the operator")]
+fn only_the_operator_can_buy() {
+    let mut c = setup(0, 100 * USDC);
+    as_(alice());
+    c.purchase(alice(), U128(USDC), Some(Mode::Normal));
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn raising_limits_needs_a_full_access_signature() {
+    let mut c = setup(0, 100 * USDC);
+    as_(alice());
+    c.set_limits(U128(u128::MAX), U128(u128::MAX));
+}
+
+#[test]
+#[should_panic(expected = "New purchases are paused")]
+fn pause_stops_new_purchases() {
+    let mut c = setup(0, 100 * USDC);
+    call(owner(), DAY, [0; 32], 1);
+    c.set_paused(true);
+    as_(operator());
+    c.purchase(alice(), U128(USDC), Some(Mode::Normal));
+}
+
+#[test]
+#[should_panic(expected = "Only USDC is accepted")]
+fn rejects_other_tokens() {
+    let mut c = setup(0, 100 * USDC);
+    as_(id("fake.near"));
+    c.ft_on_transfer(alice(), U128(100 * USDC), "".into());
+}

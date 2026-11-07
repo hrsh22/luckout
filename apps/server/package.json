@@ -1,0 +1,20 @@
+{
+  "name": "@luckout/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env --watch src/main.ts",
+    "start": "node --env-file-if-exists=../../.env src/main.ts",
+    "typecheck": "tsc",
+    "test": "node --env-file-if-exists=../../.env --test"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.1.2",
+    "@effect/sql-pg": "4.1.2",
+    "@effect/sql-pglite": "4.1.2",
+    "@electric-sql/pglite": "0.5.15",
+    "@luckout/api": "workspace:*",
+    "effect": "4.1.2"
+  },
+  "devDependencies": { "@types/node": "24", "typescript": "6.0.3" }
+}
