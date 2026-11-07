@@ -59,9 +59,13 @@ export class Auth extends Context.Service<Auth, {
           const expected = Buffer.from(mac(payload))
           const given = Buffer.from(tag)
           if (given.length !== expected.length || !timingSafeEqual(given, expected)) return yield* denied("Invalid session")
-          const { a, e } = JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number }
-          if (Date.now() > e) return yield* denied("Session expired; sign in again")
-          return a
+          const session = yield* Effect.try({
+            try: () => JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number },
+            catch: () => denied("Invalid session")
+          })
+          if (typeof session.a !== "string" || typeof session.e !== "number") return yield* denied("Invalid session")
+          if (Date.now() > session.e) return yield* denied("Session expired; sign in again")
+          return session.a
         })
 
       return Auth.of({ challenge, verify, authenticate })
