@@ -37,7 +37,13 @@ console.log(`Attacker holds ${operatorId}'s key. Victim ${victim}: balance ${usd
 await attempt(
   `Buy ${usd(Number(account.per_purchase_limit) + 1_000_000)} in one purchase (over the per-purchase limit)`,
   contract, "purchase",
-  { customer: victim, reference_price: String(Number(account.per_purchase_limit) + 1_000_000), mode: "normal" }
+  {
+    customer: victim,
+    reference_price: String(Number(account.per_purchase_limit) + 1_000_000),
+    mode: "normal",
+    order_id: `attack-${Date.now()}`,
+    max_debit: "1000000000000"
+  }
 )
 await attempt("Withdraw the victim's balance to the attacker", contract, "withdraw", { amount: account.balance }, 1n)
 await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
