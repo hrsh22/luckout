@@ -18,7 +18,10 @@ const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
 const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
-    return handlers.handle("search", ({ query }) => bitrefill.search(query.q))
+    return handlers.handleAll({
+      search: ({ query }) => bitrefill.search(query.q),
+      voucher: ({ params }) => bitrefill.voucher(params.id)
+    })
   })
 )
 

@@ -4,19 +4,22 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema } from "effect/ht
 /** Whole micro-USDC (6 decimals), never floats (ADR-0004). */
 export const MicroUsdc = Schema.Int
 
+export class VoucherSummary extends Schema.Class<VoucherSummary>("VoucherSummary")({
+  id: Schema.String,
+  name: Schema.String,
+  countryCode: Schema.String,
+  currency: Schema.String
+}) {}
+
 export class VoucherPackage extends Schema.Class<VoucherPackage>("VoucherPackage")({
   /** Bitrefill package value, e.g. "500" or "Dinner for One". */
   value: Schema.String,
-  /** Current Bitrefill price, the basis of the Reference Price. */
+  /** Current Bitrefill USD price: the Reference Price. */
   priceMicroUsdc: MicroUsdc
 }) {}
 
 export class Voucher extends Schema.Class<Voucher>("Voucher")({
-  id: Schema.String,
-  name: Schema.String,
-  countryCode: Schema.String,
-  currency: Schema.String,
-  image: Schema.String,
+  ...VoucherSummary.fields,
   packages: Schema.Array(VoucherPackage)
 }) {}
 
@@ -33,7 +36,12 @@ export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).a
 export class CatalogApi extends HttpApiGroup.make("catalog").add(
   HttpApiEndpoint.get("search", "/catalog", {
     query: { q: Schema.String },
-    success: Schema.Array(Voucher),
+    success: Schema.Array(VoucherSummary),
+    error: BitrefillUnavailable
+  }),
+  HttpApiEndpoint.get("voucher", "/catalog/:id", {
+    params: { id: Schema.String },
+    success: Voucher,
     error: BitrefillUnavailable
   })
 ) {}

@@ -66,7 +66,7 @@ The repo is a pnpm workspace:
 
 1. The quote comes from the contract's `quote` view.
 2. `purchase` debits the Maximum Price and locks the reserve onchain. Admission is idempotent through a unique key in Postgres.
-3. The server buys on Bitrefill from the prepaid balance (create the invoice, then pay it from the balance).
+3. The server buys on Bitrefill from the prepaid USD store credit, through Bitrefill's MCP `buy-products` with `balance_currency: "USD"`. On testnet the free test products are bought through REST instead (see `docs/research/bitrefill-funding.md`).
 4. If delivered, the server calls `confirm_delivery`, which runs the Draw and credits the Refund in the same call. It then stores the code and the Draw and sends both to the customer.
 5. If Bitrefill fails, the server calls `fail_purchase`, which refunds everything with no Draw.
 6. Every minute, the reconciler finishes or fails any purchase that stopped part-way.
@@ -93,7 +93,7 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 | Telegram bot token (from BotFather) | Day 4 |
 | NEAR AI Cloud API key | Day 4 |
 | Bitrefill API key: done, it's already in `.env` | — |
-| Whether Bitrefill can hold the account balance in USD instead of BTC, plus about $50 of float | Day 5 |
+| About $50 of float: a USD store-credit deposit paid in USDC on Base (the server can create the deposit invoice) | Day 5 |
 | 1Click API key | Day 5 |
 | NEAR mainnet accounts (owner and operator), a few NEAR for storage and gas, and about $200–500 USDC for the Refund Reserve | Day 6 |
 | VM: operating system and size, a subdomain for the API pointed at the VM, and SSH access | Day 6 |
@@ -106,7 +106,8 @@ Each of these is a quick check against an API or the docs while building.
 
 - **NEAR AI Cloud:** which models it offers, and whether they support tool calling.
 - **NEAR Connect:** whether HOT Wallet sign-in works inside Telegram.
-- ~~**Bitrefill:** whether test products exist.~~ Checked 7 Nov: they do. `test-gift-card-code` and `test-gift-card-link` deliver in under a second for free, even with a zero balance, so the testnet demo uses real Bitrefill fulfillment. The `-fail` products become `not_available` after one use, so the failure path is tested with a stub. Prices come in satoshis, and the server converts them to USDC at Bitrefill's own rate (the sat price of the $10 test card).
+- ~~**Bitrefill:** whether test products exist.~~ Checked 7 Nov: they do. `test-gift-card-code` and `test-gift-card-link` deliver in under a second for free, even with a zero balance, so the testnet demo uses real Bitrefill fulfillment. The `-fail` products become `not_available` after one use, so the failure path is tested with a stub. REST prices come in satoshis, so the Reference Price instead comes from MCP `get-product-details` in USD, and test products are priced at face value.
+- **Bitrefill USD charge:** whether the USD balance pays MCP's quoted price or the about 1% lower balance price. Settle it with the first funded purchase.
 - **1Click:** whether it can deliver USDC into the customer's account so that a single deposit follows.
 - **Testnet USDC:** use our own test token with a faucet instead of hunting for a testnet USDC.
 
@@ -115,7 +116,7 @@ Each of these is a quick check against an API or the docs while building.
 | Risk | Mitigation |
 |---|---|
 | The README doesn't run for the first-pass agents | PGlite fallback with no Docker; a fresh-clone check on Day 6 |
-| The Bitrefill balance is held in BTC, so the float is exposed to the BTC price | Keep the float small and refill often; ask Bitrefill about USD |
+| USD store credit can't be refunded, and is capped at $2,000 across all balances | Keep the float small and refill often |
 | Early variance drains the reserve | Jackpot can lose money over about 100 Draws (about 12% chance); fund the reserve before launch and don't sweep profit early (ADR-0003) |
 | Block producers can bias `random_seed` | Bounded by the Discount Cap and Spending Limits; disclosed |
 | India's Online Gaming Act (2025) | Pitch globally, use Swiggy as one example, geo-restrict where required. This is not legal advice. |
