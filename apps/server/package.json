@@ -16,7 +16,9 @@
     "@luckout/api": "workspace:*",
     "@toon-format/toon": "4.4.0",
     "effect": "4.1.2",
-    "near-api-js": "7.4.0"
+    "grammy": "1.46.0",
+    "near-api-js": "7.4.0",
+    "openai": "7.53.0"
   },
   "devDependencies": {
     "@types/node": "24",

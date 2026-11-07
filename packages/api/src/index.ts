@@ -171,4 +171,19 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound })
 ).middleware(Authorization) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi) {}
+export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
+  "LinkInvalid",
+  { message: Schema.String },
+  { httpApiStatus: 400 }
+) {}
+
+/** Links the Telegram user who got `code` from the bot to the signed-in NEAR account (ADR-0001). */
+export class TelegramApi extends HttpApiGroup.make("telegram").add(
+  HttpApiEndpoint.post("link", "/telegram/link", {
+    payload: Schema.Struct({ code: Schema.String }),
+    success: Schema.Struct({ telegramName: Schema.String }),
+    error: LinkInvalid
+  })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi) {}

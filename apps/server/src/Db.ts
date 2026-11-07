@@ -43,6 +43,24 @@ const migrations = Migrator.fromRecord({
         UNIQUE (account_id, idempotency_key)
       )`
     yield* sql`CREATE INDEX purchases_account ON purchases (account_id, created_at DESC)`
+  }),
+  "0002_telegram": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE telegram_link_codes (
+        code TEXT PRIMARY KEY,
+        telegram_user_id BIGINT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        telegram_name TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      )`
+    yield* sql`
+      CREATE TABLE telegram_links (
+        telegram_user_id BIGINT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        linked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
   })
 })
 
