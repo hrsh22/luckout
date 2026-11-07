@@ -186,4 +186,46 @@ export class TelegramApi extends HttpApiGroup.make("telegram").add(
   })
 ).middleware(Authorization) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi) {}
+// ---------- top-ups (NEAR Intents 1Click, mainnet) ----------
+
+export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
+  assetId: Schema.String,
+  symbol: Schema.String,
+  chain: Schema.String
+}) {}
+
+export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
+  /** Send exactly `amountIn` of `symbol` on `chain` here. */
+  depositAddress: Schema.String,
+  depositMemo: Schema.optional(Schema.String),
+  amountIn: Schema.String,
+  amountInFormatted: Schema.String,
+  symbol: Schema.String,
+  chain: Schema.String,
+  /** USDC (micro) that lands in the customer's NEAR account. */
+  usdcOut: MicroUsdc,
+  timeEstimateSeconds: Schema.Number,
+  deadline: Schema.String
+}) {}
+
+export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
+  "TopUpUnavailable",
+  { message: Schema.String },
+  { httpApiStatus: 400 }
+) {}
+
+export class TopUpApi extends HttpApiGroup.make("topup").add(
+  HttpApiEndpoint.get("assets", "/topup/assets", { success: Schema.Array(TopUpAsset), error: TopUpUnavailable }),
+  HttpApiEndpoint.post("quote", "/topup/quote", {
+    payload: Schema.Struct({ originAsset: Schema.String, usdc: MicroUsdc }),
+    success: TopUpQuote,
+    error: TopUpUnavailable
+  }),
+  HttpApiEndpoint.get("status", "/topup/status", {
+    query: { depositAddress: Schema.String },
+    success: Schema.Struct({ status: Schema.String }),
+    error: TopUpUnavailable
+  })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi) {}

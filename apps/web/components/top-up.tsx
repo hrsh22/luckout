@@ -1,0 +1,117 @@
+"use client"
+
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { api, errorMessage } from "@/lib/api"
+import { toMicro, usd } from "@/lib/format"
+import { contractId, send, usdcId, view } from "@/lib/near"
+import { useSession } from "@/lib/session"
+import type { TopUpAsset, TopUpQuote } from "@luckout/api"
+import { useEffect, useState } from "react"
+
+const STORAGE_DEPOSIT = "1250000000000000000000" // 0.00125 NEAR, USDC's registration fee
+const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
+
+/** Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit. */
+export function TopUp() {
+  const { accountId, token, refresh } = useSession()
+  const [registered, setRegistered] = useState<boolean>()
+  const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
+  const [asset, setAsset] = useState("")
+  const [amount, setAmount] = useState("20")
+  const [quote, setQuote] = useState<TopUpQuote>()
+  const [status, setStatus] = useState<string>()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+  const fail = (e: unknown) => setError(errorMessage(e))
+
+  useEffect(() => {
+    if (!accountId || !token) return
+    view<unknown>(usdcId, "storage_balance_of", { account_id: accountId }).then((b) => setRegistered(b !== null), fail)
+    api((c) => c.topup.assets(), token).then((a) => (setAssets(a), setAsset(a.find((x) => x.symbol === "USDC" && x.chain === "base")?.assetId ?? a[0]?.assetId ?? "")), fail)
+  }, [accountId, token])
+
+  // Poll 1Click until the swap settles.
+  useEffect(() => {
+    if (!quote || !token || (status && DONE.has(status))) return
+    const t = setInterval(() => {
+      api((c) => c.topup.status({ query: { depositAddress: quote.depositAddress } }), token).then((s) => setStatus(s.status), () => {})
+    }, 5000)
+    return () => clearInterval(t)
+  }, [quote, token, status])
+
+  const step = async (f: () => Promise<unknown>) => {
+    setBusy(true)
+    setError(undefined)
+    await f().catch(fail)
+    setBusy(false)
+  }
+
+  if (!token) return null
+  if (registered === false) {
+    return (
+      <Button variant="outline" className="self-start" disabled={busy} onClick={() => step(async () => {
+        await send({ receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
+        setRegistered(true)
+      })}>
+        Enable USDC on your account (0.00125 NEAR, once)
+      </Button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {!quote && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Input className="w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
+          <span className="text-muted-foreground text-sm">USDC, paid with</span>
+          <select className="bg-background h-9 rounded-md border px-2 text-sm" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
+            {assets?.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {a.chain}</option>)}
+          </select>
+          <Button disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
+            setQuote(await api((c) => c.topup.quote({ payload: { originAsset: asset, usdc: toMicro(amount) } }), token))
+            setStatus("PENDING_DEPOSIT")
+          })}>
+            Get deposit address
+          </Button>
+        </div>
+      )}
+
+      {quote && (
+        <div className="bg-card flex flex-col gap-2 rounded-xl border p-4 text-sm">
+          <p>
+            Send exactly <b>{quote.amountInFormatted} {quote.symbol}</b> on <b>{quote.chain}</b> to:
+          </p>
+          <p className="font-mono break-all select-all">{quote.depositAddress}</p>
+          {quote.depositMemo && <p>Memo (required): <span className="font-mono select-all">{quote.depositMemo}</span></p>}
+          <p className="text-muted-foreground">
+            {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your transfer
+            confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, the funds are refunded to your
+            NEAR account on NEAR Intents.
+          </p>
+          <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
+          {status === "SUCCESS" && (
+            <Button className="self-start" disabled={busy} onClick={() => step(async () => {
+              await send({
+                receiverId: usdcId,
+                method: "ft_transfer_call",
+                args: { receiver_id: contractId, amount: String(quote.usdcOut), msg: "" },
+                deposit: "1",
+                tgas: 100
+              })
+              setQuote(undefined)
+              setStatus(undefined)
+              await refresh()
+            })}>
+              Deposit {usd(quote.usdcOut)} into Luckout
+            </Button>
+          )}
+          {(status === "REFUNDED" || status === "FAILED") && (
+            <Button variant="outline" className="self-start" onClick={() => (setQuote(undefined), setStatus(undefined))}>Start over</Button>
+          )}
+        </div>
+      )}
+      {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
+    </div>
+  )
+}

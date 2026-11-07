@@ -11,6 +11,7 @@ import { DbLive } from "./Db.ts"
 import { Near } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Telegram } from "./Telegram.ts"
+import { TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -64,6 +65,17 @@ const TelegramHandlers = HttpApiBuilder.group(Api, "telegram", (handlers) =>
   })
 )
 
+const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
+  Effect.gen(function*() {
+    const topup = yield* TopUp
+    return handlers.handleAll({
+      assets: () => topup.assets,
+      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc)),
+      status: ({ query }) => topup.status(query.depositAddress)
+    })
+  })
+)
+
 const AuthorizationLive = Layer.effect(
   Authorization,
   Effect.gen(function*() {
@@ -78,11 +90,11 @@ const AuthorizationLive = Layer.effect(
 
 const Services = Telegram.layer.pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer)),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, DbLive))
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, DbLive))
 )
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers]),
+  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers]),
   Layer.provide(AuthorizationLive),
   Layer.provide(Services)
 )

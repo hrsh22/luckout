@@ -7,6 +7,7 @@ import { MODES, modeName, sameMode, toMicro, usd } from "@/lib/format"
 import { type Call, contractId, network, send, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { useState } from "react"
+import { TopUp } from "./top-up"
 
 const ONE_YOCTO = "1"
 
@@ -80,6 +81,13 @@ export function WalletPanel() {
           </Button>
         </div>
         <p className="text-muted-foreground text-xs">Deposits are at least 1 USDC. Whatever isn't locked in a purchase can be withdrawn any time.</p>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="font-heading text-lg font-semibold">Top up from any chain</h2>
+        {network === "mainnet"
+          ? <TopUp />
+          : <p className="text-muted-foreground text-sm">Top-ups from Ethereum, Base, Arbitrum, Solana, Bitcoin and more run on mainnet through NEAR Intents. On testnet, use the test USDC button above.</p>}
       </section>
 
       {account && (
