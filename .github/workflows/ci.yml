@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  apps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # Tests that call Bitrefill skip themselves without BITREFILL_API_KEY.
+      - run: pnpm test
+      - run: pnpm --filter @luckout/web build
+
+  contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            contract/target
+          key: cargo-${{ hashFiles('contract/Cargo.lock', 'contract/rust-toolchain.toml') }}
+      # rustup reads contract/rust-toolchain.toml
+      - run: cargo test --workspace

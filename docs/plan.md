@@ -104,7 +104,7 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 
 Each of these is a quick check against an API or the docs while building.
 
-- **NEAR AI Cloud:** which models it offers, and whether they support tool calling.
+- ~~**NEAR AI Cloud:** which models, and tool calling.~~ Checked 7 Nov: `GET https://cloud-api.near.ai/v1/models` is public and lists `supported_features`. Tool-capable and ready, among others: `deepseek-ai/DeepSeek-V4.1-Flash-1017` ($0.30/$1.20 per M tokens), `Qwen/Qwen3.6-35B-A3B-FP8` ($0.17/$1.10), `z-ai/glm-5.3-flash` ($0.08/$0.50), `anthropic/claude-haiku-5-5` ($0.10/$0.50). Pick one when the key arrives; prefer an open-weight model if it runs in NEAR AI's private (TEE) inference.
 - **NEAR Connect:** whether HOT Wallet sign-in works inside Telegram.
 - ~~**Bitrefill:** whether test products exist.~~ Checked 7 Nov: they do. `test-gift-card-code` and `test-gift-card-link` deliver in under a second for free, even with a zero balance, so the testnet demo uses real Bitrefill fulfillment. The `-fail` products become `not_available` after one use, so the failure path is tested with a stub. REST prices come in satoshis, so the Reference Price instead comes from MCP `get-product-details` in USD, and test products are priced at face value.
 - **Bitrefill test-card quota:** after about 15 free test deliveries on 7 Nov, `test-gift-card-code` and `test-gift-card-link` began returning `permanent_failure`. If it doesn't reset, the testnet demo needs a clearly labelled simulated fulfilment (and so would a fresh clone without a Bitrefill key). Check on 8 Nov.
