@@ -1,7 +1,7 @@
 import { BitrefillUnavailable, Voucher, VoucherSummary } from "@luckout/api"
 import { decode as decodeToon } from "@toon-format/toon"
-import { Config, Context, Effect, flow, Layer, Option, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { Cache, Config, Context, Data, Effect, flow, Layer, Option, Schedule, Schema } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 
 // Our float is the USD store-credit sub-account (docs/research/bitrefill-funding.md).
 // REST v2 only sees the primary sub-account (BTC), so real products are priced and
@@ -42,7 +42,13 @@ export type Redemption = Readonly<Record<string, unknown>>
 
 export type Delivery =
   | { readonly _tag: "Delivered"; readonly invoiceId: string; readonly orderId: string; readonly redemption: Redemption }
-  | { readonly _tag: "Failed"; readonly invoiceId: string; readonly status: string }
+  /** Bitrefill definitely did not deliver, so the purchase can be failed and refunded. */
+  | { readonly _tag: "Failed"; readonly reason: string }
+
+/** Bitrefill refused before creating or paying anything (e.g. balance too low). */
+class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }> {}
+// MCP codes that may hide a payment: never treat them as a refusal.
+const UNCERTAIN = new Set(["PAYMENT_UNCERTAIN", "SERVICE_UNAVAILABLE"])
 
 /** "5.53" → 5_530_000, with no floating point (ADR-0004). */
 export const usdToMicro = (usd: string): number => {
@@ -95,22 +101,43 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
           base.execute,
           Effect.flatMap((r) => r.text),
+          Effect.mapError(unavailable),
           Effect.flatMap((body) =>
-            Effect.try(() => {
-              const line = body.split("\n").find((l) => l.startsWith("data: ")) ?? body
-              const { result, error } = JSON.parse(line.replace(/^data: /, ""))
-              const text: string = result?.content?.[0]?.text ?? ""
-              if (error || result?.isError) throw new Error(`${name}: ${error?.message ?? text}`)
-              return text.trimStart().startsWith("{") ? JSON.parse(text) : decodeToon(text)
+            Effect.try({
+              try: () => {
+                const line = body.split("\n").find((l) => l.startsWith("data: ")) ?? body
+                const { result, error } = JSON.parse(line.replace(/^data: /, ""))
+                const text: string = result?.content?.[0]?.text ?? ""
+                const parse = () => (text.trimStart().startsWith("{") ? JSON.parse(text) : decodeToon(text))
+                if (error) throw new Error(`${name}: ${error.message}`)
+                if (result?.isError) {
+                  // Tool errors read like `error: Balance too low / code: INVALID_INPUT`.
+                  const e = (() => { try { return parse() } catch { return {} } })() as { error?: string; code?: string }
+                  if (e.code && !UNCERTAIN.has(e.code)) throw new Rejected({ reason: `${e.error ?? text} (${e.code})` })
+                  throw new Error(`${name}: ${text}`)
+                }
+                return parse()
+              },
+              catch: (e) => (e instanceof Rejected ? e : unavailable(e))
             })
           ),
-          Effect.flatMap(Schema.decodeUnknownEffect(schema)),
-          Effect.mapError(unavailable)
+          Effect.flatMap((u) => Schema.decodeUnknownEffect(schema)(u).pipe(Effect.mapError(unavailable)))
         )
 
       const search = Effect.fn("Bitrefill.search")(function*(q: string) {
         const products = yield* get("/products/search", Schema.Array(Product), { q, include_test_products: String(testnet) })
         return products.map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency }))
+      })
+
+      // MCP allows 30 calls a minute per key, so prices are cached for a minute.
+      const mcpPrices = yield* Cache.make({
+        lookup: (id: string) =>
+          mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct).pipe(
+            Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e)),
+            retry
+          ),
+        capacity: 1_000,
+        timeToLive: "1 minute"
       })
 
       const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string) {
@@ -127,7 +154,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             )
           })
         }
-        const p = yield* mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct).pipe(retry)
+        const p = yield* Cache.get(mcpPrices, id)
         return new Voucher({
           id: p.id,
           name: p.name,
@@ -148,7 +175,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             rest.execute,
             Effect.flatMap(HttpClientResponse.schemaBodyJson(data(Invoice))),
             Effect.map((r) => r.data.id),
-            Effect.mapError(unavailable)
+            Effect.mapError((e) => {
+              // A 4xx (e.g. 403 not_available) means no invoice was created.
+              const status = HttpClientError.isHttpClientError(e) ? e.response?.status ?? 0 : 0
+              return status >= 400 && status < 500 ? new Rejected({ reason: `HTTP ${status}` }) : unavailable(e)
+            })
           )
           : mcp("buy-products", {
             cart_items: [{ product_id: id, package_value: value }],
@@ -157,7 +188,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           }, McpPurchase).pipe(Effect.map((r) => r.response.invoice_id))
 
       const buy = Effect.fn("Bitrefill.buy")(function*(id: string, value: string) {
-        const invoiceId = yield* createInvoice(id, value)
+        const created = yield* createInvoice(id, value).pipe(
+          Effect.map((invoiceId) => ({ invoiceId })),
+          Effect.catchTag("Rejected", (e) => Effect.succeed({ rejected: e.reason }))
+        )
+        if ("rejected" in created) return { _tag: "Failed", reason: created.rejected } as const
+        const { invoiceId } = created
         // Delivery normally takes well under a second; poll for up to ~1 minute.
         // Still pending after that = unknown, left to the reconciler (never "failed").
         const invoice = yield* get(`/invoices/${invoiceId}`, Invoice).pipe(
@@ -171,7 +207,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         if (invoice.status === "all_delivered" && order?.redemption_info) {
           return { _tag: "Delivered", invoiceId, orderId: order.id, redemption: order.redemption_info } as const
         }
-        if (invoice.status === "all_error") return { _tag: "Failed", invoiceId, status: invoice.status } as const
+        if (invoice.status === "all_error") return { _tag: "Failed", reason: `invoice ${invoiceId} is all_error` } as const
         return yield* Effect.fail(unavailable(`invoice ${invoiceId} is still ${invoice.status}`))
       })
 

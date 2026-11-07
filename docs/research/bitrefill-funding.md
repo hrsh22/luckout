@@ -200,3 +200,20 @@ Concrete calls (same `Authorization: Bearer $BITREFILL_API_KEY` throughout):
 ## Housekeeping: invoices created during this research
 
 All 23 were checked with `GET /v2/invoices?limit=50` and are `not_delivered` / `unpaid`. No funds were sent. Five are deposit invoices (USD via usdc_base, bitcoin ×2 and lightning; BTC via bitcoin). Eleven are test-product invoices. Seven are for real products with crypto methods, left unpaid. **Two of those seven (`203b6e2f`, `94548b59`) used `payment_method:"balance"` with `auto_pay:false` on real products.** That is outside the brief's rule. Both are unpaid, and every balance is 0 so they can't be paid, but don't call `POST /invoices/{id}/pay` on them. The USDC invoices expire after 60 minutes (per MCP); REST doesn't say when the others expire.
+
+## Addendum (2026-11-07): Bitrefill's own agent tooling, and what Luckout borrows
+
+Sources: [bitrefill.com/assistant](https://www.bitrefill.com/assistant/?hl=en), [MCP partner integration guide](https://docs.bitrefill.com/docs/mcp-partner-integration-guide), [github.com/bitrefill/agents](https://github.com/bitrefill/agents) (an agent skill, `skills/bitrefill/`), [github.com/bitrefill/cli](https://github.com/bitrefill/cli).
+
+**USD instead of BTC.** No API or tool changes the primary sub-account. The MCP guide documents only the per-purchase `balance_currency` and the `currency` filter on `get-balances`. Bitrefill's own skill does what we do: *"Without `--balance_currency` the buy debits the primary sub-account, which can be BTC."* So `buy-products` with `balance_currency: "USD"` is the supported path. Changing a website setting won't change what the API uses (we checked after the switch: still BTC). Their top-up path for USD credit is a Bitrefill Gift Card (`bitrefill-giftcard-usd`) or `POST /accounts/deposit`.
+
+**Rules from their guide and skill that we now follow:**
+- **Charge `payment_price` from `get-product-details` in the right currency, never the face value.** That is our Reference Price.
+- **Retry only `SERVICE_UNAVAILABLE`, and never retry `PAYMENT_UNCERTAIN`.** The server retries reads only. A tool error with any other code means nothing was created, so the purchase can be failed and refunded. `PAYMENT_UNCERTAIN`, network errors and a stuck invoice are left to the reconciler, never treated as failed.
+- **MCP allows 30 requests a minute per key.** Prices are cached for a minute per product.
+- **Balance payments debit at once.** A balance purchase is final as soon as `buy-products` returns, so the server must record the invoice id before doing anything else.
+- **Their test products differ from ours.** MCP test products (`*-syldavia`) must be enabled by Bitrefill, and on MCP a balance payment debits the real balance even for a test product. Our REST `test-gift-card-*` products are free, so the testnet demo stays on REST.
+
+**References for the Agent (Day 4).** Bitrefill runs a Telegram assistant, [@BitrefillAssistantBot](https://t.me/BitrefillAssistantBot), with the same search → quote → confirm → deliver-in-chat loop we're building. Their skill's confirm line is a good template: *"[Product] — [amount]: [total] USDC. Confirm?"* Their `references/safeguards.md` covers spending caps and logging for agents. Luckout's differences are the Lucky modes and the Spending Limits enforced onchain, which their assistant doesn't have; worth saying in the pitch.
+
+**Not useful for us:** x402 (USDC on EVM/Solana per request, no NEAR), OAuth or guest checkout (we buy from our own account with an API key), and their CLI (the server calls MCP directly in a few lines).

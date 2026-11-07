@@ -32,3 +32,9 @@ test("test vouchers are priced at face value", live, async () => {
   const v = await run((b) => b.voucher("test-gift-card-code"))
   assert.equal(v.packages.find((p) => p.value === "10")?.priceMicroUsdc, 10_000_000)
 })
+
+// A package that doesn't exist is refused before any invoice, whatever the balance.
+test("a refusal from Bitrefill is a definite Failed, not an unknown", live, async () => {
+  const d = await run((b) => b.buy("swiggy-money-india", "999999"))
+  assert.equal(d._tag, "Failed", JSON.stringify(d))
+})
