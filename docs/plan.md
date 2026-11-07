@@ -89,7 +89,7 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 
 | Item | Needed by |
 |---|---|
-| NEAR testnet accounts: owner and operator (server) | Day 2 |
+| ~~NEAR testnet accounts~~: done 7 Nov via the faucet: `luckout.testnet` (owner), `app.` (contract), `usdc.` (test token), `server.` (operator, function-call key in `.env`) | — |
 | Telegram bot token (from BotFather) | Day 4 |
 | NEAR AI Cloud API key | Day 4 |
 | Bitrefill API key: done, it's already in `.env` | — |

@@ -17,6 +17,8 @@ pnpm dev               # web on :3000, server on :8787
 pnpm test              # server tests; the Bitrefill ones are skipped without a key
 ```
 
+**Testnet deployment:** contract [`app.luckout.testnet`](https://testnet.nearblocks.io/address/app.luckout.testnet), test-USDC token with a public `faucet` method (100 tUSDC per call) [`usdc.luckout.testnet`](https://testnet.nearblocks.io/address/usdc.luckout.testnet), and operator `server.luckout.testnet`. To deploy your own, run `contract/deploy-testnet.sh` (needs `cargo-near` and `near-cli-rs`); `cd contract && cargo test` runs the contract tests.
+
 No database is needed: without `DATABASE_URL`, the server stores data in PGlite under `apps/server/.data/`. All environment variables are listed in [`.env.example`](.env.example).
 
 ## How it works
