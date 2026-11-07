@@ -10,6 +10,7 @@ import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
 import { Near } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
+import { rateLimit } from "./RateLimit.ts"
 import { Telegram } from "./Telegram.ts"
 import { TopUp } from "./TopUp.ts"
 
@@ -103,7 +104,7 @@ const Server = Layer.unwrap(
   Effect.gen(function*() {
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-    return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin] }))).pipe(
+    return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin] }), HttpRouter.middleware(rateLimit, { global: true }))).pipe(
       Layer.provide(NodeHttpServer.layer(createServer, { port }))
     )
   })
