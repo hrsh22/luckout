@@ -61,6 +61,19 @@ const migrations = Migrator.fromRecord({
         chat_id BIGINT NOT NULL,
         linked_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`
+  }),
+  // Security review: codes are now issued by the signed-in web session, not by the bot.
+  "0003_web_issued_telegram_codes_and_max_debit": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`DROP TABLE telegram_link_codes`
+    yield* sql`
+      CREATE TABLE telegram_link_codes (
+        code TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+      )`
+    yield* sql`ALTER TABLE telegram_links ADD COLUMN telegram_name TEXT NOT NULL DEFAULT ''`
+    yield* sql`ALTER TABLE purchases ADD COLUMN max_debit BIGINT`
   })
 })
 

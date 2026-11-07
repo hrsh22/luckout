@@ -7,6 +7,7 @@ import { MODES, modeName, sameMode, toMicro, usd } from "@/lib/format"
 import { type Call, contractId, network, send, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { useState } from "react"
+import { TelegramLink } from "./telegram-link"
 import { TopUp } from "./top-up"
 
 const ONE_YOCTO = "1"
@@ -101,7 +102,7 @@ export function WalletPanel() {
                   type="button"
                   aria-pressed={sameMode(account.default_mode, m.mode)}
                   disabled={!!busy}
-                  onClick={run("mode", { receiverId: contractId, method: "set_default_mode", args: { mode: m.mode } })}
+                  onClick={run("mode", { receiverId: contractId, method: "set_default_mode", args: { mode: m.mode }, deposit: ONE_YOCTO })}
                   className="aria-pressed:border-foreground aria-pressed:bg-secondary rounded-lg border px-3 py-2 text-sm"
                 >
                   {m.name} {m.premium}
@@ -109,6 +110,11 @@ export function WalletPanel() {
               ))}
             </div>
             <p className="text-muted-foreground text-xs">Every purchase uses {modeName(account.default_mode)} unless you pick another one for that purchase.</p>
+          </section>
+
+          <section className="flex flex-col gap-3">
+            <h2 className="font-heading text-lg font-semibold">Telegram</h2>
+            <TelegramLink />
           </section>
 
           <section className="flex flex-col gap-3">

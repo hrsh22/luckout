@@ -140,7 +140,7 @@ fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
         };
         let r = (1 + (seed[0] as u128 % 200)) * USDC / 2;
         call(operator(), DAY, seed, 0);
-        let pid = c.purchase(alice(), U128(r), Some(mode));
+        let pid = c.purchase(alice(), U128(r), Some(mode), format!("loop{}", i), U128(u128::MAX));
         let p = c.get_purchase(pid).unwrap();
         // The lock covers the largest possible discount and never exceeds the cap it was admitted under.
         assert!(c.locked_reserve >= p.locked.0);
@@ -164,7 +164,7 @@ fn draw_is_recomputable_from_the_event() {
     let mut c = setup(500 * USDC, 100 * USDC);
     let seed = [7u8; 32];
     call(operator(), DAY, seed, 0);
-    let pid = c.purchase(alice(), U128(6 * USDC), Some(Mode::Lucky(2)));
+    let pid = c.purchase(alice(), U128(6 * USDC), Some(Mode::Lucky(2)), format!("o{}", 2), U128(u128::MAX));
     call(operator(), DAY, seed, 0);
     let p = c.confirm_delivery(pid);
 
@@ -178,10 +178,10 @@ fn draw_is_recomputable_from_the_event() {
 #[test]
 fn default_mode_is_used_when_no_mode_is_given() {
     let mut c = setup(500 * USDC, 100 * USDC);
-    as_(alice());
+    call(alice(), DAY, [0; 32], 1);
     c.set_default_mode(Mode::Lucky(1));
     as_(operator());
-    let pid = c.purchase(alice(), U128(4 * USDC), None);
+    let pid = c.purchase(alice(), U128(4 * USDC), None, format!("o{}", 3), U128(u128::MAX));
     assert_eq!(c.get_purchase(pid).unwrap().mode, Mode::Lucky(1));
     assert_eq!(balance(&c), 95 * USDC);
 }
@@ -190,7 +190,7 @@ fn default_mode_is_used_when_no_mode_is_given() {
 fn failed_purchase_returns_everything() {
     let mut c = setup(500 * USDC, 100 * USDC);
     as_(operator());
-    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)));
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), format!("o{}", 4), U128(u128::MAX));
     assert_eq!(balance(&c), 85 * USDC);
     c.fail_purchase(pid);
     assert_eq!(balance(&c), 100 * USDC);
@@ -201,7 +201,7 @@ fn failed_purchase_returns_everything() {
 fn reclaim_opens_after_24_hours() {
     let mut c = setup(500 * USDC, 100 * USDC);
     as_(operator());
-    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)));
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)), format!("o{}", 5), U128(u128::MAX));
     call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
     c.reclaim(pid);
     assert_eq!(balance(&c), 100 * USDC);
@@ -213,7 +213,7 @@ fn reclaim_opens_after_24_hours() {
 fn reclaim_too_early_fails() {
     let mut c = setup(500 * USDC, 100 * USDC);
     as_(operator());
-    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)));
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)), format!("o{}", 6), U128(u128::MAX));
     as_(alice());
     c.reclaim(pid);
 }
@@ -223,7 +223,7 @@ fn reclaim_too_early_fails() {
 fn cannot_fail_after_the_draw() {
     let mut c = setup(500 * USDC, 100 * USDC);
     as_(operator());
-    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)));
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), format!("o{}", 7), U128(u128::MAX));
     c.confirm_delivery(pid);
     c.fail_purchase(pid);
 }
@@ -234,7 +234,7 @@ fn per_purchase_limit_counts_the_maximum_price() {
     let mut c = setup(500 * USDC, 200 * USDC);
     as_(operator());
     // 40 USDC on Jackpot can cost 60, above the default 50 USDC limit.
-    c.purchase(alice(), U128(40 * USDC), Some(Mode::Lucky(2)));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Lucky(2)), format!("o{}", 8), U128(u128::MAX));
 }
 
 #[test]
@@ -242,19 +242,19 @@ fn per_purchase_limit_counts_the_maximum_price() {
 fn daily_limit_is_enforced() {
     let mut c = setup(0, 200 * USDC);
     as_(operator());
-    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
-    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
-    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal), format!("o{}", 9), U128(u128::MAX));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal), format!("o{}", 10), U128(u128::MAX));
+    c.purchase(alice(), U128(40 * USDC), Some(Mode::Normal), format!("o{}", 11), U128(u128::MAX));
 }
 
 #[test]
 fn daily_limit_resets_the_next_day() {
     let mut c = setup(0, 200 * USDC);
     as_(operator());
-    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
-    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal), format!("o{}", 12), U128(u128::MAX));
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal), format!("o{}", 13), U128(u128::MAX));
     call(operator(), 2 * DAY, [0; 32], 0);
-    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(50 * USDC), Some(Mode::Normal), format!("o{}", 14), U128(u128::MAX));
 }
 
 #[test]
@@ -262,7 +262,7 @@ fn daily_limit_resets_the_next_day() {
 fn only_the_operator_can_buy() {
     let mut c = setup(0, 100 * USDC);
     as_(alice());
-    c.purchase(alice(), U128(USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(USDC), Some(Mode::Normal), format!("o{}", 15), U128(u128::MAX));
 }
 
 #[test]
@@ -280,7 +280,7 @@ fn pause_stops_new_purchases() {
     call(owner(), DAY, [0; 32], 1);
     c.set_paused(true);
     as_(operator());
-    c.purchase(alice(), U128(USDC), Some(Mode::Normal));
+    c.purchase(alice(), U128(USDC), Some(Mode::Normal), format!("o{}", 16), U128(u128::MAX));
 }
 
 #[test]
@@ -289,4 +289,35 @@ fn rejects_other_tokens() {
     let mut c = setup(0, 100 * USDC);
     as_(id("fake.near"));
     let _ = c.ft_on_transfer(alice(), U128(100 * USDC), "".into());
+}
+
+#[test]
+fn the_same_order_is_admitted_once() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let a = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), "order-1".into(), U128(15 * USDC));
+    let b = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), "order-1".into(), U128(15 * USDC));
+    assert_eq!(a, b);
+    assert_eq!(balance(&c), 85 * USDC, "debited once");
+}
+
+#[test]
+#[should_panic(expected = "Price changed since you confirmed")]
+fn never_debits_more_than_the_customer_confirmed() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    // Confirmed a Normal-looking $10, but the Default Mode would make it Jackpot ($15).
+    as_(alice());
+    call(alice(), DAY, [0; 32], 1);
+    c.set_default_mode(Mode::Lucky(2));
+    as_(operator());
+    c.purchase(alice(), U128(10 * USDC), None, "order-2".into(), U128(10 * USDC));
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn default_mode_needs_a_full_access_signature() {
+    let mut c = setup(0, 100 * USDC);
+    as_(alice());
+    c.set_default_mode(Mode::Lucky(2));
 }

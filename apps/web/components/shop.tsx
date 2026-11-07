@@ -56,10 +56,11 @@ export function Shop() {
   }, [voucher, value, mode])
 
   const buy = async () => {
-    if (!voucher || !value || !token) return
+    if (!voucher || !value || !token || !quote) return
     setBusy(true)
     setError(undefined)
-    await api((c) => c.purchases.create({ payload: { voucherId: voucher.id, value, ...(mode ? { mode } : {}), idempotencyKey } }), token)
+    // Exactly what the quote showed: explicit mode, and the contract refuses to debit above maxPrice.
+    await api((c) => c.purchases.create({ payload: { voucherId: voucher.id, value, mode: mode ?? "normal", maxPrice: quote.maxPrice, idempotencyKey } }), token)
       .then(setPurchase, fail)
     await refresh().catch(() => {})
     setBusy(false)

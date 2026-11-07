@@ -52,8 +52,10 @@ export type Order =
 
 /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
 class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }> {}
-// MCP codes that may hide a payment: never treat them as a refusal.
-const UNCERTAIN = new Set(["PAYMENT_UNCERTAIN", "SERVICE_UNAVAILABLE"])
+// Only codes that mean "rejected before anything was paid" count as a refusal. Anything else,
+// including codes we haven't seen, is an unknown outcome left to the reconciler: guessing
+// "not paid" would refund the customer for a voucher we may already have paid for.
+const REFUSED_BEFORE_PAYMENT = new Set(["INVALID_INPUT", "PRODUCT_NOT_FOUND", "NOT_FOUND", "OUT_OF_STOCK"])
 
 /** "5.53" → 5_530_000, with no floating point (ADR-0004). */
 export const usdToMicro = (usd: string): number => {
@@ -120,7 +122,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
                 if (result?.isError) {
                   // Tool errors read like `error: Balance too low / code: INVALID_INPUT`.
                   const e = (() => { try { return parse() } catch { return {} } })() as { error?: string; code?: string }
-                  if (e.code && !UNCERTAIN.has(e.code)) throw new Rejected({ reason: `${e.error ?? text} (${e.code})` })
+                  if (e.code && REFUSED_BEFORE_PAYMENT.has(e.code)) throw new Rejected({ reason: `${e.error ?? text} (${e.code})` })
                   throw new Error(`${name}: ${text}`)
                 }
                 return parse()

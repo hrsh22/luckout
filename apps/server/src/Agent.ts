@@ -16,7 +16,8 @@ export interface Pending {
   readonly voucherId: string
   readonly voucherName: string
   readonly value: string
-  readonly mode: Mode | undefined
+  /** Always resolved (the Default Mode when the customer named none), so the button shows the real maximum. */
+  readonly mode: Mode
   readonly maxPrice: number
   readonly referencePrice: number
 }
@@ -70,6 +71,15 @@ export const makeAgent = (deps: {
   const run = <A>(e: Effect.Effect<A, { message: string }>) =>
     Effect.runPromise(Effect.match(e, { onFailure: (err) => ({ error: err.message }), onSuccess: (a) => a }))
 
+  // The quote must use the mode the contract will apply, so an omitted mode means the Default Mode.
+  const resolveMode = (accountId: string, mode: string | undefined) =>
+    mode && MODES[mode]
+      ? Effect.succeed(MODES[mode]!)
+      : deps.near.view<{ default_mode: Mode } | null>("get_account", { account_id: accountId }).pipe(
+        Effect.map((a) => a?.default_mode ?? ("normal" as Mode))
+      )
+  const game = (m: Mode) => (m === "normal" ? undefined : m.lucky)
+
   const tools = (accountId: string, prepare: (p: Pending) => void) => ({
     search_vouchers: ({ query }: { query: string }) =>
       run(deps.bitrefill.search(query).pipe(Effect.map((vs) => vs.slice(0, 8).map((v) => ({ id: v.id, name: v.name, country: v.countryCode }))))),
@@ -93,16 +103,14 @@ export const makeAgent = (deps: {
           : { balance: "$0.00", note: "No deposit yet; they can top up in the web app." }
       ))),
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
-      run(deps.purchases.quote(voucher_id, value, mode && mode !== "normal" ? (MODES[mode] as { lucky: number }).lucky : undefined).pipe(
-        Effect.map((q) => ({ price: usd(q.referencePrice), most_you_pay: usd(q.maxPrice), lucky_part: usd(q.luckyAmount) }))
+      run(resolveMode(accountId, mode).pipe(
+        Effect.flatMap((m) => deps.purchases.quote(voucher_id, value, game(m))),
+        Effect.map((q) => ({ mode: q.mode, price: usd(q.referencePrice), most_you_pay: usd(q.maxPrice), lucky_part: usd(q.luckyAmount) }))
       )),
     prepare_purchase: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {
-        const m = mode ? MODES[mode] : undefined
-        const [voucher, q] = yield* Effect.all([
-          deps.bitrefill.voucher(voucher_id),
-          deps.purchases.quote(voucher_id, value, m && m !== "normal" ? m.lucky : undefined)
-        ])
+        const m = yield* resolveMode(accountId, mode)
+        const [voucher, q] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m))])
         prepare({ voucherId: voucher.id, voucherName: voucher.name, value, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice })
         return { shown: "A Confirm button is now under your reply." }
       })),

@@ -13,9 +13,20 @@ const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 const LINK_TTL_MINUTES = 10
 const PENDING_TTL_MS = 10 * 60 * 1000
 
+interface Status {
+  readonly linked: boolean
+  readonly telegramName?: string
+  readonly botUrl?: string
+}
+
+// Linking direction (security review): the signed-in web session — proof of the wallet —
+// issues the code and opens the bot with it. Whoever sends that code to the bot gets linked,
+// so the wallet owner alone decides which Telegram account may buy for them.
 export class Telegram extends Context.Service<Telegram, {
-  /** Binds the Telegram user who received `code` to the signed-in NEAR account. */
-  link(accountId: string, code: string): Effect.Effect<{ telegramName: string }, LinkInvalid>
+  status(accountId: string): Effect.Effect<Status>
+  /** A one-time deep link to the bot that links whichever Telegram user opens it. */
+  linkCode(accountId: string): Effect.Effect<{ url: string; expiresAt: number }, LinkInvalid>
+  unlink(accountId: string): Effect.Effect<void>
 }>()("luckout/Telegram") {
   static readonly layer = Layer.effect(
     Telegram,
@@ -31,28 +42,36 @@ export class Telegram extends Context.Service<Telegram, {
       const bot = Option.isSome(token) ? new Bot(Redacted.value(token.value)) : undefined
       const db = <A>(e: Effect.Effect<A, unknown>) => Effect.runPromise(Effect.orDie(e))
 
-      const link = Effect.fn("Telegram.link")(function*(accountId: string, code: string) {
-        const rows = yield* sql<{ telegram_user_id: string; chat_id: string; telegram_name: string }>`
-          DELETE FROM telegram_link_codes WHERE code = ${code} AND expires_at > now()
-          RETURNING telegram_user_id, chat_id, telegram_name`.pipe(Effect.orDie)
-        const row = rows[0]
-        if (!row) return yield* new LinkInvalid({ message: "This link expired. Send /start to the bot for a new one." })
-        yield* sql`
-          INSERT INTO telegram_links (telegram_user_id, account_id, chat_id) VALUES (${row.telegram_user_id}, ${accountId}, ${row.chat_id})
-          ON CONFLICT (telegram_user_id) DO UPDATE SET account_id = excluded.account_id, chat_id = excluded.chat_id, linked_at = now()`
-          .pipe(Effect.orDie)
-        if (bot) {
-          yield* Effect.promise(() =>
-            bot.api.sendMessage(Number(row.chat_id), `Linked to ${accountId}. Ask me for a gift card, e.g. "a 500 rupee Swiggy voucher".`)
-              .catch(() => undefined)
+      const botName = bot ? yield* Effect.promise(() => bot.api.getMe().then((me) => me.username, () => undefined)) : undefined
+      const botUrl = botName ? `https://t.me/${botName}` : undefined
+
+      const status = (accountId: string) =>
+        sql<{ telegram_name: string }>`SELECT telegram_name FROM telegram_links WHERE account_id = ${accountId} ORDER BY linked_at DESC LIMIT 1`
+          .pipe(
+            Effect.map((r): Status => ({
+              linked: r.length > 0,
+              ...(r[0] ? { telegramName: r[0].telegram_name } : {}),
+              ...(botUrl ? { botUrl } : {})
+            })),
+            Effect.orDie
           )
-        }
-        return { telegramName: row.telegram_name }
+
+      const linkCode = Effect.fn("Telegram.linkCode")(function*(accountId: string) {
+        if (!botUrl) return yield* new LinkInvalid({ message: "The Telegram bot is offline right now." })
+        const code = randomBytes(18).toString("base64url")
+        const expiresAt = Date.now() + LINK_TTL_MINUTES * 60_000
+        yield* sql`DELETE FROM telegram_link_codes WHERE expires_at < now()`.pipe(Effect.orDie)
+        yield* sql`INSERT INTO telegram_link_codes (code, account_id, expires_at) VALUES (${code}, ${accountId}, ${new Date(expiresAt)})`
+          .pipe(Effect.orDie)
+        return { url: `${botUrl}?start=${code}`, expiresAt }
       })
+
+      const unlink = (accountId: string) =>
+        sql`DELETE FROM telegram_links WHERE account_id = ${accountId}`.pipe(Effect.asVoid, Effect.orDie)
 
       if (!bot) {
         yield* Effect.logInfo("TELEGRAM_BOT_TOKEN not set: the Telegram Agent is off")
-        return Telegram.of({ link })
+        return Telegram.of({ status, linkCode, unlink })
       }
       if (Option.isNone(aiKey)) {
         yield* Effect.logWarning("NEAR_AI_API_KEY not set: the bot can link accounts but can't chat")
@@ -85,19 +104,25 @@ export class Telegram extends Context.Service<Telegram, {
       })
 
       bot.command("start", async (ctx) => {
+        const code = ctx.match.trim()
+        if (code) {
+          const rows = await db(sql<{ account_id: string }>`
+            DELETE FROM telegram_link_codes WHERE code = ${code} AND expires_at > now() RETURNING account_id`)
+          const accountId = rows[0]?.account_id
+          if (!accountId) return void ctx.reply(`That link expired. Open ${webOrigin}/wallet and tap "Connect Telegram" again.`)
+          const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name
+          await db(sql`
+            INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${ctx.from!.id}, ${accountId}, ${ctx.chat.id}, ${name})
+            ON CONFLICT (telegram_user_id) DO UPDATE SET account_id = excluded.account_id, chat_id = excluded.chat_id,
+              telegram_name = excluded.telegram_name, linked_at = now()`)
+          history.delete(ctx.chat.id)
+          return void ctx.reply(`Linked to ${accountId}. Ask me for a gift card, e.g. "a 500 rupee Swiggy voucher". You confirm every purchase with a button.`)
+        }
         const accountId = await linkedAccount(ctx.from!.id)
-        if (accountId) return void ctx.reply(`You're linked to ${accountId}. What would you like to buy?`)
-        const code = randomBytes(12).toString("base64url")
-        const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name
-        await db(sql`DELETE FROM telegram_link_codes WHERE expires_at < now()`)
-        await db(sql`
-          INSERT INTO telegram_link_codes (code, telegram_user_id, chat_id, telegram_name, expires_at)
-          VALUES (${code}, ${ctx.from!.id}, ${ctx.chat.id}, ${name}, now() + make_interval(mins => ${LINK_TTL_MINUTES}))`)
-        const url = `${webOrigin}/link?code=${code}`
-        // Telegram only allows https URLs on buttons.
         await ctx.reply(
-          `Welcome to Luckout. To buy from here, link your NEAR account by signing in on the web (valid ${LINK_TTL_MINUTES} minutes):\n${url}`,
-          url.startsWith("https://") ? { reply_markup: new InlineKeyboard().url("Link my NEAR account", url) } : {}
+          accountId
+            ? `You're linked to ${accountId}. What would you like to buy?`
+            : `Welcome to Luckout. To buy from here, open ${webOrigin}/wallet, sign in with your NEAR wallet and tap "Connect Telegram".`
         )
       })
 
@@ -154,7 +179,8 @@ export class Telegram extends Context.Service<Telegram, {
         if (action === "cancel") return void ctx.answerCallbackQuery({ text: "Cancelled." })
         await ctx.answerCallbackQuery({ text: "Buying…" })
         const outcome = await Effect.runPromise(
-          purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, ...(p.mode ? { mode: p.mode } : {}), idempotencyKey: id! }))
+          // The contract refuses to debit more than the maximum shown on the button.
+          purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, idempotencyKey: id! }))
             .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: result }))
         )
         await ctx.reply(outcome)
@@ -167,7 +193,7 @@ export class Telegram extends Context.Service<Telegram, {
         () => Effect.promise(() => bot.stop())
       )
       yield* Effect.logInfo("Telegram Agent is running")
-      return Telegram.of({ link })
+      return Telegram.of({ status, linkCode, unlink })
     })
   )
 }

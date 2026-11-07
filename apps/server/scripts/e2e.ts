@@ -50,19 +50,19 @@ console.log("✔ purchases need a valid session")
 
 const buy = (body: object) => req("POST", "/purchases", body, token)
 const idempotencyKey = crypto.randomUUID()
-const normal = await buy({ voucherId: "test-gift-card-code", value: "10", mode: "normal", idempotencyKey })
+const normal = await buy({ voucherId: "test-gift-card-code", value: "10", mode: "normal", maxPrice: 10_000_000, idempotencyKey })
 assert.equal(normal.status, 200, JSON.stringify(normal.json))
 assert.equal(normal.json.status, "delivered", JSON.stringify(normal.json))
 assert.ok(typeof normal.json.redemption?.code === "string")
 assert.equal(normal.json.draw, undefined, "Normal has no Draw")
 console.log(`✔ Normal purchase delivered (${normal.json.admitTx} → ${normal.json.settleTx})`)
 
-const retry = await buy({ voucherId: "test-gift-card-code", value: "10", mode: "normal", idempotencyKey })
+const retry = await buy({ voucherId: "test-gift-card-code", value: "10", mode: "normal", maxPrice: 10_000_000, idempotencyKey })
 assert.equal(retry.json.id, normal.json.id, "same idempotency key, same purchase")
 console.log("✔ retry with the same key returns the same purchase")
 
 // 100 USDC on Jackpot costs up to 150, above the default 50 USDC per-purchase limit.
-const over = await buy({ voucherId: "test-gift-card-code", value: "100", mode: { lucky: 2 }, idempotencyKey: crypto.randomUUID() })
+const over = await buy({ voucherId: "test-gift-card-code", value: "100", mode: { lucky: 2 }, maxPrice: 150_000_000, idempotencyKey: crypto.randomUUID() })
 assert.equal(over.json.status, "rejected", JSON.stringify(over.json))
 assert.match(over.json.error, /spending limit/)
 console.log(`✔ the contract enforces Spending Limits: "${over.json.error}"`)

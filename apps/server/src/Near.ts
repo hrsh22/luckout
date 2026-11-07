@@ -55,8 +55,9 @@ const toOutcome = (hash: string, tx: Tx): Effect.Effect<Outcome, ContractRejecte
   return Effect.succeed({ hash, value: raw ? JSON.parse(raw) : null, events })
 }
 
-const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION|doesn't exist|does not exist|not found/i.test(String(e))
-const isDeadTx = (e: unknown) => /InvalidNonce|Expired|nonce/i.test(String(e))
+const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION/.test(String(e))
+/** NEAR's own error kinds for a transaction that can no longer execute. */
+const isDeadTx = (e: unknown) => /InvalidNonce|\bExpired\b|InvalidTransaction.*Expired/.test(String(e))
 
 export class Near extends Context.Service<Near, {
   readonly contractId: string
@@ -101,8 +102,11 @@ export class Near extends Context.Service<Near, {
         }
         : undefined
 
+      // Every RPC call has a deadline: one hung request must not hold the send lock forever.
       const rpc = <A>(what: string, f: () => Promise<A>) =>
-        Effect.tryPromise({ try: f, catch: (e) => new NearUnavailable({ message: `${what}: ${e}` }) })
+        Effect.tryPromise({ try: f, catch: (e) => new NearUnavailable({ message: `${what}: ${e}` }) }).pipe(
+          Effect.timeoutOrElse({ duration: "30 seconds", orElse: () => Effect.fail(new NearUnavailable({ message: `${what}: timed out` })) })
+        )
 
       // One key means one nonce sequence: sign and send one transaction at a time, until
       // it is included, so a later nonce can never land first and void an earlier one.
@@ -160,13 +164,21 @@ export class Near extends Context.Service<Near, {
           if (Option.isSome(seen)) return seen.value
           // Never seen: send the same bytes again (same hash, so it can't execute twice).
           const tx = SignedTransaction.decode(base64Decode(signed.bytes))
-          yield* sendLock.withPermits(1)(
-            Effect.tryPromise({
-              try: () => provider.sendTransactionUntil(tx, "INCLUDED"),
-              catch: (e) =>
-                isDeadTx(e) ? new TxExpired({ hash: signed.hash }) : new NearUnavailable({ message: `resend: ${e}` })
-            })
+          const resent = yield* sendLock.withPermits(1)(
+            rpc("resend", () => provider.sendTransactionUntil(tx, "INCLUDED")).pipe(
+              Effect.as(true),
+              Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
+            )
           )
+          if (!resent) {
+            // A dead nonce can also mean this very transaction already ran and the first lookup
+            // hit a lagging node. Ask again at final finality before calling it expired.
+            const final = yield* rpc("final tx status", () =>
+              provider.viewTransactionStatus({ txHash: signed.hash, accountId: operator.id, waitUntil: "FINAL" })
+            ).pipe(Effect.map(Option.some), Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e))))
+            if (Option.isSome(final)) return yield* toOutcome(signed.hash, final.value)
+            return yield* new TxExpired({ hash: signed.hash })
+          }
           return yield* executed(signed.hash)
         })
 

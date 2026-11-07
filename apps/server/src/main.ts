@@ -62,7 +62,11 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
 const TelegramHandlers = HttpApiBuilder.group(Api, "telegram", (handlers) =>
   Effect.gen(function*() {
     const telegram = yield* Telegram
-    return handlers.handle("link", ({ payload }) => CurrentAccount.use((a) => telegram.link(a.accountId, payload.code)))
+    return handlers.handleAll({
+      status: () => CurrentAccount.use((a) => telegram.status(a.accountId)),
+      linkCode: () => CurrentAccount.use((a) => telegram.linkCode(a.accountId)),
+      unlink: () => CurrentAccount.use((a) => telegram.unlink(a.accountId))
+    })
   })
 )
 

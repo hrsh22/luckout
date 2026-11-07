@@ -21,6 +21,7 @@ interface Row {
   package_value: string
   requested_mode: Mode | null
   reference_price: number | string | bigint
+  max_debit: number | string | bigint | null
   step: Step
   error: string | null
   admit_tx: Signed | null
@@ -84,6 +85,16 @@ export class Purchases extends Context.Service<Purchases, {
           Effect.orDie
         )
       }
+      /**
+       * Moves a purchase on from the step it was loaded at. False if another worker already
+       * moved it, in which case this run stops: each step's side effect happens once.
+       */
+      const move = (row: Row, fields: Record<string, unknown> & { step: Step }) => {
+        const json = (v: unknown) => (v === null || typeof v !== "object" ? v : JSON.stringify(v))
+        const values = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)]))
+        return sql`UPDATE purchases SET ${sql.update(values)}, updated_at = now() WHERE id = ${row.id} AND step = ${row.step} RETURNING id`
+          .pipe(Effect.map((r) => r.length === 1), Effect.orDie)
+      }
 
       /** Sends (or resumes) one contract call whose signed transaction lives in `column`. */
       const submit = (row: Row, column: "admit_tx" | "settle_tx", method: string, args: object) => {
@@ -99,41 +110,40 @@ export class Purchases extends Context.Service<Purchases, {
         Effect.gen(function*() {
           switch (row.step) {
             case "admit": {
+              // order_id makes admission idempotent onchain: re-sending can never debit twice.
               const outcome = yield* submit(row, "admit_tx", "purchase", {
                 customer: row.account_id,
                 reference_price: String(row.reference_price),
-                mode: row.requested_mode
+                mode: row.requested_mode,
+                order_id: row.id,
+                max_debit: String(row.max_debit ?? row.reference_price)
               }).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
               if (outcome instanceof ContractRejected) {
-                yield* save(row.id, { step: "rejected", error: outcome.message })
+                yield* move(row, { step: "rejected", error: outcome.message })
                 return false
               }
-              const admitted = outcome.events.find((e) => e.event === "purchase")?.data[0]?.purchase
-              yield* save(row.id, {
-                step: "ordering",
-                contract_purchase_id: Number(outcome.value),
-                admitted
-              })
-              return true
+              // A repeated admission logs no event; read the purchase back from the contract.
+              const purchaseId = Number(outcome.value)
+              const admitted = outcome.events.find((e) => e.event === "purchase")?.data[0]?.purchase ??
+                (yield* near.view("get_purchase", { purchase_id: purchaseId }))
+              return yield* move(row, { step: "ordering", contract_purchase_id: purchaseId, admitted })
             }
             case "ordering": {
               if (resumed) {
-                yield* save(row.id, { step: "stuck", error: "Bitrefill order outcome unknown; check the Bitrefill account" })
+                yield* move(row, { step: "stuck", error: "Bitrefill order outcome unknown; check the Bitrefill account" })
                 yield* Effect.logError("purchase stuck at ordering", row.id)
                 return false
               }
               const order = yield* bitrefill.order(row.voucher_id, row.package_value)
-              yield* order._tag === "Ordered"
-                ? save(row.id, { step: "delivery", invoice_id: order.invoiceId })
-                : save(row.id, { step: "fail", error: `Bitrefill refused: ${order.reason}` })
-              return true
+              return yield* order._tag === "Ordered"
+                ? move(row, { step: "delivery", invoice_id: order.invoiceId })
+                : move(row, { step: "fail", error: `Bitrefill refused: ${order.reason}` })
             }
             case "delivery": {
               const d = yield* bitrefill.delivery(row.invoice_id!)
-              yield* d._tag === "Delivered"
-                ? save(row.id, { step: "confirm", redemption: seal(row.id, d.redemption) })
-                : save(row.id, { step: "fail", error: d.reason })
-              return true
+              return yield* d._tag === "Delivered"
+                ? move(row, { step: "confirm", redemption: seal(row.id, d.redemption) })
+                : move(row, { step: "fail", error: d.reason })
             }
             case "confirm":
             case "fail": {
@@ -147,11 +157,11 @@ export class Purchases extends Context.Service<Purchases, {
               if (outcome instanceof ContractRejected) {
                 // Already closed onchain (e.g. the customer reclaimed it after 24 hours).
                 yield* Effect.logError("settlement refused", row.id, outcome.message)
-                yield* save(row.id, { step: confirm ? "stuck" : "failed", error: outcome.message })
+                yield* move(row, { step: confirm ? "stuck" : "failed", error: outcome.message })
                 return false
               }
               const draw = outcome.events.find((e) => e.event === "draw")?.data[0] ?? null
-              yield* save(row.id, { step: confirm ? "settled" : "failed", draw })
+              yield* move(row, { step: confirm ? "settled" : "failed", draw })
               return false
             }
             default:
@@ -173,8 +183,19 @@ export class Purchases extends Context.Service<Purchases, {
           while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
         }).pipe(
           Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
+          // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
+          Effect.catchCause((cause) => Effect.logError(`purchase ${id} paused`, cause)),
           Effect.ensuring(Effect.sync(() => running.delete(id)))
         )
+
+      // A row that fails to decrypt (key missing or rotated) must not break the whole list.
+      const openRedemption = (row: Row) => {
+        try {
+          return { redemption: unseal(row.id, row.redemption!) }
+        } catch {
+          return {}
+        }
+      }
 
       const view = (row: Row): Purchase => {
         const status = row.step === "settled"
@@ -211,7 +232,7 @@ export class Purchases extends Context.Service<Purchases, {
               })
             }
             : {}),
-          ...(row.redemption && row.step === "settled" ? { redemption: unseal(row.id, row.redemption) } : {}),
+          ...(row.redemption && row.step === "settled" ? openRedemption(row) : {}),
           ...(row.admit_tx ? { admitTx: row.admit_tx.hash } : {}),
           ...(row.settle_tx ? { settleTx: row.settle_tx.hash } : {}),
           createdAt: new Date(row.created_at).toISOString()
@@ -248,9 +269,9 @@ export class Purchases extends Context.Service<Purchases, {
         }
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
         const inserted = yield* sql<{ id: string }>`
-          INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, step)
+          INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step)
           VALUES (${accountId}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value},
-                  ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, 'admit')
+                  ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, 'admit')
           ON CONFLICT (account_id, idempotency_key) DO NOTHING
           RETURNING id`.pipe(Effect.orDie)
         // A retry with the same key returns the original purchase instead of buying again.
@@ -279,7 +300,9 @@ export class Purchases extends Context.Service<Purchases, {
         WHERE step IN ('admit', 'ordering', 'delivery', 'confirm', 'fail') AND updated_at < now() - interval '30 seconds'
         ORDER BY created_at LIMIT 50`.pipe(
         Effect.orDie,
-        Effect.flatMap((rows) => Effect.forEach(rows, (r) => advance(r.id, true), { discard: true }))
+        Effect.flatMap((rows) => Effect.forEach(rows, (r) => advance(r.id, true), { discard: true, concurrency: 4 })),
+        // A failed pass (e.g. the database blinked) must never end the reconciler.
+        Effect.catchCause((cause) => Effect.logError("reconcile pass failed", cause))
       )
       yield* reconcile.pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped)
 

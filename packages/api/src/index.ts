@@ -121,6 +121,8 @@ export class NewPurchase extends Schema.Class<NewPurchase>("NewPurchase")({
   value: Schema.String,
   /** Omit to use the customer's Default Mode. */
   mode: Schema.optional(Mode),
+  /** The most the customer agreed to pay (the quote they saw). The contract refuses to debit more. */
+  maxPrice: MicroUsdc,
   /** Client-generated; retrying with the same key never buys twice. */
   idempotencyKey: Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(64))
 }) {}
@@ -177,13 +179,19 @@ export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
   { httpApiStatus: 400 }
 ) {}
 
-/** Links the Telegram user who got `code` from the bot to the signed-in NEAR account (ADR-0001). */
+/**
+ * Telegram linking (ADR-0001, ADR-0007): the signed-in web session issues a one-time code and
+ * opens the bot with it, so only the wallet owner decides which Telegram account gets access.
+ */
 export class TelegramApi extends HttpApiGroup.make("telegram").add(
-  HttpApiEndpoint.post("link", "/telegram/link", {
-    payload: Schema.Struct({ code: Schema.String }),
-    success: Schema.Struct({ telegramName: Schema.String }),
+  HttpApiEndpoint.get("status", "/telegram", {
+    success: Schema.Struct({ linked: Schema.Boolean, telegramName: Schema.optional(Schema.String), botUrl: Schema.optional(Schema.String) })
+  }),
+  HttpApiEndpoint.post("linkCode", "/telegram/link-code", {
+    success: Schema.Struct({ url: Schema.String, expiresAt: Schema.Number }),
     error: LinkInvalid
-  })
+  }),
+  HttpApiEndpoint.post("unlink", "/telegram/unlink", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}
 
 // ---------- top-ups (NEAR Intents 1Click, mainnet) ----------

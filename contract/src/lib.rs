@@ -37,6 +37,7 @@ enum Key {
     Accounts,
     Versions,
     Purchases,
+    Orders,
 }
 
 /// Normal is a Standard Purchase; Lucky(n) is a Lucky Buy on Game Version n.
@@ -180,10 +181,55 @@ pub struct Contract {
     lucky_settled: u64,
     lucky_amount_total: u128,
     lucky_paid_total: u128,
+    /// The server's order id → purchase id, so admitting the same order twice is a no-op.
+    orders: LookupMap<String, u64>,
+}
+
+/// State layout before `orders` was added (v0.1, testnet); read once by `migrate`.
+#[near(serializers = [borsh])]
+struct ContractV1 {
+    owner: AccountId,
+    operator: AccountId,
+    usdc: AccountId,
+    paused: bool,
+    accounts: LookupMap<AccountId, Account>,
+    versions: Vector<GameVersion>,
+    purchases: LookupMap<u64, Purchase>,
+    next_purchase_id: u64,
+    free_reserve: u128,
+    locked_reserve: u128,
+    proceeds: u128,
+    lucky_settled: u64,
+    lucky_amount_total: u128,
+    lucky_paid_total: u128,
 }
 
 #[near]
 impl Contract {
+    /// Upgrades v0.1 state in place (adds `orders`). Only the contract account can call it.
+    #[private]
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let old: ContractV1 = env::state_read().unwrap_or_else(|| env::panic_str("No state to migrate"));
+        Self {
+            owner: old.owner,
+            operator: old.operator,
+            usdc: old.usdc,
+            paused: old.paused,
+            accounts: old.accounts,
+            versions: old.versions,
+            purchases: old.purchases,
+            next_purchase_id: old.next_purchase_id,
+            free_reserve: old.free_reserve,
+            locked_reserve: old.locked_reserve,
+            proceeds: old.proceeds,
+            lucky_settled: old.lucky_settled,
+            lucky_amount_total: old.lucky_amount_total,
+            lucky_paid_total: old.lucky_paid_total,
+            orders: LookupMap::new(Key::Orders),
+        }
+    }
+
     #[init]
     pub fn new(owner: AccountId, operator: AccountId, usdc: AccountId) -> Self {
         let mut c = Self {
@@ -201,6 +247,7 @@ impl Contract {
             lucky_settled: 0,
             lucky_amount_total: 0,
             lucky_paid_total: 0,
+            orders: LookupMap::new(Key::Orders),
         };
         for v in default_game_versions() {
             c.push_version(v);
@@ -250,7 +297,10 @@ impl Contract {
         self.accounts.insert(id, a);
     }
 
+    /// Like every setting, needs a full-access signature (1 yoctoNEAR).
+    #[payable]
     pub fn set_default_mode(&mut self, mode: Mode) {
+        assert_one_yocto();
         self.assert_mode(mode);
         let id = env::predecessor_account_id();
         let mut a = self.existing_account(&id);
@@ -284,9 +334,22 @@ impl Contract {
     // ---------- operator (server, function-call key) ----------
 
     /// Admits a purchase: debits the Maximum Price and locks the reserve.
-    /// `mode: None` uses the customer's Default Mode.
-    pub fn purchase(&mut self, customer: AccountId, reference_price: U128, mode: Option<Mode>) -> u64 {
+    /// `mode: None` uses the customer's Default Mode. `order_id` makes admission idempotent:
+    /// the same order is admitted once, whatever the retries. `max_debit` is the most the
+    /// customer confirmed; a higher Maximum Price (the price or the reserve moved) is refused.
+    pub fn purchase(
+        &mut self,
+        customer: AccountId,
+        reference_price: U128,
+        mode: Option<Mode>,
+        order_id: String,
+        max_debit: U128,
+    ) -> u64 {
         self.assert_operator();
+        require!(!order_id.is_empty() && order_id.len() <= 64, "Invalid order id");
+        if let Some(id) = self.orders.get(&order_id) {
+            return *id;
+        }
         require!(!self.paused, "New purchases are paused");
         let r = reference_price.0;
         require!(r > 0, "Reference price must be positive");
@@ -294,6 +357,7 @@ impl Contract {
         let mode = mode.unwrap_or(a.default_mode);
         let q = self.quote_internal(r, mode);
         let debit = q.max_price.0;
+        require!(debit <= max_debit.0, "Price changed since you confirmed; please confirm again");
 
         require!(debit <= a.per_purchase_limit.0, "Over the per-purchase spending limit");
         let day = env::block_timestamp() / DAY_NS;
@@ -316,6 +380,7 @@ impl Contract {
 
         let id = self.next_purchase_id;
         self.next_purchase_id += 1;
+        self.orders.insert(order_id, id);
         let p = Purchase {
             customer,
             mode,
