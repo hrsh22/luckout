@@ -2,9 +2,9 @@ import { Effect, Option } from "effect"
 import { HttpMiddleware, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { IpNetwork } from "effect/net"
 
-// Only Caddy (on the Docker network) or a local proxy may set X-Forwarded-For; anyone
+// Only the local reverse proxy (nginx on the VM) may set X-Forwarded-For; anyone
 // else's header is ignored, so clients can't dodge the limit by spoofing it.
-const trustedProxies = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"].map(IpNetwork.fromStringUnsafe)
+const trustedProxies = ["127.0.0.0/8", "::1/128"].map(IpNetwork.fromStringUnsafe)
 
 const WINDOW_MS = 60_000
 /** Requests per IP per minute. Sign-in is tighter: each challenge writes a row. */

@@ -42,9 +42,9 @@ A token or NFTs; streaks, loyalty odds or near-miss effects; an indexer; subscri
 See ADR-0006 for the full reasoning.
 
 ```text
-            Vercel                          Our VM (Docker Compose)
+            Vercel                          Our VM (CloudPanel, pm2)
 ┌──────────────────────────┐      ┌──────────────────────────────────────┐
-│ apps/web  (Next.js)      │ HTTPS│ Caddy ──► apps/server (Effect, Node) │
+│ apps/web  (Next.js)      │ HTTPS│ nginx ──► apps/server (Effect, Node) │
 │  shop, settings, proof,  ├─────►│   HttpApi · grammY bot · Agent       │
 │  live average, win cards │      │   PurchaseWorkflow · reconciler      │
 │  NEAR Connect wallet     │      │            │                         │
@@ -82,7 +82,7 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 | 3 | Mon 10 Nov | Purchase workflow end to end on testnet (admit, Bitrefill, confirm or fail), reconciler. Web: shop, buy, result, history, settings. |
 | 4 | Tue 11 Nov | Telegram Agent: wallet-signed linking, NEAR AI Cloud tool loop (search, balance, quote, buy, history), codes by direct message. |
 | 5 | Wed 12 Nov | Proof page, Live Average, Running Total, Win Cards. 1Click Top-Ups on mainnet. |
-| 6 | Thu 13 Nov | Deploy: VM (Compose, Postgres, Caddy), Vercel, mainnet contract. Fresh-clone README check with Claude Code and Codex. Polish. |
+| 6 | Thu 13 Nov | Deploy: VM (CloudPanel, pm2, Postgres), Vercel, mainnet contract. Fresh-clone README check with Claude Code and Codex. Polish. |
 | 7 | Fri 14 Nov | Demo video, X post, submission form. Buffer, then stretch items. |
 
 ## What only you can provide

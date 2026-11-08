@@ -107,9 +107,11 @@ const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
 const Server = Layer.unwrap(
   Effect.gen(function*() {
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
+    // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
+    const host = yield* Config.String("HOST").pipe(Config.option)
     const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
     return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin] }), HttpRouter.middleware(rateLimit, { global: true }))).pipe(
-      Layer.provide(NodeHttpServer.layer(createServer, { port }))
+      Layer.provide(NodeHttpServer.layer(createServer, { port, ...(host._tag === "Some" ? { host: host.value } : {}) }))
     )
   })
 )

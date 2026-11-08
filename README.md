@@ -45,7 +45,7 @@ Without any keys, the server starts on PGlite (no database to install), the Draw
 
 - **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
 - **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, Spending Limits and isolation.
-- **Deploying:** [`deploy/README.md`](deploy/README.md) (server on a VM with Docker Compose; web on Vercel).
+- **Deploying:** [`deploy/README.md`](deploy/README.md) (server on a CloudPanel VM with pm2; web on Vercel).
 
 ## Security model
 
@@ -65,7 +65,7 @@ apps/web        Next.js web app: shop, wallet, purchases, Draw Proof, Live Avera
 apps/server     Effect server: HTTP API, purchase workflow and reconciler, Telegram agent, top-ups
 packages/api    shared HttpApi definition and schemas (typed client for the web app)
 contract/       Rust NEAR contract, plus a testnet-only test-USDC token with a faucet
-deploy/         Docker Compose stack for the server (Postgres, backups, Caddy)
+deploy/         pm2 config and VM setup for the server
 docs/           plan, decisions (ADRs), research
 CONTEXT.md      domain glossary
 ```
