@@ -96,8 +96,8 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 | About $50 of float: a USD store-credit deposit paid in USDC on Base (the server can create the deposit invoice) | Day 5 |
 | 1Click API key | Day 5 |
 | NEAR mainnet accounts (owner and operator), a few NEAR for storage and gas, and about $200–500 USDC for the Refund Reserve | Day 6 |
-| VM: operating system and size, a subdomain for the API pointed at the VM, and SSH access | Day 6 |
-| Vercel project and a public GitHub repo | Day 6 |
+| ~~VM, API subdomain and SSH~~: done 9 Nov, `luckout-api.gamified.trade` on CloudPanel | — |
+| ~~Vercel project~~: done 9 Nov, `luckout.gamified.trade`. The GitHub repo must be public before submission | Day 7 |
 | Demo video, X post, submission form, and the NEAR wallet for prizes | Day 7 |
 
 ## Open checks
@@ -107,7 +107,7 @@ Each of these is a quick check against an API or the docs while building.
 - ~~**NEAR AI Cloud:** which models, and tool calling.~~ Checked 7 Nov: `GET https://cloud-api.near.ai/v1/models` is public and lists `supported_features`. Tool-capable and ready, among others: `deepseek-ai/DeepSeek-V4.1-Flash-1017` ($0.30/$1.20 per M tokens), `Qwen/Qwen3.6-35B-A3B-FP8` ($0.17/$1.10), `z-ai/glm-5.3-flash` ($0.08/$0.50), `anthropic/claude-haiku-5-5` ($0.10/$0.50). Pick one when the key arrives; prefer an open-weight model if it runs in NEAR AI's private (TEE) inference.
 - **NEAR Connect:** whether HOT Wallet sign-in works inside Telegram.
 - ~~**Bitrefill:** whether test products exist.~~ Checked 7 Nov: they do. `test-gift-card-code` and `test-gift-card-link` deliver in under a second for free, even with a zero balance, so the testnet demo uses real Bitrefill fulfillment. The `-fail` products become `not_available` after one use, so the failure path is tested with a stub. REST prices come in satoshis, so the Reference Price instead comes from MCP `get-product-details` in USD, and test products are priced at face value.
-- **Bitrefill test-card quota:** after about 15 free test deliveries on 7 Nov, `test-gift-card-code` and `test-gift-card-link` began returning `permanent_failure`. If it doesn't reset, the testnet demo needs a clearly labelled simulated fulfilment (and so would a fresh clone without a Bitrefill key). Check on 8 Nov.
+- **Bitrefill test-card quota:** after about 15 free test deliveries on 7 Nov, `test-gift-card-code` and `test-gift-card-link` began returning `permanent_failure`. Checked 9 Nov: it resets daily; Normal and Jackpot test purchases delivered again, in production. Keep demo rehearsals under about 15 test deliveries a day.
 - **Bitrefill USD charge:** whether the USD balance pays MCP's quoted price or the about 1% lower balance price. Settle it with the first funded purchase.
 - ~~**1Click:** whether it can deliver USDC into the customer's account.~~ Checked 7 Nov: yes. An `EXACT_OUTPUT` quote to `nep141:<native USDC>` with `recipient` = the customer's NEAR account (it must exist) delivers exactly the amount asked; refunds go to the same account on Intents (`refundType: INTENTS`), since we don't know their origin-chain address. 10 USDC from Base cost 10.10 with no key and took about 35 s. The API key is optional (without it 1Click adds 0.25%). `customRecipientMsg` could deposit straight into Luckout but is marked experimental with fund-loss warnings, so we keep the two-step flow. The customer must be registered on USDC first; the Wallet page offers that.
 - **Testnet USDC:** use our own test token with a faucet instead of hunting for a testnet USDC.

@@ -24,10 +24,12 @@ Every lucky mode averages 6% over the normal price, and that's our only revenue:
 
 ## Try it on testnet
 
+**Live: [luckout.gamified.trade](https://luckout.gamified.trade)** (API at `luckout-api.gamified.trade`). Connect a testnet wallet, tap "Get 100 test USDC and deposit it" on the Wallet page, and buy a Bitrefill test voucher.
+
 Contract [`app.luckout.testnet`](https://testnet.nearblocks.io/address/app.luckout.testnet), test USDC [`usdc.luckout.testnet`](https://testnet.nearblocks.io/address/usdc.luckout.testnet) (anyone can call `faucet` for 100 tUSDC), operator `server.luckout.testnet`.
 
-- **Draw Proof** of the first testnet draw, recomputed in your browser: run the web app and open `/draw/77EAmNVpwoqL62byNaPmES54vJmRMChfzL5LrMb8NxFQ`.
-- **Is it fair?** at `/fair` shows the Live Average from `get_stats`.
+- **Draw Proof** of the first testnet draw, recomputed in your browser: [luckout.gamified.trade/draw/77EAmNVp…](https://luckout.gamified.trade/draw/77EAmNVpwoqL62byNaPmES54vJmRMChfzL5LrMb8NxFQ).
+- **Is it fair?** at [`/fair`](https://luckout.gamified.trade/fair) shows the Live Average from `get_stats`.
 - **Buying** needs the server's operator key and a Bitrefill key. On testnet only Bitrefill's free test vouchers can be bought, with test USDC.
 
 ## Quickstart
@@ -44,7 +46,7 @@ pnpm test              # unit tests; tests that call Bitrefill or 1Click skip wi
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY` the catalog and prices work; with the operator key and `REDEMPTION_KEY` purchases work. All variables are in [`.env.example`](.env.example).
 
 - **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
-- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, Spending Limits and isolation.
+- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. Set `API_URL=https://luckout-api.gamified.trade` to run it against production.
 - **Deploying:** [`deploy/README.md`](deploy/README.md) (server on a CloudPanel VM with pm2; web on Vercel).
 
 ## Security model

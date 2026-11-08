@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "pnpm --parallel -r dev",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "deploy:server": "ssh luckout-milesvm '. ~/.nvm/nvm.sh && cd ~/htdocs/luckout-api.gamified.trade && git pull -q && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 reload luckout-api && sleep 5 && curl -fsS -o /dev/null -w \"health %{http_code}\\n\" http://127.0.0.1:8788/health'"
   }
 }

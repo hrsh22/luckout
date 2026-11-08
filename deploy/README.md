@@ -45,6 +45,6 @@ cd ~/htdocs/luckout-api.gamified.trade
 git pull && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 reload luckout-api
 ```
 
-The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i`.
+From a machine with the `luckout-milesvm` SSH alias, `pnpm deploy:server` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i`.
 
 Logs: `pm2 logs luckout-api`.
