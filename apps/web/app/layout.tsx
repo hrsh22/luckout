@@ -8,6 +8,8 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
 const grotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-grotesk" })
 
 export const metadata: Metadata = {
+  // Shared Draw Proof links and Win Cards should point at our domain, not *.vercel.app.
+  metadataBase: new URL(process.env.VERCEL_ENV === "production" ? "https://luckout.gamified.trade" : process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000"),
   title: "Luckout",
   description: "Checkout, but lucky. Buy the gift cards you already buy, sometimes for much less."
 }
