@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
-import { makeAgent } from "./Agent.ts"
+import { makeAgent, trimHistory } from "./Agent.ts"
 
 // A fake OpenAI-compatible endpoint that plays back scripted model turns and records what it was sent.
 const fakeModel = async (turns: Array<object>) => {
@@ -67,4 +67,27 @@ test("voucher codes never reach the model", async () => {
   model.close()
   assert.ok(!JSON.stringify(model.seen).includes("SECRET-CODE-123"))
   assert.ok(JSON.stringify(model.seen).includes("Test Gift Card Code"), "the tool result itself did reach the model")
+})
+
+test("each turn's prompt starts with the previous turn's exact messages, so it hits the cache", async () => {
+  const model = await fakeModel([
+    call("search_vouchers", { query: "steam" }),
+    { role: "assistant", content: "Found Steam." },
+    { role: "assistant", content: "Sure." }
+  ])
+  const agent = makeAgent({ ...(deps as object), bitrefill: { ...(deps as { bitrefill: object }).bitrefill, search: () => Effect.succeed([]) }, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const first = await agent("alice.testnet", [], "steam card?")
+  await agent("alice.testnet", first.history, "thanks")
+  model.close()
+  const lastOfFirstTurn = model.seen[1]!.messages
+  const secondTurn = model.seen[2]!.messages
+  assert.deepEqual(secondTurn.slice(0, lastOfFirstTurn.length), lastOfFirstTurn, "same prefix, tool calls included")
+})
+
+test("history is trimmed in one cut, at a customer message", () => {
+  const turn = (i: number) => [{ role: "user", content: `q${i}` }, { role: "assistant", content: `a${i}` }] as const
+  const h = Array.from({ length: 31 }, (_, i) => turn(i)).flat() as Array<never>
+  assert.equal(trimHistory(h.slice(0, 60)).length, 60, "untouched until it grows past the limit")
+  const cut = trimHistory(h) as Array<{ role: string }>
+  assert.ok(cut.length <= 24 && cut[0]!.role === "user")
 })

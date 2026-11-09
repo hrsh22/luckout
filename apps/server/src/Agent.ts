@@ -57,6 +57,17 @@ Rules:
 - Voucher codes are delivered by the bot directly; never ask for or repeat them.
 - Keep replies short and plain.${testnet ? "\n- This is the testnet demo: only Bitrefill test vouchers (ids starting with test-) can be bought, with test USDC." : ""}`
 
+/**
+ * Old turns are dropped in one big cut, at a customer message, rather than one by one: the model
+ * provider caches by exact prefix, so a history that only grows keeps hitting the cache, while a
+ * sliding window shifts every token after the system prompt on every turn.
+ */
+export const trimHistory = (h: Array<ChatCompletionMessageParam>, max = 60, keep = 24) => {
+  if (h.length <= max) return h
+  const start = h.findIndex((m, i) => i >= h.length - keep && m.role === "user")
+  return start === -1 ? [] : h.slice(start)
+}
+
 export const makeAgent = (deps: {
   bitrefill: Bitrefill["Service"]
   purchases: Purchases["Service"]
@@ -131,12 +142,16 @@ export const makeAgent = (deps: {
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet) }, ...history, { role: "user", content: text }]
     for (let step = 0; step < 6; step++) {
       const res = await client.chat.completions.create({ model: deps.model, messages, tools: TOOLS })
+      const u = res.usage
+      if (u) console.log(`agent tokens: prompt ${u.prompt_tokens}, cached ${u.prompt_tokens_details?.cached_tokens ?? 0}, completion ${u.completion_tokens}`)
       const msg = res.choices[0]?.message
       if (!msg) break
       messages.push(msg)
       const calls = (msg.tool_calls ?? []).filter((c) => c.type === "function")
       if (calls.length === 0) {
-        return { reply: msg.content ?? "", pending, history: messages.slice(1).filter((m) => m.role === "user" || (m.role === "assistant" && !m.tool_calls?.length)) }
+        // The whole transcript, tool calls included: the next turn's prompt then starts with exactly
+        // this turn's tokens, which the provider has cached (cache reads cost 2% of fresh input).
+        return { reply: msg.content ?? "", pending, history: messages.slice(1) }
       }
       for (const c of calls) {
         const handler = handlers[c.function.name]

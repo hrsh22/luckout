@@ -4,7 +4,7 @@ import { SqlClient } from "effect/sql"
 import { Bot, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
-import { makeAgent, type Pending } from "./Agent.ts"
+import { makeAgent, type Pending, trimHistory } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Near, Network } from "./Near.ts"
@@ -172,7 +172,7 @@ export class Telegram extends Context.Service<Telegram, {
           }
           return void ctx.reply("Sorry, something went wrong on my side. Try again in a moment.")
         }
-        history.set(ctx.chat.id, turn.history.slice(-16))
+        history.set(ctx.chat.id, trimHistory(turn.history))
         if (!turn.pending) return void ctx.reply(turn.reply || "…")
         const id = randomUUID()
         pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
