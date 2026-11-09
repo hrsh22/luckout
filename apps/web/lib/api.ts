@@ -38,10 +38,17 @@ export const api = <A, E>(f: (c: Client) => Effect.Effect<A, E>, token?: string,
     throw e
   })
 
+// Wallets say "User closed the window…", "User rejected…" and so on when the customer backs out.
+const BACKED_OUT = /user (closed|rejected|denied|cancel)|rejected by (the )?user|cancell?ed by (the )?user|closed the window/i
+
+/** The customer closed or declined the wallet prompt: nothing was signed, and it isn't an error. */
+export const cancelled = (e: unknown) => BACKED_OUT.test(String((e as { message?: string })?.message ?? e))
+
 /** The server's own message for a failed call, when it sent one. */
 export const errorMessage = (e: unknown) => {
   const tag = (e as { _tag?: string })?._tag
   if (tag === "Unauthorized") return "Your session ended. Sign in again."
+  if (cancelled(e)) return "You closed your wallet before approving, so nothing happened."
   if (e instanceof TypeError) return "Can't reach Luckout right now. Check your connection and try again."
   return (e as { message?: string })?.message ?? String(e)
 }

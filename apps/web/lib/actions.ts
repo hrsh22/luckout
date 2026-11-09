@@ -2,7 +2,7 @@
 
 import type { Mode } from "@luckout/api"
 import { toast } from "sonner"
-import { errorMessage } from "./api"
+import { cancelled, errorMessage } from "./api"
 import { usd } from "./format"
 import { modeName } from "./modes"
 import { type Call, contractId, send, usdcId } from "./near"
@@ -35,7 +35,9 @@ export function useWalletActions() {
       toast.success(done, { id, description: undefined })
       return true
     } catch (e) {
-      toast.error(errorMessage(e), { id, description: undefined })
+      // Backing out of the wallet isn't a failure: say what happened, without the alarm.
+      if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
+      else toast.error(errorMessage(e), { id, description: undefined })
       return false
     }
   }

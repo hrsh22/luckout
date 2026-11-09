@@ -2,7 +2,7 @@
 
 import { type Mode, SignedChallenge } from "@luckout/api"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
-import { api, errorMessage, UNAUTHORIZED } from "./api"
+import { api, cancelled, errorMessage, UNAUTHORIZED } from "./api"
 import { contractId, near, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -20,6 +20,12 @@ export interface ContractAccount {
 /** Where sign-in is: choosing a wallet, then signing the one-time message. */
 export type SignInStep = "wallet" | "message"
 
+/** Why sign-in didn't finish. Backing out of the wallet is not an error, just a reason to show calmly. */
+export interface SignInProblem {
+  message: string
+  cancelled: boolean
+}
+
 interface Session {
   /** The signed-in account; set only together with a valid token. */
   accountId: string | undefined
@@ -31,9 +37,9 @@ interface Session {
   /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
   signing: SignInStep | undefined
-  signInError: string | undefined
-  /** Resolves true once signed in; false if the customer cancelled or it failed (the error is in signInError). */
-  signIn(): Promise<boolean>
+  signInError: SignInProblem | undefined
+  /** Resolves undefined once signed in, or why it didn't happen. */
+  signIn(): Promise<SignInProblem | undefined>
   signOut(): Promise<void>
   refresh(): Promise<void>
 }
@@ -62,7 +68,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState<ContractAccount | null>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
   const [signing, setSigning] = useState<SignInStep>()
-  const [signInError, setSignInError] = useState<string>()
+  const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
 
   const clear = useCallback(() => {
@@ -135,10 +141,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem(STORAGE, JSON.stringify(s))
       } catch {}
       setSession({ accountId: s.accountId, token: s.token })
-      return true
+      return undefined
     } catch (e) {
-      setSignInError(errorMessage(e))
-      return false
+      const problem = {
+        message: cancelled(e) ? "You closed your wallet before signing in. Nothing was shared." : errorMessage(e),
+        cancelled: cancelled(e)
+      }
+      setSignInError(problem)
+      return problem
     } finally {
       setSigning(undefined)
     }

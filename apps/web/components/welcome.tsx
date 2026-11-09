@@ -109,8 +109,8 @@ export function Welcome() {
                 <Point icon={ShieldCheck} tint="lilac" title="Checkable" body="Every Draw is on NEAR. Anyone can recompute it." />
               </div>
               <div className="card flex flex-col items-start gap-3 p-6">
-                <SignInButton size="lg" label="Sign in with NEAR" />
-                {signInError && <p role="alert" className="text-sm font-medium text-bad">{signInError}</p>}
+                <SignInButton size="lg" label="Sign in with NEAR" inline />
+                {signInError && <p role="alert" className={`text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
                 <p className="text-sm text-muted">Free: you sign one message, no transaction. HOT, Meteor, MyNearWallet and other NEAR wallets work.</p>
               </div>
             </>

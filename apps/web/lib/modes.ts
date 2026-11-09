@@ -30,6 +30,9 @@ export const MODES: ReadonlyArray<ModeInfo> = [
   lucky(2, "Jackpot", 5_000, [[100, 1_000], [50, 1_200], [40, 3_400]])
 ]
 
+/** The longest outcome table: lists reserve this many rows so switching modes doesn't move the page. */
+export const MOST_OUTCOMES = Math.max(...MODES.map((m) => m.outcomes.length))
+
 /** The most Cashback one Lucky Buy can pay: MAX_CASHBACK in the contract. */
 export const MAX_CASHBACK = 50_000_000
 

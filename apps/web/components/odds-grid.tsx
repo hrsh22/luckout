@@ -1,6 +1,6 @@
 "use client"
 
-import { slabColor } from "@/components/odds"
+import { slabColor, Spacers } from "@/components/odds"
 import { usd } from "@/lib/format"
 import { MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
@@ -61,9 +61,10 @@ export function OddsGrid() {
               <span><b>{o.chanceBps / 100}</b> {label(o)}</span>
             </li>
           ))}
+          <Spacers used={outcomes.length} />
         </ul>
         <p className="rounded-2xl p-4 text-[15px]" style={{ background: pal.soft, color: pal.ink }}>
-          On {m.name} each pays {m.premiumBps / 100}% extra up front, then cashback comes in fixed slabs. Every one of them gets the card.
+          Each pays {m.premiumBps / 100}% extra up front, and every one of them gets the card. All modes average 105.6% of the price.
         </p>
       </div>
     </figure>

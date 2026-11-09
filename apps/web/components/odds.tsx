@@ -1,7 +1,7 @@
 "use client"
 
 import { usd } from "@/lib/format"
-import { mostLikely, type PricedOutcome } from "@/lib/modes"
+import { MOST_OUTCOMES, mostLikely, type PricedOutcome } from "@/lib/modes"
 import { motion } from "motion/react"
 
 /** Gold deepens with the cashback: pale for 10% back, full gold for free. No cashback stays ink. */
@@ -25,6 +25,12 @@ export function OddsBar({ outcomes, className = "h-3" }: { outcomes: ReadonlyArr
   )
 }
 
+/** Empty rows up to the longest table, so a shorter one (Jackpot) keeps the same height. */
+export const Spacers = ({ used }: { used: number }) =>
+  Array.from({ length: Math.max(0, MOST_OUTCOMES - used) }, (_, i) => (
+    <li key={`spacer-${i}`} aria-hidden="true" className="invisible">&nbsp;</li>
+  ))
+
 /** Every price this purchase can end at, with its exact chance, best last. */
 export function OddsList({ outcomes, whole }: { outcomes: ReadonlyArray<PricedOutcome>; whole: boolean }) {
   const likely = mostLikely(outcomes)
@@ -44,6 +50,7 @@ export function OddsList({ outcomes, whole }: { outcomes: ReadonlyArray<PricedOu
           <span className="font-semibold tabular-nums">{o.chanceBps / 100}%</span>
         </li>
       ))}
+      <Spacers used={outcomes.length} />
     </ul>
   )
 }

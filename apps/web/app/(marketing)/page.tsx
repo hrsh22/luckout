@@ -114,11 +114,6 @@ export default async function Home() {
         <div className="mt-4">
           <OddsGrid />
         </div>
-        <p className="mt-6 max-w-[64ch] text-ink-soft">
-          Over many purchases, every lucky mode averages 105.6% of the price; they differ only in shape. One purchase can get at most{" "}
-          {usd(MAX_CASHBACK)} back, so on big purchases only part of the price plays and the rest is charged at the normal price. The shop
-          shows exactly how much before you buy.
-        </p>
       </section>
 
       <section className="relative mx-auto max-w-[1240px] px-6 pt-24 sm:px-10">

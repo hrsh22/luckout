@@ -22,7 +22,6 @@ export function AppNav() {
   const { accountId, account, ready } = useSession()
   return (
     <NavShell
-      home="/shop"
       links={LINKS}
       right={accountId
         ? (
@@ -43,11 +42,16 @@ export function AppNav() {
   )
 }
 
-/** The one sign-in button: it says which step the wallet is on. */
-export function SignInButton({ size = "md", label = "Sign in", onDone }: {
+/**
+ * The one sign-in button: it says which step the wallet is on. Where there's no room to show why
+ * sign-in stopped (the nav, the receipt), it says so in a toast.
+ */
+export function SignInButton({ size = "md", label = "Sign in", onDone, inline = false }: {
   size?: "sm" | "md" | "lg"
   label?: string
   onDone?: () => void
+  /** The page shows signInError itself. */
+  inline?: boolean
 }) {
   const { signIn, signing, ready } = useSession()
   return (
@@ -55,7 +59,11 @@ export function SignInButton({ size = "md", label = "Sign in", onDone }: {
       size={size}
       loading={!!signing}
       disabled={!ready}
-      onClick={() => signIn().then((ok) => ok && onDone?.())}
+      onClick={() =>
+        signIn().then((problem) => {
+          if (!problem) return onDone?.()
+          if (!inline) problem.cancelled ? toast(problem.message) : toast.error(problem.message)
+        })}
     >
       {signing === "wallet" ? "Choose a wallet" : signing === "message" ? "Sign the message in your wallet" : label}
     </Button>
