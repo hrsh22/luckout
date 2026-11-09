@@ -5,6 +5,7 @@ import { Bot, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { makeAgent, type Pending } from "./Agent.ts"
+import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
@@ -80,6 +81,8 @@ export class Telegram extends Context.Service<Telegram, {
       }
 
       const purchases = yield* Purchases
+      const alerts = yield* Alerts
+      const offline = `The assistant is offline right now. You can still buy in the web app: ${webOrigin}/shop`
       const agent = Option.isSome(aiKey)
         ? makeAgent({
           bitrefill: yield* Bitrefill,
@@ -153,13 +156,22 @@ export class Telegram extends Context.Service<Telegram, {
         if (!allowed(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
         const accountId = await linkedAccount(ctx.from.id)
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
-        if (!agent) return void ctx.reply("The assistant is offline right now. You can still buy in the web app.")
+        if (!agent) return void ctx.reply(offline)
         await ctx.replyWithChatAction("typing")
+        let failure: unknown
         const turn = await agent(accountId, history.get(ctx.chat.id) ?? [], ctx.message.text).catch((e) => {
+          failure = e
           console.error("agent error", e)
           return undefined
         })
-        if (!turn) return void ctx.reply("Sorry, something went wrong on my side. Try again in a moment.")
+        if (!turn) {
+          // 402: the NEAR AI account has no credits or spending limit. Tell the customer plainly, and us.
+          if ((failure as { status?: number })?.status === 402) {
+            void Effect.runPromise(alerts.admin("NEAR AI returned 402 (no credits or spending limit): the bot can't chat until credits are added at cloud.near.ai"))
+            return void ctx.reply(offline)
+          }
+          return void ctx.reply("Sorry, something went wrong on my side. Try again in a moment.")
+        }
         history.set(ctx.chat.id, turn.history.slice(-16))
         if (!turn.pending) return void ctx.reply(turn.reply || "…")
         const id = randomUUID()
