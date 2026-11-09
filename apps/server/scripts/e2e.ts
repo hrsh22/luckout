@@ -68,11 +68,12 @@ const d = lucky.json.draw
 assert.ok(d && d.finalPrice <= q.maxPrice && d.finalPrice + d.refund === q.maxPrice, JSON.stringify(lucky.json))
 console.log(`✔ Jackpot delivered: price ${q.referencePrice / 1e6}, paid ${d.finalPrice / 1e6} (Draw Proof: /draw/${lucky.json.settleTx})`)
 
-// 100 USDC on Jackpot costs up to 150, above the default 50 USDC per-purchase limit.
+// 100 USDC is above the default 50 USDC per-purchase limit. The server refuses it before
+// signing anything (the contract would too: scripts/attack.ts tries it with the operator key).
 const over = await buy({ voucherId: "test-gift-card-code", value: "100", mode: { lucky: 2 }, maxPrice: 150_000_000, idempotencyKey: crypto.randomUUID() })
-assert.equal(over.json.status, "rejected", JSON.stringify(over.json))
-assert.match(over.json.error, /spending limit/)
-console.log(`✔ the contract enforces Spending Limits: "${over.json.error}"`)
+assert.equal(over.status, 400, JSON.stringify(over.json))
+assert.match(over.json.message, /spending limit/)
+console.log(`✔ Spending Limits are checked before anything is signed: "${over.json.message}"`)
 
 const otherToken = await signIn(other)
 assert.equal((await req("GET", `/purchases/${normal.json.id}`, undefined, otherToken)).status, 404)

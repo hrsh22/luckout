@@ -5,10 +5,12 @@ import { HttpRouter } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
+import { Alerts } from "./Alerts.ts"
 import { Auth } from "./Auth.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
-import { Near } from "./Near.ts"
+import { Monitor } from "./Monitor.ts"
+import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { rateLimit } from "./RateLimit.ts"
 import { Telegram } from "./Telegram.ts"
@@ -93,10 +95,24 @@ const AuthorizationLive = Layer.effect(
   })
 )
 
-const Services = Telegram.layer.pipe(
+const Services = Layer.mergeAll(Telegram.layer, Monitor).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer)),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, DbLive))
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, Alerts.layer)),
+  Layer.provideMerge(DbLive)
 )
+
+// On mainnet, refuse to start half-configured instead of falling back to testnet defaults,
+// PGlite, or sessions that end on restart.
+const MAINNET_REQUIRES = [
+  "DATABASE_URL",
+  "WEB_ORIGIN",
+  "SESSION_SECRET",
+  "REDEMPTION_KEY",
+  "LUCKOUT_CONTRACT_ID",
+  "OPERATOR_ACCOUNT_ID",
+  "OPERATOR_PRIVATE_KEY",
+  "BITREFILL_API_KEY"
+]
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
   Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers]),
@@ -106,6 +122,8 @@ const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
 
 const Server = Layer.unwrap(
   Effect.gen(function*() {
+    const missing = (yield* Network) === "mainnet" ? MAINNET_REQUIRES.filter((k) => !process.env[k]) : []
+    if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)

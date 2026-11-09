@@ -13,6 +13,8 @@ module.exports = {
     exec_mode: "fork",
     env: { HOST: "127.0.0.1" },
     max_memory_restart: "512M",
-    kill_timeout: 10000
+    // On stop or reload, purchases in progress finish first (each takes seconds, at worst a
+    // few minutes); pm2 must not kill the process mid-purchase.
+    kill_timeout: 180000
   }]
 }

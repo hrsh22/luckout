@@ -6,12 +6,14 @@ import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { makeAgent, type Pending } from "./Agent.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Near } from "./Near.ts"
+import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 const LINK_TTL_MINUTES = 10
 const PENDING_TTL_MS = 10 * 60 * 1000
+/** Messages per Telegram user per minute; each one can cost several LLM calls. */
+const MESSAGES_PER_MINUTE = 10
 
 interface Status {
   readonly linked: boolean
@@ -37,7 +39,7 @@ export class Telegram extends Context.Service<Telegram, {
       const aiBase = yield* Config.String("NEAR_AI_BASE_URL").pipe(Config.withDefault("https://cloud-api.near.ai/v1"))
       const aiModel = yield* Config.String("NEAR_AI_MODEL").pipe(Config.withDefault("deepseek-ai/DeepSeek-V4.1-Flash-1017"))
       const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-      const testnet = (yield* Config.String("NEAR_NETWORK").pipe(Config.withDefault("testnet"))) === "testnet"
+      const testnet = (yield* Network) === "testnet"
 
       const bot = Option.isSome(token) ? new Bot(Redacted.value(token.value)) : undefined
       const db = <A>(e: Effect.Effect<A, unknown>) => Effect.runPromise(Effect.orDie(e))
@@ -46,7 +48,7 @@ export class Telegram extends Context.Service<Telegram, {
       const botUrl = botName ? `https://t.me/${botName}` : undefined
 
       const status = (accountId: string) =>
-        sql<{ telegram_name: string }>`SELECT telegram_name FROM telegram_links WHERE account_id = ${accountId} ORDER BY linked_at DESC LIMIT 1`
+        sql<{ telegram_name: string }>`SELECT telegram_name FROM telegram_links WHERE account_id = ${accountId}`
           .pipe(
             Effect.map((r): Status => ({
               linked: r.length > 0,
@@ -103,6 +105,23 @@ export class Telegram extends Context.Service<Telegram, {
         if (ctx.chat?.type === "private") await next()
       })
 
+      // grammY handles updates one at a time, so slow work (the LLM, a purchase) runs detached:
+      // one chat waiting never holds up another. Each chat's jobs still run in order.
+      const chains = new Map<number, Promise<void>>()
+      const inChat = (chatId: number, job: () => Promise<void>) => {
+        const next = (chains.get(chatId) ?? Promise.resolve()).then(job).catch((e) => console.error("telegram job failed", e))
+        chains.set(chatId, next)
+        void next.then(() => chains.get(chatId) === next && chains.delete(chatId))
+      }
+      // ponytail: fixed one-minute window in memory, one process.
+      const windows = new Map<number, { count: number; resetAt: number }>()
+      const allowed = (userId: number) => {
+        const now = Date.now()
+        const w = windows.get(userId)
+        if (!w || w.resetAt < now) return windows.set(userId, { count: 1, resetAt: now + 60_000 }), true
+        return ++w.count <= MESSAGES_PER_MINUTE
+      }
+
       bot.command("start", async (ctx) => {
         const code = ctx.match.trim()
         if (code) {
@@ -111,10 +130,11 @@ export class Telegram extends Context.Service<Telegram, {
           const accountId = rows[0]?.account_id
           if (!accountId) return void ctx.reply(`That link expired. Open ${webOrigin}/wallet and tap "Connect Telegram" again.`)
           const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name
-          await db(sql`
-            INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${ctx.from!.id}, ${accountId}, ${ctx.chat.id}, ${name})
-            ON CONFLICT (telegram_user_id) DO UPDATE SET account_id = excluded.account_id, chat_id = excluded.chat_id,
-              telegram_name = excluded.telegram_name, linked_at = now()`)
+          // One Telegram account per wallet: linking a new one replaces the old link.
+          await db(sql.withTransaction(Effect.gen(function*() {
+            yield* sql`DELETE FROM telegram_links WHERE account_id = ${accountId} OR telegram_user_id = ${ctx.from!.id}`
+            yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${ctx.from!.id}, ${accountId}, ${ctx.chat.id}, ${name})`
+          })))
           history.delete(ctx.chat.id)
           return void ctx.reply(`Linked to ${accountId}. Ask me for a gift card, e.g. "a 500 rupee Swiggy voucher". You confirm every purchase with a button.`)
         }
@@ -126,7 +146,8 @@ export class Telegram extends Context.Service<Telegram, {
         )
       })
 
-      bot.on("message:text", async (ctx) => {
+      bot.on("message:text", (ctx) => inChat(ctx.chat.id, async () => {
+        if (!allowed(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
         const accountId = await linkedAccount(ctx.from.id)
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
         if (!agent) return void ctx.reply("The assistant is offline right now. You can still buy in the web app.")
@@ -147,7 +168,7 @@ export class Telegram extends Context.Service<Telegram, {
         await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
           reply_markup: new InlineKeyboard().text(`Buy for up to ${usd(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })
-      })
+      }))
 
       const result = (p: Purchase) => {
         if (p.status !== "delivered") return p.error ?? `Purchase ${p.status}.`
@@ -177,19 +198,26 @@ export class Telegram extends Context.Service<Telegram, {
         pending.delete(id!)
         await ctx.editMessageReplyMarkup().catch(() => {})
         if (action === "cancel") return void ctx.answerCallbackQuery({ text: "Cancelled." })
+        // The wallet may have unlinked this Telegram account since the button was made.
+        if ((await linkedAccount(ctx.from.id)) !== p.accountId) {
+          return void ctx.answerCallbackQuery({ text: "This Telegram account is no longer linked to that wallet." })
+        }
         await ctx.answerCallbackQuery({ text: "Buying…" })
-        const outcome = await Effect.runPromise(
-          // The contract refuses to debit more than the maximum shown on the button.
-          purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, idempotencyKey: id! }))
-            .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: result }))
-        )
-        await ctx.reply(outcome)
+        inChat(ctx.chat!.id, async () => {
+          const outcome = await Effect.runPromise(
+            // The contract refuses to debit more than the maximum shown on the button.
+            purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, idempotencyKey: id! }))
+              .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: result }))
+          )
+          await ctx.reply(outcome)
+        })
       })
 
       bot.catch((err) => console.error("telegram error", err.error))
       // Long polling: no webhook or public URL needed (ADR-0006).
       yield* Effect.acquireRelease(
-        Effect.sync(() => void bot.start({ drop_pending_updates: true })),
+        // A rejection (e.g. 409: another process polls with this token) must not crash the server.
+        Effect.sync(() => void bot.start({ drop_pending_updates: true }).catch((e) => console.error("telegram polling stopped", e))),
         () => Effect.promise(() => bot.stop())
       )
       yield* Effect.logInfo("Telegram Agent is running")

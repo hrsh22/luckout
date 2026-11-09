@@ -1,0 +1,46 @@
+# Runbook
+
+## A purchase is stuck
+
+The Monitor alerts when a purchase reaches `stuck`, or is still unfinished after 15 minutes. Find it:
+
+```sh
+ssh luckout-milesvm
+psql -h 127.0.0.1 -U luckout luckout -c "SELECT id, account_id, step, error, invoice_id, contract_purchase_id, attempts, created_at FROM purchases WHERE step NOT IN ('settled', 'failed', 'rejected') ORDER BY created_at"
+```
+
+Then check both sides before changing anything:
+
+- **Onchain:** `near contract call-function as-read-only <contract> get_purchase json-args '{"purchase_id":<contract_purchase_id>}' network-config <network> now`. Status `Pending` (still open), `Drawing` (delivered, Draw not run yet), `Delivered`, `Failed` or `Reclaimed`.
+- **Bitrefill:** the order history in the Bitrefill account, matched by `invoice_id`, or by time and product when `invoice_id` is empty.
+
+| Error or step | Means | Do |
+|---|---|---|
+| `Bitrefill order outcome unknown` (step was `ordering`) | We may have paid Bitrefill without saving the invoice. | If Bitrefill shows the order delivered: set `invoice_id` and `step = 'delivery'`; the reconciler confirms it within a minute. If there's no order: `step = 'fail'`, and the customer is refunded. |
+| `Gave up after 12 attempts at delivery` | Bitrefill never finished delivering. | Same as above, using `invoice_id`. |
+| `Gave up … at confirm` / `at fail` | NEAR kept refusing or timing out. | Read the error. If the operator is out of gas, top it up, then set `step` back to `confirm`/`fail`, `attempts = 0`, `next_attempt_at = now()`. |
+| Onchain `Drawing` for long | The Draw callback failed. | Setting `step = 'confirm'` reschedules it; the customer can also call `retry_draw`. |
+| `fail_purchase refused, delivered onchain` | We confirmed a delivery we later tried to fail. | Check Bitrefill: if the voucher was delivered, set `step = 'settled'`. |
+
+Restart a purchase by setting its step and clearing the backoff, for example:
+
+```sql
+UPDATE purchases SET step = 'delivery', invoice_id = '<id>', attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute' WHERE id = '<uuid>';
+```
+
+Never set `admit` or `ordering` by hand: those can debit or buy again.
+
+## The customer reclaimed after we delivered
+
+The alert says "was delivered but closed onchain as Reclaimed". The customer has both the voucher and their money; the voucher cost is ours. Nothing to fix in the database.
+
+## Low operator gas or contract storage
+
+- Operator under 0.5 NEAR: send NEAR to the operator account. Purchases stop when it runs out.
+- Contract under 1 NEAR free: send NEAR to the contract account. New purchases fail when storage can't be paid.
+
+## The server won't start
+
+- `NEAR_NETWORK=mainnet also needs …`: fill in the listed values in `.env`.
+- `Another Luckout server is already running`: `pm2 list`; stop the extra process. Exactly one may run.
+- Logs: `pm2 logs luckout-api --lines 200`.

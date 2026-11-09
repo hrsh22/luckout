@@ -24,7 +24,8 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    - `PORT=8788` and `DATABASE_URL=postgres://luckout:<password>@127.0.0.1:5432/luckout`
    - `WEB_ORIGIN=` the web app's URL, for CORS
    - `SESSION_SECRET` and `REDEMPTION_KEY` (`openssl rand -hex 32` each). Back up `REDEMPTION_KEY` somewhere safe: without it, stored voucher codes can't be decrypted.
-   - the NEAR, Bitrefill, Telegram and NEAR AI values. On mainnet, the operator account should hold only a function-call key for the contract.
+   - the NEAR, Bitrefill, Telegram and NEAR AI values. On mainnet, the operator account should hold only a function-call key for the contract, and the server refuses to start if any required value is missing.
+   - `ALERT_TELEGRAM_CHAT_ID`, so alerts (low gas, contract storage, stuck or late purchases) reach you in Telegram. They're always in the logs too.
 6. **Run.**
    ```sh
    pm2 start deploy/ecosystem.config.cjs
@@ -45,6 +46,8 @@ cd ~/htdocs/luckout-api.gamified.trade
 git pull && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 reload luckout-api
 ```
 
-From a machine with the `luckout-milesvm` SSH alias, `pnpm deploy:server` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i`.
+From a machine with the `luckout-milesvm` SSH alias, `pnpm deploy:server` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs && pm2 save`.
+
+When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
 Logs: `pm2 logs luckout-api`.

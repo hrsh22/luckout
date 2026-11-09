@@ -1,7 +1,8 @@
 import { BitrefillUnavailable, Voucher, VoucherSummary } from "@luckout/api"
 import { decode as decodeToon } from "@toon-format/toon"
-import { Cache, Config, Context, Data, Effect, flow, Layer, Option, Schedule, Schema } from "effect"
+import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { Network } from "./Near.ts"
 
 // Our float is the USD store-credit sub-account (docs/research/bitrefill-funding.md).
 // REST v2 only sees the primary sub-account (BTC), so real products are priced and
@@ -56,6 +57,13 @@ class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }>
 // including codes we haven't seen, is an unknown outcome left to the reconciler: guessing
 // "not paid" would refund the customer for a voucher we may already have paid for.
 const REFUSED_BEFORE_PAYMENT = new Set(["INVALID_INPUT", "PRODUCT_NOT_FOUND", "NOT_FOUND", "OUT_OF_STOCK"])
+// HTTP statuses that mean the MCP endpoint turned the request away without running the tool.
+const REFUSED_STATUS = new Set([400, 401, 403, 404, 429])
+const httpStatus = (e: unknown) => (HttpClientError.isHttpClientError(e) ? e.response?.status ?? 0 : 0)
+
+// MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most
+// 20 of them, so anonymous browsing can never starve a customer's purchase.
+const LOOKUPS_PER_MINUTE = 20
 
 /** "5.53" → 5_530_000, with no floating point (ADR-0004). */
 export const usdToMicro = (usd: string): number => {
@@ -78,14 +86,19 @@ export class Bitrefill extends Context.Service<Bitrefill, {
     Effect.gen(function*() {
       const apiKey = yield* Config.option(Config.Redacted("BITREFILL_API_KEY"))
       const restUrl = yield* Config.String("BITREFILL_API_URL").pipe(Config.withDefault("https://api.bitrefill.com/v2"))
-      const testnet = (yield* Config.String("NEAR_NETWORK").pipe(Config.withDefault("testnet"))) === "testnet"
+      const testnet = (yield* Network) === "testnet"
       const isTest = (id: string) => testnet && id.startsWith("test-")
 
       const base = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest(Option.isSome(apiKey) ? HttpClientRequest.bearerToken(apiKey.value) : (r) => r),
         HttpClient.filterStatusOk
       )
-      const rest = base.pipe(HttpClient.mapRequest(flow(HttpClientRequest.prependUrl(restUrl), HttpClientRequest.acceptJson)))
+      const rest = base.pipe(
+        HttpClient.mapRequest(flow(HttpClientRequest.prependUrl(restUrl), HttpClientRequest.acceptJson)),
+        HttpClient.timeout("15 seconds")
+      )
+      // A timed-out buy is an unknown outcome (left to the reconciler), so this one is generous.
+      const mcpClient = base.pipe(HttpClient.timeout("45 seconds"))
       const mcpUrl = new URL("/mcp", restUrl).href
       // Only reads are retried: retrying a purchase could buy twice.
       const retry = <A, E>(self: Effect.Effect<A, E>) => Effect.retry(self, { schedule: Schedule.exponential(200), times: 3 })
@@ -108,9 +121,9 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         HttpClientRequest.post(mcpUrl).pipe(
           HttpClientRequest.setHeader("Accept", "application/json, text/event-stream"),
           HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
-          base.execute,
+          mcpClient.execute,
           Effect.flatMap((r) => r.text),
-          Effect.mapError(unavailable),
+          Effect.mapError((e) => (REFUSED_STATUS.has(httpStatus(e)) ? new Rejected({ reason: `HTTP ${httpStatus(e)}` }) : unavailable(e))),
           Effect.flatMap((body) =>
             Effect.try({
               try: () => {
@@ -138,16 +151,25 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         return products.map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency }))
       })
 
-      // MCP allows 30 calls a minute per key, so prices are cached for a minute.
-      const mcpPrices = yield* Cache.make({
-        lookup: (id: string) =>
-          mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct).pipe(
-            Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e)),
-            retry
-          ),
-        capacity: 1_000,
-        timeToLive: "1 minute"
+      // ponytail: fixed one-minute window in memory, one process.
+      let budget = { left: LOOKUPS_PER_MINUTE, resetAt: 0 }
+      const spendLookup = Effect.suspend(() => {
+        const now = Date.now()
+        if (budget.resetAt < now) budget = { left: LOOKUPS_PER_MINUTE, resetAt: now + 60_000 }
+        return budget.left-- > 0
+          ? Effect.void
+          : Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
       })
+
+      // Prices are cached for a minute; failures only briefly, so a busy minute doesn't stick.
+      const mcpPrices = yield* Cache.makeWith(
+        (id: string) =>
+          spendLookup.pipe(
+            Effect.andThen(mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct)),
+            Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e))
+          ),
+        { capacity: 1_000, timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds") }
+      )
 
       const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string) {
         if (isTest(id)) {
@@ -186,7 +208,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             Effect.map((r) => r.data.id),
             Effect.mapError((e) => {
               // A 4xx (e.g. 403 not_available) means no invoice was created.
-              const status = HttpClientError.isHttpClientError(e) ? e.response?.status ?? 0 : 0
+              const status = httpStatus(e)
               return status >= 400 && status < 500 ? new Rejected({ reason: `HTTP ${status}` }) : unavailable(e)
             })
           )

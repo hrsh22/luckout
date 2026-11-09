@@ -66,7 +66,7 @@ export const makeAgent = (deps: {
   baseURL: string
   model: string
 }) => {
-  const client = new OpenAI({ apiKey: deps.apiKey, baseURL: deps.baseURL })
+  const client = new OpenAI({ apiKey: deps.apiKey, baseURL: deps.baseURL, timeout: 45_000, maxRetries: 1 })
 
   const run = <A>(e: Effect.Effect<A, { message: string }>) =>
     Effect.runPromise(Effect.match(e, { onFailure: (err) => ({ error: err.message }), onSuccess: (a) => a }))

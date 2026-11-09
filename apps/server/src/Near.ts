@@ -55,12 +55,16 @@ const toOutcome = (hash: string, tx: Tx): Effect.Effect<Outcome, ContractRejecte
   return Effect.succeed({ hash, value: raw ? JSON.parse(raw) : null, events })
 }
 
+/** testnet or mainnet. Anything else refuses to start, so a typo can't switch off the testnet guards. */
+export const Network = Config.Literals(["testnet", "mainnet"], "NEAR_NETWORK").pipe(Config.withDefault("testnet"))
+
 const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION/.test(String(e))
 /** NEAR's own error kinds for a transaction that can no longer execute. */
 const isDeadTx = (e: unknown) => /InvalidNonce|\bExpired\b|InvalidTransaction.*Expired/.test(String(e))
 
 export class Near extends Context.Service<Near, {
   readonly contractId: string
+  readonly operatorId: string | undefined
   view<A>(method: string, args?: Record<string, unknown>): Effect.Effect<A, NearUnavailable>
   /** Signs `method` with the operator's function-call key, lets `persist` save it, then sends it. */
   call<E>(
@@ -70,6 +74,8 @@ export class Near extends Context.Service<Near, {
   ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
   /** The outcome of a transaction signed earlier, re-sending it if the network never saw it. */
   resume(signed: Signed): Effect.Effect<Outcome, ContractRejected | NearUnavailable | TxExpired>
+  /** An account's NEAR balance and storage, for monitoring. */
+  account(accountId: string): Effect.Effect<{ readonly amount: bigint; readonly storageUsage: number }, NearUnavailable>
   /** NEP-413 check: a valid signature by a full-access key of `accountId`. */
   verifySignIn(input: {
     accountId: string
@@ -83,8 +89,7 @@ export class Near extends Context.Service<Near, {
   static readonly layer = Layer.effect(
     Near,
     Effect.gen(function*() {
-      const network = yield* Config.String("NEAR_NETWORK").pipe(Config.withDefault("testnet"))
-      const testnet = network === "testnet"
+      const testnet = (yield* Network) === "testnet"
       const rpcUrl = yield* Config.String("NEAR_RPC_URL").pipe(
         Config.withDefault(testnet ? "https://test.rpc.fastnear.com" : "https://free.rpc.fastnear.com")
       )
@@ -182,6 +187,11 @@ export class Near extends Context.Service<Near, {
           return yield* executed(signed.hash)
         })
 
+      const account = (accountId: string) =>
+        rpc("account", () => provider.viewAccount({ accountId, blockQuery: { finality: "optimistic" } })).pipe(
+          Effect.map((a) => ({ amount: a.amount, storageUsage: a.storage_usage }))
+        )
+
       const verifySignIn: Near["Service"]["verifySignIn"] = (input) =>
         Effect.tryPromise(() =>
           verifyMessage({
@@ -193,7 +203,7 @@ export class Near extends Context.Service<Near, {
           })
         ).pipe(Effect.as(true), Effect.orElseSucceed(() => false))
 
-      return Near.of({ contractId, view, call, resume, verifySignIn })
+      return Near.of({ contractId, operatorId: operator?.id, view, call, resume, account, verifySignIn })
     })
   )
 }

@@ -1,6 +1,7 @@
 import { TopUpAsset, TopUpQuote, TopUpUnavailable } from "@luckout/api"
 import { Cache, Config, Context, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { Network } from "./Near.ts"
 
 // Top-ups (ADR-0001): a NEAR Intents 1Click swap from any supported chain that lands native
 // USDC in the customer's own NEAR account; one deposit then moves it into their Balance.
@@ -37,13 +38,14 @@ export class TopUp extends Context.Service<TopUp, {
       const baseUrl = yield* Config.String("ONECLICK_API_URL").pipe(Config.withDefault("https://1click.chaindefuser.com/v0"))
       // Optional: without a key 1Click charges an extra 0.25%.
       const key = yield* Config.option(Config.Redacted("ONECLICK_API_KEY"))
-      const mainnet = (yield* Config.String("NEAR_NETWORK").pipe(Config.withDefault("testnet"))) === "mainnet"
+      const mainnet = (yield* Network) === "mainnet"
 
       const http = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest((r) => {
           const req = HttpClientRequest.acceptJson(HttpClientRequest.prependUrl(r, baseUrl))
           return Option.isSome(key) ? HttpClientRequest.bearerToken(req, Redacted.value(key.value)) : req
-        })
+        }),
+        HttpClient.timeout("15 seconds")
       )
       const fail = (message: string) => new TopUpUnavailable({ message })
       const read = <A, I>(schema: Schema.Codec<A, I>) =>
