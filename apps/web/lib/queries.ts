@@ -46,9 +46,12 @@ export const usePurchases = (token: string | undefined) =>
     refetchInterval: (q) => (q.state.data?.some(pending) ? 4000 : false)
   })
 
-export const useTelegram = (token: string | undefined) =>
+/** While `waiting` (the customer is off in Telegram tapping Start), check every 2 s until linked. */
+export const useTelegram = (token: string | undefined, waiting = false) =>
   useQuery({
     queryKey: ["telegram", token],
     queryFn: () => api((c) => c.telegram.status(), token),
-    enabled: !!token
+    enabled: !!token,
+    refetchOnWindowFocus: true,
+    refetchInterval: (q) => (waiting && !q.state.data?.linked ? 2000 : false)
   })

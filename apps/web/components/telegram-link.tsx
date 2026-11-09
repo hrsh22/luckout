@@ -5,21 +5,36 @@ import { api, errorMessage } from "@/lib/api"
 import { useTelegram } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { Send } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
 /** Linking starts here, in the signed-in session, so only the wallet owner picks the Telegram account. */
 export function TelegramLink() {
   const { token } = useSession()
-  const status = useTelegram(token)
+  // Set once the bot opens in another tab: the card follows along until the link appears.
+  const [waiting, setWaiting] = useState(false)
+  const status = useTelegram(token, waiting)
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!waiting || !status.data?.linked) return
+    setWaiting(false)
+    toast.success(`Telegram connected${status.data.telegramName ? ` to ${status.data.telegramName}` : ""}`)
+  }, [waiting, status.data])
+
+  // Give up after 10 minutes; the card still refreshes when the tab regains focus.
+  useEffect(() => {
+    if (!waiting) return
+    const t = setTimeout(() => setWaiting(false), 10 * 60_000)
+    return () => clearTimeout(t)
+  }, [waiting])
 
   const connect = async () => {
     setBusy(true)
     try {
       const { url } = await api((c) => c.telegram.linkCode(), token)
       window.open(url, "_blank", "noopener")
-      toast("Finish in Telegram", { description: "Tap Start in the Luckout bot. Then come back here." })
+      setWaiting(true)
     } catch (e) {
       toast.error(errorMessage(e))
     }
@@ -41,6 +56,8 @@ export function TelegramLink() {
         <p className="text-[15px] text-ink-soft">
           {s?.linked
             ? "The bot buys only when you tap Confirm, always within your limits."
+            : waiting
+            ? "Tap Start in the Luckout bot. This updates by itself once you do."
             : "Ask the Luckout bot for a card. Nothing is bought until you tap Confirm, and codes arrive in your private chat."}
         </p>
       </div>
@@ -48,6 +65,13 @@ export function TelegramLink() {
         ? <span className="skeleton h-11 w-40 rounded-full" />
         : s.linked
         ? <Button variant="light" loading={busy} onClick={disconnect}>Disconnect</Button>
+        : waiting
+        ? (
+          <div className="flex shrink-0 items-center gap-1">
+            <Button variant="ghost" onClick={() => setWaiting(false)}>Cancel</Button>
+            <Button variant="light" loading>Waiting for Telegram</Button>
+          </div>
+        )
         : <Button loading={busy} onClick={connect} disabled={!s.botUrl}>{s.botUrl ? "Connect Telegram" : "Bot offline"}</Button>}
     </div>
   )
