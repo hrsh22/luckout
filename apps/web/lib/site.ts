@@ -9,5 +9,5 @@ export const siteUrl = process.env.VERCEL_ENV === "production"
 
 export const testnet = network === "testnet"
 
-/** A Draw from testnet that paid $0 for a $10 card, linked from the landing page. */
-export const EXAMPLE_DRAW = "D4UXKYAtVx9E4TeFptBNdYtJipu4VhD6UJKf7AMPJwS3"
+/** A Jackpot Draw from testnet that paid $0 for a $10 card (all $15 back), linked from the landing page. */
+export const EXAMPLE_DRAW = "EDQSS2ruV1Fo7tbtbtFV6We8FVP4qdDjZZ5ndB3M8xzh"
