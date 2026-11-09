@@ -9,5 +9,5 @@ export const siteUrl = process.env.VERCEL_ENV === "production"
 
 export const testnet = network === "testnet"
 
-/** A Jackpot Draw from testnet that paid $0 for a $10 card (all $15 back), linked from the landing page. */
-export const EXAMPLE_DRAW = "EDQSS2ruV1Fo7tbtbtFV6We8FVP4qdDjZZ5ndB3M8xzh"
+/** A Classic Draw from testnet: 40% back, so $7.20 for a $10 card ($4.80 of $12 back), linked from the landing page. */
+export const EXAMPLE_DRAW = "9ggLQCJyXjk4ThsDGMNwRmMDuFKvw79Uk6pNbFmedKdU"
