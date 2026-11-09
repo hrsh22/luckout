@@ -31,7 +31,7 @@ export class Voucher extends Schema.Class<Voucher>("Voucher")({
 export class BitrefillUnavailable extends Schema.TaggedError<BitrefillUnavailable>()(
   "BitrefillUnavailable",
   { message: Schema.String },
-  { httpApiStatus: 502 }
+  { httpApiStatus: 503 }
 ) {}
 
 /** Normal is a Standard Purchase; `{ lucky: n }` is a Lucky Buy on Game Version n. */
