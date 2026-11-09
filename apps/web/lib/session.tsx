@@ -1,8 +1,8 @@
 "use client"
 
-import type { Mode } from "@luckout/api"
+import { type Mode, SignedChallenge } from "@luckout/api"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
-import { api, UNAUTHORIZED } from "./api"
+import { api, errorMessage, UNAUTHORIZED } from "./api"
 import { contractId, near, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -17,6 +17,9 @@ export interface ContractAccount {
   cashback_received: string
 }
 
+/** Where sign-in is: choosing a wallet, then signing the one-time message. */
+export type SignInStep = "wallet" | "message"
+
 interface Session {
   /** The signed-in account; set only together with a valid token. */
   accountId: string | undefined
@@ -27,7 +30,10 @@ interface Session {
   account: ContractAccount | null | undefined
   /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
-  signIn(): Promise<void>
+  signing: SignInStep | undefined
+  signInError: string | undefined
+  /** Resolves true once signed in; false if the customer cancelled or it failed (the error is in signInError). */
+  signIn(): Promise<boolean>
   signOut(): Promise<void>
   refresh(): Promise<void>
 }
@@ -55,6 +61,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<ContractAccount | null>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
+  const [signing, setSigning] = useState<SignInStep>()
+  const [signInError, setSignInError] = useState<string>()
   const accountId = session?.accountId
 
   const clear = useCallback(() => {
@@ -100,24 +108,40 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     }
   }, [accountId, clear])
 
+  // Balances can change elsewhere (Telegram, another tab): re-read when the tab comes back.
   useEffect(() => {
     refresh().catch(() => {})
+    const onFocus = () => document.visibilityState === "visible" && refresh().catch(() => {})
+    document.addEventListener("visibilitychange", onFocus)
+    return () => document.removeEventListener("visibilitychange", onFocus)
   }, [refresh])
 
   const signIn = async () => {
-    const wallet = await near().connect()
-    const id = (await wallet.getAccounts())[0]?.accountId
-    if (!id) throw new Error("No account selected in the wallet")
-    const challenge = await api((c) => c.auth.challenge())
-    const nonce = Uint8Array.from(atob(challenge.nonce), (ch) => ch.charCodeAt(0))
-    const signed = await wallet.signMessage({ message: challenge.message, recipient: challenge.recipient, nonce })
-    const s = await api((c) =>
-      c.auth.verify({ payload: { accountId: id, publicKey: signed.publicKey, signature: signed.signature, nonce: challenge.nonce } })
-    )
+    setSignInError(undefined)
+    setSigning("wallet")
     try {
-      localStorage.setItem(STORAGE, JSON.stringify(s))
-    } catch {}
-    setSession({ accountId: s.accountId, token: s.token })
+      const wallet = await near().connect()
+      const id = (await wallet.getAccounts())[0]?.accountId
+      if (!id) throw new Error("No account selected in the wallet")
+      const challenge = await api((c) => c.auth.challenge())
+      const nonce = Uint8Array.from(atob(challenge.nonce), (ch) => ch.charCodeAt(0))
+      setSigning("message")
+      const signed = await wallet.signMessage({ message: challenge.message, recipient: challenge.recipient, nonce })
+      const s = await api((c) =>
+        // Class payloads must be instances: the client refuses a plain object before sending it.
+        c.auth.verify({ payload: new SignedChallenge({ accountId: id, publicKey: signed.publicKey, signature: signed.signature, nonce: challenge.nonce }) })
+      )
+      try {
+        localStorage.setItem(STORAGE, JSON.stringify(s))
+      } catch {}
+      setSession({ accountId: s.accountId, token: s.token })
+      return true
+    } catch (e) {
+      setSignInError(errorMessage(e))
+      return false
+    } finally {
+      setSigning(undefined)
+    }
   }
 
   const signOut = async () => {
@@ -126,7 +150,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <SessionContext value={{ accountId, token: session?.token, ready, account, walletUsdc, signIn, signOut, refresh }}>
+    <SessionContext
+      value={{ accountId, token: session?.token, ready, account, walletUsdc, signing, signInError, signIn, signOut, refresh }}
+    >
       {children}
     </SessionContext>
   )

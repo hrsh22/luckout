@@ -30,7 +30,7 @@ Any cashback leaves you below the normal price, one purchase gets at most $50 ba
 
 ## Try it on testnet
 
-**Live: [luckout.gamified.trade](https://luckout.gamified.trade)** (API at `luckout-api.gamified.trade`). Open the shop at [`/shop`](https://luckout.gamified.trade/shop), sign in with a testnet wallet, tap "Get 100 test USDC and deposit it" on the Balance page, and buy a Bitrefill test voucher.
+**Live: [luckout.gamified.trade](https://luckout.gamified.trade)** (API at `luckout-api.gamified.trade`). Start at [`/welcome`](https://luckout.gamified.trade/welcome): sign in with a testnet wallet, choose your default mode, tap "Get 100 test USDC", then buy a Bitrefill test voucher from the shop.
 
 Contract [`app.luckout.testnet`](https://testnet.nearblocks.io/address/app.luckout.testnet), test USDC [`usdc.luckout.testnet`](https://testnet.nearblocks.io/address/usdc.luckout.testnet) (anyone can call `faucet` for 100 tUSDC), operator `server.luckout.testnet`.
 

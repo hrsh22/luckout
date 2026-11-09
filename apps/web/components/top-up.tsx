@@ -1,7 +1,6 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { api, errorMessage } from "@/lib/api"
 import { toMicro, usd } from "@/lib/format"
 import { contractId, send, usdcId, view } from "@/lib/near"
@@ -50,7 +49,7 @@ export function TopUp() {
   if (!token) return null
   if (registered === false) {
     return (
-      <Button variant="outline" className="self-start" disabled={busy} onClick={() => step(async () => {
+      <Button variant="light" className="self-start" disabled={busy} onClick={() => step(async () => {
         await send(accountId!, { receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
         setRegistered(true)
       })}>
@@ -62,10 +61,10 @@ export function TopUp() {
   return (
     <div className="flex flex-col gap-3">
       {!quote && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Input className="w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
-          <span className="text-muted-foreground text-sm">USDC, paid with</span>
-          <select className="bg-background h-10 rounded-lg border px-2 text-sm" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
+        <div className="flex flex-col gap-3">
+          <input className="field !w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
+          <span className="text-sm text-muted">USDC, paid with</span>
+          <select className="field !w-auto" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
             {assets?.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {a.chain}</option>)}
           </select>
           <Button disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
@@ -78,13 +77,13 @@ export function TopUp() {
       )}
 
       {quote && (
-        <div className="bg-receipt flex flex-col gap-2 rounded-xl border p-4 text-sm">
+        <div className="flex flex-col gap-2 rounded-[1.5rem] bg-soft p-5 text-sm">
           <p>
             Send exactly <b>{quote.amountInFormatted} {quote.symbol}</b> on <b>{quote.chain}</b> to:
           </p>
           <p className="font-mono break-all select-all">{quote.depositAddress}</p>
           {quote.depositMemo && <p>Memo (required): <span className="font-mono select-all">{quote.depositMemo}</span></p>}
-          <p className="text-muted-foreground">
+          <p className="text-muted">
             {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your transfer
             confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, the funds are refunded to your
             NEAR account on NEAR Intents.
@@ -107,11 +106,11 @@ export function TopUp() {
             </Button>
           )}
           {(status === "REFUNDED" || status === "FAILED") && (
-            <Button variant="outline" className="self-start" onClick={() => (setQuote(undefined), setStatus(undefined))}>Start over</Button>
+            <Button variant="light" className="self-start" onClick={() => (setQuote(undefined), setStatus(undefined))}>Start over</Button>
           )}
         </div>
       )}
-      {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
+      {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
     </div>
   )
 }

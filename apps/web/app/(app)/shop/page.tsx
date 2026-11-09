@@ -1,10 +1,10 @@
-"use client"
-
-import { Shop } from "@/components/shop"
-import { useSession } from "@/lib/session"
+import { Catalog } from "@/components/catalog"
+import { Suspense } from "react"
 
 export default function ShopPage() {
-  // Keyed on the account: signing out or switching accounts clears any purchase on screen.
-  const { accountId } = useSession()
-  return <Shop key={accountId ?? "signed-out"} />
+  return (
+    <Suspense>
+      <Catalog />
+    </Suspense>
+  )
 }

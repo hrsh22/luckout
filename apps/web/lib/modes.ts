@@ -36,6 +36,11 @@ export const MAX_CASHBACK = 50_000_000
 export const sameMode = (a: Mode | undefined, b: Mode | undefined) => JSON.stringify(a) === JSON.stringify(b)
 export const modeInfo = (m: Mode | undefined) => MODES.find((x) => sameMode(x.mode, m))
 export const modeName = (m: Mode | undefined) => modeInfo(m)?.name ?? "Default"
+/** "classic": how a mode appears in URLs. */
+export const modeSlug = (m: Mode | undefined) => (modeInfo(m) ?? MODES[0]!).name.toLowerCase()
+export const modeFromSlug = (s: string | null | undefined) => MODES.find((m) => m.name.toLowerCase() === s)?.mode
+/** The mode we suggest to new customers. Normal stays the contract's default until they choose. */
+export const RECOMMENDED = "Classic"
 
 /** Chance, in basis points, of any Cashback; every Cashback leaves the price below normal. */
 export const cashbackChanceBps = (m: ModeInfo) => m.outcomes.filter((x) => x.finalBps < 10_000).reduce((s, x) => s + x.chanceBps, 0)
