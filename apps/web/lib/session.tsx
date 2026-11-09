@@ -14,7 +14,7 @@ export interface ContractAccount {
   day: number
   spent_today: string
   premiums_paid: string
-  refunds_received: string
+  cashback_received: string
 }
 
 interface Session {

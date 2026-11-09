@@ -37,7 +37,7 @@ export function WalletPanel({ accountId }: { accountId: string }) {
     tgas: 100
   })
   const micro = toMicro(amount)
-  const running = account ? Number(account.refunds_received) - Number(account.premiums_paid) : 0
+  const running = account ? Number(account.cashback_received) - Number(account.premiums_paid) : 0
 
   return (
     <div className="flex flex-col gap-6">

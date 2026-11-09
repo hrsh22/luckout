@@ -8,7 +8,7 @@ import Link from "next/link"
 export const revalidate = 60
 export const metadata: Metadata = {
   title: "Is it fair?",
-  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every refund, read live from the contract."
+  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the contract."
 }
 
 interface Reserve { free: string; locked: string; discount_cap: string }

@@ -14,7 +14,7 @@ export interface DrawEvent {
   roll: number
   final_bps: number
   final_price: string
-  refund: string
+  cashback: string
 }
 
 export interface GameVersion {
@@ -67,7 +67,7 @@ export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<
   const roll = rollFrom(random)
   const bps = finalBpsFor(version.outcomes, roll)
   const price = finalPrice(BigInt(e.reference_price), BigInt(e.lucky_amount), BigInt(e.max_price), bps)
-  const refund = BigInt(e.max_price) - price
+  const cashback = BigInt(e.max_price) - price
   const row = (label: string, expected: string | number | bigint, recomputed: string | number | bigint) => ({
     label,
     expected: String(expected),
@@ -79,6 +79,6 @@ export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<
     row("Roll", e.roll, roll),
     row("Final Price share", e.final_bps, bps),
     row("Final Price", e.final_price, price),
-    row("Cashback", e.refund, refund)
+    row("Cashback", e.cashback, cashback)
   ]
 }

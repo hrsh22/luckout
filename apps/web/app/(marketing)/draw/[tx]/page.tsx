@@ -56,7 +56,7 @@ export default async function DrawProof({ params }: Props) {
       <dl className="bg-receipt grid grid-cols-2 gap-6 rounded-2xl border p-6 sm:grid-cols-4">
         <Stat label="Price" value={usd(ref)} />
         <Stat label="Paid up front" value={usd(draw.max_price)} />
-        <Stat label="Cashback" value={usd(draw.refund)} />
+        <Stat label="Cashback" value={usd(draw.cashback)} />
         <Stat label={diff < 0 ? `Paid, ${usd(-diff)} below the price` : "Paid"} value={usd(paid)} strong />
       </dl>
 

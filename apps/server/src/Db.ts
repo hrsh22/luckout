@@ -93,6 +93,11 @@ const migrations = Migrator.fromRecord({
     yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'delivery', 'confirm', 'fail')`
     yield* sql`DELETE FROM telegram_links a USING telegram_links b WHERE a.account_id = b.account_id AND a.linked_at < b.linked_at`
     yield* sql`CREATE UNIQUE INDEX telegram_links_account ON telegram_links (account_id)`
+  }),
+  // The contract's draw event calls it cashback now; rename it in stored Draws too.
+  "0005_draw_cashback": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE purchases SET draw = (draw - 'refund') || jsonb_build_object('cashback', draw->'refund') WHERE draw ? 'refund'`
   })
 })
 

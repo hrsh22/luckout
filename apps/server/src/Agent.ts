@@ -109,7 +109,7 @@ export const makeAgent = (deps: {
             daily_limit: usd(Number(a.daily_limit)),
             spent_today: usd(Number(a.spent_today)),
             default_mode: a.default_mode,
-            running_total: usd(Number(a.refunds_received) - Number(a.premiums_paid))
+            running_total: usd(Number(a.cashback_received) - Number(a.premiums_paid))
           }
           : { balance: "$0.00", note: "No deposit yet; they can top up in the web app." }
       ))),

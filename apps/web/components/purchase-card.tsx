@@ -70,7 +70,7 @@ export function PurchaseCard({ p }: { p: Purchase }) {
           {lucky && diff > 0 && <span className="text-muted-foreground text-sm">{usd(diff)} above the price of {usd(p.referencePrice)}</span>}
         </div>
       )}
-      {p.draw && p.draw.refund > 0 && <p className="text-muted-foreground text-sm">{usd(p.draw.refund)} cashback went to your balance.</p>}
+      {p.draw && p.draw.cashback > 0 && <p className="text-muted-foreground text-sm">{usd(p.draw.cashback)} cashback went to your balance.</p>}
       {p.error && <p className="text-muted-foreground text-sm">{p.error}</p>}
 
       {(code || pin || link) && (

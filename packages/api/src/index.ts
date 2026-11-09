@@ -94,7 +94,7 @@ export class Draw extends Schema.Class<Draw>("Draw")({
   roll: Schema.Int,
   finalBps: Schema.Int,
   finalPrice: MicroUsdc,
-  refund: MicroUsdc
+  cashback: MicroUsdc
 }) {}
 
 export const PurchaseStatus = Schema.Literals(["pending", "delivered", "failed", "rejected"])

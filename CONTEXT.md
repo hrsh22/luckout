@@ -77,7 +77,7 @@ The random event, run by the contract in the receipt right after the one that co
 _Avoid_: Bet result, spin result, reveal animation
 
 **Cashback**:
-Money credited automatically to the customer's Balance from a Lucky Buy's Draw, as a share of what they paid in 10% slabs (100% is free). Any Cashback leaves the Final Price below Reference Price. The contract's fields and events call it `refund`.
+Money credited automatically to the customer's Balance from a Lucky Buy's Draw, as a share of what they paid in 10% slabs (100% is free). Any Cashback leaves the Final Price below Reference Price.
 _Avoid_: Refund (in anything customers read), yield, token reward, partial cashback
 
 **Final Price**:
@@ -125,7 +125,7 @@ The part of a Lucky Buy's Reference Price that its Game Version applies to: the 
 _Avoid_: Stake, bet size
 
 **Draw Proof**:
-The public record of one Draw: its transaction, random seed, purchase ID, and Game Version, from which anyone can recompute the Refund in their browser.
+The public record of one Draw: its transaction, random seed, purchase ID, and Game Version, from which anyone can recompute the Cashback in their browser.
 _Avoid_: Receipt, audit log
 
 **Live Average**:

@@ -1,9 +1,15 @@
 //! Testnet-only USDC stand-in: a standard NEP-141 token with 6 decimals and a
 //! public faucet, so judges can try Luckout without real money.
 
-use near_contract_standards::fungible_token::metadata::{FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC};
-use near_contract_standards::fungible_token::{FungibleToken, FungibleTokenCore, FungibleTokenResolver};
-use near_contract_standards::storage_management::{StorageBalance, StorageBalanceBounds, StorageManagement};
+use near_contract_standards::fungible_token::metadata::{
+    FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
+};
+use near_contract_standards::fungible_token::{
+    FungibleToken, FungibleTokenCore, FungibleTokenResolver,
+};
+use near_contract_standards::storage_management::{
+    StorageBalance, StorageBalanceBounds, StorageManagement,
+};
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, AccountId, NearToken, PanicOnDefault, PromiseOrValue};
 
@@ -19,7 +25,9 @@ pub struct Contract {
 impl Contract {
     #[init]
     pub fn new() -> Self {
-        Self { token: FungibleToken::new(b"t".to_vec()) }
+        Self {
+            token: FungibleToken::new(b"t".to_vec()),
+        }
     }
 
     /// Mints 100 tUSDC to the caller, registering them first if needed.
@@ -48,7 +56,13 @@ impl FungibleTokenCore for Contract {
     }
 
     #[payable]
-    fn ft_transfer_call(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>, msg: String) -> PromiseOrValue<U128> {
+    fn ft_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
         self.token.ft_transfer_call(receiver_id, amount, memo, msg)
     }
 
@@ -64,15 +78,27 @@ impl FungibleTokenCore for Contract {
 #[near]
 impl FungibleTokenResolver for Contract {
     #[private]
-    fn ft_resolve_transfer(&mut self, sender_id: AccountId, receiver_id: AccountId, amount: U128) -> U128 {
-        self.token.internal_ft_resolve_transfer(&sender_id, receiver_id, amount).0.into()
+    fn ft_resolve_transfer(
+        &mut self,
+        sender_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+    ) -> U128 {
+        self.token
+            .internal_ft_resolve_transfer(&sender_id, receiver_id, amount)
+            .0
+            .into()
     }
 }
 
 #[near]
 impl StorageManagement for Contract {
     #[payable]
-    fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>) -> StorageBalance {
+    fn storage_deposit(
+        &mut self,
+        account_id: Option<AccountId>,
+        registration_only: Option<bool>,
+    ) -> StorageBalance {
         self.token.storage_deposit(account_id, registration_only)
     }
 
@@ -119,7 +145,9 @@ mod tests {
     #[test]
     fn faucet_registers_and_mints() {
         let alice: AccountId = "alice.testnet".parse().unwrap();
-        testing_env!(VMContextBuilder::new().predecessor_account_id(alice.clone()).build());
+        testing_env!(VMContextBuilder::new()
+            .predecessor_account_id(alice.clone())
+            .build());
         let mut c = Contract::new();
         assert_eq!(c.faucet().0, FAUCET_AMOUNT);
         assert_eq!(c.faucet().0, 2 * FAUCET_AMOUNT);

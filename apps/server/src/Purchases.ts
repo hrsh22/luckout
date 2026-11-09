@@ -288,7 +288,7 @@ export class Purchases extends Context.Service<Purchases, {
                 roll: Number(d.roll),
                 finalBps: Number(d.final_bps),
                 finalPrice: Number(d.final_price),
-                refund: Number(d.refund)
+                cashback: Number(d.cashback)
               })
             }
             : {}),

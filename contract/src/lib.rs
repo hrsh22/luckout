@@ -8,8 +8,8 @@ use near_sdk::json_types::U128;
 use near_sdk::serde_json::{json, Value};
 use near_sdk::store::{LookupMap, Vector};
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas,
-    NearToken, PanicOnDefault, Promise, PromiseError, PromiseOrValue,
+    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken,
+    PanicOnDefault, Promise, PromiseError, PromiseOrValue,
 };
 
 pub const BPS: u128 = 10_000;
@@ -80,7 +80,7 @@ impl GameVersion {
     fn max_discount_bps(&self) -> u128 {
         BPS - self.min_final_bps() as u128
     }
-    /// Largest Cashback (Refund) as a share of the Lucky Amount.
+    /// Largest Cashback as a share of the Lucky Amount.
     fn max_cashback_bps(&self) -> u128 {
         BPS + self.premium_bps as u128 - self.min_final_bps() as u128
     }
@@ -107,9 +107,9 @@ pub struct Account {
     pub default_mode: Mode,
     pub day: u64,
     pub spent_today: U128,
-    /// Running Total = refunds_received - premiums_paid.
+    /// Running Total = cashback_received - premiums_paid.
     pub premiums_paid: U128,
-    pub refunds_received: U128,
+    pub cashback_received: U128,
 }
 
 impl Default for Account {
@@ -122,7 +122,7 @@ impl Default for Account {
             day: 0,
             spent_today: U128(0),
             premiums_paid: U128(0),
-            refunds_received: U128(0),
+            cashback_received: U128(0),
         }
     }
 }
@@ -140,7 +140,7 @@ pub struct Purchase {
     pub locked: U128,
     pub created_at: u64,
     pub status: Status,
-    pub refund: U128,
+    pub cashback: U128,
 }
 
 #[near(serializers = [json])]
@@ -235,14 +235,20 @@ impl Contract {
         amount: U128,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        require!(env::predecessor_account_id() == self.usdc, "Only USDC is accepted");
+        require!(
+            env::predecessor_account_id() == self.usdc,
+            "Only USDC is accepted"
+        );
         match msg.as_str() {
             "" => {
                 require!(amount.0 >= MIN_DEPOSIT, "Deposit at least 1 USDC");
                 let mut a = self.accounts.get(&sender_id).cloned().unwrap_or_default();
                 a.balance.0 += amount.0;
                 self.accounts.insert(sender_id.clone(), a);
-                emit("deposit", json!({ "account_id": sender_id, "amount": amount }));
+                emit(
+                    "deposit",
+                    json!({ "account_id": sender_id, "amount": amount }),
+                );
             }
             "reserve" => {
                 require!(sender_id == self.owner, "Only the owner funds the reserve");
@@ -265,7 +271,10 @@ impl Contract {
         a.per_purchase_limit = per_purchase;
         a.daily_limit = daily;
         self.accounts.insert(id.clone(), a);
-        emit("limits", json!({ "account_id": id, "per_purchase": per_purchase, "daily": daily }));
+        emit(
+            "limits",
+            json!({ "account_id": id, "per_purchase": per_purchase, "daily": daily }),
+        );
     }
 
     /// Like every setting, needs a full-access signature (1 yoctoNEAR).
@@ -296,7 +305,10 @@ impl Contract {
     /// confirmed nor failed the purchase within 24 hours.
     pub fn reclaim(&mut self, purchase_id: u64) {
         let p = self.pending(purchase_id);
-        require!(p.customer == env::predecessor_account_id(), "Not your purchase");
+        require!(
+            p.customer == env::predecessor_account_id(),
+            "Not your purchase"
+        );
         require!(
             env::block_timestamp() >= p.created_at + RECLAIM_AFTER_NS,
             "Reclaim opens 24 hours after purchase"
@@ -320,10 +332,16 @@ impl Contract {
         max_debit: U128,
     ) -> u64 {
         self.assert_operator();
-        require!(!order_id.is_empty() && order_id.len() <= 64, "Invalid order id");
+        require!(
+            !order_id.is_empty() && order_id.len() <= 64,
+            "Invalid order id"
+        );
         if let Some(&id) = self.orders.get(&order_id) {
             let p = self.purchases.get(&id).unwrap();
-            require!(p.customer == customer && p.reference_price.0 == reference_price.0, "Order id belongs to another purchase");
+            require!(
+                p.customer == customer && p.reference_price.0 == reference_price.0,
+                "Order id belongs to another purchase"
+            );
             return id;
         }
         require!(!self.paused, "New purchases are paused");
@@ -332,15 +350,24 @@ impl Contract {
         let mode = mode.unwrap_or(a.default_mode);
         let q = self.quote_internal(r, mode);
         let debit = q.max_price.0;
-        require!(debit <= max_debit.0, "Price changed since you confirmed; please confirm again");
+        require!(
+            debit <= max_debit.0,
+            "Price changed since you confirmed; please confirm again"
+        );
 
-        require!(debit <= a.per_purchase_limit.0, "Over the per-purchase spending limit");
+        require!(
+            debit <= a.per_purchase_limit.0,
+            "Over the per-purchase spending limit"
+        );
         let day = env::block_timestamp() / DAY_NS;
         if a.day != day {
             a.day = day;
             a.spent_today = U128(0);
         }
-        require!(a.spent_today.0 + debit <= a.daily_limit.0, "Over the daily spending limit");
+        require!(
+            a.spent_today.0 + debit <= a.daily_limit.0,
+            "Over the daily spending limit"
+        );
         require!(a.balance.0 >= debit, "Insufficient balance");
         a.balance.0 -= debit;
         a.spent_today.0 += debit;
@@ -365,7 +392,7 @@ impl Contract {
             locked: U128(lock),
             created_at: env::block_timestamp(),
             status: Status::Pending,
-            refund: U128(0),
+            cashback: U128(0),
         };
         emit("purchase", json!({ "purchase_id": id, "purchase": &p }));
         self.purchases.insert(id, p);
@@ -385,7 +412,10 @@ impl Contract {
         }
         require!(p.status == Status::Pending, "Purchase is already closed");
         self.proceeds += p.reference_price.0;
-        emit("delivered", json!({ "purchase_id": purchase_id, "customer": p.customer }));
+        emit(
+            "delivered",
+            json!({ "purchase_id": purchase_id, "customer": p.customer }),
+        );
         match p.mode {
             Mode::Normal => {
                 p.status = Status::Delivered;
@@ -405,17 +435,22 @@ impl Contract {
         let p = self.load(purchase_id);
         require!(p.status == Status::Drawing, "No Draw to retry");
         let caller = env::predecessor_account_id();
-        require!(caller == p.customer || caller == self.operator, "Not your purchase");
+        require!(
+            caller == p.customer || caller == self.operator,
+            "Not your purchase"
+        );
         self.schedule_draw(purchase_id)
     }
 
-    /// Runs the Draw and credits the Refund. Only the contract can call it, with randomness
+    /// Runs the Draw and credits the Cashback. Only the contract can call it, with randomness
     /// from a block that didn't exist when delivery was confirmed.
     #[private]
     pub fn on_draw(&mut self, purchase_id: u64) -> Purchase {
         let mut p = self.load(purchase_id);
         require!(p.status == Status::Drawing, "Draw already done");
-        let Mode::Lucky(v) = p.mode else { env::panic_str("Not a Lucky Buy") };
+        let Mode::Lucky(v) = p.mode else {
+            env::panic_str("Not a Lucky Buy")
+        };
         let version = self.version(v).clone();
         let seed = env::random_seed_array();
         let random = draw_random(&seed, purchase_id);
@@ -425,22 +460,22 @@ impl Contract {
         let lucky = p.lucky_amount.0;
         let max_price = p.max_price.0;
         let final_price = final_price(r, lucky, max_price, final_bps);
-        let refund = max_price - final_price;
+        let cashback = max_price - final_price;
         let premium = max_price - r;
 
         let mut a = self.existing_account(&p.customer);
-        a.balance.0 += refund;
+        a.balance.0 += cashback;
         a.premiums_paid.0 += premium;
-        a.refunds_received.0 += refund;
+        a.cashback_received.0 += cashback;
         self.accounts.insert(p.customer.clone(), a);
 
-        // Free Reserve changes by Risk Premium - Refund once the lock is released.
+        // Free Reserve changes by Risk Premium - Cashback once the lock is released.
         self.locked_reserve -= p.locked.0;
-        self.free_reserve = self.free_reserve + p.locked.0 + premium - refund;
+        self.free_reserve = self.free_reserve + p.locked.0 + premium - cashback;
         self.lucky_settled += 1;
         self.lucky_amount_total += lucky;
-        self.lucky_paid_total += lucky + premium - refund;
-        p.refund = U128(refund);
+        self.lucky_paid_total += lucky + premium - cashback;
+        p.cashback = U128(cashback);
         p.status = Status::Delivered;
 
         emit(
@@ -457,7 +492,7 @@ impl Contract {
                 "roll": roll,
                 "final_bps": final_bps,
                 "final_price": U128(final_price),
-                "refund": U128(refund),
+                "cashback": U128(cashback),
             }),
         );
         self.purchases.insert(purchase_id, p.clone());
@@ -477,7 +512,10 @@ impl Contract {
     pub fn add_game_version(&mut self, version: GameVersion) -> u32 {
         self.assert_owner();
         let id = self.push_version(version.clone());
-        emit("game_version_added", json!({ "game_version": id, "version": version }));
+        emit(
+            "game_version_added",
+            json!({ "game_version": id, "version": version }),
+        );
         id
     }
 
@@ -525,7 +563,10 @@ impl Contract {
             return;
         }
         // The transfer failed (e.g. the receiver isn't registered on USDC): put the money back.
-        emit("payout_restored", json!({ "payout": &payout, "amount": amount }));
+        emit(
+            "payout_restored",
+            json!({ "payout": &payout, "amount": amount }),
+        );
         match payout {
             Payout::Customer(id) => {
                 let mut a = self.accounts.get(&id).cloned().unwrap_or_default();
@@ -599,7 +640,12 @@ impl Contract {
                 (lucky, (lucky * version.premium_bps as u128).div_ceil(BPS))
             }
         };
-        Quote { mode, reference_price: U128(r), lucky_amount: U128(lucky), max_price: U128(r + premium) }
+        Quote {
+            mode,
+            reference_price: U128(r),
+            lucky_amount: U128(lucky),
+            max_price: U128(r + premium),
+        }
     }
 
     fn unwind(&mut self, purchase_id: u64, mut p: Purchase, status: Status) {
@@ -609,7 +655,11 @@ impl Contract {
         self.locked_reserve -= p.locked.0;
         self.free_reserve += p.locked.0;
         emit(
-            if status == Status::Failed { "failed" } else { "reclaimed" },
+            if status == Status::Failed {
+                "failed"
+            } else {
+                "reclaimed"
+            },
             json!({ "purchase_id": purchase_id, "customer": p.customer, "amount": p.max_price }),
         );
         p.status = status;
@@ -635,7 +685,9 @@ impl Contract {
     }
 
     fn version(&self, v: u32) -> &GameVersion {
-        self.versions.get(v).unwrap_or_else(|| env::panic_str("Unknown game version"))
+        self.versions
+            .get(v)
+            .unwrap_or_else(|| env::panic_str("Unknown game version"))
     }
 
     fn assert_mode(&self, mode: Mode) {
@@ -645,11 +697,17 @@ impl Contract {
     }
 
     fn existing_account(&self, id: &AccountId) -> Account {
-        self.accounts.get(id).cloned().unwrap_or_else(|| env::panic_str("No balance; deposit first"))
+        self.accounts
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("No balance; deposit first"))
     }
 
     fn load(&self, purchase_id: u64) -> Purchase {
-        self.purchases.get(&purchase_id).cloned().unwrap_or_else(|| env::panic_str("Unknown purchase"))
+        self.purchases
+            .get(&purchase_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("Unknown purchase"))
     }
 
     fn pending(&self, purchase_id: u64) -> Purchase {
@@ -659,17 +717,25 @@ impl Contract {
     }
 
     fn schedule_draw(&self, purchase_id: u64) -> Promise {
-        Self::ext(env::current_account_id()).with_static_gas(GAS_DRAW).on_draw(purchase_id)
+        Self::ext(env::current_account_id())
+            .with_static_gas(GAS_DRAW)
+            .on_draw(purchase_id)
     }
 
     fn assert_operator(&self) {
-        require!(env::predecessor_account_id() == self.operator, "Only the operator");
+        require!(
+            env::predecessor_account_id() == self.operator,
+            "Only the operator"
+        );
     }
 
     /// Owner calls need a full-access signature.
     fn assert_owner(&self) {
         assert_one_yocto();
-        require!(env::predecessor_account_id() == self.owner, "Only the owner");
+        require!(
+            env::predecessor_account_id() == self.owner,
+            "Only the owner"
+        );
     }
 }
 
@@ -683,14 +749,32 @@ pub fn default_game_versions() -> Vec<GameVersion> {
         let none = BPS as u32 - cashback.iter().map(|&(_, chance)| chance).sum::<u32>();
         let mut outcomes: Vec<Outcome> = cashback
             .iter()
-            .map(|&(pct, chance_bps)| Outcome { final_bps: paid * (100 - pct) / 100, chance_bps })
+            .map(|&(pct, chance_bps)| Outcome {
+                final_bps: paid * (100 - pct) / 100,
+                chance_bps,
+            })
             .collect();
-        outcomes.push(Outcome { final_bps: paid, chance_bps: none });
-        GameVersion { name: name.into(), premium_bps, outcomes }
+        outcomes.push(Outcome {
+            final_bps: paid,
+            chance_bps: none,
+        });
+        GameVersion {
+            name: name.into(),
+            premium_bps,
+            outcomes,
+        }
     };
     vec![
-        v("Lite", 1_000, &[(100, 100), (50, 100), (30, 100), (20, 200), (10, 1_800)]),
-        v("Classic", 2_000, &[(100, 200), (50, 300), (40, 400), (30, 700), (20, 2_400)]),
+        v(
+            "Lite",
+            1_000,
+            &[(100, 100), (50, 100), (30, 100), (20, 200), (10, 1_800)],
+        ),
+        v(
+            "Classic",
+            2_000,
+            &[(100, 200), (50, 300), (40, 400), (30, 700), (20, 2_400)],
+        ),
         v("Jackpot", 5_000, &[(100, 1_000), (50, 1_200), (40, 3_400)]),
     ]
 }
@@ -698,7 +782,10 @@ pub fn default_game_versions() -> Vec<GameVersion> {
 /// Chances sum to 100%, no outcome exceeds the Maximum Price, any Cashback leaves the customer
 /// below the Reference Price, at least one outcome is a discount, and the average is exactly 105.6%.
 pub fn validate_game_version(v: &GameVersion) {
-    require!(!v.name.is_empty() && !v.outcomes.is_empty(), "Empty game version");
+    require!(
+        !v.name.is_empty() && !v.outcomes.is_empty(),
+        "Empty game version"
+    );
     require!(v.premium_bps > 0, "Premium must be positive");
     let max = BPS as u32 + v.premium_bps;
     let mut chance = 0u128;
@@ -706,13 +793,22 @@ pub fn validate_game_version(v: &GameVersion) {
     for o in &v.outcomes {
         require!(o.chance_bps > 0, "Zero-chance outcome");
         require!(o.final_bps <= max, "Outcome above maximum price");
-        require!(o.final_bps == max || o.final_bps < BPS as u32, "Any cashback must leave the price below normal");
+        require!(
+            o.final_bps == max || o.final_bps < BPS as u32,
+            "Any cashback must leave the price below normal"
+        );
         chance += o.chance_bps as u128;
         weighted += o.chance_bps as u128 * o.final_bps as u128;
     }
     require!(chance == BPS, "Chances must sum to 100%");
-    require!(weighted == TARGET_FINAL_BPS * BPS, "Average must be exactly 105.6%");
-    require!((v.min_final_bps() as u128) < BPS, "Needs at least one discount");
+    require!(
+        weighted == TARGET_FINAL_BPS * BPS,
+        "Average must be exactly 105.6%"
+    );
+    require!(
+        (v.min_final_bps() as u128) < BPS,
+        "Needs at least one discount"
+    );
 }
 
 pub fn draw_random(seed: &[u8; 32], purchase_id: u64) -> [u8; 32] {

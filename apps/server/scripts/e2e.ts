@@ -65,7 +65,7 @@ const { json: q } = await req("GET", "/quote?voucherId=test-gift-card-code&value
 const lucky = await buy({ voucherId: "test-gift-card-code", value: "10", mode: { lucky: 2 }, maxPrice: q.maxPrice, idempotencyKey: crypto.randomUUID() })
 assert.equal(lucky.json.status, "delivered", JSON.stringify(lucky.json))
 const d = lucky.json.draw
-assert.ok(d && d.finalPrice <= q.maxPrice && d.finalPrice + d.refund === q.maxPrice, JSON.stringify(lucky.json))
+assert.ok(d && d.finalPrice <= q.maxPrice && d.finalPrice + d.cashback === q.maxPrice, JSON.stringify(lucky.json))
 console.log(`✔ Jackpot delivered: price ${q.referencePrice / 1e6}, paid ${d.finalPrice / 1e6} (Draw Proof: /draw/${lucky.json.settleTx})`)
 
 // 100 USDC is above the default 50 USDC per-purchase limit. The server refuses it before

@@ -57,7 +57,7 @@ await attempt("Bundle a confirmation with a call that reverts unlucky Draws", co
 await attempt("Run a Draw directly, picking the moment", contract, "on_draw", { purchase_id: 0 })
 await attempt("Withdraw the victim's balance to the attacker", contract, "withdraw", { amount: account.balance }, 1n)
 await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
-await attempt("Drain the Refund Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)
+await attempt("Drain the Cashback Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)
 await attempt("Pause the shop", contract, "set_paused", { paused: true })
 await attempt("Move test USDC out of the contract directly", process.env.USDC_CONTRACT_ID ?? "usdc.luckout.testnet", "ft_transfer", { receiver_id: operatorId, amount: "1000000" }, 1n)
 
