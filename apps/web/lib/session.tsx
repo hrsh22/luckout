@@ -2,7 +2,7 @@
 
 import type { Mode } from "@luckout/api"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
-import { api } from "./api"
+import { api, UNAUTHORIZED } from "./api"
 import { contractId, near, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -11,17 +11,21 @@ export interface ContractAccount {
   per_purchase_limit: string
   daily_limit: string
   default_mode: Mode
+  day: number
   spent_today: string
   premiums_paid: string
   refunds_received: string
 }
 
 interface Session {
+  /** The signed-in account; set only together with a valid token. */
   accountId: string | undefined
   token: string | undefined
+  /** False until the saved session has been checked against the wallet. */
+  ready: boolean
   /** undefined while loading, null before the first deposit */
   account: ContractAccount | null | undefined
-  /** tUSDC/USDC held in the wallet, not yet deposited */
+  /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
   signIn(): Promise<void>
   signOut(): Promise<void>
@@ -31,6 +35,7 @@ interface Session {
 const STORAGE = "luckout.session"
 const SessionContext = createContext<Session | null>(null)
 
+// ponytail: the token sits in localStorage; move to an HttpOnly cookie on .gamified.trade if XSS risk grows.
 const load = (): { accountId: string; token: string; expiresAt: number } | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")
@@ -39,12 +44,25 @@ const load = (): { accountId: string; token: string; expiresAt: number } | undef
     return undefined
   }
 }
+const forget = () => {
+  try {
+    localStorage.removeItem(STORAGE)
+  } catch {}
+}
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
-  const [accountId, setAccountId] = useState<string>()
-  const [token, setToken] = useState<string>()
+  const [session, setSession] = useState<{ accountId: string; token: string }>()
+  const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<ContractAccount | null>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
+  const accountId = session?.accountId
+
+  const clear = useCallback(() => {
+    forget()
+    setSession(undefined)
+    setAccount(undefined)
+    setWalletUsdc(undefined)
+  }, [])
 
   const refresh = useCallback(async () => {
     if (!accountId) return
@@ -56,14 +74,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setWalletUsdc(w)
   }, [accountId])
 
+  // Restore the saved session only if the wallet is still on the same account.
   useEffect(() => {
     near().getConnectedWallet().then(({ accounts }) => {
-      const id = accounts[0]?.accountId
-      setAccountId(id)
       const saved = load()
-      if (id && saved?.accountId === id) setToken(saved.token)
-    }, () => {})
+      if (saved && saved.accountId === accounts[0]?.accountId) setSession(saved)
+      else forget()
+    }, forget).finally(() => setReady(true))
   }, [])
+
+  // The wallet signed out or switched accounts elsewhere: this session no longer matches it.
+  useEffect(() => {
+    const c = near()
+    const onSignOut = () => clear()
+    const onSignIn = (e: { accounts: Array<{ accountId: string }> }) => {
+      if (accountId && e.accounts[0]?.accountId !== accountId) clear()
+    }
+    c.on("wallet:signOut", onSignOut)
+    c.on("wallet:signIn", onSignIn)
+    window.addEventListener(UNAUTHORIZED, clear)
+    return () => {
+      c.off("wallet:signOut", onSignOut)
+      c.off("wallet:signIn", onSignIn)
+      window.removeEventListener(UNAUTHORIZED, clear)
+    }
+  }, [accountId, clear])
 
   useEffect(() => {
     refresh().catch(() => {})
@@ -72,32 +107,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const signIn = async () => {
     const wallet = await near().connect()
     const id = (await wallet.getAccounts())[0]?.accountId
-    if (!id) throw new Error("No account selected")
-    setAccountId(id)
+    if (!id) throw new Error("No account selected in the wallet")
     const challenge = await api((c) => c.auth.challenge())
     const nonce = Uint8Array.from(atob(challenge.nonce), (ch) => ch.charCodeAt(0))
     const signed = await wallet.signMessage({ message: challenge.message, recipient: challenge.recipient, nonce })
-    const session = await api((c) =>
+    const s = await api((c) =>
       c.auth.verify({ payload: { accountId: id, publicKey: signed.publicKey, signature: signed.signature, nonce: challenge.nonce } })
     )
     try {
-      localStorage.setItem(STORAGE, JSON.stringify(session))
+      localStorage.setItem(STORAGE, JSON.stringify(s))
     } catch {}
-    setToken(session.token)
+    setSession({ accountId: s.accountId, token: s.token })
   }
 
   const signOut = async () => {
-    try {
-      localStorage.removeItem(STORAGE)
-    } catch {}
-    setToken(undefined)
-    setAccountId(undefined)
-    setAccount(undefined)
+    clear()
     await near().disconnect().catch(() => {})
   }
 
   return (
-    <SessionContext value={{ accountId, token, account, walletUsdc, signIn, signOut, refresh }}>
+    <SessionContext value={{ accountId, token: session?.token, ready, account, walletUsdc, signIn, signOut, refresh }}>
       {children}
     </SessionContext>
   )

@@ -1,5 +1,5 @@
 import type { DrawEvent, GameVersion } from "./draw"
-import { contractId, txEvents, view } from "./near"
+import { contractId, txEvents, view } from "./chain"
 
 /** Loads one Draw from its transaction plus the Game Version it was played on. */
 export async function loadDraw(tx: string) {

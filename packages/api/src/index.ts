@@ -8,7 +8,10 @@ export class VoucherSummary extends Schema.Class<VoucherSummary>("VoucherSummary
   id: Schema.String,
   name: Schema.String,
   countryCode: Schema.String,
-  currency: Schema.String
+  currency: Schema.String,
+  /** Bitrefill image path and its brand colour, for the product logo. */
+  image: Schema.optional(Schema.String),
+  background: Schema.optional(Schema.String)
 }) {}
 
 export class VoucherPackage extends Schema.Class<VoucherPackage>("VoucherPackage")({

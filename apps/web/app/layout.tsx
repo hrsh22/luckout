@@ -1,30 +1,26 @@
-import { Header } from "@/components/header"
-import { SessionProvider } from "@/lib/session"
-import type { Metadata } from "next"
-import { Inter, Space_Grotesk } from "next/font/google"
+import type { Metadata, Viewport } from "next"
+import { Archivo } from "next/font/google"
+import { siteUrl } from "@/lib/site"
 import "./globals.css"
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" })
-const grotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-grotesk" })
+// One family, two voices: normal width for reading, expanded heavy for prices and headlines.
+const archivo = Archivo({ subsets: ["latin"], axes: ["wdth"], variable: "--font-archivo" })
 
 export const metadata: Metadata = {
   // Shared Draw Proof links and Win Cards should point at our domain, not *.vercel.app.
-  metadataBase: new URL(process.env.VERCEL_ENV === "production" ? "https://luckout.gamified.trade" : process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000"),
-  title: "Luckout",
-  description: "Checkout, but lucky. Buy the gift cards you already buy, sometimes for much less."
+  metadataBase: new URL(siteUrl),
+  title: { default: "Luckout: checkout, but lucky", template: "%s | Luckout" },
+  description:
+    "Gift cards, top-ups and eSIMs paid in USDC on NEAR. Pay the price, or add a little for a fair, provable chance to pay less. You always get the card.",
+  openGraph: { siteName: "Luckout", type: "website" }
 }
+
+export const viewport: Viewport = { themeColor: "#13161D" }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${grotesk.variable}`}>
-      <body className="min-h-dvh antialiased">
-        <SessionProvider>
-          <div className="mx-auto flex max-w-3xl flex-col gap-10 px-4 py-6">
-            <Header />
-            {children}
-          </div>
-        </SessionProvider>
-      </body>
+    <html lang="en" className={archivo.variable}>
+      <body className="bg-background text-foreground min-h-dvh antialiased">{children}</body>
     </html>
   )
 }

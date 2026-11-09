@@ -3,7 +3,8 @@
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { errorMessage } from "@/lib/api"
-import { MODES, modeName, sameMode, toMicro, usd } from "@/lib/format"
+import { toMicro, usd } from "@/lib/format"
+import { MODES, modeName, sameMode } from "@/lib/modes"
 import { type Call, contractId, network, send, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { useState } from "react"
@@ -12,7 +13,7 @@ import { TopUp } from "./top-up"
 
 const ONE_YOCTO = "1"
 
-export function WalletPanel() {
+export function WalletPanel({ accountId }: { accountId: string }) {
   const { account, walletUsdc, refresh } = useSession()
   const [amount, setAmount] = useState("10")
   const [perPurchase, setPerPurchase] = useState("")
@@ -23,7 +24,7 @@ export function WalletPanel() {
   const run = (label: string, ...calls: Array<Call>) => async () => {
     setBusy(label)
     setError(undefined)
-    await send(...calls).catch((e) => setError(errorMessage(e)))
+    await send(accountId, ...calls).catch((e) => setError(errorMessage(e)))
     await refresh().catch(() => {})
     setBusy(undefined)
   }
@@ -42,24 +43,24 @@ export function WalletPanel() {
     <div className="flex flex-col gap-6">
       {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
 
-      <section className="bg-card grid gap-4 rounded-xl border p-4 sm:grid-cols-3">
-        <div>
-          <p className="text-muted-foreground text-xs">Balance in Luckout</p>
-          <p className="font-heading text-2xl font-bold tabular-nums">{account ? usd(account.balance) : "—"}</p>
+      <dl className="bg-receipt grid gap-6 rounded-2xl border p-6 sm:grid-cols-3">
+        <div className="flex flex-col gap-1">
+          <dt className="text-muted-foreground text-sm">Balance in Luckout</dt>
+          <dd className="font-display text-3xl tabular-nums">{account ? usd(account.balance) : account === null ? usd(0) : "…"}</dd>
         </div>
-        <div>
-          <p className="text-muted-foreground text-xs">In your wallet</p>
-          <p className="font-heading text-2xl font-bold tabular-nums">{walletUsdc !== undefined ? usd(walletUsdc) : "—"}</p>
+        <div className="flex flex-col gap-1">
+          <dt className="text-muted-foreground text-sm">USDC in your wallet</dt>
+          <dd className="font-display text-3xl tabular-nums">{walletUsdc !== undefined ? usd(walletUsdc) : "…"}</dd>
         </div>
-        <div>
-          <p className="text-muted-foreground text-xs">Running Total</p>
-          <p className="font-heading text-2xl font-bold tabular-nums">{running >= 0 ? "+" : "−"}{usd(Math.abs(running))}</p>
-          <p className="text-muted-foreground text-xs">Discounts won minus extra paid, over all lucky buys.</p>
+        <div className="flex flex-col gap-1">
+          <dt className="text-muted-foreground text-sm">Running Total</dt>
+          <dd className="font-display text-3xl tabular-nums">{running >= 0 ? "+" : "−"}{usd(Math.abs(running))}</dd>
+          <dd className="text-muted-foreground text-sm">Discounts won minus premiums paid, over all your lucky buys.</dd>
         </div>
-      </section>
+      </dl>
 
       <section className="flex flex-col gap-3">
-        <h2 className="font-heading text-lg font-semibold">Add or withdraw USDC</h2>
+        <h2 className="font-display text-xl">Add or withdraw USDC</h2>
         {network === "testnet" && (
           <Button
             variant="outline"
@@ -81,11 +82,11 @@ export function WalletPanel() {
             Withdraw
           </Button>
         </div>
-        <p className="text-muted-foreground text-xs">Deposits are at least 1 USDC. Whatever isn't locked in a purchase can be withdrawn any time.</p>
+        <p className="text-muted-foreground text-sm">Deposits are at least 1 USDC. Whatever isn't locked in a purchase can be withdrawn any time.</p>
       </section>
 
       <section className="flex flex-col gap-3">
-        <h2 className="font-heading text-lg font-semibold">Top up from any chain</h2>
+        <h2 className="font-display text-xl">Top up from any chain</h2>
         {network === "mainnet"
           ? <TopUp />
           : <p className="text-muted-foreground text-sm">Top-ups from Ethereum, Base, Arbitrum, Solana, Bitcoin and more run on mainnet through NEAR Intents. On testnet, use the test USDC button above.</p>}
@@ -94,7 +95,7 @@ export function WalletPanel() {
       {account && (
         <>
           <section className="flex flex-col gap-3">
-            <h2 className="font-heading text-lg font-semibold">Default mode</h2>
+            <h2 className="font-display text-xl">Default mode</h2>
             <div className="flex flex-wrap gap-2">
               {MODES.map((m) => (
                 <button
@@ -103,25 +104,26 @@ export function WalletPanel() {
                   aria-pressed={sameMode(account.default_mode, m.mode)}
                   disabled={!!busy}
                   onClick={run("mode", { receiverId: contractId, method: "set_default_mode", args: { mode: m.mode }, deposit: ONE_YOCTO })}
-                  className="aria-pressed:border-foreground aria-pressed:bg-secondary rounded-lg border px-3 py-2 text-sm"
+                  className="aria-pressed:border-foreground aria-pressed:bg-foreground aria-pressed:text-background bg-receipt min-h-11 rounded-lg border px-4 text-sm font-medium"
                 >
-                  {m.name} {m.premium}
+                  {m.name}{m.premiumBps ? ` +${m.premiumBps / 100}%` : ""}
                 </button>
               ))}
             </div>
-            <p className="text-muted-foreground text-xs">Every purchase uses {modeName(account.default_mode)} unless you pick another one for that purchase.</p>
+            <p className="text-muted-foreground text-sm">Every purchase, in the shop and in Telegram, uses {modeName(account.default_mode)} unless you pick another one for that purchase.</p>
           </section>
 
           <section className="flex flex-col gap-3">
-            <h2 className="font-heading text-lg font-semibold">Telegram</h2>
+            <h2 className="font-display text-xl">Telegram</h2>
             <TelegramLink />
           </section>
 
           <section className="flex flex-col gap-3">
-            <h2 className="font-heading text-lg font-semibold">Spending limits</h2>
+            <h2 className="font-display text-xl">Spending limits</h2>
             <p className="text-muted-foreground text-sm">
-              Now {usd(account.per_purchase_limit)} per purchase and {usd(account.daily_limit)} per day ({usd(account.spent_today)} used today).
-              The contract enforces these on every purchase, including ones the Telegram agent makes.
+              Now {usd(account.per_purchase_limit)} per purchase and {usd(account.daily_limit)} per day, with{" "}
+              {usd(account.day === Math.floor(Date.now() / 86_400_000) ? account.spent_today : 0)} used today. The contract enforces these
+              on every purchase, including ones the Telegram bot makes. The day resets at 00:00 UTC.
             </p>
             <div className="flex flex-wrap items-center gap-2">
               <Input className="w-36" inputMode="decimal" placeholder="Per purchase" value={perPurchase} onChange={(e) => setPerPurchase(e.target.value)} aria-label="Per-purchase limit in USDC" />

@@ -5,8 +5,11 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-heading: var(--font-grotesk);
-    --font-sans: var(--font-inter);
+    --font-heading: var(--font-archivo);
+    --font-sans: var(--font-archivo);
+    --color-gold: var(--gold);
+    --color-gold-soft: var(--gold-soft);
+    --color-receipt: var(--receipt);
     --color-ring: var(--ring);
     --color-input: var(--input);
     --color-border: var(--border);
@@ -55,6 +58,10 @@
     --input: #E2DCCB;
     --ring: #8A5A00;
     --radius: 0.75rem;
+    /* Gold means one thing everywhere: you paid less than the price. */
+    --gold: #E9B949;
+    --gold-soft: #F4DFA2;
+    --receipt: #FBFAF6;
 }
 
 .dark {
@@ -79,6 +86,20 @@
 }
 
 @layer base {
+  /* Archivo, expanded and heavy: the price-tag voice for headlines and prices. */
+  .font-display {
+    font-family: var(--font-archivo);
+    font-stretch: 125%;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      transition-delay: 0ms !important;
+      }
+    }
   * {
     @apply border-border outline-ring/50;
     }

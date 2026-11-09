@@ -2,161 +2,316 @@
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { api, errorMessage } from "@/lib/api"
-import { MODES, sameMode, usd } from "@/lib/format"
+import { api, errorMessage, TimedOut } from "@/lib/api"
+import { productImage, usd } from "@/lib/format"
+import { chanceLessBps, type ModeInfo, modeInfo, MODES, mostLikely, pricedOutcomes, sameMode, simpleQuote } from "@/lib/modes"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { Mode, Purchase, Quote, Voucher, VoucherSummary } from "@luckout/api"
 import Link from "next/link"
 import { useEffect, useState } from "react"
-import { PurchaseCard } from "./purchase-card"
+import { PurchaseCard, usePolledPurchase } from "./purchase-card"
+
+const SUGGESTIONS = network === "testnet" ? ["Test gift card"] : ["Amazon", "Steam", "Netflix", "Uber", "Spotify", "Airbnb"]
 
 export function Shop() {
-  const { token, account, refresh, signIn } = useSession()
-  const [q, setQ] = useState(network === "testnet" ? "test gift card" : "amazon")
+  const [q, setQ] = useState(SUGGESTIONS[0]!)
   const [results, setResults] = useState<ReadonlyArray<VoucherSummary>>()
+  const [searching, setSearching] = useState(false)
+  const [picked, setPicked] = useState<VoucherSummary>()
+  const [error, setError] = useState<string>()
+
+  const search = (query = q) => {
+    setQ(query)
+    setError(undefined)
+    setPicked(undefined)
+    setSearching(true)
+    api((c) => c.catalog.search({ query: { q: query } }))
+      .then(setResults, (e) => setError(errorMessage(e)))
+      .finally(() => setSearching(false))
+  }
+  useEffect(() => search(), []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (picked) return <VoucherView summary={picked} back={() => setPicked(undefined)} />
+
+  return (
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h1 className="font-display text-4xl">Shop</h1>
+        <p className="text-muted-foreground">Gift cards, top-ups and eSIMs from Bitrefill, paid from your Luckout balance.</p>
+      </div>
+      <form className="flex gap-2" onSubmit={(e) => (e.preventDefault(), search())} role="search">
+        <Input className="h-12 text-base" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search a brand, like Amazon or Steam" aria-label="Search gift cards" />
+        <Button type="submit" size="lg" disabled={searching}>Search</Button>
+      </form>
+      <div className="-mt-2 flex flex-wrap gap-2">
+        {SUGGESTIONS.map((s) => (
+          <button key={s} type="button" onClick={() => search(s)} className="bg-secondary hover:bg-border min-h-9 rounded-full px-3.5 text-sm">
+            {s}
+          </button>
+        ))}
+      </div>
+      {network === "testnet" && (
+        <p className="text-muted-foreground text-sm">Testnet preview: only Bitrefill test cards can be bought, with test USDC from the Balance page.</p>
+      )}
+      {error && <p role="alert" className="text-destructive">{error}</p>}
+
+      <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4" aria-busy={searching}>
+        {searching && !results && Array.from({ length: 8 }, (_, i) => <li key={i} className="bg-secondary h-44 animate-pulse rounded-xl" />)}
+        {results?.map((v) => (
+          <li key={v.id}>
+            <button
+              type="button"
+              onClick={() => setPicked(v)}
+              className="bg-receipt hover:border-foreground/40 focus-visible:ring-ring/50 flex h-full w-full flex-col overflow-hidden rounded-xl border text-left outline-none focus-visible:ring-3"
+            >
+              <Logo v={v} className="aspect-[4/3] w-full" />
+              <span className="flex flex-col p-3">
+                <span className="font-semibold leading-snug">{v.name}</span>
+                <span className="text-muted-foreground text-sm">{v.countryCode}, {v.currency}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {results?.length === 0 && !searching && <p className="text-muted-foreground">Nothing matches "{q}". Try a brand name.</p>}
+    </section>
+  )
+}
+
+function Logo({ v, className }: { v: VoucherSummary; className: string }) {
+  return v.image
+    ? (
+      <span className={`${className} flex items-center justify-center`} style={{ background: v.background ?? "#FFFFFF" }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={productImage(v.image, v.background)} alt="" loading="lazy" className="h-full w-full object-contain" />
+      </span>
+    )
+    : <span className={`${className} bg-secondary font-display flex items-center justify-center text-3xl`} aria-hidden="true">{v.name[0]}</span>
+}
+
+function VoucherView({ summary, back }: { summary: VoucherSummary; back: () => void }) {
+  const { accountId, token, account, refresh, signIn } = useSession()
   const [voucher, setVoucher] = useState<Voucher>()
   const [value, setValue] = useState<string>()
   const [mode, setMode] = useState<Mode>()
   const [quote, setQuote] = useState<Quote>()
-  const [purchase, setPurchase] = useState<Purchase>()
+  const [quoting, setQuoting] = useState(false)
   const [idempotencyKey, setKey] = useState("")
-  const [busy, setBusy] = useState(false)
+  const [buying, setBuying] = useState(false)
+  const [purchase, setPurchase] = useState<Purchase>()
   const [error, setError] = useState<string>()
   const fail = (e: unknown) => setError(errorMessage(e))
+  const live = usePolledPurchase(purchase, token)
 
-  const search = () => {
-    setError(undefined)
-    setVoucher(undefined)
-    api((c) => c.catalog.search({ query: { q } })).then(setResults, fail)
-  }
-  useEffect(search, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    api((c) => c.catalog.voucher({ params: { id: summary.id } })).then((v) => {
+      setVoucher(v)
+      // Preselect a mid-range amount so there's a price to look at straight away.
+      setValue(v.packages[Math.floor((v.packages.length - 1) / 2)]?.value)
+    }, fail)
+  }, [summary.id])
 
   // The saved Default Mode is preselected; picking another applies to this purchase only.
   useEffect(() => {
     if (account && mode === undefined) setMode(account.default_mode)
   }, [account, mode])
 
-  const open = (id: string) => {
-    setError(undefined)
-    setValue(undefined)
-    setPurchase(undefined)
-    api((c) => c.catalog.voucher({ params: { id } })).then(setVoucher, fail)
-  }
-
   // A fresh idempotency key per selection: double clicks and retries can't buy twice.
+  // Responses that arrive after the selection changed are dropped.
   useEffect(() => {
     setQuote(undefined)
     setKey(crypto.randomUUID())
     if (!voucher || !value) return
+    let current = true
     const m = mode ?? "normal"
-    api((c) =>
-      c.catalog.quote({ query: { voucherId: voucher.id, value, ...(m === "normal" ? {} : { game: m.lucky }) } })
-    ).then(setQuote, fail)
+    setQuoting(true)
+    setError(undefined)
+    api((c) => c.catalog.quote({ query: { voucherId: voucher.id, value, ...(m === "normal" ? {} : { game: m.lucky }) } }))
+      .then((q) => current && setQuote(q), (e) => current && fail(e))
+      .finally(() => current && setQuoting(false))
+    return () => {
+      current = false
+    }
   }, [voucher, value, mode])
 
   const buy = async () => {
     if (!voucher || !value || !token || !quote) return
-    setBusy(true)
+    setBuying(true)
     setError(undefined)
-    // Exactly what the quote showed: explicit mode, and the contract refuses to debit above maxPrice.
-    await api((c) => c.purchases.create({ payload: { voucherId: voucher.id, value, mode: mode ?? "normal", maxPrice: quote.maxPrice, idempotencyKey } }), token)
-      .then(setPurchase, fail)
+    // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice.
+    const payload = { voucherId: voucher.id, value, mode: quote.mode, maxPrice: quote.maxPrice, idempotencyKey }
+    await api((c) => c.purchases.create({ payload }), token, "150 seconds")
+      .then(setPurchase, async (e) => {
+        if (!(e instanceof TimedOut)) return fail(e)
+        // Still running on the server: the same key returns the same purchase, then we poll it.
+        await api((c) => c.purchases.create({ payload }), token).then(setPurchase, fail)
+      })
     await refresh().catch(() => {})
-    setBusy(false)
+    setBuying(false)
   }
 
+  const pkg = voucher?.packages.find((p) => p.value === value)
   const short = quote && account ? Number(account.balance) < quote.maxPrice : false
 
   return (
     <section className="flex flex-col gap-6">
-      <form className="flex gap-2" onSubmit={(e) => (e.preventDefault(), search())}>
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search gift cards" aria-label="Search gift cards" />
-        <Button type="submit" variant="outline">Search</Button>
-      </form>
-      {network === "testnet" && (
-        <p className="text-muted-foreground -mt-4 text-xs">Testnet: only Bitrefill test vouchers can be bought, paid in test USDC.</p>
-      )}
-      {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
+      <button type="button" onClick={back} className="text-muted-foreground hover:text-foreground -ml-2 self-start rounded-md px-2 py-2 text-sm">
+        Back to results
+      </button>
+      <div className="grid gap-8 lg:grid-cols-[1.4fr_1fr] lg:items-start">
+        <div className="flex flex-col gap-8">
+          <div className="flex items-center gap-4">
+            <Logo v={summary} className="size-20 shrink-0 overflow-hidden rounded-xl border" />
+            <div>
+              <h1 className="font-display text-3xl leading-tight">{summary.name}</h1>
+              <p className="text-muted-foreground">{summary.countryCode}, {summary.currency}</p>
+            </div>
+          </div>
 
-      {!voucher && (
-        <ul className="grid gap-2 sm:grid-cols-2">
-          {results?.map((v) => (
-            <li key={v.id}>
-              <button type="button" onClick={() => open(v.id)} className="bg-card hover:bg-secondary w-full rounded-xl border p-3 text-left">
-                <span className="font-heading font-semibold">{v.name}</span>
-                <span className="text-muted-foreground ml-2 text-sm">{v.countryCode} · {v.currency}</span>
-              </button>
-            </li>
-          ))}
-          {results?.length === 0 && <li className="text-muted-foreground text-sm">Nothing found.</li>}
-        </ul>
-      )}
-
-      {voucher && (
-        <div className="flex flex-col gap-5">
-          <button type="button" onClick={() => setVoucher(undefined)} className="text-muted-foreground self-start text-sm">← All results</button>
-          <h2 className="font-heading text-2xl font-bold">{voucher.name}</h2>
-
-          <fieldset className="flex flex-col gap-2">
-            <legend className="text-muted-foreground mb-2 text-sm">Amount</legend>
+          <fieldset className="flex flex-col gap-3">
+            <legend className="mb-3 text-lg font-semibold">Amount</legend>
+            {!voucher && !error && <div className="bg-secondary h-11 w-64 animate-pulse rounded-lg" />}
             <div className="flex flex-wrap gap-2">
-              {voucher.packages.map((p) => (
+              {voucher?.packages.map((p) => (
                 <button
                   key={p.value}
                   type="button"
                   aria-pressed={value === p.value}
                   onClick={() => setValue(p.value)}
-                  className="aria-pressed:border-foreground aria-pressed:bg-secondary rounded-lg border px-3 py-2 text-sm"
+                  className="aria-pressed:border-foreground aria-pressed:bg-foreground aria-pressed:text-background bg-receipt min-h-11 rounded-lg border px-4 text-sm font-medium"
                 >
-                  {p.value} {voucher.currency} <span className="text-muted-foreground">· {usd(p.priceMicroUsdc)}</span>
+                  {p.value} {voucher.currency}
+                  {voucher.currency !== "USD" && <span className="opacity-70">, {usd(p.priceMicroUsdc)}</span>}
                 </button>
               ))}
             </div>
+            {voucher?.packages.length === 0 && <p className="text-muted-foreground">This card has no fixed amounts we can sell right now.</p>}
           </fieldset>
 
-          <fieldset className="flex flex-col gap-2">
-            <legend className="text-muted-foreground mb-2 text-sm">How lucky do you feel?</legend>
+          <fieldset className="flex flex-col gap-3">
+            <legend className="mb-3 text-lg font-semibold">How do you want to pay?</legend>
             <div className="grid gap-2 sm:grid-cols-2">
               {MODES.map((m) => (
-                <button
+                <ModeOption
                   key={m.name}
-                  type="button"
-                  aria-pressed={sameMode(mode ?? "normal", m.mode)}
-                  onClick={() => setMode(m.mode)}
-                  className="aria-pressed:border-foreground aria-pressed:bg-secondary rounded-xl border p-3 text-left"
-                >
-                  <span className="font-heading font-semibold">{m.name}</span>
-                  {m.premium && <span className="text-muted-foreground ml-1 text-sm">{m.premium}</span>}
-                  {account && sameMode(account.default_mode, m.mode) && <span className="text-muted-foreground ml-2 text-xs">default</span>}
-                  <span className="text-muted-foreground block text-sm">{m.line}</span>
-                </button>
+                  m={m}
+                  price={pkg?.priceMicroUsdc}
+                  selected={sameMode(mode ?? "normal", m.mode)}
+                  isDefault={!!account && sameMode(account.default_mode, m.mode)}
+                  onSelect={() => setMode(m.mode)}
+                />
               ))}
             </div>
-            <p className="text-muted-foreground text-xs">Every lucky mode averages 6% above the price. You always get the voucher.</p>
+            <p className="text-muted-foreground text-sm">Every lucky mode averages 6% above the price over many purchases. You always get the card.</p>
           </fieldset>
-
-          {quote && (
-            <div className="bg-card flex flex-col gap-3 rounded-xl border p-4">
-              <p>
-                {quote.luckyAmount === 0
-                  ? <>You pay <b>{usd(quote.referencePrice)}</b>.</>
-                  : <>You pay at most <b>{usd(quote.maxPrice)}</b>, and maybe much less. Any refund lands in your balance right after delivery.</>}
-              </p>
-              {quote.luckyAmount > 0 && quote.luckyAmount < quote.referencePrice && (
-                <p className="text-muted-foreground text-sm">The draw applies to {usd(quote.luckyAmount)} of this price; the rest is at the normal price.</p>
-              )}
-              {!token
-                ? <Button onClick={() => signIn().catch(fail)}>Sign in to buy</Button>
-                : !account || short
-                ? <Link href="/wallet" className="text-sm underline">Add funds to buy ({account ? `balance ${usd(account.balance)}` : "no balance yet"})</Link>
-                : <Button onClick={buy} disabled={busy}>{busy ? "Buying…" : `Buy for up to ${usd(quote.maxPrice)}`}</Button>}
-            </div>
-          )}
-
-          {purchase && <PurchaseCard p={purchase} />}
         </div>
-      )}
+
+        <aside className="bg-receipt flex flex-col gap-4 rounded-2xl border p-5 lg:sticky lg:top-24" aria-live="polite">
+          {live
+            ? <PurchaseCard p={live} />
+            : (
+              <>
+                <h2 className="font-semibold">Your purchase</h2>
+                {!quote && <div className={`bg-secondary h-24 rounded-lg ${quoting ? "animate-pulse" : ""}`} />}
+                {quote && <Summary quote={quote} info={modeInfo(quote.mode)!} />}
+                {error && <p role="alert" className="text-destructive text-sm">{error}</p>}
+                {quote && (!accountId
+                  ? <Button size="lg" onClick={() => signIn().catch(fail)}>Sign in to buy</Button>
+                  : !account || short
+                  ? (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-sm">
+                        {account ? `Your balance is ${usd(account.balance)}.` : "You haven't added funds yet."} You need {usd(quote.maxPrice)}.
+                      </p>
+                      <Link href="/wallet" className="bg-primary text-primary-foreground flex h-12 items-center justify-center rounded-lg font-medium">Add funds</Link>
+                    </div>
+                  )
+                  : (
+                    <Button size="lg" onClick={buy} disabled={buying}>
+                      {buying ? "Buying… this takes a few seconds" : quote.luckyAmount === 0 ? `Buy for ${usd(quote.maxPrice)}` : `Buy for up to ${usd(quote.maxPrice)}`}
+                    </Button>
+                  ))}
+              </>
+            )}
+        </aside>
+      </div>
     </section>
+  )
+}
+
+function ModeOption({ m, price, selected, isDefault, onSelect }: {
+  m: ModeInfo
+  price: number | undefined
+  selected: boolean
+  isDefault: boolean
+  onSelect: () => void
+}) {
+  const outcomes = price === undefined ? undefined : pricedOutcomes(m, simpleQuote(m, price))
+  const best = outcomes?.[outcomes.length - 1]
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      onClick={onSelect}
+      className="aria-pressed:border-foreground aria-pressed:ring-foreground bg-receipt flex min-h-24 flex-col gap-1 rounded-xl border p-4 text-left aria-pressed:ring-1"
+    >
+      <span className="flex items-baseline gap-2">
+        <span className="font-display text-lg">{m.name}</span>
+        <span className="text-muted-foreground text-sm">{m.premiumBps ? `adds up to ${m.premiumBps / 100}%` : "the price, no Draw"}</span>
+        {isDefault && <span className="bg-secondary ml-auto rounded px-1.5 py-0.5 text-xs">Your default</span>}
+      </span>
+      <span className="text-muted-foreground text-sm leading-snug">
+        {m.premiumBps === 0
+          ? "Pay exactly the price."
+          : outcomes && best
+          ? `Most likely ${usd(mostLikely(outcomes).price)}. ${chanceLessBps(m) / 100}% chance of less, down to ${best.price === 0 ? "nothing" : usd(best.price)}.`
+          : `${chanceLessBps(m) / 100}% chance to pay less than the price.`}
+      </span>
+    </button>
+  )
+}
+
+function Summary({ quote, info }: { quote: Quote; info: ModeInfo }) {
+  const outcomes = pricedOutcomes(info, quote)
+  const likely = mostLikely(outcomes)
+  return (
+    <div className="flex flex-col gap-3">
+      <dl className="flex flex-col gap-2 text-sm">
+        <div className="flex justify-between"><dt className="text-muted-foreground">Price</dt><dd className="tabular-nums">{usd(quote.referencePrice)}</dd></div>
+        <div className="flex justify-between"><dt className="text-muted-foreground">Mode</dt><dd>{info.name}</dd></div>
+        <div className="flex items-baseline justify-between border-t pt-2">
+          <dt className="font-semibold">{quote.luckyAmount === 0 ? "You pay" : "Most you pay"}</dt>
+          <dd className="font-display text-2xl tabular-nums">{usd(quote.maxPrice)}</dd>
+        </div>
+      </dl>
+      {quote.luckyAmount > 0 && (
+        <>
+          <div className="flex h-3 overflow-hidden rounded-full border" aria-hidden="true">
+            {outcomes.map((o) => (
+              <span
+                key={o.price}
+                style={{ width: `${o.chanceBps / 100}%` }}
+                className={o.price === 0 ? "bg-gold" : o.price < quote.referencePrice ? "bg-gold-soft" : o.price === quote.referencePrice ? "bg-receipt" : "bg-foreground"}
+              />
+            ))}
+          </div>
+          <ul className="text-muted-foreground flex flex-col gap-1 text-sm">
+            {outcomes.map((o) => (
+              <li key={o.price} className="flex justify-between tabular-nums">
+                <span>{o.price === 0 ? "Free" : usd(o.price)}{o === likely ? ", most likely" : ""}</span>
+                <span>{o.chanceBps / 100}%</span>
+              </li>
+            ))}
+          </ul>
+          {quote.luckyAmount < quote.referencePrice && (
+            <p className="text-muted-foreground text-sm">
+              The Draw applies to {usd(quote.luckyAmount)} of the price; the rest is at the normal price.
+            </p>
+          )}
+          <p className="text-muted-foreground text-sm">Any refund lands in your balance right after delivery.</p>
+        </>
+      )}
+    </div>
   )
 }

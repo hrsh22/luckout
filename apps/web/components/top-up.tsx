@@ -51,7 +51,7 @@ export function TopUp() {
   if (registered === false) {
     return (
       <Button variant="outline" className="self-start" disabled={busy} onClick={() => step(async () => {
-        await send({ receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
+        await send(accountId!, { receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
         setRegistered(true)
       })}>
         Enable USDC on your account (0.00125 NEAR, once)
@@ -65,7 +65,7 @@ export function TopUp() {
         <div className="flex flex-wrap items-center gap-2">
           <Input className="w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
           <span className="text-muted-foreground text-sm">USDC, paid with</span>
-          <select className="bg-background h-9 rounded-md border px-2 text-sm" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
+          <select className="bg-background h-10 rounded-lg border px-2 text-sm" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
             {assets?.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {a.chain}</option>)}
           </select>
           <Button disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
@@ -78,7 +78,7 @@ export function TopUp() {
       )}
 
       {quote && (
-        <div className="bg-card flex flex-col gap-2 rounded-xl border p-4 text-sm">
+        <div className="bg-receipt flex flex-col gap-2 rounded-xl border p-4 text-sm">
           <p>
             Send exactly <b>{quote.amountInFormatted} {quote.symbol}</b> on <b>{quote.chain}</b> to:
           </p>
@@ -92,7 +92,7 @@ export function TopUp() {
           <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
           {status === "SUCCESS" && (
             <Button className="self-start" disabled={busy} onClick={() => step(async () => {
-              await send({
+              await send(accountId!, {
                 receiverId: usdcId,
                 method: "ft_transfer_call",
                 args: { receiver_id: contractId, amount: String(quote.usdcOut), msg: "" },

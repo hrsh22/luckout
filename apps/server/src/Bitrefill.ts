@@ -14,6 +14,8 @@ const Product = Schema.Struct({
   name: Schema.String,
   country_code: Schema.String,
   currency: Schema.String,
+  image: Schema.optional(Schema.String),
+  logo_background: Schema.optional(Schema.String),
   packages: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String, amount: Schema.optional(Schema.Number) })))
 })
 const McpProduct = Schema.Struct({
@@ -146,9 +148,14 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           Effect.flatMap((u) => Schema.decodeUnknownEffect(schema)(u).pipe(Effect.mapError(unavailable)))
         )
 
+      const images = (p: { image?: string | undefined; logo_background?: string | undefined }) => ({
+        ...(p.image ? { image: p.image } : {}),
+        ...(p.logo_background ? { background: p.logo_background } : {})
+      })
+
       const search = Effect.fn("Bitrefill.search")(function*(q: string) {
         const products = yield* get("/products/search", Schema.Array(Product), { q, include_test_products: String(testnet) })
-        return products.map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency }))
+        return products.map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency, ...images(p) }))
       })
 
       // ponytail: fixed one-minute window in memory, one process.
@@ -179,6 +186,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             name: p.name,
             countryCode: p.country_code,
             currency: p.currency,
+            ...images(p),
             // Test products are free on Bitrefill; price them at their USD face value.
             packages: (p.packages ?? []).flatMap((pkg) =>
               pkg.amount === undefined ? [] : [{ value: pkg.value, priceMicroUsdc: Math.round(pkg.amount * 1_000_000) }]
