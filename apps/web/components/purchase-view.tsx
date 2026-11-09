@@ -2,7 +2,7 @@
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import { api } from "@/lib/api"
-import { safeLink, usd } from "@/lib/format"
+import { safeLink, usd, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { explorer } from "@/lib/near"
 import { keyPalette, modePalette } from "@/lib/palette"
@@ -69,7 +69,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
         <h2 className="font-display mt-4 text-5xl leading-none font-extrabold">{headline(p)}</h2>
         {p.status === "delivered" && (
           <p className="mt-2 text-[17px] opacity-85">
-            You paid <b>{usd(paid)}</b> for a {usd(p.referencePrice)} card{below ? `, ${usd(p.referencePrice - paid)} less than the price` : ""}.
+            You paid <b>{usdUp(paid)}</b> for a {usd(p.referencePrice)} card{below ? `, ${usd(p.referencePrice - paid)} less than the price` : ""}.
           </p>
         )}
         {p.status === "pending" && <Progress />}
@@ -78,7 +78,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
           <>
             <div className="perforation mt-6 -mx-6 opacity-70" aria-hidden="true" />
             <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
-              <div><dt className="opacity-70">Paid up front</dt><dd className="text-base font-semibold">{usd(p.maxPrice ?? paid)}</dd></div>
+              <div><dt className="opacity-70">Paid up front</dt><dd className="text-base font-semibold">{usdUp(p.maxPrice ?? paid)}</dd></div>
               <div><dt className="opacity-70">Cashback</dt><dd className="text-base font-semibold">{usd(p.draw.cashback)}</dd></div>
               <div><dt className="opacity-70">{modeName(p.mode)} roll</dt><dd className="text-base font-semibold">{p.draw.roll}</dd></div>
             </dl>
@@ -201,7 +201,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
         </span>
         <span className="flex shrink-0 flex-col items-end gap-1">
           {p.status === "delivered"
-            ? <span className="font-display text-xl font-extrabold">{usd(paid)}</span>
+            ? <span className="font-display text-xl font-extrabold">{usdUp(paid)}</span>
             : <span className={`text-sm font-semibold ${p.status === "pending" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
@@ -223,9 +223,9 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
             <div className="flex flex-col gap-4 border-t border-line p-4 sm:p-5">
               <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                 <div><dt className="text-muted">Price</dt><dd className="font-semibold">{usd(p.referencePrice)}</dd></div>
-                <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usd(p.maxPrice ?? p.referencePrice)}</dd></div>
+                <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usdUp(p.maxPrice ?? p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : "None"}</dd></div>
-                <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{p.status === "delivered" ? usd(paid) : "Nothing"}</dd></div>
+                <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{p.status === "delivered" ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code. This updates by itself.</p>}

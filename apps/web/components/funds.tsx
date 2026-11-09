@@ -5,7 +5,7 @@ import { TopUp } from "@/components/top-up"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
-import { toMicro, usd } from "@/lib/format"
+import { toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
@@ -59,7 +59,7 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
       open={open}
       onOpenChange={onOpenChange}
       title="Add funds"
-      description={need ? `You need ${usd(need)} more for this card.` : "Your balance pays for cards. Withdraw what you don't spend any time."}
+      description={need ? `You need ${usdUp(need)} more for this card.` : "Your balance pays for cards. Withdraw what you don't spend any time."}
     >
       <AddFundsPanel key={need ?? 0} need={need} onDone={(ok) => ok && onOpenChange(false)} />
     </Sheet>
@@ -75,7 +75,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
   // Every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
   const noGas = walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
   const actions = useWalletActions()
-  const [amount, setAmount] = useState(() => (need ? dollars(Math.max(need, 1_000_000)) : "25"))
+  const [amount, setAmount] = useState(() => (need ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000) : "25"))
   const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
   const [tab, setTab] = useState<"wallet" | "chain">("wallet")
   const inWallet = Number(walletUsdc ?? 0)
@@ -136,7 +136,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
               value={amount}
               onChange={setAmount}
               picks={[
-                ...(need ? [{ label: `Exactly ${usd(Math.max(need, 1_000_000))}`, micro: Math.max(need, 1_000_000) }] : []),
+                ...(need ? [{ label: `Exactly ${usdUp(Math.max(need, 1_000_000))}`, micro: Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 }] : []),
                 { label: "$10", micro: 10_000_000 },
                 { label: "$25", micro: 25_000_000 },
                 { label: "$50", micro: 50_000_000 },

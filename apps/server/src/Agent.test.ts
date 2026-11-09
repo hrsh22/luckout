@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
-import { makeAgent, trimHistory } from "./Agent.ts"
+import { blocker, makeAgent, trimHistory, usdUp } from "./Agent.ts"
 
 // A fake OpenAI-compatible endpoint that plays back scripted model turns and records what it was sent.
 const fakeModel = async (turns: Array<object>) => {
@@ -45,8 +45,12 @@ const deps = {
         })
       ])
   },
-  near: { view: () => Effect.succeed(null) }
+  near: { view: () => Effect.succeed(rich) },
+  web: "https://luckout.test"
 } as never
+
+// An account that can afford the $15 test purchase, within its limits.
+const rich = { balance: "100000000", per_purchase_limit: "50000000", daily_limit: "100000000", day: 0, spent_today: "0", default_mode: "normal" }
 
 test("prepare_purchase returns a confirmation and buys nothing", async () => {
   const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "Tap Buy to confirm." }])
@@ -55,7 +59,7 @@ test("prepare_purchase returns a confirmation and buys nothing", async () => {
   model.close()
   assert.equal(bought, 0, "the model can't buy; only the customer's tap can")
   assert.deepEqual(turn.pending, {
-    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000
+    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000
   })
   assert.equal(turn.reply, "Tap Buy to confirm.")
 })
@@ -90,4 +94,30 @@ test("history is trimmed in one cut, at a customer message", () => {
   assert.equal(trimHistory(h.slice(0, 60)).length, 60, "untouched until it grows past the limit")
   const cut = trimHistory(h) as Array<{ role: string }>
   assert.ok(cut.length <= 24 && cut[0]!.role === "user")
+})
+
+test("no Confirm button for a purchase the customer can't pay for", async () => {
+  const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "You're short." }])
+  const broke = { ...rich, balance: "500000" }
+  const agent = makeAgent({ ...(deps as object), near: { view: () => Effect.succeed(broke) }, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.testnet", [], "buy it")
+  model.close()
+  assert.equal(turn.pending, undefined)
+  const toolResult = JSON.stringify(model.seen[1]!.messages.at(-1))
+  assert.match(toolResult, /\$14\.50 short/)
+  assert.match(toolResult, /luckout\.test\/wallet/)
+})
+
+test("blocker: balance first, then the per-purchase and daily limits", () => {
+  const now = 5 * 86_400_000
+  assert.match(blocker(null, 1_000_000, "w")!, /\$0\.00 and this needs \$1\.00/)
+  assert.match(blocker({ ...rich, per_purchase_limit: "10000000" } as never, 15_000_000, "w")!, /per-purchase limit of \$10\.00/)
+  assert.match(blocker({ ...rich, day: 5, spent_today: "90000000" } as never, 15_000_000, "w", now)!, /daily limit/)
+  assert.equal(blocker({ ...rich, day: 4, spent_today: "90000000" } as never, 15_000_000, "w", now), undefined, "yesterday's spending doesn't count")
+})
+
+test("amounts the customer pays round up to the cent, never down", () => {
+  assert.equal(usdUp(1_221_000), "$1.23")
+  assert.equal(usdUp(1_330_000), "$1.33")
+  assert.equal(usdUp(0), "$0.00")
 })

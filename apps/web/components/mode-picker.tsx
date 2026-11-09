@@ -1,7 +1,7 @@
 "use client"
 
 import { OddsBar } from "@/components/odds"
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import type { Mode } from "@luckout/api"
@@ -63,8 +63,8 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
             </span>
             <span className={`mt-1 text-[15px] ${selected ? "opacity-80" : "text-ink-soft"}`}>
               {m.premiumBps === 0
-                ? price ? `Pay ${usd(example)}, exactly the price` : "Exactly the price, no Draw"
-                : price ? `Pay ${usd(outcomes[0]!.price)} now, +${m.premiumBps / 100}%` : `+${m.premiumBps / 100}% up front`}
+                ? price ? `Pay ${usdUp(example)}, exactly the price` : "Exactly the price, no Draw"
+                : price ? `Pay ${usdUp(outcomes[0]!.price)} now, +${m.premiumBps / 100}%` : `+${m.premiumBps / 100}% up front`}
             </span>
             <span className="mt-auto pt-4">
               {m.premiumBps === 0

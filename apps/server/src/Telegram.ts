@@ -4,13 +4,12 @@ import { SqlClient } from "effect/sql"
 import { Bot, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
-import { makeAgent, type Pending, trimHistory } from "./Agent.ts"
+import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 
-const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 const LINK_TTL_MINUTES = 10
 const PENDING_TTL_MS = 10 * 60 * 1000
 /** Messages per Telegram user per minute; each one can cost several LLM calls. */
@@ -89,6 +88,7 @@ export class Telegram extends Context.Service<Telegram, {
           purchases,
           near: yield* Near,
           testnet,
+          web: webOrigin,
           apiKey: Redacted.value(aiKey.value),
           baseURL: aiBase,
           model: aiModel
@@ -139,7 +139,9 @@ export class Telegram extends Context.Service<Telegram, {
             yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${ctx.from!.id}, ${accountId}, ${ctx.chat.id}, ${name})`
           })))
           history.delete(ctx.chat.id)
-          return void ctx.reply(`Linked to ${accountId}. Ask me for a gift card, e.g. "a 500 rupee Swiggy voucher". You confirm every purchase with a button.`)
+          return void ctx.reply(
+            `You're in, ${accountId}. Tell me what you want, like ${testnet ? `"a $10 test gift card" (this is the testnet demo)` : `"a ₹500 Swiggy voucher"`}. Nothing is bought until you tap Confirm.`
+          )
         }
         const accountId = await linkedAccount(ctx.from!.id)
         await ctx.reply(
@@ -178,10 +180,10 @@ export class Telegram extends Context.Service<Telegram, {
         pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
         const p = turn.pending
         const summary = p.maxPrice === p.referencePrice
-          ? `${p.voucherName} ${p.value} for ${usd(p.referencePrice)}.`
-          : `${p.voucherName} ${p.value}: price ${usd(p.referencePrice)}. You pay ${usd(p.maxPrice)} now, then maybe get cashback.`
+          ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
+          : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`
         await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
-          reply_markup: new InlineKeyboard().text(`Buy for ${usd(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
+          reply_markup: new InlineKeyboard().text(`Buy for ${usdUp(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })
       }))
 
@@ -193,10 +195,10 @@ export class Telegram extends Context.Service<Telegram, {
         const lines = [
           `${p.voucherName} ${p.value} is yours.`,
           !p.draw
-            ? `You paid ${usd(paid)}.`
+            ? `You paid ${usdUp(paid)}.`
             : p.draw.cashback === 0
-            ? `No cashback this time: you paid ${usd(paid)}.`
-            : `${paid === 0 ? "Free!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usd(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
+            ? `No cashback this time: you paid ${usdUp(paid)}.`
+            : `${paid === 0 ? "Free!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
           typeof r.code === "string" ? `Code: ${r.code}` : "",
           typeof r.pin === "string" ? `PIN: ${r.pin}` : "",
           typeof r.link === "string" ? `Link: ${r.link}` : "",

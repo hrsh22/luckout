@@ -23,7 +23,9 @@ export class VoucherPackage extends Schema.Class<VoucherPackage>("VoucherPackage
 
 export class Voucher extends Schema.Class<Voucher>("Voucher")({
   ...VoucherSummary.fields,
-  packages: Schema.Array(VoucherPackage)
+  packages: Schema.Array(VoucherPackage),
+  /** Amounts Bitrefill sells that Luckout can't: under the 1 USDC minimum purchase. */
+  tooSmall: Schema.optional(Schema.Array(VoucherPackage))
 }) {}
 
 export class BitrefillUnavailable extends Schema.TaggedError<BitrefillUnavailable>()(

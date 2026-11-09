@@ -10,12 +10,16 @@ import type { Purchases } from "./Purchases.ts"
 // OpenAI-compatible API. Safety is structural, not prompt-based:
 // - the model can only *prepare* a purchase; a human taps Confirm before anything is bought,
 //   and the contract's Spending Limits still bound every purchase;
+// - a purchase the customer can't pay for (balance, limits) is never offered as a button;
+// - on testnet the catalog itself only holds test cards (Bitrefill.ts), so the model can't offer others;
 // - Redemption Data never enters the model's context (the bot sends codes itself).
 
 export interface Pending {
   readonly voucherId: string
   readonly voucherName: string
   readonly value: string
+  /** The card's own currency, so "500" reads as "500 INR". */
+  readonly currency: string
   /** Always resolved (the Default Mode when the customer named none), so the button shows the real maximum. */
   readonly mode: Mode
   readonly maxPrice: number
@@ -23,7 +27,12 @@ export interface Pending {
 }
 
 const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
-const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+export const modeName = (m: Mode) => (m === "normal" ? "Normal" : ["Lite", "Classic", "Jackpot"][m.lucky] ?? "Lucky")
+
+/** Money as people read it. */
+export const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+/** What the customer pays, rounded up to the cent: never show less than what leaves their balance. */
+export const usdUp = (micro: number) => `$${(Math.ceil(micro / 10_000) / 100).toFixed(2)}`
 
 const tool = (name: string, description: string, properties: Record<string, object> = {}, required: Array<string> = []): ChatCompletionTool => ({
   type: "function",
@@ -32,15 +41,15 @@ const tool = (name: string, description: string, properties: Record<string, obje
 const mode = { type: "string", enum: ["normal", "lite", "classic", "jackpot"], description: "Omit to use the customer's Default Mode" }
 
 const TOOLS = [
-  tool("search_vouchers", "Search gift cards, top-ups and eSIMs by brand.", { query: { type: "string" } }, ["query"]),
-  tool("get_voucher", "Amounts and current prices (USD) for one voucher.", { voucher_id: { type: "string" } }, ["voucher_id"]),
-  tool("get_balance", "The customer's Luckout balance, Spending Limits, Default Mode and Running Total."),
-  tool("quote", "The exact quote for one amount in one mode: the price and what they pay up front.", {
+  tool("search_vouchers", "Find gift cards, top-ups and eSIMs by brand.", { query: { type: "string" } }, ["query"]),
+  tool("get_voucher", "The amounts on sale for one voucher, with today's USD price for each.", { voucher_id: { type: "string" } }, ["voucher_id"]),
+  tool("get_balance", "The customer's balance, Spending Limits, Default Mode and Running Total."),
+  tool("quote", "The exact quote for one amount in one mode, and whether their balance covers it.", {
     voucher_id: { type: "string" },
     value: { type: "string", description: "The amount exactly as get_voucher lists it" },
     mode
   }, ["voucher_id", "value"]),
-  tool("prepare_purchase", "Show the customer a Confirm button for this purchase. Nothing is bought until they tap it.", {
+  tool("prepare_purchase", "Put a Confirm button under your reply. Nothing is bought until they tap it. Refused if their balance or limits don't cover it.", {
     voucher_id: { type: "string" },
     value: { type: "string" },
     mode
@@ -48,14 +57,31 @@ const TOOLS = [
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included).")
 ]
 
-const system = (testnet: boolean) => `You are Luckout's shopping assistant in Telegram. Luckout sells gift cards, mobile top-ups and eSIMs from Bitrefill, paid from the customer's USDC balance on NEAR.
-Modes: Normal pays exactly the price, no draw. Lucky modes cost more up front (Lite +10%, Classic +20%, Jackpot +50%), then a fair onchain draw pays cashback in fixed slabs, from 10% of what they paid up to all of it, at most $50 per purchase. Chance of any cashback / of all of it back: Lite 23% / 1%, Classic 40% / 2%, Jackpot 56% / 10%. When lucky_part is below the price, cashback is only on that part. Any cashback leaves the customer below the normal price. Every lucky mode averages 5.6% above the price. The customer always gets the voucher.
+const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards, phone top-ups and eSIMs (from Bitrefill) with the USDC balance they keep in Luckout.
+
+What you know:
+- Normal pays exactly the price.
+- Lucky modes cost more up front, then a fair draw on NEAR may pay cashback: Lite +10% (23% get cashback, 1% get it free), Classic +20% (40%, 2% free; the one we recommend), Jackpot +50% (56%, 10% free). Cashback comes in fixed slabs and any cashback means they paid less than the price. Each lucky mode averages 5.6% above the price over many buys. They always get the card.
+- One purchase gets at most $50 back, so on big buys only part of the price plays (the quote's lucky_part). Purchases start at $1, so smaller amounts aren't sold.
+- Add funds or change limits: ${web}/wallet. Browse: ${web}/shop.
+
+How you talk:
+- Like a sharp, friendly person texting. Usually one to three short sentences.
+- Answer what they asked. Bring up odds, caps, averages or rules only when they change the answer or they ask.
+- If they ask for options, give the few that fit best, not the whole catalog.
+- When comparing modes, one line each, same shape: "Classic: $1.33 now, 40% chance of cashback, 2% it's free".
+- "Lucky" with no mode: quote Classic and mention Lite and Jackpot exist.
+- Say amounts the way they did (₹500, $10). Tools give USD.
+- Plain text only: no headers, bold, markdown or em dashes.
+
 Rules:
-- Use tools for every price, balance and quote; never guess numbers.
-- To buy, call prepare_purchase; the customer confirms with a button. Never say something was bought before they confirm.
-- Any cashback means the customer paid less than the price; no cashback means they paid the up-front amount. Never call a result without cashback a win.
-- Voucher codes are delivered by the bot directly; never ask for or repeat them.
-- Keep replies short and plain.${testnet ? "\n- This is the testnet demo: only Bitrefill test vouchers (ids starting with test-) can be bought, with test USDC." : ""}`
+- Every price, balance and quote comes from a tool. Never guess a number.
+- Only offer a purchase they can pay for. If a tool says they're short or over a limit, say by how much and give the link.
+- To buy, call prepare_purchase; they confirm with a button. Never say it's bought before they confirm.
+- No cashback means they paid the up-front amount; never call that a win.
+- The bot sends voucher codes itself; never ask for or repeat them.${testnet
+  ? `\n- This is the testnet demo: only Bitrefill's test cards can be bought, with free test USDC. If they ask for a real brand, say so in one line and offer the $10 test gift card.`
+  : ""}`
 
 /**
  * Old turns are dropped in one big cut, at a customer message, rather than one by one: the model
@@ -68,11 +94,39 @@ export const trimHistory = (h: Array<ChatCompletionMessageParam>, max = 60, keep
   return start === -1 ? [] : h.slice(start)
 }
 
+interface Account {
+  balance: string
+  per_purchase_limit: string
+  daily_limit: string
+  day: number
+  spent_today: string
+  default_mode: Mode
+  premiums_paid: string
+  cashback_received: string
+}
+
+/** Why the customer can't buy this right now, in words the model can pass on; undefined if they can. */
+export const blocker = (a: Account | null, maxPrice: number, web: string, now = Date.now()) => {
+  const balance = Number(a?.balance ?? 0)
+  if (balance < maxPrice) {
+    return `Not enough balance: they have ${usd(balance)} and this needs ${usdUp(maxPrice)}, so they're ${usdUp(maxPrice - balance)} short. Add funds at ${web}/wallet`
+  }
+  if (maxPrice > Number(a!.per_purchase_limit)) {
+    return `Over their per-purchase limit of ${usd(Number(a!.per_purchase_limit))}. They can raise it at ${web}/wallet#limits`
+  }
+  const spent = a!.day === Math.floor(now / 86_400_000) ? Number(a!.spent_today) : 0
+  if (spent + maxPrice > Number(a!.daily_limit)) {
+    return `Over their daily limit: ${usd(spent)} of ${usd(Number(a!.daily_limit))} used today. It resets at 00:00 UTC, or they can raise it at ${web}/wallet#limits`
+  }
+  return undefined
+}
+
 export const makeAgent = (deps: {
   bitrefill: Bitrefill["Service"]
   purchases: Purchases["Service"]
   near: Near["Service"]
   testnet: boolean
+  web: string
   apiKey: string
   baseURL: string
   model: string
@@ -82,55 +136,73 @@ export const makeAgent = (deps: {
   const run = <A>(e: Effect.Effect<A, { message: string }>) =>
     Effect.runPromise(Effect.match(e, { onFailure: (err) => ({ error: err.message }), onSuccess: (a) => a }))
 
+  const account = (accountId: string) => deps.near.view<Account | null>("get_account", { account_id: accountId })
   // The quote must use the mode the contract will apply, so an omitted mode means the Default Mode.
-  const resolveMode = (accountId: string, mode: string | undefined) =>
-    mode && MODES[mode]
-      ? Effect.succeed(MODES[mode]!)
-      : deps.near.view<{ default_mode: Mode } | null>("get_account", { account_id: accountId }).pipe(
-        Effect.map((a) => a?.default_mode ?? ("normal" as Mode))
-      )
+  const resolveMode = (a: Account | null, name: string | undefined) => (name && MODES[name]) || a?.default_mode || ("normal" as Mode)
   const game = (m: Mode) => (m === "normal" ? undefined : m.lucky)
 
   const tools = (accountId: string, prepare: (p: Pending) => void) => ({
     search_vouchers: ({ query }: { query: string }) =>
-      run(deps.bitrefill.search(query).pipe(Effect.map((vs) => vs.slice(0, 8).map((v) => ({ id: v.id, name: v.name, country: v.countryCode }))))),
+      run(deps.bitrefill.search(query).pipe(Effect.map((vs) => {
+        const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, country: v.countryCode }))
+        return deps.testnet && results.length === 0
+          ? { results, note: "Testnet demo: only Bitrefill's test cards are sold. Try search_vouchers('test')." }
+          : { results }
+      }))),
     get_voucher: ({ voucher_id }: { voucher_id: string }) =>
       run(deps.bitrefill.voucher(voucher_id).pipe(Effect.map((v) => ({
         name: v.name,
         currency: v.currency,
-        amounts: v.packages.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) }))
+        amounts: v.packages.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })),
+        ...(v.tooSmall?.length
+          ? { not_sold_under_1_dollar_minimum: v.tooSmall.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })) }
+          : {})
       })))),
     get_balance: () =>
-      run(deps.near.view<Record<string, string> | null>("get_account", { account_id: accountId }).pipe(Effect.map((a) =>
+      run(account(accountId).pipe(Effect.map((a) =>
         a
           ? {
             balance: usd(Number(a.balance)),
             per_purchase_limit: usd(Number(a.per_purchase_limit)),
             daily_limit: usd(Number(a.daily_limit)),
-            spent_today: usd(Number(a.spent_today)),
-            default_mode: a.default_mode,
+            default_mode: modeName(a.default_mode),
             running_total: usd(Number(a.cashback_received) - Number(a.premiums_paid))
           }
-          : { balance: "$0.00", note: "No deposit yet; they can top up in the web app." }
+          : { balance: "$0.00", note: `No deposit yet. Add funds at ${deps.web}/wallet` }
       ))),
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
-      run(resolveMode(accountId, mode).pipe(
-        Effect.flatMap((m) => deps.purchases.quote(voucher_id, value, game(m))),
-        Effect.map((q) => ({ mode: q.mode, price: usd(q.referencePrice), pay_up_front: usd(q.maxPrice), lucky_part: usd(q.luckyAmount) }))
-      )),
+      run(Effect.gen(function*() {
+        const a = yield* account(accountId)
+        const m = resolveMode(a, mode)
+        const q = yield* deps.purchases.quote(voucher_id, value, game(m))
+        const why = blocker(a, q.maxPrice, deps.web)
+        return {
+          mode: modeName(m),
+          price: usd(q.referencePrice),
+          pay_now: usdUp(q.maxPrice),
+          ...(q.luckyAmount > 0 && q.luckyAmount < q.referencePrice ? { lucky_part: usd(q.luckyAmount) } : {}),
+          ...(why ? { cannot_buy_yet: why } : {})
+        }
+      })),
     prepare_purchase: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {
-        const m = yield* resolveMode(accountId, mode)
+        const a = yield* account(accountId)
+        const m = resolveMode(a, mode)
         const [voucher, q] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m))])
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice })
-        return { shown: "A Confirm button is now under your reply." }
+        // A button that would fail on tap is worse than no button: say what's in the way instead.
+        const why = blocker(a, q.maxPrice, deps.web)
+        if (why) return { error: why }
+        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice })
+        return {
+          shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
+        }
       })),
     recent_purchases: () =>
       run(deps.purchases.list(accountId).pipe(Effect.map((ps) => ps.slice(0, 5).map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,
         status: p.status,
         price: usd(p.referencePrice),
-        paid: p.draw ? usd(p.draw.finalPrice) : p.status === "delivered" ? usd(p.referencePrice) : null,
+        paid: p.draw ? usdUp(p.draw.finalPrice) : p.status === "delivered" ? usd(p.referencePrice) : null,
         when: p.createdAt
       })))))
   })
@@ -139,7 +211,7 @@ export const makeAgent = (deps: {
   return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string) => {
     let pending: Pending | undefined
     const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, (p) => (pending = p))
-    const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet) }, ...history, { role: "user", content: text }]
+    const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
     for (let step = 0; step < 6; step++) {
       const res = await client.chat.completions.create({ model: deps.model, messages, tools: TOOLS })
       const u = res.usage

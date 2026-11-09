@@ -1,6 +1,6 @@
 "use client"
 
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { MOST_OUTCOMES, mostLikely, type PricedOutcome } from "@/lib/modes"
 import { motion } from "motion/react"
 
@@ -41,10 +41,10 @@ export function OddsList({ outcomes, whole }: { outcomes: ReadonlyArray<PricedOu
           <span className="size-3 shrink-0 rounded-full" style={{ background: slabColor(o) }} aria-hidden="true" />
           <span className="min-w-0 flex-1">
             {o.cashback === 0
-              ? <>No cashback, you pay <b>{usd(o.price)}</b></>
+              ? <>No cashback, you pay <b>{usdUp(o.price)}</b></>
               : o.price === 0
               ? <><b>Free</b>, all {usd(o.cashback)} back</>
-              : <>{whole ? `${o.pct}% back, ` : `${usd(o.cashback)} back, `}you pay <b>{usd(o.price)}</b></>}
+              : <>{whole ? `${o.pct}% back, ` : `${usd(o.cashback)} back, `}you pay <b>{usdUp(o.price)}</b></>}
             {o === likely && <span className="ml-2 text-sm text-muted">most likely</span>}
           </span>
           <span className="font-semibold tabular-nums">{o.chanceBps / 100}%</span>

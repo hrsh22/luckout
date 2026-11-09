@@ -1,4 +1,4 @@
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { loadDraw } from "@/lib/proof"
 import { ImageResponse } from "next/og"
 
@@ -33,7 +33,7 @@ export default async function Image({ params }: { params: Promise<{ tx: string }
         {win
           ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={{ fontSize: 120, fontWeight: 800, color: GOLD, lineHeight: 1 }}>{paid === 0 ? "Free." : `Paid ${usd(paid)}`}</div>
+              <div style={{ fontSize: 120, fontWeight: 800, color: GOLD, lineHeight: 1 }}>{paid === 0 ? "Free." : `Paid ${usdUp(paid)}`}</div>
               <div style={{ fontSize: 48, color: PAPER }}>{`for a ${usd(ref)} gift card.`}</div>
             </div>
           )

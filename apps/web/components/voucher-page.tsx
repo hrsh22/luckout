@@ -9,7 +9,7 @@ import { OddsBar, OddsList } from "@/components/odds"
 import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purchase-view"
 import { Button } from "@/components/ui/button"
 import { api, errorMessage, TimedOut } from "@/lib/api"
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
@@ -133,7 +133,19 @@ export function VoucherPage() {
                   </span>
                 </button>
               ))}
+              {voucher.data?.tooSmall?.map((p) => (
+                <span
+                  key={p.value}
+                  title="Under the $1 minimum purchase"
+                  className="flex h-12 items-center rounded-full border-[1.5px] border-dashed border-line px-5 font-semibold text-muted"
+                >
+                  {p.value} {voucher.data?.currency}
+                </span>
+              ))}
             </div>
+            {!!voucher.data?.tooSmall?.length && (
+              <p className="text-sm text-muted">Dashed amounts are under our $1 minimum purchase, so they can't be bought here.</p>
+            )}
             {voucher.data?.packages.length === 0 && <p className="text-ink-soft">This card has no fixed amounts we can sell right now.</p>}
           </section>
 
@@ -188,10 +200,10 @@ function Receipt({ shown, exact, info, error, children }: {
       </div>
       <div>
         <p className="text-ink-soft">{lucky ? "You pay now" : "You pay"}</p>
-        <p className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={shown.maxPrice} /></p>
+        <p className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={shown.maxPrice} up /></p>
         <p className="mt-2 text-[15px] text-ink-soft">
           {lucky
-            ? `The ${usd(shown.referencePrice)} price, plus ${usd(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back.`
+            ? `The ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back.`
             : `Exactly the price. No Draw, no cashback.`}
         </p>
       </div>
@@ -230,7 +242,7 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
   if (balance < need) {
     return (
       <>
-        <Button size="lg" variant="gold" onClick={() => setAdding(true)}>Add {usd(need - balance)} to buy</Button>
+        <Button size="lg" variant="gold" onClick={() => setAdding(true)}>Add {usdUp(need - balance)} to buy</Button>
         <AddFundsSheet open={adding} onOpenChange={setAdding} need={need - balance} />
       </>
     )
@@ -245,7 +257,7 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
   }
   return (
     <Button size="lg" loading={!quote} onClick={() => quote && onBuy(quote)}>
-      {quote ? `Buy for ${usd(quote.maxPrice)}` : "Checking the price"}
+      {quote ? `Buy for ${usdUp(quote.maxPrice)}` : "Checking the price"}
     </Button>
   )
 }

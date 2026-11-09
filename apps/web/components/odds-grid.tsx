@@ -1,7 +1,7 @@
 "use client"
 
 import { slabColor, Spacers } from "@/components/odds"
-import { usd } from "@/lib/format"
+import { usdUp } from "@/lib/format"
 import { MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { motion } from "motion/react"
@@ -11,7 +11,7 @@ const PRICE = 20_000_000
 const LUCKY = MODES.filter((m) => m.premiumBps > 0)
 
 const label = (o: PricedOutcome) =>
-  o.price === 0 ? "got it all back, free" : o.cashback > 0 ? `got ${o.pct}% back, paid ${usd(o.price)}` : `no cashback, paid ${usd(o.price)}`
+  o.price === 0 ? "got it all back, free" : o.cashback > 0 ? `got ${o.pct}% back, paid ${usdUp(o.price)}` : `no cashback, paid ${usdUp(o.price)}`
 
 /** The honest odds, drawn: 100 buyers of a $20 card, each dot what one of them paid. */
 export function OddsGrid() {

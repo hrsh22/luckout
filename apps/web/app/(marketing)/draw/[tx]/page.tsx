@@ -1,6 +1,6 @@
 import { BrowserCheck } from "@/components/browser-check"
 import { contractId, explorer } from "@/lib/chain"
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { cashbackPct, MAX_CASHBACK } from "@/lib/modes"
 import { loadDraw } from "@/lib/proof"
 import type { Metadata } from "next"
@@ -20,7 +20,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if ("error" in d) return { title: "Draw Proof" }
   const paid = Number(d.draw.final_price)
   return {
-    title: `Draw Proof: paid ${paid === 0 ? "nothing" : usd(paid)} for a ${usd(d.draw.reference_price)} card`,
+    title: `Draw Proof: paid ${paid === 0 ? "nothing" : usdUp(paid)} for a ${usd(d.draw.reference_price)} card`,
     description: "Recompute this Draw yourself, straight from the NEAR chain."
   }
 }
@@ -46,7 +46,7 @@ export default async function DrawProof({ params }: Props) {
       <div className="blob top-0 -right-40 size-[380px] bg-[#FFE1A6] opacity-70" aria-hidden="true" />
       <div className="relative flex flex-col gap-4">
         <h1 className="font-display text-[48px] leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[72px]">
-          {paid === 0 ? "Paid nothing" : `Paid ${usd(paid)}`} for a {usd(ref)} card
+          {paid === 0 ? "Paid nothing" : `Paid ${usdUp(paid)}`} for a {usd(ref)} card
         </h1>
         <p className="text-lg text-ink-soft">
           Purchase #{draw.purchase_id} by {draw.customer} on {version.name} (up to +{version.premium_bps / 100}%),{" "}
@@ -56,9 +56,9 @@ export default async function DrawProof({ params }: Props) {
 
       <dl className={`relative grid grid-cols-2 gap-6 rounded-[2rem] p-7 sm:grid-cols-4 ${diff < 0 ? "bg-gold text-gold-ink" : "card"}`}>
         <Stat label="Price" value={usd(ref)} />
-        <Stat label="Paid up front" value={usd(draw.max_price)} />
+        <Stat label="Paid up front" value={usdUp(draw.max_price)} />
         <Stat label="Cashback" value={usd(draw.cashback)} />
-        <Stat label={diff < 0 ? `Paid, ${usd(-diff)} below the price` : "Paid"} value={usd(paid)} strong />
+        <Stat label={diff < 0 ? `Paid, ${usd(-diff)} below the price` : "Paid"} value={usdUp(paid)} strong />
       </dl>
 
       <section className="flex flex-col gap-4">

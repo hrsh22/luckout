@@ -74,6 +74,12 @@ export const usdToMicro = (usd: string): number => {
   return Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0"))
 }
 
+/** The contract refuses purchases under 1 USDC (MIN_REFERENCE_PRICE), so smaller amounts are never offered. */
+export const MIN_PRICE = 1_000_000
+export const forSale = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc >= MIN_PRICE)
+/** Amounts Bitrefill sells that Luckout can't, because they're under the minimum. */
+export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc < MIN_PRICE)
+
 export class Bitrefill extends Context.Service<Bitrefill, {
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
   /** Packages with their current USD price, the Reference Price. */
@@ -155,7 +161,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
 
       const search = Effect.fn("Bitrefill.search")(function*(q: string) {
         const products = yield* get("/products/search", Schema.Array(Product), { q, include_test_products: String(testnet) })
-        return products.map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency, ...images(p) }))
+        // On testnet only test products can be bought, so nothing else is offered (web or bot).
+        return products.filter((p) => !testnet || p.id.startsWith("test-")).map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency, ...images(p) }))
       })
 
       // ponytail: fixed one-minute window in memory, one process.
@@ -179,6 +186,9 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       )
 
       const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string) {
+        if (testnet && !isTest(id)) {
+          return yield* new BitrefillUnavailable({ message: "This is the testnet demo: only Bitrefill's test cards can be bought here." })
+        }
         if (isTest(id)) {
           const p = yield* get(`/products/${encodeURIComponent(id)}`, Product)
           return new Voucher({
@@ -188,18 +198,20 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             currency: p.currency,
             ...images(p),
             // Test products are free on Bitrefill; price them at their USD face value.
-            packages: (p.packages ?? []).flatMap((pkg) =>
+            packages: forSale((p.packages ?? []).flatMap((pkg) =>
               pkg.amount === undefined ? [] : [{ value: pkg.value, priceMicroUsdc: Math.round(pkg.amount * 1_000_000) }]
-            )
+            ))
           })
         }
         const p = yield* Cache.get(mcpPrices, id)
+        const all = p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
         return new Voucher({
           id: p.id,
           name: p.name,
           countryCode: p.country_code,
           currency: p.currency,
-          packages: p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
+          packages: forSale(all),
+          tooSmall: tooSmall(all)
         })
       })
 

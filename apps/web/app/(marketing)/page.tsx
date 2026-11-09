@@ -2,7 +2,7 @@ import { HeroArt } from "@/components/hero-art"
 import { OddsGrid } from "@/components/odds-grid"
 import { buttonVariants } from "@/components/ui/button"
 import { contractId, liveAverage, network, type Stats, view } from "@/lib/chain"
-import { usd } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MAX_CASHBACK, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { EXAMPLE_DRAW } from "@/lib/site"
@@ -94,7 +94,7 @@ export default async function Home() {
                   <h3 className="font-display text-[30px] font-extrabold">{m.name}</h3>
                   {m.name === RECOMMENDED && <span className="pill">Recommended</span>}
                 </div>
-                <p className="font-display mt-4 text-5xl font-extrabold">{usd(outcomes[0]!.price)}</p>
+                <p className="font-display mt-4 text-5xl font-extrabold">{usdUp(outcomes[0]!.price)}</p>
                 <p className="opacity-75">{m.premiumBps ? `up front, +${m.premiumBps / 100}%` : "exactly the price"}</p>
                 <div className="mt-auto pt-6 text-[15px]">
                   {m.premiumBps === 0
