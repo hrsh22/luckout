@@ -146,6 +146,9 @@ export class Telegram extends Context.Service<Telegram, {
         )
       })
 
+      // So the operator can find their chat id for ALERT_TELEGRAM_CHAT_ID.
+      bot.command("chatid", (ctx) => ctx.reply(`This chat's id is ${ctx.chat.id}.`))
+
       bot.on("message:text", (ctx) => inChat(ctx.chat.id, async () => {
         if (!allowed(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
         const accountId = await linkedAccount(ctx.from.id)
