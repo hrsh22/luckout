@@ -2,14 +2,15 @@
 
 import { shortAccount } from "@/components/avatar"
 import { TopUp } from "@/components/top-up"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
 import { toMicro, usd } from "@/lib/format"
-import { network } from "@/lib/near"
+import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
-import { Droplets } from "lucide-react"
+import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
+import { toast } from "sonner"
 import { useEffect, useState } from "react"
 
 const dollars = (micro: number) => (micro / 1e6).toFixed(micro % 1e6 ? 2 : 0)
@@ -70,7 +71,9 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
  * chosen before the first deposit is saved right after it, with one more approval.
  */
 export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onDone: (ok: boolean) => void }) {
-  const { accountId, walletUsdc } = useSession()
+  const { accountId, walletUsdc, walletNear } = useSession()
+  // Every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
+  const noGas = walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
   const actions = useWalletActions()
   const [amount, setAmount] = useState(() => (need ? dollars(Math.max(need, 1_000_000)) : "25"))
   const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
@@ -95,11 +98,12 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
 
   return (
     <div className="flex flex-col gap-6">
+      {noGas && accountId && <GasNotice accountId={accountId} />}
       {network === "testnet" && (
         <div className="flex flex-col gap-3 rounded-[1.5rem] bg-gold-soft p-5 text-gold-ink">
           <p className="flex items-center gap-2 font-semibold"><Droplets size={18} aria-hidden="true" />This is the testnet</p>
           <p className="text-[15px]">Get 100 free test USDC, deposited straight into your balance in one approval.</p>
-          <Button variant="gold" size="lg" loading={busy === "faucet" || busy === "mode"} disabled={!!busy} onClick={() => (setBusy("faucet"), actions.faucet().then(done))}>
+          <Button variant="gold" size="lg" loading={busy === "faucet" || busy === "mode"} disabled={!!busy || noGas} onClick={() => (setBusy("faucet"), actions.faucet().then(done))}>
             {busy === "mode" ? "Saving your default mode" : "Get 100 test USDC"}
           </Button>
         </div>
@@ -145,13 +149,50 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
             <Button
               size="lg"
               loading={busy === "deposit"}
-              disabled={!!busy || !(micro >= 1_000_000) || micro > inWallet}
+              disabled={!!busy || noGas || !(micro >= 1_000_000) || micro > inWallet}
               onClick={() => (setBusy("deposit"), actions.deposit(micro).then(done))}
             >
               {micro > inWallet ? "More than your wallet holds" : `Deposit ${micro >= 1_000_000 ? usd(micro) : ""}`}
             </Button>
           </div>
         )}
+    </div>
+  )
+}
+
+/** The wallet has no NEAR for fees: how to get some, then check again without reloading. */
+function GasNotice({ accountId }: { accountId: string }) {
+  const { refresh } = useSession()
+  const [checking, setChecking] = useState(false)
+  return (
+    <div className="flex flex-col gap-3 rounded-[1.5rem] bg-warn-soft p-5 text-warn">
+      <p className="flex items-center gap-2 font-semibold"><Fuel size={18} aria-hidden="true" />Your wallet needs a little NEAR first</p>
+      <p className="text-[15px]">
+        Every NEAR transaction costs a tiny fee in NEAR (about 0.03), and {shortAccount(accountId)} has none yet.{" "}
+        {network === "testnet" ? "Get free testnet NEAR from the official faucet, then check again." : "Send it about 0.1 NEAR, then check again."}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {network === "testnet" && (
+          <a href="https://docs.near.org/getting-started/faucet" target="_blank" rel="noreferrer" className={buttonVariants({ size: "sm" })}>
+            Open the faucet<ExternalLink />
+          </a>
+        )}
+        <Button variant="light" size="sm" onClick={() => navigator.clipboard.writeText(accountId).then(() => toast.success("Account copied"))}>
+          <Copy />Copy account
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          loading={checking}
+          onClick={async () => {
+            setChecking(true)
+            await refresh().catch(() => {})
+            setChecking(false)
+          }}
+        >
+          Check again
+        </Button>
+      </div>
     </div>
   )
 }

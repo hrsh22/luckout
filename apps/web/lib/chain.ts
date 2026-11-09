@@ -15,6 +15,13 @@ async function rpc<T>(method: string, params: object): Promise<T> {
   return res.result
 }
 
+/** Liquid NEAR on an account, in yoctoNEAR: what pays network fees. */
+export const nearBalance = (accountId: string) =>
+  rpc<{ amount: string }>("query", { request_type: "view_account", finality: "optimistic", account_id: accountId }).then((r) => r.amount)
+
+/** Below this a wallet can't pay for our transactions (a deposit costs about 0.03 NEAR). */
+export const MIN_GAS_NEAR = 50_000_000_000_000_000_000_000n // 0.05 NEAR
+
 /** Reads a contract view straight from RPC, without our server (ADR-0006). */
 export async function view<T>(contract: string, method: string, args: object = {}): Promise<T> {
   const r = await rpc<{ result: Array<number> }>("query", {

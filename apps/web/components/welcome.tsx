@@ -17,29 +17,35 @@ import type { Mode } from "@luckout/api"
 import { Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 const STEPS = ["Sign in", "Choose a mode", "Add funds", "Ready"] as const
 type Step = 0 | 1 | 2 | 3
 
 /**
  * Welcome: sign in, choose how you like to pay, add funds, done. Each step is one decision,
- * and nothing here buys anything.
+ * and nothing here buys anything. It runs as its own page (/welcome) or over the page a new
+ * customer signed in on; `onDone` closes it there.
  */
-export function Welcome() {
+export function Welcome({ onDone }: { onDone?: () => void }) {
   const { accountId, account, signInError } = useSession()
   const actions = useWalletActions()
   const router = useRouter()
   const next = useSearchParams().get("next")
   const leave = next && next.startsWith("/") && !next.startsWith("//") ? next : "/shop"
-  const [step, setStep] = useState<Step>(0)
+  // Already signed in: start at the first real decision, with no step-to-step animation on open.
+  const signedIn = !!accountId && account !== undefined
+  const [step, setStep] = useState<Step>(signedIn ? 1 : 0)
   const [dir, setDir] = useState(1)
-  const [mode, setMode] = useState<Mode>(MODES.find((m) => m.name === RECOMMENDED)!.mode)
+  const [mode, setMode] = useState<Mode>(
+    (accountId && (account?.default_mode ?? pendingMode(accountId))) || MODES.find((m) => m.name === RECOMMENDED)!.mode
+  )
   const [saving, setSaving] = useState(false)
+  const top = useRef<HTMLDivElement>(null)
   const go = (s: Step) => {
     setDir(s > step ? 1 : -1)
     setStep(s)
-    window.scrollTo({ top: 0, behavior: "smooth" })
+    top.current?.scrollIntoView({ behavior: "smooth", block: "start" })
   }
 
   // Signed in (here or before): move on, keeping any mode already chosen.
@@ -73,7 +79,7 @@ export function Welcome() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-8">
+    <div ref={top} className="mx-auto flex w-full max-w-[760px] scroll-mt-28 flex-col gap-8">
       <ol className="grid grid-cols-4 gap-2" aria-label="Welcome steps">
         {STEPS.map((label, i) => (
           <li key={label} className="flex flex-col gap-2" aria-current={i === step ? "step" : undefined}>
@@ -165,7 +171,9 @@ export function Welcome() {
               </div>
               <TelegramLink />
               <div>
-                <Button size="lg" onClick={() => router.push(leave)}>{leave === "/shop" ? "Find a card" : "Back to your card"}</Button>
+                <Button size="lg" onClick={() => (onDone ? onDone() : router.push(leave))}>
+                  {onDone ? "Start shopping" : leave === "/shop" ? "Find a card" : "Back to your card"}
+                </Button>
               </div>
             </>
           )}

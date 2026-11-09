@@ -3,7 +3,7 @@
 import { type Mode, SignedChallenge } from "@luckout/api"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 import { api, cancelled, errorMessage, UNAUTHORIZED } from "./api"
-import { contractId, near, usdcId, view } from "./near"
+import { contractId, near, nearBalance, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
 export interface ContractAccount {
@@ -36,6 +36,8 @@ interface Session {
   account: ContractAccount | null | undefined
   /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
+  /** NEAR in the wallet, in yoctoNEAR: it pays the network fee on every transaction */
+  walletNear: string | undefined
   signing: SignInStep | undefined
   signInError: SignInProblem | undefined
   /** Resolves undefined once signed in, or why it didn't happen. */
@@ -45,6 +47,14 @@ interface Session {
 }
 
 const STORAGE = "luckout.session"
+
+/** Everything the app shows about an account, read straight from the chain. */
+const readAccount = (id: string) =>
+  Promise.all([
+    view<ContractAccount | null>(contractId, "get_account", { account_id: id }),
+    view<string>(usdcId, "ft_balance_of", { account_id: id }),
+    nearBalance(id).catch(() => undefined)
+  ])
 const SessionContext = createContext<Session | null>(null)
 
 // ponytail: the token sits in localStorage; move to an HttpOnly cookie on .gamified.trade if XSS risk grows.
@@ -67,6 +77,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<ContractAccount | null>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
+  const [walletNear, setWalletNear] = useState<string>()
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
@@ -76,16 +87,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setSession(undefined)
     setAccount(undefined)
     setWalletUsdc(undefined)
+    setWalletNear(undefined)
   }, [])
 
   const refresh = useCallback(async () => {
     if (!accountId) return
-    const [a, w] = await Promise.all([
-      view<ContractAccount | null>(contractId, "get_account", { account_id: accountId }),
-      view<string>(usdcId, "ft_balance_of", { account_id: accountId })
-    ])
+    const [a, w, n] = await readAccount(accountId)
     setAccount(a)
     setWalletUsdc(w)
+    setWalletNear(n)
   }, [accountId])
 
   // Restore the saved session only if the wallet is still on the same account.
@@ -140,6 +150,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       try {
         localStorage.setItem(STORAGE, JSON.stringify(s))
       } catch {}
+      // Read the account before switching to signed in, so the page settles once: a new customer
+      // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
+      const [a, w, n] = await readAccount(s.accountId).catch(() => [undefined, undefined, undefined] as const)
+      setAccount(a)
+      setWalletUsdc(w)
+      setWalletNear(n)
       setSession({ accountId: s.accountId, token: s.token })
       return undefined
     } catch (e) {
@@ -161,7 +177,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SessionContext
-      value={{ accountId, token: session?.token, ready, account, walletUsdc, signing, signInError, signIn, signOut, refresh }}
+      value={{ accountId, token: session?.token, ready, account, walletUsdc, walletNear, signing, signInError, signIn, signOut, refresh }}
     >
       {children}
     </SessionContext>

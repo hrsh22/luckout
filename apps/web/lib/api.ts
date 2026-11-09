@@ -49,6 +49,11 @@ export const errorMessage = (e: unknown) => {
   const tag = (e as { _tag?: string })?._tag
   if (tag === "Unauthorized") return "Your session ended. Sign in again."
   if (cancelled(e)) return "You closed your wallet before approving, so nothing happened."
-  if (e instanceof TypeError) return "Can't reach Luckout right now. Check your connection and try again."
+  if (/does not have enough balance/i.test(String((e as { message?: string })?.message ?? e))) {
+    return "Your wallet needs a little NEAR to pay the network fee. Add some NEAR and try again."
+  }
+  if (e instanceof TypeError || /transport error/i.test(String((e as { message?: string })?.message))) {
+    return "Can't reach Luckout right now. Check your connection and try again."
+  }
   return (e as { message?: string })?.message ?? String(e)
 }
