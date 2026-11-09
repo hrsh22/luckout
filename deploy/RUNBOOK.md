@@ -20,6 +20,7 @@ Then check both sides before changing anything:
 | `Gave up after 12 attempts at delivery` | Bitrefill never finished delivering. | Same as above, using `invoice_id`. |
 | `Gave up … at confirm` / `at fail` | NEAR kept refusing or timing out. | Read the error. If the operator is out of gas, top it up, then set `step` back to `confirm`/`fail`, `attempts = 0`, `next_attempt_at = now()`. |
 | Onchain `Drawing` for long | The Draw callback failed. | Setting `step = 'confirm'` reschedules it; the customer can also call `retry_draw`. |
+| `Bitrefill refused: HTTP 400` on every purchase | Usually the account's daily purchase limit (`purchase_limit_reached`, 15 per day across all products on our account as of 2026-11-09). The customer was refunded in full. | Nothing to fix in code. It resets daily; ask Bitrefill to raise it before launch. |
 | `fail_purchase refused, delivered onchain` | We confirmed a delivery we later tried to fail. | Check Bitrefill: if the voucher was delivered, set `step = 'settled'`. |
 
 Restart a purchase by setting its step and clearing the backoff, for example:
