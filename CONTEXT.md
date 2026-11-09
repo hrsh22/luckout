@@ -1,6 +1,6 @@
 # Luckout
 
-Luckout ("checkout, but lucky") is a voucher shop, run on NEAR with a Web App and a Telegram Agent, where customers buy at the current Bitrefill price or pay a bounded premium for a chance to pay much less. See `docs/adr/`, starting with ADR-0001 and ADR-0002.
+Luckout ("checkout, but lucky") is a voucher shop, run on NEAR with a Web App and a Telegram Agent, where customers buy at the current Bitrefill price or pay a little extra up front for Cashback, sometimes all of it. See `docs/adr/`, starting with ADR-0001 and ADR-0002.
 
 ## Language
 
@@ -21,7 +21,7 @@ The terms of one purchase: Voucher, Reference Price, Game Version, and Maximum P
 _Avoid_: Estimate, floating price
 
 **Balance**:
-The customer's USDC held by the contract on their behalf; purchases debit it, Refunds and failed purchases credit it, and any unlocked amount can be withdrawn at any time.
+The customer's USDC held by the contract on their behalf; purchases debit it, Cashback and failed purchases credit it, and any unlocked amount can be withdrawn at any time.
 _Avoid_: Wallet, account credit, house funds
 
 **Top-Up**:
@@ -45,7 +45,7 @@ The Normal mode: the customer buys a Voucher at exactly Reference Price, with no
 _Avoid_: Safe bet, fee-bearing purchase
 
 **Lucky Buy**:
-A purchase in which the customer pays a bounded Maximum Price for a guaranteed Voucher and a Draw determines a Refund, allowing some outcomes below Reference Price.
+A purchase in which the customer pays a bounded Maximum Price for a guaranteed Voucher and a Draw determines the Cashback, which always leaves the price below Reference Price when there is any.
 _Avoid_: Spin, gamble, lottery ticket
 
 **Voucher Guarantee**:
@@ -57,7 +57,7 @@ The private code, PIN, link, or instructions needed to use a Voucher, delivered 
 _Avoid_: Voucher, public metadata, onchain token
 
 **Game Version**:
-An immutable table of Final Price percentages and probabilities that a customer accepts before a Lucky Buy. The live versions are Classic (+10%), Bold (+25%), and Jackpot (+50%); all share the same Target Gross Margin and differ only in how much extra is risked and how big the wins are.
+An immutable table of Cashback slabs and probabilities that a customer accepts before a Lucky Buy, stored onchain as Final Price percentages. The live versions are Lite (+10%), Classic (+20%), and Jackpot (+50%); all share the same Target Gross Margin and differ only in how much extra is paid up front and how often and how big the Cashback is.
 _Avoid_: Live odds, mutable configuration, difficulty
 
 **Default Mode**:
@@ -65,7 +65,7 @@ The mode, Normal or one of the Game Versions, that a customer chooses once and e
 _Avoid_: Recommended mode, auto mode
 
 **Maximum Price**:
-The greatest Final Price a customer can pay for a Lucky Buy, equal to Reference Price plus its Game Version's premium (10%, 25%, or 50%) on the Lucky Amount.
+The greatest Final Price a customer can pay for a Lucky Buy, equal to Reference Price plus its Game Version's premium (10%, 20%, or 50%) on the Lucky Amount.
 _Avoid_: Bet size, maximum loss
 
 **Risk Premium**:
@@ -73,23 +73,23 @@ The difference between a Lucky Buy's Maximum Price and its Reference Price; it i
 _Avoid_: Entry fee, wager
 
 **Draw**:
-The random event, run by the contract in the receipt right after the one that confirms delivery, that determines a Lucky Buy's Refund; it never changes the selected Voucher or whether the customer receives it, and nothing can undo the confirmation once the Draw is scheduled.
+The random event, run by the contract in the receipt right after the one that confirms delivery, that determines a Lucky Buy's Cashback; it never changes the selected Voucher or whether the customer receives it, and nothing can undo the confirmation once the Draw is scheduled.
 _Avoid_: Bet result, spin result, reveal animation
 
-**Refund**:
-Money credited automatically to the customer's Balance from a Lucky Buy's Draw, reducing its Final Price and sometimes bringing it below Reference Price.
-_Avoid_: Yield, token reward, cashback
+**Cashback**:
+Money credited automatically to the customer's Balance from a Lucky Buy's Draw, as a share of what they paid in 10% slabs (100% is free). Any Cashback leaves the Final Price below Reference Price. The contract's fields and events call it `refund`.
+_Avoid_: Refund (in anything customers read), yield, token reward, partial cashback
 
 **Final Price**:
-The Maximum Price minus the Refund.
+The Maximum Price minus the Cashback.
 _Avoid_: Loss, swap output
 
 **Reference Discount**:
-The amount by which a Lucky Buy's Final Price falls below its Reference Price. Getting some Refund while still paying above Reference Price is never called a discount or win.
+The amount by which a Lucky Buy's Final Price falls below its Reference Price. No Game Version may pay Cashback that still leaves the price above Reference Price.
 _Avoid_: Refund, prize, winnings
 
 **Target Gross Margin**:
-The long-run expected amount above Reference Price, before operating costs, across many Draws: 6% for every Game Version and purchase size. It is the only revenue.
+The long-run expected amount above Reference Price, before operating costs, across many Draws: exactly 5.6% for every Game Version and purchase size. It is the only revenue.
 _Avoid_: House edge, guaranteed profit, per-order fee, top-up fee
 
 **Failed Purchase**:
@@ -100,24 +100,28 @@ _Avoid_: Cancellation, Draw loss
 The customer's right to recover the full amount debited for a purchase the operator has neither confirmed nor failed within 24 hours.
 _Avoid_: Cancellation, chargeback
 
-**Refund Reserve**:
-The operator-funded pool in the contract that backs Lucky Buy Refunds; the portion locked for accepted purchases forms Locked Draw Liabilities and the rest is Free Reserve.
-_Avoid_: Liquidity pool, treasury
+**Cashback Reserve**:
+The operator-funded pool in the contract that backs Lucky Buy Cashback; the portion locked for accepted purchases forms Locked Draw Liabilities and the rest is Free Reserve.
+_Avoid_: Refund Reserve, liquidity pool, treasury
 
 **Locked Draw Liability**:
-The Free Reserve held for one accepted Lucky Buy: its largest possible Reference Discount, which is the part of its largest Refund not already covered by its own Risk Premium. It is held until that purchase is confirmed, failed, or reclaimed.
+The Free Reserve held for one accepted Lucky Buy: its largest possible Reference Discount, which is the part of its largest Cashback not already covered by its own Risk Premium. It is held until that purchase is confirmed, failed, or reclaimed.
 _Avoid_: Free Reserve, operator funds
 
 **Free Reserve**:
-Refund Reserve not locked against an accepted Lucky Buy; the operator may withdraw it, which reduces capacity for new Lucky Buys.
+Cashback Reserve not locked against an accepted Lucky Buy; the operator may withdraw it, which reduces capacity for new Lucky Buys.
 _Avoid_: Protocol revenue, customer funds
 
 **Discount Cap**:
 The largest Reference Discount one Lucky Buy can produce: 20% of Free Reserve at admission. It never limits purchase size, grows as the reserve grows, and never changes an accepted purchase.
 _Avoid_: Purchase cap, mode restriction
 
+**Cashback Cap**:
+The most Cashback one Lucky Buy can pay: 50 USDC, sized for a 1,000 USDC Cashback Reserve. Like the Discount Cap, it never limits purchase size, only the Lucky Amount.
+_Avoid_: Prize limit, purchase cap
+
 **Lucky Amount**:
-The part of a Lucky Buy's Reference Price that its Game Version applies to: the whole price, or less when the full price's largest discount would exceed the Discount Cap. The Risk Premium is charged only on this part, and the rest is bought at Reference Price.
+The part of a Lucky Buy's Reference Price that its Game Version applies to: the whole price, or less when the full price's largest Cashback would exceed the Cashback Cap or its largest discount would exceed the Discount Cap. The Risk Premium is charged only on this part, and the rest is bought at Reference Price.
 _Avoid_: Stake, bet size
 
 **Draw Proof**:
@@ -125,7 +129,7 @@ The public record of one Draw: its transaction, random seed, purchase ID, and Ga
 _Avoid_: Receipt, audit log
 
 **Live Average**:
-The public, running average Final Price of all settled Lucky Buys, shown beside the promised 106% of Reference Price.
+The public, running average Final Price of all settled Lucky Buys, shown beside the promised 105.6% of Reference Price.
 _Avoid_: House edge, RTP
 
 **Running Total**:

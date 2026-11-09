@@ -2,7 +2,7 @@ import { OddsGrid } from "@/components/odds-grid"
 import { buttonVariants } from "@/components/ui/button"
 import { contractId, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
-import { chanceLessBps, MODES, mostLikely, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { cashbackChanceBps, MAX_CASHBACK, MODES, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { EXAMPLE_DRAW, testnet } from "@/lib/site"
 import Link from "next/link"
 
@@ -18,22 +18,22 @@ const STEPS = [
   },
   {
     title: "Pick a card and a mode",
-    body: "Choose the brand and amount, then Normal to pay exactly the price, or a lucky mode. You see the most you could pay before you confirm."
+    body: "Choose the brand and amount, then Normal to pay exactly the price, or a lucky mode that costs a little more up front. You see every possible cashback before you confirm."
   },
   {
     title: "Get the code in seconds",
-    body: "Bitrefill delivers the code. Then the contract runs the Draw and puts any refund straight back into your balance."
+    body: "Bitrefill delivers the code. Then the contract runs the Draw and puts any cashback straight into your balance."
   }
 ]
 
 const FAQ = [
   {
     q: "Do I always get the card?",
-    a: "Yes. The Draw only decides how much of the price comes back to you. If Bitrefill can't deliver, the whole amount returns to your balance and there's no Draw."
+    a: "Yes. The Draw only decides how much cashback you get. If Bitrefill can't deliver, the whole amount returns to your balance and there's no Draw."
   },
   {
     q: "How does Luckout make money?",
-    a: "Every lucky mode is built so that, across many purchases, buyers pay 106% of the price on average. That 6% is our only revenue. Normal purchases cost exactly the price."
+    a: "Every lucky mode is built so that, across many purchases, buyers pay 105.6% of the price on average. That 5.6% is our only revenue. Normal purchases cost exactly the price."
   },
   {
     q: "Where is my money while it's in Luckout?",
@@ -41,7 +41,7 @@ const FAQ = [
   },
   {
     q: "How random is the Draw?",
-    a: "It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why each Draw's biggest possible refund is capped at a share of the reserve."
+    a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why one Draw can pay back at most ${usd(MAX_CASHBACK)}, and never more than a share of the reserve.`
   },
   {
     q: "Can the Telegram bot spend my money?",
@@ -64,7 +64,7 @@ export default async function Home() {
           <h1 className="font-display text-5xl leading-[0.95] text-balance sm:text-7xl">Checkout, but lucky.</h1>
           <p className="text-muted-foreground max-w-xl text-lg leading-relaxed text-pretty sm:text-xl">
             Gift cards, phone top-ups and eSIMs from thousands of brands, paid in USDC. Pay the price, or add a little for a fair
-            chance to pay less, sometimes nothing. Either way, the card is yours.
+            chance at cashback, sometimes all of it. Either way, the card is yours.
           </p>
           <div className="flex flex-wrap gap-3">
             <Link href="/shop" className={buttonVariants({ size: "lg" })}>Open the shop</Link>
@@ -92,7 +92,8 @@ export default async function Home() {
         <div className="mb-8 flex max-w-2xl flex-col gap-3">
           <h2 className="font-display text-3xl sm:text-4xl">Four ways to pay for a $20 card</h2>
           <p className="text-muted-foreground leading-relaxed">
-            The most likely result of every lucky mode is paying the full premium. The chance of paying less is the reason to pick one.
+            Lucky modes cost more up front and pay cashback in fixed slabs. Any cashback leaves you below the price, but the most
+            likely result is no cashback.
           </p>
         </div>
         <div className="overflow-x-auto rounded-2xl border">
@@ -100,32 +101,30 @@ export default async function Home() {
             <thead className="text-muted-foreground border-b text-sm">
               <tr>
                 <th scope="col" className="p-4 font-medium">Mode</th>
-                <th scope="col" className="p-4 font-medium">You add up to</th>
-                <th scope="col" className="p-4 font-medium">Most likely you pay</th>
-                <th scope="col" className="p-4 font-medium">Chance to pay less</th>
-                <th scope="col" className="p-4 font-medium">Best case</th>
+                <th scope="col" className="p-4 font-medium">You pay up front</th>
+                <th scope="col" className="p-4 font-medium">Chance of cashback</th>
+                <th scope="col" className="p-4 font-medium">Cashback slabs</th>
+                <th scope="col" className="p-4 font-medium">Free</th>
               </tr>
             </thead>
             <tbody>
               {MODES.map((m) => {
                 const outcomes = pricedOutcomes(m, simpleQuote(m, EXAMPLE))
-                const likely = mostLikely(outcomes)
-                const best = outcomes[outcomes.length - 1]!
+                const slabs = outcomes.filter((o) => o.cashback > 0)
+                const free = slabs.find((o) => o.price === 0)
                 return (
                   <tr key={m.name} className="border-b last:border-0">
                     <th scope="row" className="font-display p-4 text-lg">{m.name}</th>
-                    <td className="p-4 tabular-nums">{m.premiumBps ? `${m.premiumBps / 100}%` : "Nothing"}</td>
                     <td className="p-4 tabular-nums">
-                      <b>{usd(likely.price)}</b>
-                      {m.premiumBps > 0 && <span className="text-muted-foreground">, {likely.chanceBps / 100}% of the time</span>}
+                      <b>{usd(outcomes[0]!.price)}</b>
+                      {m.premiumBps > 0 && <span className="text-muted-foreground">, +{m.premiumBps / 100}%</span>}
                     </td>
-                    <td className="p-4 tabular-nums">{m.premiumBps ? `${chanceLessBps(m) / 100}%` : "None"}</td>
+                    <td className="p-4 tabular-nums">{m.premiumBps ? `${cashbackChanceBps(m) / 100}%` : "None"}</td>
+                    <td className="text-muted-foreground p-4 text-sm tabular-nums">
+                      {slabs.length ? slabs.filter((o) => o !== free).map((o) => `${o.pct}% back: ${o.chanceBps / 100}%`).join(" · ") : "No Draw"}
+                    </td>
                     <td className="p-4 tabular-nums">
-                      {best.price === 0
-                        ? <span className="bg-gold rounded px-1.5 py-0.5 font-semibold">Free, {best.chanceBps / 100}%</span>
-                        : best.price < EXAMPLE
-                        ? <span className="bg-gold-soft rounded px-1.5 py-0.5 font-semibold">{usd(best.price)}, {best.chanceBps / 100}%</span>
-                        : usd(best.price)}
+                      {free ? <span className="bg-gold rounded px-1.5 py-0.5 font-semibold">{free.chanceBps / 100}%</span> : "—"}
                     </td>
                   </tr>
                 )
@@ -134,8 +133,9 @@ export default async function Home() {
           </table>
         </div>
         <p className="text-muted-foreground mt-4 max-w-2xl text-sm leading-relaxed">
-          Over many purchases, every lucky mode averages 106% of the price. On big purchases the Draw applies to part of the price, and
-          the rest is charged at the normal price; the shop shows exactly how much before you buy.
+          Over many purchases, every lucky mode averages 105.6% of the price. One purchase can get at most {usd(MAX_CASHBACK)} back, so
+          on big purchases only part of the price plays and the rest is charged at the normal price; the shop shows exactly how much
+          before you buy.
         </p>
       </section>
 
@@ -148,11 +148,11 @@ export default async function Home() {
               read from it a minute ago.
             </p>
             <div className="border-background/20 flex flex-col gap-1 border-t pt-5">
-              <p className="font-display text-gold text-6xl tabular-nums">{avg === undefined ? "106%" : `${avg.toFixed(1)}%`}</p>
+              <p className="font-display text-gold text-6xl tabular-nums">{avg === undefined ? "105.6%" : `${avg.toFixed(1)}%`}</p>
               <p className="text-background/75 text-sm">
                 {avg === undefined
                   ? "promised average, for every mode"
-                  : `of the price, on average, over ${stats!.lucky_settled} Draws. Promised: 106%.`}
+                  : `of the price, on average, over ${stats!.lucky_settled} Draws. Promised: 105.6%.`}
               </p>
             </div>
             <Link href="/fair" className="text-gold self-start text-sm font-semibold underline underline-offset-4">See the live numbers</Link>
@@ -165,8 +165,9 @@ export default async function Home() {
             <Point title="Nobody can retry a Draw">
               Delivery is confirmed first. The Draw runs a block later, in a step nothing can undo, not even us.
             </Point>
-            <Point title="Refunds are covered before you buy">
-              Each lucky purchase locks its biggest possible refund from the reserve, so the money is there whatever the result.
+            <Point title="Cashback is covered before you buy">
+              Each lucky purchase locks what its biggest possible cashback would cost the reserve, so the money is there whatever the
+              result.
             </Point>
             <Point title="Limits you set">
               The contract caps every purchase at your per-purchase and daily limits, including the ones the Telegram bot makes.
@@ -185,11 +186,11 @@ export default async function Home() {
           <Link href="/wallet" className={`${buttonVariants({ variant: "outline" })} self-start`}>Link Telegram</Link>
         </div>
         <div className="bg-secondary flex flex-col gap-3 rounded-2xl p-5 text-[15px] sm:p-7" aria-label="Example chat with the Luckout bot">
-          <p className="bg-foreground text-background self-end rounded-2xl rounded-br-sm px-4 py-2.5">A $25 Steam card, Bold</p>
+          <p className="bg-foreground text-background self-end rounded-2xl rounded-br-sm px-4 py-2.5">A $25 Steam card, Classic</p>
           <div className="bg-receipt flex max-w-[85%] flex-col gap-3 rounded-2xl rounded-bl-sm px-4 py-3">
-            <p>Steam $25: price $25.00. On Bold you pay at most $31.25. That's the most likely result; 18% of the time you pay less, down to nothing.</p>
+            <p>Steam $25: price $25.00. On Classic you pay $30.00 now, and 40% of the time you get cashback, from 20% to all of it.</p>
             <div className="grid grid-cols-2 gap-2 text-sm font-medium">
-              <span className="bg-secondary rounded-lg px-3 py-2 text-center">Buy for up to $31.25</span>
+              <span className="bg-secondary rounded-lg px-3 py-2 text-center">Buy for $30.00</span>
               <span className="bg-secondary rounded-lg px-3 py-2 text-center">Cancel</span>
             </div>
           </div>

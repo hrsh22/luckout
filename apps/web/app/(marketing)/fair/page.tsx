@@ -1,5 +1,6 @@
 import { contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
+import { MAX_CASHBACK } from "@/lib/modes"
 import { EXAMPLE_DRAW } from "@/lib/site"
 import type { Metadata } from "next"
 import Link from "next/link"
@@ -24,7 +25,7 @@ export default async function Fair() {
       <div className="flex flex-col gap-4">
         <h1 className="font-display text-4xl sm:text-5xl">Is it fair?</h1>
         <p className="text-muted-foreground text-lg leading-relaxed">
-          Every lucky mode is built to average 106% of the price. That 6% is Luckout's only revenue. Here is what lucky buyers have
+          Every lucky mode is built to average 105.6% of the price. That 5.6% is Luckout's only revenue. Here is what lucky buyers have
           actually paid so far, read from the contract within the last minute.
         </p>
       </div>
@@ -39,22 +40,22 @@ export default async function Fair() {
         </div>
         <div className="flex flex-col gap-1">
           <h2 className="text-muted-foreground text-sm">Promised</h2>
-          <p className="font-display text-6xl tabular-nums">106.0%</p>
+          <p className="font-display text-6xl tabular-nums">105.6%</p>
           <p className="text-muted-foreground text-sm">in the long run, for every mode and every size</p>
         </div>
       </section>
       <p className="text-muted-foreground leading-relaxed">
-        Over a few dozen Draws the average swings a lot; over thousands it settles near 106%. Every Draw links to a Draw Proof you can
+        Over a few dozen Draws the average swings a lot; over thousands it settles near 105.6%. Every Draw links to a Draw Proof you can
         recompute in your browser, like <Link href={`/draw/${EXAMPLE_DRAW}`} className="text-foreground underline underline-offset-4">this one</Link>.
       </p>
 
       {reserve && (
         <section className="flex flex-col gap-3">
-          <h2 className="font-display text-2xl">The Refund Reserve</h2>
+          <h2 className="font-display text-2xl">The Cashback Reserve</h2>
           <p className="text-muted-foreground leading-relaxed">
-            {usd(reserve.free)} is free and {usd(reserve.locked)} is locked for purchases in progress. Each Lucky Buy locks its largest
-            possible discount before it starts, so every refund is already covered. The biggest discount one purchase can win right now
-            is {usd(reserve.discount_cap)}: 20% of the free reserve.
+            {usd(reserve.free)} is free and {usd(reserve.locked)} is locked for purchases in progress. Each Lucky Buy locks what its
+            biggest possible cashback would cost before it starts, so every cashback is already covered. One purchase can get at most{" "}
+            {usd(MAX_CASHBACK)} back, and can't cost the reserve more than {usd(reserve.discount_cap)} right now: 20% of the free reserve.
           </p>
         </section>
       )}
@@ -62,7 +63,7 @@ export default async function Fair() {
       <section className="flex flex-col gap-3">
         <h2 className="font-display text-2xl">What the contract guarantees</h2>
         <ul className="text-muted-foreground flex list-disc flex-col gap-2 pl-5 leading-relaxed">
-          <li>Every Game Version is immutable, and the contract refuses any table that doesn't average exactly 106%.</li>
+          <li>Every Game Version is immutable, and the contract refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.</li>
           <li>The Draw runs a block after delivery is confirmed, so nobody, including us, can retry it or cancel a purchase after seeing the result.</li>
           <li>Your per-purchase and daily limits apply to every purchase, whoever submits it. The daily limit resets at 00:00 UTC.</li>
           <li>A purchase we neither deliver nor cancel can be reclaimed in full after 24 hours.</li>

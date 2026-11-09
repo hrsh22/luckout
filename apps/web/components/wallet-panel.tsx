@@ -55,7 +55,7 @@ export function WalletPanel({ accountId }: { accountId: string }) {
         <div className="flex flex-col gap-1">
           <dt className="text-muted-foreground text-sm">Running Total</dt>
           <dd className="font-display text-3xl tabular-nums">{running >= 0 ? "+" : "−"}{usd(Math.abs(running))}</dd>
-          <dd className="text-muted-foreground text-sm">Discounts won minus premiums paid, over all your lucky buys.</dd>
+          <dd className="text-muted-foreground text-sm">Cashback received minus the extra you paid up front, over all your lucky buys.</dd>
         </div>
       </dl>
 

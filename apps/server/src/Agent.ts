@@ -22,20 +22,20 @@ export interface Pending {
   readonly referencePrice: number
 }
 
-const MODES: Record<string, Mode> = { normal: "normal", classic: { lucky: 0 }, bold: { lucky: 1 }, jackpot: { lucky: 2 } }
+const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 
 const tool = (name: string, description: string, properties: Record<string, object> = {}, required: Array<string> = []): ChatCompletionTool => ({
   type: "function",
   function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } }
 })
-const mode = { type: "string", enum: ["normal", "classic", "bold", "jackpot"], description: "Omit to use the customer's Default Mode" }
+const mode = { type: "string", enum: ["normal", "lite", "classic", "jackpot"], description: "Omit to use the customer's Default Mode" }
 
 const TOOLS = [
   tool("search_vouchers", "Search gift cards, top-ups and eSIMs by brand.", { query: { type: "string" } }, ["query"]),
   tool("get_voucher", "Amounts and current prices (USD) for one voucher.", { voucher_id: { type: "string" } }, ["voucher_id"]),
   tool("get_balance", "The customer's Luckout balance, Spending Limits, Default Mode and Running Total."),
-  tool("quote", "The exact quote for one amount in one mode: price and the most they could pay.", {
+  tool("quote", "The exact quote for one amount in one mode: the price and what they pay up front.", {
     voucher_id: { type: "string" },
     value: { type: "string", description: "The amount exactly as get_voucher lists it" },
     mode
@@ -49,11 +49,11 @@ const TOOLS = [
 ]
 
 const system = (testnet: boolean) => `You are Luckout's shopping assistant in Telegram. Luckout sells gift cards, mobile top-ups and eSIMs from Bitrefill, paid from the customer's USDC balance on NEAR.
-Modes: Normal pays exactly the price, no draw. Lucky modes pay up to a premium on top (Classic +10%, Bold +25%, Jackpot +50%), and a fair onchain draw can bring the price down, sometimes to half or free; every lucky mode averages 6% above the price. The customer always gets the voucher.
+Modes: Normal pays exactly the price, no draw. Lucky modes cost more up front (Lite +10%, Classic +20%, Jackpot +50%), then a fair onchain draw pays cashback in fixed slabs, from 10% of what they paid up to all of it, at most $50 per purchase. Chance of any cashback / of all of it back: Lite 23% / 1%, Classic 40% / 2%, Jackpot 56% / 10%. When lucky_part is below the price, cashback is only on that part. Any cashback leaves the customer below the normal price. Every lucky mode averages 5.6% above the price. The customer always gets the voucher.
 Rules:
 - Use tools for every price, balance and quote; never guess numbers.
 - To buy, call prepare_purchase; the customer confirms with a button. Never say something was bought before they confirm.
-- Only call a result a discount or a win when the Final Price was below the price.
+- Any cashback means the customer paid less than the price; no cashback means they paid the up-front amount. Never call a result without cashback a win.
 - Voucher codes are delivered by the bot directly; never ask for or repeat them.
 - Keep replies short and plain.${testnet ? "\n- This is the testnet demo: only Bitrefill test vouchers (ids starting with test-) can be bought, with test USDC." : ""}`
 
@@ -116,7 +116,7 @@ export const makeAgent = (deps: {
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(resolveMode(accountId, mode).pipe(
         Effect.flatMap((m) => deps.purchases.quote(voucher_id, value, game(m))),
-        Effect.map((q) => ({ mode: q.mode, price: usd(q.referencePrice), most_you_pay: usd(q.maxPrice), lucky_part: usd(q.luckyAmount) }))
+        Effect.map((q) => ({ mode: q.mode, price: usd(q.referencePrice), pay_up_front: usd(q.maxPrice), lucky_part: usd(q.luckyAmount) }))
       )),
     prepare_purchase: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {

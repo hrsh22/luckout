@@ -23,7 +23,7 @@
 
 | Area | What |
 |---|---|
-| Buy | Top-ups from any chain (1Click, mainnet), four modes (Normal, Classic, Bold, Jackpot) with a saved Default Mode, instant onchain Draw, no gas for customers |
+| Buy | Top-ups from any chain (1Click, mainnet), four modes (Normal, Lite, Classic, Jackpot) with a saved Default Mode, instant onchain Draw, no gas for customers |
 | Agent | Telegram agent on NEAR AI Cloud; Telegram linked by wallet signature; codes sent only by direct message; Spending Limits enforced onchain |
 | Proof | Draw Proof page with in-browser recompute, public Live Average, personal Running Total, Win Cards with `next/og` previews |
 | Access | Web App with NEAR Connect (HOT Wallet included); testnet demo with a test-USDC faucet; README that runs from a fresh clone |
@@ -67,7 +67,7 @@ The repo is a pnpm workspace:
 1. The quote comes from the contract's `quote` view.
 2. `purchase` debits the Maximum Price and locks the reserve onchain. Admission is idempotent through a unique key in Postgres.
 3. The server buys on Bitrefill from the prepaid USD store credit, through Bitrefill's MCP `buy-products` with `balance_currency: "USD"`. On testnet the free test products are bought through REST instead (see `docs/research/bitrefill-funding.md`).
-4. If delivered, the server calls `confirm_delivery`, which runs the Draw and credits the Refund in the same call. It then stores the code and the Draw and sends both to the customer.
+4. If delivered, the server calls `confirm_delivery`, which schedules the Draw; it credits the Cashback a block later. It then stores the code and the Draw and sends both to the customer.
 5. If Bitrefill fails, the server calls `fail_purchase`, which refunds everything with no Draw.
 6. Every minute, the reconciler finishes or fails any purchase that stopped part-way.
 
@@ -95,7 +95,7 @@ Rust work waits for an explicit go-ahead. The contract is designed and drafted i
 | Bitrefill API key: done, it's already in `.env` | — |
 | About $50 of float: a USD store-credit deposit paid in USDC on Base (the server can create the deposit invoice) | Day 5 |
 | 1Click API key | Day 5 |
-| NEAR mainnet accounts (owner and operator), a few NEAR for storage and gas, and about $200–500 USDC for the Refund Reserve | Day 6 |
+| NEAR mainnet accounts (owner and operator), a few NEAR for storage and gas, and about $1,000 USDC for the Cashback Reserve | Day 6 |
 | ~~VM, API subdomain and SSH~~: done 9 Nov, `luckout-api.gamified.trade` on CloudPanel | — |
 | ~~Vercel project~~: done 9 Nov, `luckout.gamified.trade`. The GitHub repo must be public before submission | Day 7 |
 | Demo video, X post, submission form, and the NEAR wallet for prizes | Day 7 |

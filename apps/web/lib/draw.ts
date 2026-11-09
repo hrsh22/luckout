@@ -79,6 +79,6 @@ export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<
     row("Roll", e.roll, roll),
     row("Final Price share", e.final_bps, bps),
     row("Final Price", e.final_price, price),
-    row("Refund", e.refund, refund)
+    row("Cashback", e.refund, refund)
   ]
 }

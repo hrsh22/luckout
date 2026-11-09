@@ -1,6 +1,6 @@
 # Luckout
 
-**Checkout, but lucky.** Buy the gift cards you already buy, pay a little extra for a fair chance to pay much less, and always get your voucher.
+**Checkout, but lucky.** Buy the gift cards you already buy, pay a little extra up front for a fair chance at cashback, sometimes all of it, and always get your voucher.
 
 Luckout is a voucher shop on NEAR. It has a web app and a Telegram agent, and its vouchers come from Bitrefill. Built for the NEAR Hackathon 2026.
 
@@ -10,17 +10,23 @@ Luckout is a voucher shop on NEAR. It has a web app and a Telegram agent, and it
 
 1. **Top up** from any chain. NEAR Intents 1Click swaps it into native USDC in your NEAR account, and one deposit moves it into your Luckout balance, held by the contract.
 2. **Buy** in the web app or ask the Telegram agent. Our server submits the purchase, so you pay no gas and sign nothing each time, and the contract enforces the Spending Limits you set.
-3. **Draw.** When the voucher is delivered, the same onchain call draws your price and credits any refund. The code and the result arrive together, seconds after you buy.
-4. **Check it.** Every draw has a Draw Proof page that recomputes it in your browser from the chain, and a public page shows the live average against the promised 106%.
+3. **Draw.** When the voucher is delivered, the contract draws your cashback and credits it to your balance. The code and the result arrive together, seconds after you buy.
+4. **Check it.** Every draw has a Draw Proof page that recomputes it in your browser from the chain, and a public page shows the live average against the promised 105.6%.
 
-| Mode | Most you pay (₹500 voucher) | Chance to pay less | Best case | Average |
+Exact odds on a ₹500 voucher (chance → what you end up paying):
+
+| Cashback | Normal · ₹500 | Lite · ₹550 | Classic · ₹600 | Jackpot · ₹750 |
 |---|---:|---:|---:|---:|
-| Normal | ₹500 | No draw | ₹500 | ₹500 |
-| Classic | ₹550 | 4% | ₹250 | ₹530 |
-| Bold | ₹625 | 18% | Free | ₹530 |
-| Jackpot | ₹750 | 25% | Free | ₹530 |
+| 100% back | — | 1% → ₹0 | 2% → ₹0 | 10% → ₹0 |
+| 50% back | — | 1% → ₹275 | 3% → ₹300 | 12% → ₹375 |
+| 40% back | — | — | 4% → ₹360 | 34% → ₹450 |
+| 30% back | — | 1% → ₹385 | 7% → ₹420 | — |
+| 20% back | — | 2% → ₹440 | 24% → ₹480 | — |
+| 10% back | — | 18% → ₹495 | — | — |
+| No cashback | 100% → ₹500 | 77% → ₹550 | 60% → ₹600 | 44% → ₹750 |
+| **Average** | ₹500 | ₹528 | ₹528 | ₹528 |
 
-Every lucky mode averages 6% over the normal price, and that's our only revenue: no top-up fees, no service fees.
+Any cashback leaves you below the normal price, one purchase gets at most $50 back, and every lucky mode averages exactly 5.6% over the normal price. That's our only revenue: no top-up fees, no service fees.
 
 ## Try it on testnet
 
@@ -56,7 +62,7 @@ Without any keys, the server starts on PGlite (no database to install), the Draw
 - **The agent can't buy on its own.** The model can only prepare a purchase; you tap Confirm, and the contract refuses to debit more than the maximum on the button. Voucher codes never enter the model's context, and the bot only talks in private chats. Telegram is linked from your signed-in wallet session, never the other way round.
 - **Admission is idempotent onchain.** Each purchase carries the server's order id, and the contract admits an order once, so no retry or resend can debit twice.
 - **No result shopping.** Confirming delivery closes the purchase for good, and the Draw then runs in a separate receipt a block later, with gas the contract sets and randomness that didn't exist when the confirmation was signed. Nobody, not even a full-access key, can bundle the confirmation with a call that reverts unlucky outcomes, fail the purchase after seeing the result, or call the Draw directly. A purchase the operator neither confirms nor fails can be reclaimed in full after 24 hours.
-- **Every refund is covered before the purchase starts.** Each Lucky Buy locks its largest possible discount from the Refund Reserve, and one purchase can never win more than 20% of the free reserve.
+- **Every cashback is covered before the purchase starts.** Each Lucky Buy locks its largest possible discount from the Cashback Reserve; one purchase can get at most $50 back and never cost more than 20% of the free reserve.
 - **Sign-in** uses NEP-413 signed messages with single-use nonces, accepted only from a full-access key of the account. Voucher codes are encrypted at rest (AES-256-GCM).
 - **Crash-safe purchases.** Every step is saved before its side effect, and each transaction is saved before it is sent; a reconciler finishes anything left part-way without buying or charging twice, backing off and flagging for a human anything that keeps failing.
 
@@ -83,5 +89,5 @@ CONTEXT.md      domain glossary
 
 - [Build plan](docs/plan.md): scope, schedule, what's needed, risks.
 - [Decisions](docs/adr/): why it works the way it does.
-- [Glossary](CONTEXT.md): Balance, Lucky Buy, Game Version, Draw, Refund Reserve, and so on.
+- [Glossary](CONTEXT.md): Balance, Lucky Buy, Game Version, Draw, Cashback, and so on.
 - [Bitrefill funding research](docs/research/bitrefill-funding.md): why the float is USD store credit.

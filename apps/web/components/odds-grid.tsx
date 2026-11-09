@@ -1,7 +1,7 @@
 "use client"
 
 import { usd } from "@/lib/format"
-import { MODES, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { useState } from "react"
 
 const PRICE = 20_000_000
@@ -17,12 +17,12 @@ const tone = (price: number) =>
     ? "bg-receipt border-foreground/40"
     : "bg-foreground border-foreground"
 
-const label = (price: number) =>
-  price === 0 ? "paid nothing" : price < PRICE ? `paid ${usd(price)}` : price === PRICE ? `paid ${usd(price)}, the price` : `paid ${usd(price)}`
+const label = (o: PricedOutcome) =>
+  o.price === 0 ? "got it all back, free" : o.cashback > 0 ? `got ${o.pct}% back, paid ${usd(o.price)}` : `no cashback, paid ${usd(o.price)}`
 
 /** The honest odds, drawn: 100 buyers of a $20 card, each square what one of them paid. */
 export function OddsGrid() {
-  const [index, setIndex] = useState(2)
+  const [index, setIndex] = useState(1)
   const m = LUCKY[index]!
   const outcomes = pricedOutcomes(m, simpleQuote(m, PRICE))
   const cells = outcomes.flatMap((o) => Array.from({ length: o.chanceBps / 100 }, () => o.price))
@@ -63,12 +63,12 @@ export function OddsGrid() {
         {outcomes.map((o) => (
           <li key={o.price} className="flex items-center gap-2">
             <span className={`size-3 shrink-0 rounded-[2px] border ${tone(o.price)}`} aria-hidden="true" />
-            <span><b className="tabular-nums">{o.chanceBps / 100}</b> {label(o.price)}</span>
+            <span><b className="tabular-nums">{o.chanceBps / 100}</b> {label(o)}</span>
           </li>
         ))}
       </ul>
       <p className="text-muted-foreground text-sm">
-        On {m.name} you add up to {m.premiumBps / 100}%. Every one of them gets the card.
+        On {m.name} each pays {m.premiumBps / 100}% extra up front, then cashback comes in slabs. Every one of them gets the card.
       </p>
     </figure>
   )

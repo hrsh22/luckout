@@ -71,7 +71,7 @@ fn deliver(c: &mut Contract, pid: u64, seed: [u8; 32]) -> Purchase {
 }
 
 #[test]
-fn default_tables_sum_to_100_and_average_exactly_106() {
+fn default_tables_sum_to_100_and_average_exactly_105_6() {
     for v in default_game_versions() {
         validate_game_version(&v);
         let total: u128 = (0..10_000).map(|r| final_bps_for_roll(&v.outcomes, r) as u128).sum();
@@ -80,16 +80,36 @@ fn default_tables_sum_to_100_and_average_exactly_106() {
 }
 
 #[test]
-fn chance_to_pay_less_matches_adr_0002() {
-    let less: Vec<u32> = default_game_versions()
+fn default_tables_match_adr_0002() {
+    let vs = default_game_versions();
+    let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Lite", "Classic", "Jackpot"]);
+    // Classic on 100: pays 120, then 20% back is 96, 30% is 84, and so on.
+    let classic: Vec<(u32, u32)> = vs[1].outcomes.iter().map(|o| (o.final_bps, o.chance_bps)).collect();
+    assert_eq!(classic, [(0, 200), (6_000, 300), (7_200, 400), (8_400, 700), (9_600, 2_400), (12_000, 6_000)]);
+    // Chance of any Cashback; every Cashback leaves the price below normal.
+    let cashback: Vec<u32> = vs
         .iter()
         .map(|v| v.outcomes.iter().filter(|o| o.final_bps < 10_000).map(|o| o.chance_bps).sum())
         .collect();
-    assert_eq!(less, vec![400, 1_800, 2_500]);
+    assert_eq!(cashback, [2_300, 4_000, 5_600]);
 }
 
 #[test]
-#[should_panic(expected = "Average must be exactly 106%")]
+#[should_panic(expected = "Any cashback must leave the price below normal")]
+fn rejects_cashback_that_still_costs_more_than_normal() {
+    validate_game_version(&GameVersion {
+        name: "Teaser".into(),
+        premium_bps: 2_000,
+        outcomes: vec![
+            Outcome { final_bps: 10_800, chance_bps: 5_000 },
+            Outcome { final_bps: 12_000, chance_bps: 5_000 },
+        ],
+    });
+}
+
+#[test]
+#[should_panic(expected = "Average must be exactly 105.6%")]
 fn rejects_a_table_with_a_bigger_edge() {
     validate_game_version(&GameVersion {
         name: "Greedy".into(),
@@ -116,7 +136,7 @@ fn small_purchases_get_the_full_game_version() {
     let c = setup(30 * USDC, 100 * USDC);
     let q = |v| c.quote(U128(6 * USDC), Mode::Lucky(v));
     assert_eq!((q(0).lucky_amount.0, q(0).max_price.0), (6 * USDC, 6_600_000));
-    assert_eq!((q(1).lucky_amount.0, q(1).max_price.0), (6 * USDC, 7_500_000));
+    assert_eq!((q(1).lucky_amount.0, q(1).max_price.0), (6 * USDC, 7_200_000));
     assert_eq!((q(2).lucky_amount.0, q(2).max_price.0), (6 * USDC, 9 * USDC));
     let n = c.quote(U128(6 * USDC), Mode::Normal);
     assert_eq!((n.lucky_amount.0, n.max_price.0), (0, 6 * USDC));
@@ -124,12 +144,25 @@ fn small_purchases_get_the_full_game_version() {
 
 #[test]
 fn big_purchases_only_play_the_lucky_amount() {
-    let c = setup(200 * USDC, 100 * USDC);
-    // Discount Cap = 40 USDC.
-    let jackpot = c.quote(U128(1_000 * USDC), Mode::Lucky(2));
-    assert_eq!((jackpot.lucky_amount.0, jackpot.max_price.0), (40 * USDC, 1_020 * USDC));
-    let classic = c.quote(U128(1_000 * USDC), Mode::Lucky(0));
-    assert_eq!((classic.lucky_amount.0, classic.max_price.0), (80 * USDC, 1_008 * USDC));
+    let c = setup(150 * USDC, 100 * USDC);
+    // Discount Cap = 30 USDC, below the 50 USDC Cashback cap for Lite.
+    let lite = c.quote(U128(1_000 * USDC), Mode::Lucky(0));
+    assert_eq!((lite.lucky_amount.0, lite.max_price.0), (30 * USDC, 1_003 * USDC));
+}
+
+#[test]
+fn no_lucky_buy_pays_back_more_than_50_usdc() {
+    // 1,000 USDC of reserve: the Discount Cap (200) is looser than the Cashback cap.
+    let c = setup(1_000 * USDC, 100 * USDC);
+    let r = 1_000 * USDC;
+    let free = |v: u32| {
+        let q = c.quote(U128(r), Mode::Lucky(v));
+        (q.lucky_amount.0, q.max_price.0 - final_price(r, q.lucky_amount.0, q.max_price.0, 0))
+    };
+    // Lite 45.45 + 10%, Classic 41.67 + 20%, Jackpot 33.33 + 50%: each free result pays back 50.
+    assert_eq!(free(0), (45_454_545, 50 * USDC));
+    assert_eq!(free(1), (41_666_666, 50 * USDC));
+    assert_eq!(free(2), (33_333_333, 50 * USDC));
 }
 
 #[test]
@@ -198,7 +231,7 @@ fn default_mode_is_used_when_no_mode_is_given() {
     as_(operator());
     let pid = c.purchase(alice(), U128(4 * USDC), None, format!("o{}", 3), U128(u128::MAX));
     assert_eq!(c.get_purchase(pid).unwrap().mode, Mode::Lucky(1));
-    assert_eq!(balance(&c), 95 * USDC);
+    assert_eq!(balance(&c), 95_200_000);
 }
 
 #[test]
@@ -248,7 +281,7 @@ fn cannot_fail_after_the_draw() {
 fn per_purchase_limit_counts_the_maximum_price() {
     let mut c = setup(500 * USDC, 200 * USDC);
     as_(operator());
-    // 40 USDC on Jackpot can cost 60, above the default 50 USDC limit.
+    // 40 USDC on Jackpot can cost 56.67 (only 33.33 of it plays), above the default 50 USDC limit.
     c.purchase(alice(), U128(40 * USDC), Some(Mode::Lucky(2)), format!("o{}", 8), U128(u128::MAX));
 }
 

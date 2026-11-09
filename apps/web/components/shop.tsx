@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { productImage, usd } from "@/lib/format"
-import { chanceLessBps, type ModeInfo, modeInfo, MODES, mostLikely, pricedOutcomes, sameMode, simpleQuote } from "@/lib/modes"
+import { cashbackChanceBps, type ModeInfo, modeInfo, MODES, mostLikely, pricedOutcomes, sameMode, simpleQuote } from "@/lib/modes"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { Mode, Purchase, Quote, Voucher, VoucherSummary } from "@luckout/api"
@@ -203,7 +203,7 @@ function VoucherView({ summary, back }: { summary: VoucherSummary; back: () => v
                 />
               ))}
             </div>
-            <p className="text-muted-foreground text-sm">Every lucky mode averages 6% above the price over many purchases. You always get the card.</p>
+            <p className="text-muted-foreground text-sm">Lucky modes cost more up front, then pay cashback. Any cashback leaves you below the price, and every lucky mode averages 5.6% above it over many purchases. You always get the card.</p>
           </fieldset>
         </div>
 
@@ -229,7 +229,7 @@ function VoucherView({ summary, back }: { summary: VoucherSummary; back: () => v
                   )
                   : (
                     <Button size="lg" onClick={buy} disabled={buying}>
-                      {buying ? "Buying… this takes a few seconds" : quote.luckyAmount === 0 ? `Buy for ${usd(quote.maxPrice)}` : `Buy for up to ${usd(quote.maxPrice)}`}
+                      {buying ? "Buying… this takes a few seconds" : `Buy for ${usd(quote.maxPrice)}`}
                     </Button>
                   ))}
               </>
@@ -258,15 +258,15 @@ function ModeOption({ m, price, selected, isDefault, onSelect }: {
     >
       <span className="flex items-baseline gap-2">
         <span className="font-display text-lg">{m.name}</span>
-        <span className="text-muted-foreground text-sm">{m.premiumBps ? `adds up to ${m.premiumBps / 100}%` : "the price, no Draw"}</span>
+        <span className="text-muted-foreground text-sm">{m.premiumBps ? `+${m.premiumBps / 100}% up front` : "the price, no Draw"}</span>
         {isDefault && <span className="bg-secondary ml-auto rounded px-1.5 py-0.5 text-xs">Your default</span>}
       </span>
       <span className="text-muted-foreground text-sm leading-snug">
         {m.premiumBps === 0
           ? "Pay exactly the price."
           : outcomes && best
-          ? `Most likely ${usd(mostLikely(outcomes).price)}. ${chanceLessBps(m) / 100}% chance of less, down to ${best.price === 0 ? "nothing" : usd(best.price)}.`
-          : `${chanceLessBps(m) / 100}% chance to pay less than the price.`}
+          ? `Pay ${usd(outcomes[0]!.price)}. ${cashbackChanceBps(m) / 100}% chance of cashback, up to ${best.price === 0 ? "all " : ""}${usd(best.cashback)} back.`
+          : `${cashbackChanceBps(m) / 100}% chance of cashback, up to all of it.`}
       </span>
     </button>
   )
@@ -275,13 +275,15 @@ function ModeOption({ m, price, selected, isDefault, onSelect }: {
 function Summary({ quote, info }: { quote: Quote; info: ModeInfo }) {
   const outcomes = pricedOutcomes(info, quote)
   const likely = mostLikely(outcomes)
+  // Percentages are of what you paid only when the whole price plays.
+  const whole = quote.luckyAmount === quote.referencePrice
   return (
     <div className="flex flex-col gap-3">
       <dl className="flex flex-col gap-2 text-sm">
         <div className="flex justify-between"><dt className="text-muted-foreground">Price</dt><dd className="tabular-nums">{usd(quote.referencePrice)}</dd></div>
         <div className="flex justify-between"><dt className="text-muted-foreground">Mode</dt><dd>{info.name}</dd></div>
         <div className="flex items-baseline justify-between border-t pt-2">
-          <dt className="font-semibold">{quote.luckyAmount === 0 ? "You pay" : "Most you pay"}</dt>
+          <dt className="font-semibold">{quote.luckyAmount === 0 ? "You pay" : "You pay now"}</dt>
           <dd className="font-display text-2xl tabular-nums">{usd(quote.maxPrice)}</dd>
         </div>
       </dl>
@@ -299,17 +301,25 @@ function Summary({ quote, info }: { quote: Quote; info: ModeInfo }) {
           <ul className="text-muted-foreground flex flex-col gap-1 text-sm">
             {outcomes.map((o) => (
               <li key={o.price} className="flex justify-between tabular-nums">
-                <span>{o.price === 0 ? "Free" : usd(o.price)}{o === likely ? ", most likely" : ""}</span>
+                <span>
+                  {o.cashback === 0
+                    ? "No cashback"
+                    : o.price === 0
+                    ? `All ${usd(o.cashback)} back, free`
+                    : `${whole ? `${o.pct}% back: ` : ""}${usd(o.cashback)} back, you pay ${usd(o.price)}`}
+                  {o === likely ? ", most likely" : ""}
+                </span>
                 <span>{o.chanceBps / 100}%</span>
               </li>
             ))}
           </ul>
           {quote.luckyAmount < quote.referencePrice && (
             <p className="text-muted-foreground text-sm">
-              The Draw applies to {usd(quote.luckyAmount)} of the price; the rest is at the normal price.
+              Only {usd(quote.luckyAmount)} of the price plays, so cashback tops out at {usd(outcomes[outcomes.length - 1]!.cashback)}; the
+              rest is at the normal price.
             </p>
           )}
-          <p className="text-muted-foreground text-sm">Any refund lands in your balance right after delivery.</p>
+          <p className="text-muted-foreground text-sm">Any cashback lands in your balance right after delivery.</p>
         </>
       )}
     </div>

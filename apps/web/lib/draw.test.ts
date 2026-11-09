@@ -30,5 +30,5 @@ test("a real testnet Draw recomputes exactly", async () => {
 
 test("a tampered Draw is caught", async () => {
   const checks = await verify({ ...event, roll: 12, final_price: "0", refund: "9000000" }, jackpot)
-  assert.deepEqual(checks.filter((c) => !c.ok).map((c) => c.label), ["Roll", "Final Price", "Refund"])
+  assert.deepEqual(checks.filter((c) => !c.ok).map((c) => c.label), ["Roll", "Final Price", "Cashback"])
 })

@@ -28,9 +28,9 @@ near contract deploy "$APP" use-file target/near/luckout.wasm with-init-call new
 # The contract must be registered on the token to receive deposits.
 call "$USDC" storage_deposit "{\"account_id\":\"$APP\",\"registration_only\":true}" '0.01 NEAR' '30 Tgas' "$OWNER"
 
-# Refund Reserve: 500 tUSDC from the faucet (100 per call), giving a Discount Cap of 100.
-for _ in 1 2 3 4 5; do call "$USDC" faucet '{}' '0 NEAR' '30 Tgas' "$OWNER"; done
-call "$USDC" ft_transfer_call "{\"receiver_id\":\"$APP\",\"amount\":\"500000000\",\"msg\":\"reserve\"}" '1 yoctoNEAR' '100 Tgas' "$OWNER"
+# Cashback Reserve: 1,000 tUSDC from the faucet (100 per call); the 50 USDC Cashback Cap then limits each purchase.
+for _ in $(seq 10); do call "$USDC" faucet '{}' '0 NEAR' '30 Tgas' "$OWNER"; done
+call "$USDC" ft_transfer_call "{\"receiver_id\":\"$APP\",\"amount\":\"1000000000\",\"msg\":\"reserve\"}" '1 yoctoNEAR' '100 Tgas' "$OWNER"
 
 # The server's key can only call the purchase methods (ADR-0001).
 near account add-key "$SERVER" grant-function-call-access --allowance unlimited --contract-account-id "$APP" \

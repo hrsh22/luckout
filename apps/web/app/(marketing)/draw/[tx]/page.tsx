@@ -1,6 +1,7 @@
 import { BrowserCheck } from "@/components/browser-check"
 import { contractId, explorer } from "@/lib/chain"
 import { usd } from "@/lib/format"
+import { cashbackPct, MAX_CASHBACK } from "@/lib/modes"
 import { loadDraw } from "@/lib/proof"
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
@@ -54,9 +55,9 @@ export default async function DrawProof({ params }: Props) {
 
       <dl className="bg-receipt grid grid-cols-2 gap-6 rounded-2xl border p-6 sm:grid-cols-4">
         <Stat label="Price" value={usd(ref)} />
-        <Stat label="Most they could pay" value={usd(draw.max_price)} />
-        <Stat label="Paid" value={usd(paid)} strong />
-        <Stat label={diff < 0 ? "Below the price" : diff > 0 ? "Above the price" : "Difference"} value={usd(Math.abs(diff))} />
+        <Stat label="Paid up front" value={usd(draw.max_price)} />
+        <Stat label="Cashback" value={usd(draw.refund)} />
+        <Stat label={diff < 0 ? `Paid, ${usd(-diff)} below the price` : "Paid"} value={usd(paid)} strong />
       </dl>
 
       <section className="flex flex-col gap-4">
@@ -65,7 +66,7 @@ export default async function DrawProof({ params }: Props) {
           <li>The block's random seed: <code className="text-foreground break-all">{draw.seed}</code></li>
           <li>Random value = sha256(seed, then purchase number #{draw.purchase_id}), so Draws in the same block are independent.</li>
           <li>Roll = the first 8 bytes of the random value, modulo 10,000.</li>
-          <li>The roll picks a row of the {version.name} table below. The Final Price is that share of the price, rounded up, never above the most they could pay.</li>
+          <li>The roll picks a row of the {version.name} table below. The Final Price is that share of the price, rounded up, never above what they paid up front; the rest comes back as cashback.</li>
         </ol>
         <BrowserCheck tx={tx} />
       </section>
@@ -75,7 +76,7 @@ export default async function DrawProof({ params }: Props) {
         <div className="overflow-x-auto rounded-xl border">
           <table className="bg-receipt w-full text-sm">
             <thead className="text-muted-foreground border-b text-left">
-              <tr><th scope="col" className="p-3 font-medium">Rolls</th><th scope="col" className="p-3 font-medium">Chance</th><th scope="col" className="p-3 font-medium">Pays</th></tr>
+              <tr><th scope="col" className="p-3 font-medium">Rolls</th><th scope="col" className="p-3 font-medium">Chance</th><th scope="col" className="p-3 font-medium">Cashback</th></tr>
             </thead>
             <tbody>
               {version.outcomes.map((o, i) => {
@@ -85,7 +86,11 @@ export default async function DrawProof({ params }: Props) {
                   <tr key={i} className={`border-b last:border-0 ${hit ? "bg-gold font-semibold" : ""}`}>
                     <td className="p-3 tabular-nums">{from}–{from + o.chance_bps - 1}</td>
                     <td className="p-3 tabular-nums">{o.chance_bps / 100}%</td>
-                    <td className="p-3">{o.final_bps / 100}% of the price{hit ? `, roll ${draw.roll}` : ""}</td>
+                    <td className="p-3">
+                      {o.final_bps < 10_000 + version.premium_bps ? `${cashbackPct(version.premium_bps, o.final_bps)}% back` : "None"}
+                      <span className="text-muted-foreground">, pays {o.final_bps / 100}% of the price</span>
+                      {hit ? `, roll ${draw.roll}` : ""}
+                    </td>
                   </tr>
                 )
               })}
@@ -93,8 +98,8 @@ export default async function DrawProof({ params }: Props) {
           </table>
         </div>
         <p className="text-muted-foreground text-sm leading-relaxed">
-          Game Versions are immutable and every table averages exactly 106%. A block producer can bias the seed slightly; the Discount
-          Cap and Spending Limits bound what that could ever be worth.
+          Game Versions are immutable and every table averages exactly 105.6%. A block producer can bias the seed slightly; the{" "}
+          {usd(MAX_CASHBACK)} cashback cap, the Discount Cap and Spending Limits bound what that could ever be worth.
         </p>
       </section>
 

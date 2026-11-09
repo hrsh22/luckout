@@ -1,5 +1,5 @@
 //! Luckout: one contract holding customer Balances in USDC, their Spending
-//! Limits and Default Mode, immutable Game Versions, the Refund Reserve and
+//! Limits and Default Mode, immutable Game Versions, the Cashback Reserve and
 //! every Draw. See CONTEXT.md and docs/adr/0001..0005 for the domain language.
 //!
 //! All amounts are USDC base units (6 decimals) and all rates are basis points.
@@ -13,10 +13,12 @@ use near_sdk::{
 };
 
 pub const BPS: u128 = 10_000;
-/// Every Game Version averages 106% of the Lucky Amount (ADR-0002).
-pub const TARGET_FINAL_BPS: u128 = 10_600;
+/// Every Game Version averages 105.6% of the Lucky Amount (ADR-0002).
+pub const TARGET_FINAL_BPS: u128 = 10_560;
 /// The Discount Cap: 20% of Free Reserve.
 pub const DISCOUNT_CAP_BPS: u128 = 2_000;
+/// The most Cashback one Lucky Buy can pay, so a 1,000 USDC reserve serves many buyers (ADR-0002).
+pub const MAX_CASHBACK: u128 = 50_000_000; // 50 USDC
 pub const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const RECLAIM_AFTER_NS: u64 = DAY_NS;
 pub const MIN_DEPOSIT: u128 = 1_000_000; // 1 USDC, keeps dust accounts from bloating storage
@@ -77,6 +79,10 @@ impl GameVersion {
     /// Largest Reference Discount as a share of the Lucky Amount.
     fn max_discount_bps(&self) -> u128 {
         BPS - self.min_final_bps() as u128
+    }
+    /// Largest Cashback (Refund) as a share of the Lucky Amount.
+    fn max_cashback_bps(&self) -> u128 {
+        BPS + self.premium_bps as u128 - self.min_final_bps() as u128
     }
 }
 
@@ -153,7 +159,7 @@ pub struct Reserve {
     pub proceeds: U128,
 }
 
-/// Live Average = lucky_paid_total / lucky_amount_total, promised to be ~106%.
+/// Live Average = lucky_paid_total / lucky_amount_total, promised to be ~105.6%.
 #[near(serializers = [json])]
 pub struct Stats {
     pub lucky_settled: u64,
@@ -222,7 +228,7 @@ impl Contract {
     // ---------- deposits ----------
 
     /// USDC `ft_transfer_call` hook. msg "" credits the sender's Balance;
-    /// msg "reserve" (owner only) funds the Refund Reserve.
+    /// msg "reserve" (owner only) funds the Cashback Reserve.
     pub fn ft_on_transfer(
         &mut self,
         sender_id: AccountId,
@@ -567,7 +573,13 @@ impl Contract {
     }
 
     pub fn get_config(&self) -> Value {
-        json!({ "owner": self.owner, "operator": self.operator, "usdc": self.usdc, "paused": self.paused })
+        json!({
+            "owner": self.owner,
+            "operator": self.operator,
+            "usdc": self.usdc,
+            "paused": self.paused,
+            "max_cashback": U128(MAX_CASHBACK),
+        })
     }
 }
 
@@ -579,9 +591,11 @@ impl Contract {
             Mode::Lucky(v) => {
                 let version = self.version(v);
                 let cap = self.free_reserve * DISCOUNT_CAP_BPS / BPS;
-                let lucky = r.min(cap * BPS / version.max_discount_bps());
+                let lucky = r
+                    .min(cap * BPS / version.max_discount_bps())
+                    .min(MAX_CASHBACK * BPS / version.max_cashback_bps());
                 require!(lucky > 0, "Reserve too small for a Lucky Buy; use Normal");
-                // Rounded up, so even tiny Lucky Amounts average at least 106% (ADR-0004).
+                // Rounded up, so even tiny Lucky Amounts average at least 105.6% (ADR-0004).
                 (lucky, (lucky * version.premium_bps as u128).div_ceil(BPS))
             }
         };
@@ -661,34 +675,43 @@ impl Contract {
 
 // ---------- pure game logic (mirrored by the Web App's Draw Proof) ----------
 
+/// Each table lists (Cashback as a % of what the customer paid, chance in bps); the rest of the
+/// chance gets no Cashback. Stored as Final Price shares of the Lucky Amount.
 pub fn default_game_versions() -> Vec<GameVersion> {
-    let v = |name: &str, premium_bps, table: &[(u32, u32)]| GameVersion {
-        name: name.into(),
-        premium_bps,
-        outcomes: table.iter().map(|&(final_bps, chance_bps)| Outcome { final_bps, chance_bps }).collect(),
+    let v = |name: &str, premium_bps: u32, cashback: &[(u32, u32)]| {
+        let paid = BPS as u32 + premium_bps;
+        let none = BPS as u32 - cashback.iter().map(|&(_, chance)| chance).sum::<u32>();
+        let mut outcomes: Vec<Outcome> = cashback
+            .iter()
+            .map(|&(pct, chance_bps)| Outcome { final_bps: paid * (100 - pct) / 100, chance_bps })
+            .collect();
+        outcomes.push(Outcome { final_bps: paid, chance_bps: none });
+        GameVersion { name: name.into(), premium_bps, outcomes }
     };
     vec![
-        v("Classic", 1_000, &[(5_000, 100), (8_000, 300), (10_000, 2_500), (11_000, 7_100)]),
-        v("Bold", 2_500, &[(0, 200), (5_000, 600), (8_000, 1_000), (10_000, 3_000), (12_500, 5_200)]),
-        v("Jackpot", 5_000, &[(0, 1_000), (5_000, 1_500), (10_000, 2_800), (15_000, 4_700)]),
+        v("Lite", 1_000, &[(100, 100), (50, 100), (30, 100), (20, 200), (10, 1_800)]),
+        v("Classic", 2_000, &[(100, 200), (50, 300), (40, 400), (30, 700), (20, 2_400)]),
+        v("Jackpot", 5_000, &[(100, 1_000), (50, 1_200), (40, 3_400)]),
     ]
 }
 
-/// Chances sum to 100%, no outcome exceeds the Maximum Price, at least one
-/// outcome is a discount, and the average is exactly 106%.
+/// Chances sum to 100%, no outcome exceeds the Maximum Price, any Cashback leaves the customer
+/// below the Reference Price, at least one outcome is a discount, and the average is exactly 105.6%.
 pub fn validate_game_version(v: &GameVersion) {
     require!(!v.name.is_empty() && !v.outcomes.is_empty(), "Empty game version");
     require!(v.premium_bps > 0, "Premium must be positive");
+    let max = BPS as u32 + v.premium_bps;
     let mut chance = 0u128;
     let mut weighted = 0u128;
     for o in &v.outcomes {
         require!(o.chance_bps > 0, "Zero-chance outcome");
-        require!(o.final_bps <= BPS as u32 + v.premium_bps, "Outcome above maximum price");
+        require!(o.final_bps <= max, "Outcome above maximum price");
+        require!(o.final_bps == max || o.final_bps < BPS as u32, "Any cashback must leave the price below normal");
         chance += o.chance_bps as u128;
         weighted += o.chance_bps as u128 * o.final_bps as u128;
     }
     require!(chance == BPS, "Chances must sum to 100%");
-    require!(weighted == TARGET_FINAL_BPS * BPS, "Average must be exactly 106%");
+    require!(weighted == TARGET_FINAL_BPS * BPS, "Average must be exactly 105.6%");
     require!((v.min_final_bps() as u128) < BPS, "Needs at least one discount");
 }
 

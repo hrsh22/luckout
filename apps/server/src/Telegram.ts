@@ -179,9 +179,9 @@ export class Telegram extends Context.Service<Telegram, {
         const p = turn.pending
         const summary = p.maxPrice === p.referencePrice
           ? `${p.voucherName} ${p.value} for ${usd(p.referencePrice)}.`
-          : `${p.voucherName} ${p.value}: price ${usd(p.referencePrice)}, you pay at most ${usd(p.maxPrice)}, maybe much less.`
+          : `${p.voucherName} ${p.value}: price ${usd(p.referencePrice)}. You pay ${usd(p.maxPrice)} now, then maybe get cashback.`
         await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
-          reply_markup: new InlineKeyboard().text(`Buy for up to ${usd(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
+          reply_markup: new InlineKeyboard().text(`Buy for ${usd(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })
       }))
 
@@ -192,9 +192,11 @@ export class Telegram extends Context.Service<Telegram, {
         const r = p.redemption ?? {}
         const lines = [
           `${p.voucherName} ${p.value} is yours.`,
-          p.draw
-            ? `You paid ${usd(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`
-            : `You paid ${usd(paid)}.`,
+          !p.draw
+            ? `You paid ${usd(paid)}.`
+            : p.draw.refund === 0
+            ? `No cashback this time: you paid ${usd(paid)}.`
+            : `${paid === 0 ? "Free!" : `${usd(p.draw.refund)} cashback!`} You paid ${usd(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
           typeof r.code === "string" ? `Code: ${r.code}` : "",
           typeof r.pin === "string" ? `PIN: ${r.pin}` : "",
           typeof r.link === "string" ? `Link: ${r.link}` : "",
