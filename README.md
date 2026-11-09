@@ -24,7 +24,7 @@ Every lucky mode averages 6% over the normal price, and that's our only revenue:
 
 ## Try it on testnet
 
-**Live: [luckout.gamified.trade](https://luckout.gamified.trade)** (API at `luckout-api.gamified.trade`). Connect a testnet wallet, tap "Get 100 test USDC and deposit it" on the Wallet page, and buy a Bitrefill test voucher.
+**Live: [luckout.gamified.trade](https://luckout.gamified.trade)** (API at `luckout-api.gamified.trade`). Open the shop at [`/shop`](https://luckout.gamified.trade/shop), sign in with a testnet wallet, tap "Get 100 test USDC and deposit it" on the Balance page, and buy a Bitrefill test voucher.
 
 Contract [`app.luckout.testnet`](https://testnet.nearblocks.io/address/app.luckout.testnet), test USDC [`usdc.luckout.testnet`](https://testnet.nearblocks.io/address/usdc.luckout.testnet) (anyone can call `faucet` for 100 tUSDC), operator `server.luckout.testnet`.
 
@@ -70,11 +70,11 @@ What the contract does **not** prove, and you trust us for:
 ## Repository
 
 ```text
-apps/web        Next.js web app: shop, wallet, purchases, Draw Proof, Live Average, Win Cards
+apps/web        Next.js web app: landing page, shop, balance, purchases, Draw Proof, Live Average, Win Cards
 apps/server     Effect server: HTTP API, purchase workflow and reconciler, Telegram agent, top-ups
 packages/api    shared HttpApi definition and schemas (typed client for the web app)
 contract/       Rust NEAR contract, plus a testnet-only test-USDC token with a faucet
-deploy/         pm2 config and VM setup for the server
+deploy/         pm2 config, VM setup and the runbook for the server
 docs/           plan, decisions (ADRs), research
 CONTEXT.md      domain glossary
 ```
