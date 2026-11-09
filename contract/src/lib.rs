@@ -20,10 +20,14 @@ pub const DISCOUNT_CAP_BPS: u128 = 2_000;
 pub const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const RECLAIM_AFTER_NS: u64 = DAY_NS;
 pub const MIN_DEPOSIT: u128 = 1_000_000; // 1 USDC, keeps dust accounts from bloating storage
+/// Every purchase stores a record; a floor keeps a stolen operator key from cheaply filling storage.
+pub const MIN_REFERENCE_PRICE: u128 = 1_000_000; // 1 USDC
 pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 50_000_000; // 50 USDC
 pub const DEFAULT_DAILY_LIMIT: u128 = 100_000_000; // 100 USDC
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_ON_SEND: Gas = Gas::from_tgas(10);
+/// The Draw callback's gas is set here, not by the caller (it uses ~3 Tgas).
+const GAS_DRAW: Gas = Gas::from_tgas(20);
 
 #[ext_contract(ext_ft)]
 #[allow(dead_code)]
@@ -83,6 +87,9 @@ pub enum Status {
     Delivered,
     Failed,
     Reclaimed,
+    /// A Lucky Buy whose delivery is confirmed and whose Draw runs in the next receipt.
+    /// Appended last so stored statuses keep their Borsh tags.
+    Drawing,
 }
 
 #[near(serializers = [borsh, json])]
@@ -185,51 +192,8 @@ pub struct Contract {
     orders: LookupMap<String, u64>,
 }
 
-/// State layout before `orders` was added (v0.1, testnet); read once by `migrate`.
-#[near(serializers = [borsh])]
-struct ContractV1 {
-    owner: AccountId,
-    operator: AccountId,
-    usdc: AccountId,
-    paused: bool,
-    accounts: LookupMap<AccountId, Account>,
-    versions: Vector<GameVersion>,
-    purchases: LookupMap<u64, Purchase>,
-    next_purchase_id: u64,
-    free_reserve: u128,
-    locked_reserve: u128,
-    proceeds: u128,
-    lucky_settled: u64,
-    lucky_amount_total: u128,
-    lucky_paid_total: u128,
-}
-
 #[near]
 impl Contract {
-    /// Upgrades v0.1 state in place (adds `orders`). Only the contract account can call it.
-    #[private]
-    #[init(ignore_state)]
-    pub fn migrate() -> Self {
-        let old: ContractV1 = env::state_read().unwrap_or_else(|| env::panic_str("No state to migrate"));
-        Self {
-            owner: old.owner,
-            operator: old.operator,
-            usdc: old.usdc,
-            paused: old.paused,
-            accounts: old.accounts,
-            versions: old.versions,
-            purchases: old.purchases,
-            next_purchase_id: old.next_purchase_id,
-            free_reserve: old.free_reserve,
-            locked_reserve: old.locked_reserve,
-            proceeds: old.proceeds,
-            lucky_settled: old.lucky_settled,
-            lucky_amount_total: old.lucky_amount_total,
-            lucky_paid_total: old.lucky_paid_total,
-            orders: LookupMap::new(Key::Orders),
-        }
-    }
-
     #[init]
     pub fn new(owner: AccountId, operator: AccountId, usdc: AccountId) -> Self {
         let mut c = Self {
@@ -294,7 +258,8 @@ impl Contract {
         let mut a = self.existing_account(&id);
         a.per_purchase_limit = per_purchase;
         a.daily_limit = daily;
-        self.accounts.insert(id, a);
+        self.accounts.insert(id.clone(), a);
+        emit("limits", json!({ "account_id": id, "per_purchase": per_purchase, "daily": daily }));
     }
 
     /// Like every setting, needs a full-access signature (1 yoctoNEAR).
@@ -305,7 +270,8 @@ impl Contract {
         let id = env::predecessor_account_id();
         let mut a = self.existing_account(&id);
         a.default_mode = mode;
-        self.accounts.insert(id, a);
+        self.accounts.insert(id.clone(), a);
+        emit("default_mode", json!({ "account_id": id, "mode": mode }));
     }
 
     #[payable]
@@ -316,6 +282,7 @@ impl Contract {
         require!(a.balance.0 >= amount.0, "Insufficient balance");
         a.balance.0 -= amount.0;
         self.accounts.insert(id.clone(), a);
+        emit("withdraw", json!({ "account_id": id, "amount": amount }));
         self.send(id.clone(), amount.0, Payout::Customer(id))
     }
 
@@ -335,8 +302,9 @@ impl Contract {
 
     /// Admits a purchase: debits the Maximum Price and locks the reserve.
     /// `mode: None` uses the customer's Default Mode. `order_id` makes admission idempotent:
-    /// the same order is admitted once, whatever the retries. `max_debit` is the most the
-    /// customer confirmed; a higher Maximum Price (the price or the reserve moved) is refused.
+    /// the same order is admitted once, whatever the retries, and only for the same customer
+    /// and price. `max_debit` is the most the customer confirmed; a higher Maximum Price (the
+    /// price or the reserve moved) is refused.
     pub fn purchase(
         &mut self,
         customer: AccountId,
@@ -347,12 +315,13 @@ impl Contract {
     ) -> u64 {
         self.assert_operator();
         require!(!order_id.is_empty() && order_id.len() <= 64, "Invalid order id");
-        if let Some(id) = self.orders.get(&order_id) {
-            return *id;
+        if let Some(&id) = self.orders.get(&order_id) {
+            let p = self.purchases.get(&id).unwrap();
+            require!(p.customer == customer && p.reference_price.0 == reference_price.0, "Order id belongs to another purchase");
+            return id;
         }
         require!(!self.paused, "New purchases are paused");
         let r = reference_price.0;
-        require!(r > 0, "Reference price must be positive");
         let mut a = self.existing_account(&customer);
         let mode = mode.unwrap_or(a.default_mode);
         let q = self.quote_internal(r, mode);
@@ -397,60 +366,94 @@ impl Contract {
         id
     }
 
-    /// Confirms delivery. For a Lucky Buy the same call runs the Draw and
-    /// credits the Refund, so the operator can't see a result and then fail it.
-    pub fn confirm_delivery(&mut self, purchase_id: u64) -> Purchase {
+    /// Confirms delivery. A Lucky Buy's Draw then runs in `on_draw`, a separate receipt with
+    /// gas set by the contract, so no transaction can bundle the confirmation with another call
+    /// that panics on an outcome it dislikes and so retry the Draw (ADR-0001, amended). The
+    /// operator can't fail a purchase after confirming it either. Confirming a purchase whose
+    /// Draw callback failed schedules the Draw again.
+    pub fn confirm_delivery(&mut self, purchase_id: u64) -> PromiseOrValue<Purchase> {
         self.assert_operator();
-        let mut p = self.pending(purchase_id);
-        let r = p.reference_price.0;
-        if let Mode::Lucky(v) = p.mode {
-            let version = self.version(v).clone();
-            let seed = env::random_seed_array();
-            let random = draw_random(&seed, purchase_id);
-            let roll = roll_from_random(&random);
-            let final_bps = final_bps_for_roll(&version.outcomes, roll);
-            let lucky = p.lucky_amount.0;
-            let max_price = p.max_price.0;
-            let final_price = final_price(r, lucky, max_price, final_bps);
-            let refund = max_price - final_price;
-            let premium = max_price - r;
-
-            let mut a = self.existing_account(&p.customer);
-            a.balance.0 += refund;
-            a.premiums_paid.0 += premium;
-            a.refunds_received.0 += refund;
-            self.accounts.insert(p.customer.clone(), a);
-
-            // Free Reserve changes by Risk Premium - Refund once the lock is released.
-            self.locked_reserve -= p.locked.0;
-            self.free_reserve = self.free_reserve + p.locked.0 + premium - refund;
-            self.lucky_settled += 1;
-            self.lucky_amount_total += lucky;
-            self.lucky_paid_total += lucky + premium - refund;
-            p.refund = U128(refund);
-
-            emit(
-                "draw",
-                json!({
-                    "purchase_id": purchase_id,
-                    "customer": p.customer,
-                    "game_version": v,
-                    "reference_price": p.reference_price,
-                    "lucky_amount": p.lucky_amount,
-                    "max_price": p.max_price,
-                    "seed": hex(&seed),
-                    "random": hex(&random),
-                    "roll": roll,
-                    "final_bps": final_bps,
-                    "final_price": U128(final_price),
-                    "refund": U128(refund),
-                }),
-            );
-        } else {
-            emit("delivered", json!({ "purchase_id": purchase_id, "customer": p.customer }));
+        let mut p = self.load(purchase_id);
+        if p.status == Status::Drawing {
+            return PromiseOrValue::Promise(self.schedule_draw(purchase_id));
         }
-        self.proceeds += r;
+        require!(p.status == Status::Pending, "Purchase is already closed");
+        self.proceeds += p.reference_price.0;
+        emit("delivered", json!({ "purchase_id": purchase_id, "customer": p.customer }));
+        match p.mode {
+            Mode::Normal => {
+                p.status = Status::Delivered;
+                self.purchases.insert(purchase_id, p.clone());
+                PromiseOrValue::Value(p)
+            }
+            Mode::Lucky(_) => {
+                p.status = Status::Drawing;
+                self.purchases.insert(purchase_id, p);
+                PromiseOrValue::Promise(self.schedule_draw(purchase_id))
+            }
+        }
+    }
+
+    /// The customer (or operator) re-runs a Draw whose callback failed, e.g. out of gas.
+    pub fn retry_draw(&mut self, purchase_id: u64) -> Promise {
+        let p = self.load(purchase_id);
+        require!(p.status == Status::Drawing, "No Draw to retry");
+        let caller = env::predecessor_account_id();
+        require!(caller == p.customer || caller == self.operator, "Not your purchase");
+        self.schedule_draw(purchase_id)
+    }
+
+    /// Runs the Draw and credits the Refund. Only the contract can call it, with randomness
+    /// from a block that didn't exist when delivery was confirmed.
+    #[private]
+    pub fn on_draw(&mut self, purchase_id: u64) -> Purchase {
+        let mut p = self.load(purchase_id);
+        require!(p.status == Status::Drawing, "Draw already done");
+        let Mode::Lucky(v) = p.mode else { env::panic_str("Not a Lucky Buy") };
+        let version = self.version(v).clone();
+        let seed = env::random_seed_array();
+        let random = draw_random(&seed, purchase_id);
+        let roll = roll_from_random(&random);
+        let final_bps = final_bps_for_roll(&version.outcomes, roll);
+        let r = p.reference_price.0;
+        let lucky = p.lucky_amount.0;
+        let max_price = p.max_price.0;
+        let final_price = final_price(r, lucky, max_price, final_bps);
+        let refund = max_price - final_price;
+        let premium = max_price - r;
+
+        let mut a = self.existing_account(&p.customer);
+        a.balance.0 += refund;
+        a.premiums_paid.0 += premium;
+        a.refunds_received.0 += refund;
+        self.accounts.insert(p.customer.clone(), a);
+
+        // Free Reserve changes by Risk Premium - Refund once the lock is released.
+        self.locked_reserve -= p.locked.0;
+        self.free_reserve = self.free_reserve + p.locked.0 + premium - refund;
+        self.lucky_settled += 1;
+        self.lucky_amount_total += lucky;
+        self.lucky_paid_total += lucky + premium - refund;
+        p.refund = U128(refund);
         p.status = Status::Delivered;
+
+        emit(
+            "draw",
+            json!({
+                "purchase_id": purchase_id,
+                "customer": p.customer,
+                "game_version": v,
+                "reference_price": p.reference_price,
+                "lucky_amount": p.lucky_amount,
+                "max_price": p.max_price,
+                "seed": hex(&seed),
+                "random": hex(&random),
+                "roll": roll,
+                "final_bps": final_bps,
+                "final_price": U128(final_price),
+                "refund": U128(refund),
+            }),
+        );
         self.purchases.insert(purchase_id, p.clone());
         p
     }
@@ -467,12 +470,15 @@ impl Contract {
     #[payable]
     pub fn add_game_version(&mut self, version: GameVersion) -> u32 {
         self.assert_owner();
-        self.push_version(version)
+        let id = self.push_version(version.clone());
+        emit("game_version_added", json!({ "game_version": id, "version": version }));
+        id
     }
 
     #[payable]
     pub fn set_operator(&mut self, operator: AccountId) {
         self.assert_owner();
+        emit("set_operator", json!({ "operator": operator }));
         self.operator = operator;
     }
 
@@ -481,6 +487,7 @@ impl Contract {
     pub fn set_paused(&mut self, paused: bool) {
         self.assert_owner();
         self.paused = paused;
+        emit("set_paused", json!({ "paused": paused }));
     }
 
     #[payable]
@@ -488,6 +495,7 @@ impl Contract {
         self.assert_owner();
         require!(self.free_reserve >= amount.0, "Exceeds free reserve");
         self.free_reserve -= amount.0;
+        emit("reserve_withdrawn", json!({ "amount": amount }));
         self.send(self.owner.clone(), amount.0, Payout::Reserve)
     }
 
@@ -496,6 +504,7 @@ impl Contract {
         self.assert_owner();
         require!(self.proceeds >= amount.0, "Exceeds proceeds");
         self.proceeds -= amount.0;
+        emit("proceeds_withdrawn", json!({ "amount": amount }));
         self.send(self.owner.clone(), amount.0, Payout::Proceeds)
     }
 
@@ -509,6 +518,8 @@ impl Contract {
         if result.is_ok() {
             return;
         }
+        // The transfer failed (e.g. the receiver isn't registered on USDC): put the money back.
+        emit("payout_restored", json!({ "payout": &payout, "amount": amount }));
         match payout {
             Payout::Customer(id) => {
                 let mut a = self.accounts.get(&id).cloned().unwrap_or_default();
@@ -562,6 +573,7 @@ impl Contract {
 
 impl Contract {
     fn quote_internal(&self, r: u128, mode: Mode) -> Quote {
+        require!(r >= MIN_REFERENCE_PRICE, "Purchases start at 1 USDC");
         let (lucky, premium) = match mode {
             Mode::Normal => (0, 0),
             Mode::Lucky(v) => {
@@ -569,7 +581,8 @@ impl Contract {
                 let cap = self.free_reserve * DISCOUNT_CAP_BPS / BPS;
                 let lucky = r.min(cap * BPS / version.max_discount_bps());
                 require!(lucky > 0, "Reserve too small for a Lucky Buy; use Normal");
-                (lucky, lucky * version.premium_bps as u128 / BPS)
+                // Rounded up, so even tiny Lucky Amounts average at least 106% (ADR-0004).
+                (lucky, (lucky * version.premium_bps as u128).div_ceil(BPS))
             }
         };
         Quote { mode, reference_price: U128(r), lucky_amount: U128(lucky), max_price: U128(r + premium) }
@@ -621,10 +634,18 @@ impl Contract {
         self.accounts.get(id).cloned().unwrap_or_else(|| env::panic_str("No balance; deposit first"))
     }
 
+    fn load(&self, purchase_id: u64) -> Purchase {
+        self.purchases.get(&purchase_id).cloned().unwrap_or_else(|| env::panic_str("Unknown purchase"))
+    }
+
     fn pending(&self, purchase_id: u64) -> Purchase {
-        let p = self.purchases.get(&purchase_id).cloned().unwrap_or_else(|| env::panic_str("Unknown purchase"));
+        let p = self.load(purchase_id);
         require!(p.status == Status::Pending, "Purchase is already closed");
         p
+    }
+
+    fn schedule_draw(&self, purchase_id: u64) -> Promise {
+        Self::ext(env::current_account_id()).with_static_gas(GAS_DRAW).on_draw(purchase_id)
     }
 
     fn assert_operator(&self) {

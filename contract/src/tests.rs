@@ -55,6 +55,21 @@ fn balance(c: &Contract) -> u128 {
     c.get_account(alice()).unwrap().balance.0
 }
 
+fn contract() -> AccountId {
+    id("luckout.near")
+}
+
+/// Confirms delivery, then runs the Draw callback the way NEAR would, in a later receipt.
+fn deliver(c: &mut Contract, pid: u64, seed: [u8; 32]) -> Purchase {
+    call(operator(), DAY, [0; 32], 0);
+    let _ = c.confirm_delivery(pid);
+    if c.get_purchase(pid).unwrap().status == Status::Drawing {
+        call(contract(), DAY, seed, 0);
+        c.on_draw(pid);
+    }
+    c.get_purchase(pid).unwrap()
+}
+
 #[test]
 fn default_tables_sum_to_100_and_average_exactly_106() {
     for v in default_game_versions() {
@@ -138,19 +153,20 @@ fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
             0 => Mode::Normal,
             n => Mode::Lucky(n as u32 - 1),
         };
-        let r = (1 + (seed[0] as u128 % 200)) * USDC / 2;
+        let r = (2 + (seed[0] as u128 % 199)) * USDC / 2;
         call(operator(), DAY, seed, 0);
         let pid = c.purchase(alice(), U128(r), Some(mode), format!("loop{}", i), U128(u128::MAX));
         let p = c.get_purchase(pid).unwrap();
         // The lock covers the largest possible discount and never exceeds the cap it was admitted under.
         assert!(c.locked_reserve >= p.locked.0);
 
-        call(operator(), DAY, seed, 0);
         if i % 9 == 0 {
+            call(operator(), DAY, seed, 0);
             c.fail_purchase(pid);
             assert_eq!(c.get_purchase(pid).unwrap().refund.0, 0);
         } else {
-            let p = c.confirm_delivery(pid);
+            let p = deliver(&mut c, pid, seed);
+            assert_eq!(p.status, Status::Delivered);
             assert!(p.refund.0 <= p.max_price.0 - p.reference_price.0 + p.locked.0);
         }
         assert_eq!(c.locked_reserve, 0);
@@ -165,8 +181,7 @@ fn draw_is_recomputable_from_the_event() {
     let seed = [7u8; 32];
     call(operator(), DAY, seed, 0);
     let pid = c.purchase(alice(), U128(6 * USDC), Some(Mode::Lucky(2)), format!("o{}", 2), U128(u128::MAX));
-    call(operator(), DAY, seed, 0);
-    let p = c.confirm_delivery(pid);
+    let p = deliver(&mut c, pid, seed);
 
     let log = get_logs().into_iter().find(|l| l.contains("\"draw\"")).unwrap();
     let random = draw_random(&seed, pid);
@@ -224,7 +239,7 @@ fn cannot_fail_after_the_draw() {
     let mut c = setup(500 * USDC, 100 * USDC);
     as_(operator());
     let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), format!("o{}", 7), U128(u128::MAX));
-    c.confirm_delivery(pid);
+    let _ = c.confirm_delivery(pid);
     c.fail_purchase(pid);
 }
 
@@ -320,4 +335,92 @@ fn default_mode_needs_a_full_access_signature() {
     let mut c = setup(0, 100 * USDC);
     as_(alice());
     c.set_default_mode(Mode::Lucky(2));
+}
+
+#[test]
+fn the_draw_runs_in_a_later_receipt_the_confirmation_cant_revert() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), "o-later".into(), U128(u128::MAX));
+    let _ = c.confirm_delivery(pid);
+    // Nothing about the outcome exists yet in the confirming receipt.
+    assert!(get_logs().iter().all(|l| !l.contains("\"draw\"")));
+    assert_eq!(c.get_purchase(pid).unwrap().status, Status::Drawing);
+    assert_eq!(balance(&c), 85 * USDC);
+    call(contract(), DAY, [9; 32], 0);
+    let p = c.on_draw(pid);
+    assert_eq!(p.status, Status::Delivered);
+    assert_eq!(balance(&c), 85 * USDC + p.refund.0);
+    assert!(get_logs().iter().any(|l| l.contains("\"draw\"")));
+}
+
+#[test]
+#[should_panic(expected = "Draw already done")]
+fn a_draw_runs_once() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(2)), "o-once".into(), U128(u128::MAX));
+    deliver(&mut c, pid, [1; 32]);
+    call(contract(), DAY, [2; 32], 0);
+    c.on_draw(pid);
+}
+
+#[test]
+fn a_failed_draw_callback_can_be_retried_by_the_customer() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)), "o-retry".into(), U128(u128::MAX));
+    let _ = c.confirm_delivery(pid);
+    as_(alice());
+    let _ = c.retry_draw(pid);
+    call(contract(), DAY, [3; 32], 0);
+    assert_eq!(c.on_draw(pid).status, Status::Delivered);
+}
+
+#[test]
+#[should_panic(expected = "Not your purchase")]
+fn strangers_cant_retry_a_draw() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Lucky(0)), "o-stranger".into(), U128(u128::MAX));
+    let _ = c.confirm_delivery(pid);
+    as_(id("mallory.near"));
+    let _ = c.retry_draw(pid);
+}
+
+#[test]
+fn normal_purchases_settle_in_the_confirming_call() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    let pid = c.purchase(alice(), U128(10 * USDC), Some(Mode::Normal), "o-normal".into(), U128(u128::MAX));
+    let _ = c.confirm_delivery(pid);
+    assert_eq!(c.get_purchase(pid).unwrap().status, Status::Delivered);
+    assert_eq!(c.get_reserve().proceeds.0, 10 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "Order id belongs to another purchase")]
+fn an_order_id_is_bound_to_its_customer_and_price() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(id("bob.near"), U128(100 * USDC), "".into());
+    as_(operator());
+    c.purchase(alice(), U128(10 * USDC), Some(Mode::Normal), "order-x".into(), U128(u128::MAX));
+    c.purchase(id("bob.near"), U128(10 * USDC), Some(Mode::Normal), "order-x".into(), U128(u128::MAX));
+}
+
+#[test]
+#[should_panic(expected = "Purchases start at 1 USDC")]
+fn purchases_start_at_one_usdc() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    c.purchase(alice(), U128(999_999), Some(Mode::Normal), "o-tiny".into(), U128(u128::MAX));
+}
+
+#[test]
+fn the_premium_rounds_up() {
+    let c = setup(500 * USDC, 100 * USDC);
+    // 10% of 1.000001 USDC is 0.1000001: rounded up to 0.100001.
+    let q = c.quote(U128(1_000_001), Mode::Lucky(0));
+    assert_eq!(q.max_price.0, 1_100_002);
 }

@@ -52,13 +52,20 @@ Without any keys, the server starts on PGlite (no database to install), the Draw
 ## Security model
 
 - **Customers sign once, not per purchase.** The server's NEAR key is a function-call key that can only call `purchase`, `confirm_delivery` and `fail_purchase`. Raising limits, changing settings and withdrawing need the customer's own full-access signature.
-- **A compromised server or agent can spend at most your limits.** The contract checks the per-purchase and daily Spending Limits on every purchase, whoever submits it. `apps/server/scripts/attack.ts` demonstrates it on testnet: holding the operator's key, it tries to overspend, withdraw a customer's balance, raise their limits, drain the reserve, pause the shop and move tokens, and every attempt is refused by NEAR or the contract.
+- **A compromised server or agent can spend at most your limits.** The contract checks the per-purchase and daily Spending Limits on every purchase, whoever submits it. `apps/server/scripts/attack.ts` demonstrates it on testnet: holding the operator's key, it tries to overspend, bundle a confirmation with a call that reverts unlucky Draws, run a Draw directly, withdraw a customer's balance, raise their limits, drain the reserve, pause the shop and move tokens, and every attempt is refused by NEAR or the contract.
 - **The agent can't buy on its own.** The model can only prepare a purchase; you tap Confirm, and the contract refuses to debit more than the maximum on the button. Voucher codes never enter the model's context, and the bot only talks in private chats. Telegram is linked from your signed-in wallet session, never the other way round.
 - **Admission is idempotent onchain.** Each purchase carries the server's order id, and the contract admits an order once, so no retry or resend can debit twice.
-- **No result shopping.** The draw runs inside the confirmation call, using the randomness of a block that didn't exist when the call was signed, so the operator can't see an outcome and then fail the purchase instead. A purchase the operator neither confirms nor fails can be reclaimed in full after 24 hours.
+- **No result shopping.** Confirming delivery closes the purchase for good, and the Draw then runs in a separate receipt a block later, with gas the contract sets and randomness that didn't exist when the confirmation was signed. Nobody, not even a full-access key, can bundle the confirmation with a call that reverts unlucky outcomes, fail the purchase after seeing the result, or call the Draw directly. A purchase the operator neither confirms nor fails can be reclaimed in full after 24 hours.
 - **Every refund is covered before the purchase starts.** Each Lucky Buy locks its largest possible discount from the Refund Reserve, and one purchase can never win more than 20% of the free reserve.
 - **Sign-in** uses NEP-413 signed messages with single-use nonces, accepted only from a full-access key of the account. Voucher codes are encrypted at rest (AES-256-GCM).
-- **Crash-safe purchases.** Every step is saved before its side effect, and each transaction is saved before it is sent; a reconciler finishes anything left part-way without buying or charging twice.
+- **Crash-safe purchases.** Every step is saved before its side effect, and each transaction is saved before it is sent; a reconciler finishes anything left part-way without buying or charging twice, backing off and flagging for a human anything that keeps failing.
+
+What the contract does **not** prove, and you trust us for:
+
+- **Delivery.** The operator confirms delivery; the chain can't see a Bitrefill code. A purchase we never confirm or fail can be reclaimed after 24 hours.
+- **The mode and amount within your limits.** The operator submits each purchase. The contract caps the debit at what you confirmed and at your Spending Limits, but a compromised server could buy for you, in any mode, up to those limits.
+- **The daily limit is per UTC day.** It resets at 00:00 UTC, so up to twice the daily limit can be spent across midnight.
+- **Upgrades.** On testnet, the contract account keeps a full-access key, so its owner can deploy new code. Before mainnet, that key is deleted or moved behind a multisig with a timelock, and this section will say which.
 
 ## Repository
 

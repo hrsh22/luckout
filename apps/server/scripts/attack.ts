@@ -14,11 +14,13 @@ const provider = new JsonRpcProvider({ url: process.env.NEAR_RPC_URL || "https:/
 const operator = new Account(operatorId, provider, key)
 const view = (method: string, args: object = {}) => provider.callFunction({ contractId: contract, method, args })
 
-const attempt = async (title: string, receiverId: string, method: string, args: object, deposit = 0n) => {
+type Act = { method: string; args: object; deposit?: bigint }
+const attempt = async (title: string, receiverId: string, method: string | Array<Act>, args: object = {}, deposit = 0n) => {
+  const acts: Array<Act> = typeof method === "string" ? [{ method, args, deposit }] : method
   try {
     await operator.signAndSendTransaction({
       receiverId,
-      actions: [actions.functionCall(method, args, teraToGas("50"), deposit)]
+      actions: acts.map((a) => actions.functionCall(a.method, a.args, teraToGas(String(Math.floor(240 / acts.length))), a.deposit ?? 0n))
     })
     console.log(`✗ ${title}: IT WORKED (this should never happen)`)
     process.exitCode = 1
@@ -45,6 +47,14 @@ await attempt(
     max_debit: "1000000000000"
   }
 )
+// Result shopping: confirm a delivery and, in the same transaction, a call that panics when the
+// Draw went the customer's way, retrying until it doesn't. NEAR refuses multi-action transactions
+// from a function-call key, and even with a full-access key the Draw runs in a later receipt.
+await attempt("Bundle a confirmation with a call that reverts unlucky Draws", contract, [
+  { method: "confirm_delivery", args: { purchase_id: 0 } },
+  { method: "fail_purchase", args: { purchase_id: 0 } }
+])
+await attempt("Run a Draw directly, picking the moment", contract, "on_draw", { purchase_id: 0 })
 await attempt("Withdraw the victim's balance to the attacker", contract, "withdraw", { amount: account.balance }, 1n)
 await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
 await attempt("Drain the Refund Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)

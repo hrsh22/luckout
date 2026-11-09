@@ -73,7 +73,7 @@ The difference between a Lucky Buy's Maximum Price and its Reference Price; it i
 _Avoid_: Entry fee, wager
 
 **Draw**:
-The random event, run in the same call that confirms delivery, that determines a Lucky Buy's Refund; it never changes the selected Voucher or whether the customer receives it.
+The random event, run by the contract in the receipt right after the one that confirms delivery, that determines a Lucky Buy's Refund; it never changes the selected Voucher or whether the customer receives it, and nothing can undo the confirmation once the Draw is scheduled.
 _Avoid_: Bet result, spin result, reveal animation
 
 **Refund**:
