@@ -9,8 +9,8 @@ import { mkdirSync } from "node:fs"
 const SingleInstance = Layer.effectDiscard(
   Effect.gen(function*() {
     const conn = yield* (yield* SqlClient.SqlClient).reserve
-    const rows = (yield* conn.executeRaw("SELECT pg_try_advisory_lock(735001) AS ok", [])) as Array<{ ok: boolean }>
-    if (!rows[0]?.ok) return yield* Effect.die("Another Luckout server is already running against this database")
+    const rows = yield* conn.execute("SELECT pg_try_advisory_lock(735001) AS ok", [], undefined)
+    if (rows[0]?.ok !== true) return yield* Effect.die("Another Luckout server is already running against this database")
   }).pipe(Effect.orDie)
 )
 
