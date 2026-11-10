@@ -407,7 +407,15 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     sweptToday: MicroUsdc,
     usdc: MicroUsdc,
     /** In manual mode: what an open refill is waiting for you to move in. */
-    needs: Schema.optional(MicroUsdc)
+    needs: Schema.optional(MicroUsdc),
+    /** Our Base wallet, which refills swap into and pay Bitrefill from; missing when Base doesn't answer. */
+    wallet: Schema.optional(Schema.Struct({
+      address: Schema.String,
+      usdc: MicroUsdc,
+      /** ETH for gas, in wei, and where the Monitor alerts. */
+      eth: Schema.String,
+      alertBelow: Schema.String
+    }))
   }),
   refills: Schema.Array(RefillView)
 }) {}

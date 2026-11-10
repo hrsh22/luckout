@@ -6,6 +6,7 @@ import { Money } from "@/components/money"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
+import { network } from "@/lib/chain"
 import { toMicro, usd } from "@/lib/format"
 import { type Call, explorer, explorerAccount, send } from "@/lib/near"
 import { useSession } from "@/lib/session"
@@ -60,8 +61,9 @@ const STEP: Record<string, { label: string; tone: "good" | "warn" | "bad" | "mut
   invoice: { label: "Asking Bitrefill", tone: "busy" },
   quote: { label: "Getting a quote", tone: "busy" },
   fund: { label: "Funding the treasury", tone: "warn" },
-  send: { label: "Paying", tone: "busy" },
-  swapping: { label: "Swapping to Base", tone: "busy" },
+  send: { label: "Sending to NEAR Intents", tone: "busy" },
+  swapping: { label: "Swapping into our Base wallet", tone: "busy" },
+  pay: { label: "Paying Bitrefill", tone: "busy" },
   crediting: { label: "Waiting for Bitrefill", tone: "busy" },
   done: { label: "Credited", tone: "good" },
   refunded: { label: "Refunded to the treasury", tone: "warn" },
@@ -322,6 +324,7 @@ function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: AsOwner; 
           <a href={explorerAccount(t.accountId)} target="_blank" rel="noreferrer" className="text-sm text-muted underline-offset-2 hover:underline">{t.accountId}</a>
         )}
       </div>
+      {t.wallet && <BaseWallet w={t.wallet} />}
       <p className="text-[15px] text-ink-soft">
         {mode === "none"
           ? "The server has no treasury key yet, so refills can't be paid."
@@ -346,6 +349,31 @@ function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: AsOwner; 
       </div>
       <TreasuryModeSheet open={sheet === "mode"} onClose={() => setSheet(undefined)} o={o} tx={tx} />
       <MoveProceedsSheet open={sheet === "move"} onClose={() => setSheet(undefined)} o={o} tx={tx} />
+    </div>
+  )
+}
+
+/**
+ * Our wallet on Base: refills swap into it, then pay Bitrefill from it. It has no key of its own; the
+ * treasury signs for it through NEAR Chain Signatures, so whoever controls the treasury controls it.
+ */
+function BaseWallet({ w }: { w: NonNullable<AdminOverview["treasury"]["wallet"]> }) {
+  const low = BigInt(w.eth) < BigInt(w.alertBelow)
+  const eth = (Number(BigInt(w.eth) / 10n ** 12n) / 1e6).toFixed(5)
+  return (
+    <div className="rounded-[1.25rem] bg-soft p-4 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-semibold">Base wallet</span>
+        <a href={`https://${network === "testnet" ? "sepolia." : ""}basescan.org/address/${w.address}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-muted underline-offset-2 hover:underline">
+          {w.address.slice(0, 6)}…{w.address.slice(-4)}
+        </a>
+      </div>
+      <p className="mt-1 text-ink-soft"><Money micro={w.usdc} /> USDC waiting · {eth} ETH for gas</p>
+      {low && (
+        <p className="mt-2 flex items-start gap-2 text-warn">
+          <CircleAlert size={16} className="mt-0.5 shrink-0" aria-hidden="true" />Low on gas: send about $1 of ETH on Base to {w.address}, or refills stop.
+        </p>
+      )}
     </div>
   )
 }

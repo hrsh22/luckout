@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Near } from "./Near.ts"
 
@@ -34,5 +35,17 @@ export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
     credit: Effect.die("bitrefill.credit was not expected in this test"),
     deposit: unused("bitrefill.deposit"),
     depositState: unused("bitrefill.depositState"),
+    ...overrides
+  })
+
+export const fakeBase = (overrides: Partial<Base["Service"]> = {}) =>
+  Base.of({
+    configured: true,
+    address: Effect.die("base.address was not expected in this test"),
+    balances: Effect.die("base.balances was not expected in this test"),
+    prepare: unused("base.prepare"),
+    sign: unused("base.sign"),
+    send: unused("base.send"),
+    status: unused("base.status"),
     ...overrides
   })

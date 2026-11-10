@@ -153,6 +153,14 @@ const migrations = Migrator.fromRecord({
       )`
     // At most one refill runs at a time: the database enforces it, not just the code.
     yield* sql`CREATE UNIQUE INDEX refills_one_open ON refills ((true)) WHERE step IN ('invoice', 'quote', 'fund', 'send', 'swapping', 'crediting')`
+  }),
+  // Refills land in our Base wallet first, then pay Bitrefill from it (ADR-0009, amended 2026-11-10).
+  "0009_base_wallet": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE refills ADD COLUMN pay_tx JSONB`
+    yield* sql`ALTER TABLE refills ADD COLUMN paid_at TIMESTAMPTZ`
+    yield* sql`DROP INDEX refills_one_open`
+    yield* sql`CREATE UNIQUE INDEX refills_one_open ON refills ((true)) WHERE step IN ('fund', 'quote', 'send', 'swapping', 'invoice', 'pay', 'crediting')`
   })
 })
 
