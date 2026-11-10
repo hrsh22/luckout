@@ -170,7 +170,9 @@ const Server = Layer.unwrap(
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)
     const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-    return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin] }), HttpRouter.middleware(rateLimit, { global: true }))).pipe(
+    // More sites that may call this server (exact origins, comma-separated), e.g. testnet's own domain.
+    const more = (yield* Config.String("CORS_ORIGINS").pipe(Config.withDefault(""))).split(",").map((o) => o.trim()).filter(Boolean)
+    return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin, ...more] }), HttpRouter.middleware(rateLimit, { global: true }))).pipe(
       Layer.provide(NodeHttpServer.layer(createServer, { port, ...(host._tag === "Some" ? { host: host.value } : {}) }))
     )
   })

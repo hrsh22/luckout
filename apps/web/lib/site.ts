@@ -1,7 +1,12 @@
 import { network } from "./chain"
 
-/** Our public URL: shared Draw Proof links and Win Cards point here, not at *.vercel.app. */
-export const siteUrl = process.env.VERCEL_ENV === "production"
+/**
+ * Our public URL: shared Draw Proof links and Win Cards point here, not at *.vercel.app. Each Vercel
+ * environment sets it (luckout.gamified.trade for mainnet, testnet.luckout.gamified.trade for testnet).
+ */
+export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
+  ? process.env.NEXT_PUBLIC_SITE_URL
+  : process.env.VERCEL_ENV === "production"
   ? "https://luckout.gamified.trade"
   : process.env.VERCEL_URL
   ? `https://${process.env.VERCEL_URL}`

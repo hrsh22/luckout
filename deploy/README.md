@@ -1,5 +1,20 @@
 # Deploying the server
 
+## Two environments
+
+| | Testnet | Mainnet |
+|---|---|---|
+| Branch | `testnet` (where development happens) | `main` (changes only by PR from `testnet`, with CI passing) |
+| Web (Vercel) | Preview env vars, domain `testnet.luckout.gamified.trade` on branch `testnet` | Production env vars, `luckout.gamified.trade` |
+| API | `luckout-testnet-api.gamified.trade`, VM user `luckout-testnet-api`, port 8789 | `luckout-api.gamified.trade`, VM user `luckout-api`, port 8788 |
+| Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_mainnet` (role `luckout_mainnet`) |
+| Telegram | the testnet bot | the mainnet bot |
+| Bitrefill | its own account (test cards are free) | its own account and key |
+
+Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK`. By hand: `pnpm deploy:testnet` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
+
+The steps below set up one site; repeat them per environment with its own user, port, database and `.env`.
+
 The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's nginx handles HTTPS (Let's Encrypt) and proxies to the server on `127.0.0.1:8788` (8787 is taken by another site on our VM). Postgres is the VM's existing server, with its own role and database. The web app deploys to Vercel separately.
 
 ## Once
@@ -46,7 +61,7 @@ cd ~/htdocs/luckout-api.gamified.trade
 git pull && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 reload luckout-api
 ```
 
-From a machine with the `luckout-milesvm` SSH alias, `pnpm deploy:server` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs && pm2 save`.
+From a machine with the `luckout-milesvm` / `luckout-testnet-api-milesvm` SSH aliases, `pnpm deploy:mainnet` / `pnpm deploy:testnet` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs && pm2 save`.
 
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
