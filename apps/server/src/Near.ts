@@ -75,9 +75,44 @@ export const otherNetworkAccounts = (network: "testnet" | "mainnet", env: Record
       .map((a) => `${k}=${a}`)
   )
 
-const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION/.test(String(e))
-/** NEAR's own error kinds for a transaction that can no longer execute. */
-const isDeadTx = (e: unknown) => /InvalidNonce|\bExpired\b|InvalidTransaction.*Expired/.test(String(e))
+/** The chain has never seen this transaction (raw RPC kind, or near-api-js 7's `UnknownTransactionError`). */
+export const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION|UnknownTransaction/.test(String(e))
+/** NEAR's own error kinds for a transaction that can no longer execute (`InvalidNonceError`, `TransactionExpiredError`). */
+export const isDeadTx = (e: unknown) => /InvalidNonce|Invalid nonce|expired/i.test(String(e))
+
+/** Free public endpoints, each tried when the one before is rate-limited or down (checked 2026-11-10). */
+export const MAINNET_RPC_URLS = "https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.intea.rs"
+export const TESTNET_RPC_URLS = "https://test.rpc.fastnear.com,https://near-testnet.drpc.org,https://rpc.testnet.near.org"
+
+/**
+ * The endpoint failed to answer (rate limit, outage, network, timeout), as opposed to the chain
+ * answering, even with an error. near-api-js already retried 500/503/408 a few times by then.
+ */
+export const transportTrouble = (message: string) =>
+  /rate limit|too many requests|-?\b429\b|internal server error|timeout error|bad gateway|unavailable|exceeded \d+ attempts|fetch failed|failed to fetch|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timed out/i
+    .test(message)
+
+/**
+ * Runs one RPC call with a deadline, moving to the next endpoint on transport trouble. The chain's
+ * own answers (unknown transaction, contract panic, invalid nonce…) come back unchanged, so callers
+ * can still tell them apart. Every call is a read or the same signed bytes again (same hash), so
+ * repeating it elsewhere is safe. The switch sticks until that endpoint fails in turn.
+ */
+export const failover = <P, A>(providers: ReadonlyArray<P>, at: { i: number }, what: string, f: (provider: P) => Promise<A>) => {
+  const attempt = (left: number): Effect.Effect<A, NearUnavailable> => {
+    const i = at.i
+    return Effect.tryPromise({ try: () => f(providers[i]!), catch: (e) => new NearUnavailable({ message: `${what}: ${e}` }) }).pipe(
+      // One hung request must not hold a send lock forever.
+      Effect.timeoutOrElse({ duration: "20 seconds", orElse: () => Effect.fail(new NearUnavailable({ message: `${what}: timed out` })) }),
+      Effect.catchTag("NearUnavailable", (e) => {
+        if (left <= 1 || !transportTrouble(e.message)) return Effect.fail(e)
+        if (at.i === i) at.i = (i + 1) % providers.length
+        return attempt(left - 1)
+      })
+    )
+  }
+  return attempt(providers.length)
+}
 
 /** A customer's signed NEP-366 delegate action, as borsh decodes it. */
 export interface SignedDelegate {
@@ -141,8 +176,10 @@ export class Near extends Context.Service<Near, {
     Near,
     Effect.gen(function*() {
       const testnet = (yield* Network) === "testnet"
-      const rpcUrl = yield* Config.String("NEAR_RPC_URL").pipe(
-        Config.withDefault(testnet ? "https://test.rpc.fastnear.com" : "https://free.rpc.fastnear.com")
+      // Several endpoints, comma-separated: a rate limit or outage moves calls to the next one.
+      const rpcUrls = yield* Config.String("NEAR_RPC_URL").pipe(
+        Config.withDefault(testnet ? TESTNET_RPC_URLS : MAINNET_RPC_URLS),
+        Config.map((s) => s.split(",").map((u) => u.trim()).filter(Boolean))
       )
       const contractId = yield* Config.String("LUCKOUT_CONTRACT_ID").pipe(
         Config.withDefault(testnet ? "app.luckout.testnet" : "")
@@ -157,13 +194,9 @@ export class Near extends Context.Service<Near, {
         Config.withDefault(testnet ? "usdc.luckout.testnet" : "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1")
       )
 
-      const provider = new JsonRpcProvider({ url: rpcUrl })
-
-      // Every RPC call has a deadline: one hung request must not hold the send lock forever.
-      const rpc = <A>(what: string, f: () => Promise<A>) =>
-        Effect.tryPromise({ try: f, catch: (e) => new NearUnavailable({ message: `${what}: ${e}` }) }).pipe(
-          Effect.timeoutOrElse({ duration: "30 seconds", orElse: () => Effect.fail(new NearUnavailable({ message: `${what}: timed out` })) })
-        )
+      const providers = rpcUrls.map((url) => new JsonRpcProvider({ url }))
+      const at = { i: 0 }
+      const rpc = <A>(what: string, f: (provider: JsonRpcProvider) => Promise<A>) => failover(providers, at, what, f)
 
       /**
        * One account's key, sending one transaction at a time until it is included, so a later
@@ -177,7 +210,7 @@ export class Near extends Context.Service<Near, {
           let lastNonce = 0n
 
           const executed = (hash: string) =>
-            rpc("tx status", () => provider.viewTransactionStatus({ txHash: hash, accountId: id, waitUntil: "EXECUTED_OPTIMISTIC" })).pipe(
+            rpc("tx status", (p) => p.viewTransactionStatus({ txHash: hash, accountId: id, waitUntil: "EXECUTED_OPTIMISTIC" })).pipe(
               Effect.flatMap((tx) => toOutcome(hash, tx))
             )
 
@@ -186,8 +219,8 @@ export class Near extends Context.Service<Near, {
               const hash = yield* lock.withPermits(1)(Effect.gen(function*() {
                 const publicKey = yield* rpc("key", () => signer.getPublicKey())
                 const [key, block] = yield* Effect.all([
-                  rpc("access key", () => provider.viewAccessKey({ accountId: id, publicKey, finalityQuery: { finality: "optimistic" } })),
-                  rpc("block", () => provider.viewBlock({ finality: "final" }))
+                  rpc("access key", (p) => p.viewAccessKey({ accountId: id, publicKey, finalityQuery: { finality: "optimistic" } })),
+                  rpc("block", (p) => p.viewBlock({ finality: "final" }))
                 ])
                 const nonce = (BigInt(key.nonce) > lastNonce ? BigInt(key.nonce) : lastNonce) + 1n
                 const tx = createTransaction(id, publicKey, receiverId, nonce, txActions, baseDecode(block.header.hash))
@@ -195,7 +228,7 @@ export class Near extends Context.Service<Near, {
                 const signed = { hash: baseEncode(txHash), bytes: base64Encode(signedTransaction.encode()) }
                 yield* persist(signed)
                 lastNonce = nonce
-                yield* rpc("send", () => provider.sendTransactionUntil(signedTransaction, "INCLUDED"))
+                yield* rpc("send", (p) => p.sendTransactionUntil(signedTransaction, "INCLUDED"))
                 return signed.hash
               }))
               return yield* executed(hash)
@@ -211,7 +244,7 @@ export class Near extends Context.Service<Near, {
               // Never seen: send the same bytes again (same hash, so it can't execute twice).
               const tx = SignedTransaction.decode(base64Decode(signed.bytes))
               const resent = yield* lock.withPermits(1)(
-                rpc("resend", () => provider.sendTransactionUntil(tx, "INCLUDED")).pipe(
+                rpc("resend", (p) => p.sendTransactionUntil(tx, "INCLUDED")).pipe(
                   Effect.as(true),
                   Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
                 )
@@ -219,8 +252,8 @@ export class Near extends Context.Service<Near, {
               if (!resent) {
                 // A dead nonce can also mean this very transaction already ran and the first lookup
                 // hit a lagging node. Ask again at final finality before calling it expired.
-                const final = yield* rpc("final tx status", () =>
-                  provider.viewTransactionStatus({ txHash: signed.hash, accountId: id, waitUntil: "FINAL" })
+                const final = yield* rpc("final tx status", (p) =>
+                  p.viewTransactionStatus({ txHash: signed.hash, accountId: id, waitUntil: "FINAL" })
                 ).pipe(Effect.map(Option.some), Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e))))
                 if (Option.isSome(final)) return yield* toOutcome(signed.hash, final.value)
                 return yield* new TxExpired({ hash: signed.hash })
@@ -238,7 +271,7 @@ export class Near extends Context.Service<Near, {
         : undefined
 
       const view = <A>(method: string, args: Record<string, unknown> = {}, contract = contractId) =>
-        rpc(`view ${method}`, () => provider.callFunction({ contractId: contract, method, args })).pipe(
+        rpc(`view ${method}`, (p) => p.callFunction({ contractId: contract, method, args })).pipe(
           Effect.map((v) => v as A)
         )
 
@@ -267,16 +300,16 @@ export class Near extends Context.Service<Near, {
       }
 
       const accessKey = (accountId: string, publicKey: string) =>
-        rpc("access key", () => provider.viewAccessKey({ accountId, publicKey, finalityQuery: { finality: "optimistic" } })).pipe(
+        rpc("access key", (p) => p.viewAccessKey({ accountId, publicKey, finalityQuery: { finality: "optimistic" } })).pipe(
           Effect.map((k) => ({ nonce: BigInt(k.nonce), fullAccess: k.permission === "FullAccess" })),
           Effect.catchTag("NearUnavailable", (e) =>
             /UNKNOWN_ACCESS_KEY|UNKNOWN_ACCOUNT|does not exist/i.test(e.message) ? Effect.succeed(undefined) : Effect.fail(e))
         )
 
-      const height = rpc("block", () => provider.viewBlock({ finality: "final" })).pipe(Effect.map((b) => BigInt(b.header.height)))
+      const height = rpc("block", (p) => p.viewBlock({ finality: "final" })).pipe(Effect.map((b) => BigInt(b.header.height)))
 
       const account = (accountId: string) =>
-        rpc("account", () => provider.viewAccount({ accountId, blockQuery: { finality: "optimistic" } })).pipe(
+        rpc("account", (p) => p.viewAccount({ accountId, blockQuery: { finality: "optimistic" } })).pipe(
           Effect.map((a) => ({ amount: a.amount, storageUsage: a.storage_usage }))
         )
 
@@ -287,7 +320,7 @@ export class Near extends Context.Service<Near, {
             signerPublicKey: input.publicKey,
             payload: { message: input.message, recipient: input.recipient, nonce: input.nonce },
             signature: input.signature,
-            provider
+            provider: providers[at.i]!
           })
         ).pipe(Effect.as(true), Effect.orElseSucceed(() => false))
 

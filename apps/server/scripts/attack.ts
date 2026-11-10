@@ -10,7 +10,7 @@ const operatorId = process.env.OPERATOR_ACCOUNT_ID!
 const key = process.env.OPERATOR_PRIVATE_KEY as KeyPairString
 if (!operatorId || !key) throw new Error("Set OPERATOR_ACCOUNT_ID and OPERATOR_PRIVATE_KEY")
 
-const provider = new JsonRpcProvider({ url: process.env.NEAR_RPC_URL || "https://test.rpc.fastnear.com" })
+const provider = new JsonRpcProvider({ url: process.env.NEAR_RPC_URL?.split(",")[0]?.trim() || "https://test.rpc.fastnear.com" })
 const operator = new Account(operatorId, provider, key)
 const view = (method: string, args: object = {}) => provider.callFunction({ contractId: contract, method, args })
 
