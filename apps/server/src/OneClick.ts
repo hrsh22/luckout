@@ -22,6 +22,8 @@ const Quote = Schema.Struct({
   deadline: Schema.optional(Schema.String)
 })
 const QuoteResponse = Schema.Struct({
+  /** 1Click's id for the quote; support asks for it. */
+  correlationId: Schema.optional(Schema.String),
   quote: Quote,
   /** 1Click's echo of what it will do, checked against what we asked for. */
   quoteRequest: Schema.optional(Schema.Struct({
@@ -30,7 +32,10 @@ const QuoteResponse = Schema.Struct({
     recipient: Schema.String,
     swapType: Schema.String,
     amount: Schema.String,
-    refundTo: Schema.String
+    refundTo: Schema.String,
+    depositType: Schema.optional(Schema.String),
+    recipientType: Schema.optional(Schema.String),
+    refundType: Schema.optional(Schema.String)
   }))
 })
 export type QuoteResponse = typeof QuoteResponse.Type
