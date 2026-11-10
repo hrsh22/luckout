@@ -107,7 +107,8 @@ const world = (o: {
       amountOut: r.amount,
       minAmountOut: r.amount,
       timeEstimate: 22,
-      deadline: r.deadline
+      // Like the real 1Click: the deposit address lives for days; refunds start at the requested deadline.
+      deadline: new Date(Date.parse(r.deadline) + 3 * 86_400_000).toISOString()
     },
     quoteRequest: {
       originAsset: r.originAsset,
@@ -201,10 +202,12 @@ test("in manual mode the refill waits for the owner, and says how much to move",
     const refill = yield* Refill
     const v = yield* refill.request(30_000_000, "boss.testnet")
     const row = yield* settle(v.id)
-    return { row, needs: (yield* refill.status).needs }
+    const [s] = yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql<{ deadline: string }>`SELECT swap->>'deadline' AS deadline FROM refills WHERE id = ${v.id}`)
+    return { row, needs: (yield* refill.status).needs, deadline: s!.deadline }
   }))
   assert.equal(r.row.step, "fund")
   assert.equal(r.needs, 30_150_000)
+  assert.ok(Date.parse(r.deadline) - Date.now() <= 30 * 60_000, "the swap keeps our refund deadline, not the address's")
   assert.deepEqual(w.txs, [], "nothing signed")
 })
 
