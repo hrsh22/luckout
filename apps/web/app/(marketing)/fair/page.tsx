@@ -1,7 +1,7 @@
 import { contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
 import { MAX_CASHBACK } from "@/lib/modes"
-import { EXAMPLE_DRAW } from "@/lib/site"
+import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import type { Metadata } from "next"
 import Link from "next/link"
 
@@ -48,7 +48,7 @@ export default async function Fair() {
       </section>
       <p className="max-w-[64ch] text-ink-soft">
         Over a few dozen Draws the average swings a lot; over thousands it settles near 105.6%. Every Draw links to a Draw Proof you can
-        recompute in your browser, like <Link href={`/draw/${EXAMPLE_DRAW}`} className="font-semibold text-ink underline underline-offset-4">this one</Link>.
+        recompute in your browser, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.
       </p>
 
       {reserve && (

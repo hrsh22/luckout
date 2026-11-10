@@ -13,8 +13,11 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // stops for the day once an account (or everyone together) has used the free relays. The admin
 // panel can switch it off and change both caps.
 
-/** Until an admin changes them: on, 20 free relays per account and 500 in all per rolling day. */
-export const DEFAULT_SETTINGS = new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 500 })
+/** Until an admin changes them: free relays per account, and for everyone, per rolling day. Mainnet starts small. */
+export const RELAY_DEFAULTS = {
+  mainnet: new RelaySettings({ enabled: true, perAccountDaily: 5, allDaily: 50 }),
+  testnet: new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 500 })
+} as const
 const MAX_GAS = 100_000_000_000_000n // 100 Tgas, what a deposit's ft_transfer_call needs
 /** USDC's storage registration fee: the only deposit besides 1 yoctoNEAR. */
 export const USDC_REGISTRATION = 1_250_000_000_000_000_000_000n
@@ -29,6 +32,8 @@ export interface Allowlist {
 /** The deposit a call must carry for us to pay its fee, or undefined if we don't pay for it at all. */
 const expectedDeposit = (receiver: string, method: string, args: Record<string, unknown>, a: Allowlist) => {
   if (receiver === a.contractId && ["withdraw", "set_default_mode", "set_limits"].includes(method)) return 1n
+  // A customer's own safety nets: the contract checks it's their purchase.
+  if (receiver === a.contractId && ["reclaim", "retry_draw"].includes(method)) return 0n
   if (receiver === a.usdcId) {
     if (method === "ft_transfer_call" && args.receiver_id === a.contractId) return 1n
     if (method === "storage_deposit" && (args.account_id ?? a.accountId) === a.accountId && args.registration_only === true) return USDC_REGISTRATION
@@ -49,7 +54,7 @@ export const refusal = (d: Pick<SignedDelegate["delegateAction"], "senderId" | "
     return "Luckout only pays the fee for its own calls."
   }
   const deposit = expectedDeposit(d.receiverId, call.methodName, args ?? {}, a)
-  if (deposit === undefined) return "Luckout only pays the fee for its own calls: deposits, withdrawals and settings."
+  if (deposit === undefined) return "Luckout only pays the fee for its own calls: deposits, withdrawals, settings and reclaims."
   if (BigInt(call.deposit) !== deposit) return "That call carries an unexpected deposit."
   if (BigInt(call.gas) > MAX_GAS) return "That call asks for more gas than it needs."
   return undefined
@@ -93,7 +98,9 @@ export class Relay extends Context.Service<Relay, {
       const testnet = (yield* Network) === "testnet"
       const usdcId = near.usdcId
 
-      const settings = readSetting("relay", RelaySettings, DEFAULT_SETTINGS).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+      const settings = readSetting("relay", RelaySettings, RELAY_DEFAULTS[testnet ? "testnet" : "mainnet"]).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql)
+      )
       const configure = (next: RelaySettings, by: string) =>
         writeSetting("relay", RelaySettings, next, by).pipe(Effect.provideService(SqlClient.SqlClient, sql))
 

@@ -1,4 +1,4 @@
-import { AdminInvalid, AdminOverview, AttentionPurchase, type CreditSettings, PurchaseInvalid, type RefillView, type RelaySettings } from "@luckout/api"
+import { AdminInvalid, AdminOverview, AttentionPurchase, type CreditSettings, PurchaseInvalid, type RefillView, type RelaySettings, type ShopStatus } from "@luckout/api"
 import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
@@ -8,6 +8,7 @@ import { Near, Network } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
+import { Sales } from "./Sales.ts"
 
 // The admin panel's server side. Only accounts in ADMIN_ACCOUNTS get anything; everyone else is
 // told the page doesn't exist. Nothing here moves money: reserve, proceeds, pausing and gas are
@@ -39,6 +40,8 @@ export class Admin extends Context.Service<Admin, {
   configureCredit(settings: CreditSettings, by: string): Effect.Effect<CreditSettings, AdminInvalid>
   refill(amount: number | undefined, by: string): Effect.Effect<RefillView, AdminInvalid>
   resolveRefill(id: string, note: string, by: string): Effect.Effect<void, AdminInvalid>
+  /** Stops or restarts new purchases on the server (no wallet needed). */
+  setSales(open: boolean, by: string): Effect.Effect<ShopStatus>
   /** Runs a purchase's next step now instead of after its backoff. Never re-buys or re-charges. */
   retry(id: string, by: string): Effect.Effect<void, PurchaseInvalid>
 }>()("luckout/Admin") {
@@ -50,6 +53,7 @@ export class Admin extends Context.Service<Admin, {
       const relay = yield* Relay
       const credit = yield* Credit
       const refills = yield* Refill
+      const sales = yield* Sales
       const alerts = yield* Alerts
       const network = yield* Network
       const admins = new Set(
@@ -61,8 +65,8 @@ export class Admin extends Context.Service<Admin, {
           accountId
             ? spendable(near, accountId).pipe(Effect.map((s) => [{ role, accountId, spendable: String(s), alertBelow: String(GAS_ALERT[role]) }]))
             : Effect.succeed([])
-        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r] = yield* Effect.all([
-          near.view<{ owner: string; operator: string; usdc: string; paused: boolean; max_cashback: string }>("get_config"),
+        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop] = yield* Effect.all([
+          near.view<{ owner: string; pending_owner?: string | null; operator: string; usdc: string; paused: boolean; max_cashback: string }>("get_config"),
           near.view<{ free: string; locked: string; discount_cap: string; proceeds: string }>("get_reserve"),
           near.view<{ lucky_settled: number; lucky_amount_total: string; lucky_paid_total: string }>("get_stats"),
           Effect.all([
@@ -88,12 +92,21 @@ export class Admin extends Context.Service<Admin, {
             WHERE step = 'stuck' OR (step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')
             ORDER BY created_at DESC LIMIT 20`,
           credit.view,
-          refills.status
+          refills.status,
+          sales.status
         ], { concurrency: "unbounded" })
         const p = purchases[0] ?? { today: 0, delivered: 0, ordered: 0 }
         return new AdminOverview({
           network,
-          contract: { id: near.contractId, owner: config.owner, operator: config.operator, usdc: config.usdc, paused: config.paused },
+          contract: {
+            id: near.contractId,
+            owner: config.owner,
+            ...(config.pending_owner ? { pendingOwner: config.pending_owner } : {}),
+            operator: config.operator,
+            usdc: config.usdc,
+            paused: config.paused
+          },
+          salesStopped: shop.reason === "stopped",
           reserve: {
             free: Number(reserve.free),
             locked: Number(reserve.locked),
@@ -196,6 +209,7 @@ export class Admin extends Context.Service<Admin, {
         configureCredit,
         refill: refills.request,
         resolveRefill: refills.resolve,
+        setSales: sales.setOpen,
         retry
       })
     })

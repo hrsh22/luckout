@@ -8,7 +8,7 @@ import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
 import { Near, type Outcome } from "./Near.ts"
 import { RelaySettings } from "@luckout/api"
-import { DEFAULT_SETTINGS, refusal, Relay, USDC_REGISTRATION } from "./Relay.ts"
+import { refusal, Relay, RELAY_DEFAULTS, USDC_REGISTRATION } from "./Relay.ts"
 
 // The relayer pays only for our own calls, exactly as the app makes them, and checks what the
 // network would refuse before it spends anything. NEAR is faked; the database is in memory.
@@ -141,7 +141,7 @@ test("no relayer, or today's free relays used up: the wallet pays instead", asyn
   const w = world()
   const r = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    for (let i = 0; i < DEFAULT_SETTINGS.perAccountDaily; i++) {
+    for (let i = 0; i < RELAY_DEFAULTS.testnet.perAccountDaily; i++) {
       yield* sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${`h${i}`}, ${ALICE}, '{}'::jsonb)`
     }
     const available = yield* Relay.use((r) => r.available(ALICE))
@@ -163,9 +163,9 @@ test("the admin switch and caps apply to the next relay", async () => {
     const sent = yield* w.send(withdraw()).pipe(Effect.match({ onFailure: (e) => e._tag, onSuccess: () => "ok" }))
     yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 0, allDaily: 500 }), "admin.testnet")
     const noQuota = yield* relay.available(ALICE)
-    yield* relay.configure(DEFAULT_SETTINGS, "admin.testnet")
+    yield* relay.configure(RELAY_DEFAULTS.testnet, "admin.testnet")
     return { off, sent, noQuota, back: yield* relay.available(ALICE), saved: yield* relay.settings }
   }))
-  assert.deepEqual({ ...r, saved: { ...r.saved } }, { off: false, sent: "RelayUnavailable", noQuota: false, back: true, saved: { ...DEFAULT_SETTINGS } })
+  assert.deepEqual({ ...r, saved: { ...r.saved } }, { off: false, sent: "RelayUnavailable", noQuota: false, back: true, saved: { ...RELAY_DEFAULTS.testnet } })
   assert.deepEqual(w.relayed, [])
 })

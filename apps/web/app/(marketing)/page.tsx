@@ -5,7 +5,7 @@ import { contractId, liveAverage, network, type Stats, view } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MAX_CASHBACK, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
-import { EXAMPLE_DRAW } from "@/lib/site"
+import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import { Lock, Repeat2, ShieldCheck, SlidersHorizontal } from "lucide-react"
 import Link from "next/link"
 
@@ -135,7 +135,7 @@ export default async function Home() {
             <ul className="grid gap-4 sm:grid-cols-2">
               <Point icon={ShieldCheck} title="Every Draw is public">
                 The contract logs the seed and the roll. Anyone can recompute a Draw in their browser.{" "}
-                <Link href={`/draw/${EXAMPLE_DRAW}`} className="font-semibold text-gold underline underline-offset-4">See one</Link>
+                <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-gold underline underline-offset-4">See one</Link>
               </Point>
               <Point icon={Repeat2} title="Nobody can retry a Draw">Delivery is confirmed first. The Draw runs a block later, in a step nothing can undo, not even us.</Point>
               <Point icon={Lock} title="Cashback is covered first">Each lucky purchase locks what its biggest possible cashback would cost, so the money is there whatever the result.</Point>

@@ -7,6 +7,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
+import { Sales } from "./Sales.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 
@@ -87,6 +88,7 @@ export class Telegram extends Context.Service<Telegram, {
           bitrefill: yield* Bitrefill,
           purchases,
           near: yield* Near,
+          shopOpen: Effect.map((yield* Sales).status, (st) => st.open),
           testnet,
           web: webOrigin,
           apiKey: Redacted.value(aiKey.value),

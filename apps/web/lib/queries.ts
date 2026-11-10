@@ -64,3 +64,12 @@ export const useIsAdmin = (token: string | undefined) =>
     enabled: !!token,
     staleTime: Infinity
   }).data === true
+
+/** Whether purchases can start: an admin may have stopped sales, or the owner paused the contract. */
+export const useShopStatus = () =>
+  useQuery({
+    queryKey: ["shop-status"],
+    queryFn: () => api((c) => c.status()),
+    staleTime: 20_000,
+    refetchInterval: 60_000
+  })

@@ -11,6 +11,7 @@ import { DbMemory } from "./Db.ts"
 import { Near } from "./Near.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
+import { Sales } from "./Sales.ts"
 import { fakeBitrefill, fakeNear } from "./testing.ts"
 
 // The admin panel's server side on an in-memory database, with NEAR and Bitrefill faked.
@@ -45,7 +46,7 @@ const refill = Refill.of({
 })
 const alerts: Array<string> = []
 const layer = Admin.layer.pipe(
-  Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer)),
+  Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
   Layer.provide(Layer.mergeAll(
     Layer.succeed(Near, near),
     Layer.succeed(Bitrefill, bitrefill),
@@ -54,7 +55,7 @@ const layer = Admin.layer.pipe(
   )),
   Layer.provideMerge(DbMemory)
 )
-const run = <A, E>(e: Effect.Effect<A, E, Admin | Relay | Credit | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
+const run = <A, E>(e: Effect.Effect<A, E, Admin | Relay | Credit | Sales | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
 
 const purchase = (id: string, step: string, error: string | null, minutesAgo = 30) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
@@ -82,7 +83,7 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
     assert.equal(o.purchases.today, 2)
     assert.equal(o.purchases.deliveredToday, 1)
     assert.deepEqual(o.purchases.attention.map((a) => [a.step, a.retryable]), [["stuck", false]])
-    assert.equal(o.credit.balance, 120_500_000)
+    assert.equal(o.credit.balance, undefined, "testnet sells only free test cards: no Bitrefill credit to track")
     assert.equal(o.credit.target, 100_000_000, "no sales yet: the floor")
     assert.equal(o.credit.refillsAvailable, false)
   })))
@@ -125,3 +126,15 @@ test("credit settings that don't hang together are refused, and changes are anno
     assert.equal((yield* credit.settings).ceiling, 800_000_000)
     assert.match(alerts.at(-1) ?? "", /boss\.testnet set Bitrefill credit/)
   })))
+
+test("any admin can stop and restart sales, and it's announced", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const stopped = yield* admin.setSales(false, "boss.testnet")
+    assert.deepEqual([stopped.open, stopped.reason], [false, "stopped"])
+    assert.equal((yield* admin.overview).salesStopped, true)
+    assert.match(alerts.at(-1) ?? "", /boss\.testnet stopped sales/)
+    const open = yield* admin.setSales(true, "boss.testnet")
+    assert.equal(open.open, true)
+  })))
+

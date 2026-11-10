@@ -1,15 +1,16 @@
-import { CreditSettings, NewPurchase, Voucher } from "@luckout/api"
+import { CreditSettings, NewPurchase, ShopStatus, Voucher } from "@luckout/api"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill, type Order } from "./Bitrefill.ts"
-import { Credit, DEFAULT_CREDIT } from "./Credit.ts"
+import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { ContractRejected, Near, type Outcome } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
+import { Sales } from "./Sales.ts"
 import { fakeBitrefill, fakeNear } from "./testing.ts"
 
 // The purchase workflow end to end on an in-memory database, with NEAR and Bitrefill faked.
@@ -34,6 +35,7 @@ const world = (opts: {
   let creditBalance = opts.credit ?? 1_000_000_000
   const orders = [...(opts.orders ?? [])]
   let kicks = 0
+  let shop = new ShopStatus({ open: true })
   const price = opts.price ?? 10_000_000
   const voucherId = opts.real ? "amazon-us" : "test-card"
   const outcome = (value: unknown, events: Outcome["events"] = []): Outcome => ({ hash: "h", value, events, failures: [] })
@@ -81,6 +83,7 @@ const world = (opts: {
       Layer.succeed(Near, near),
       Layer.succeed(Bitrefill, bitrefill),
       Layer.succeed(Refill, refill),
+      Layer.succeed(Sales, Sales.of({ status: Effect.sync(() => shop), setOpen: () => Effect.die("not used") })),
       Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.void }))
     )),
     Layer.provideMerge(DbMemory),
@@ -99,7 +102,8 @@ const world = (opts: {
     buy,
     run,
     kicks: () => kicks,
-    setCredit: (micro: number) => void (creditBalance = micro)
+    setCredit: (micro: number) => void (creditBalance = micro),
+    setShop: (s: ShopStatus) => void (shop = s)
   }
 }
 
@@ -158,11 +162,11 @@ test("a real card the credit covers goes straight through, without a refill", as
 })
 
 test("a card the credit can't cover waits uncharged, then goes on once the credit arrives", async () => {
-  const w = world({ real: true, price: 50_000_000, credit: 20_000_000 })
+  const w = world({ real: true, price: 12_000_000, credit: 5_000_000 })
   const r = await w.run(Effect.gen(function*() {
     const p = yield* w.buy()
     const calledBefore = [...w.calls]
-    w.setCredit(80_000_000)
+    w.setCredit(30_000_000)
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     // The workflow runs in its own fiber; give it a moment.
@@ -183,14 +187,14 @@ test("two purchases can never count on the same credit", async () => {
 })
 
 test("a card above the largest order is refused up front", async () => {
-  const w = world({ real: true, price: DEFAULT_CREDIT.maxOrder + 1 })
+  const w = world({ real: true, price: CREDIT_DEFAULTS.mainnet.maxOrder + 1 })
   const e = await w.run(w.buy().pipe(Effect.flip))
   assert.match(e.message, /most Luckout sells in one purchase/)
   assert.deepEqual(w.calls, [])
 })
 
 test("one account can have only one purchase waiting", async () => {
-  const w = world({ real: true, price: 50_000_000, credit: 0 })
+  const w = world({ real: true, price: 12_000_000, credit: 0 })
   const e = await w.run(Effect.gen(function*() {
     yield* w.buy()
     return yield* w.buy().pipe(Effect.flip)
@@ -199,11 +203,11 @@ test("one account can have only one purchase waiting", async () => {
 })
 
 test("a purchase that waits too long is cancelled, and nothing was charged", async () => {
-  const w = world({ real: true, price: 50_000_000, credit: 0 })
+  const w = world({ real: true, price: 12_000_000, credit: 0 })
   const p = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
-    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${DEFAULT_CREDIT.waitMinutes + 1}) WHERE id = ${p.id}`
+    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = ${p.id}`
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     return yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", p.id))
   }))
@@ -218,7 +222,7 @@ test("if Bitrefill says the credit is too low after all, the charged purchase wa
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
     const waiting = p.status
-    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${DEFAULT_CREDIT.waitMinutes + 1}) WHERE id = ${p.id}`
+    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = ${p.id}`
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     yield* Effect.sleep("300 millis")
     return { waiting, after: (yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", p.id))).status }
@@ -231,7 +235,29 @@ test("if Bitrefill says the credit is too low after all, the charged purchase wa
 
 test("credit settings are refused when they don't hang together", async () => {
   const { settingsProblem } = await import("./Credit.ts")
-  assert.match(settingsProblem(new CreditSettings({ ...DEFAULT_CREDIT, floor: 600_000_000 })) ?? "", /floor/)
-  assert.match(settingsProblem(new CreditSettings({ ...DEFAULT_CREDIT, maxOrder: 600_000_000 })) ?? "", /largest order/)
-  assert.equal(settingsProblem(DEFAULT_CREDIT), undefined)
+  assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, floor: 600_000_000 })) ?? "", /floor/)
+  assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, maxOrder: 600_000_000 })) ?? "", /largest order/)
+  assert.equal(settingsProblem(CREDIT_DEFAULTS.testnet), undefined)
+  assert.equal(settingsProblem(CREDIT_DEFAULTS.mainnet), undefined)
 })
+
+test("while sales are closed, new purchases are refused and waiting ones keep their place", async () => {
+  const w = world({ real: true, price: 12_000_000, credit: 0 })
+  const r = await w.run(Effect.gen(function*() {
+    const waiting = yield* w.buy()
+    w.setShop(new ShopStatus({ open: false, reason: "stopped" }))
+    const refused = yield* w.buy(undefined, "bob.test").pipe(Effect.flip)
+    w.setCredit(30_000_000)
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
+    const held = (yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", waiting.id))).status
+    w.setShop(new ShopStatus({ open: true }))
+    yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
+    yield* Effect.sleep("300 millis")
+    return { refused: refused.message, held, after: (yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", waiting.id))).status }
+  }))
+  assert.match(r.refused, /paused for a few minutes/)
+  assert.equal(r.held, "waiting", "not admitted while closed")
+  assert.equal(r.after, "delivered")
+})
+

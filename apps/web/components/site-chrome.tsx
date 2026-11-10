@@ -2,7 +2,7 @@ import { Wordmark } from "@/components/brand"
 import { NavShell } from "@/components/nav-shell"
 import { buttonVariants } from "@/components/ui/button"
 import { contractId, explorerAccount, network } from "@/lib/chain"
-import { EXAMPLE_DRAW } from "@/lib/site"
+import { EXAMPLE_DRAW_HREF, TESTNET_SITE } from "@/lib/site"
 import Link from "next/link"
 
 const LINKS = [
@@ -30,8 +30,9 @@ export function SiteFooter({ compact = false }: { compact?: boolean }) {
         NEAR {network}{network === "testnet" ? ", test USDC only" : ""}
       </span>
       <Link className={link} href="/fair">Fairness</Link>
-      <Link className={link} href={`/draw/${EXAMPLE_DRAW}`}>A Draw Proof</Link>
+      <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>
       <a className={link} href={explorerAccount(contractId)} target="_blank" rel="noreferrer">The contract</a>
+      {network === "mainnet" && <a className={link} href={TESTNET_SITE}>Try the free testnet demo</a>}
       <span className="sm:ml-auto">Gift cards by Bitrefill. You always get the card.</span>
     </footer>
   )

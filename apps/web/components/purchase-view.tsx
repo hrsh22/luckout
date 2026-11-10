@@ -1,13 +1,15 @@
 "use client"
 
 import { Button, buttonVariants } from "@/components/ui/button"
+import { useWalletActions } from "@/lib/actions"
 import { api } from "@/lib/api"
 import { safeLink, usd, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
-import { explorer } from "@/lib/near"
+import { contractId, explorer, view } from "@/lib/near"
 import { keyPalette, modePalette } from "@/lib/palette"
 import type { Purchase } from "@luckout/api"
-import { Check, ChevronDown, Copy, ExternalLink, Link2, ShieldCheck } from "lucide-react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useEffect, useState } from "react"
@@ -89,6 +91,8 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
         )}
       </div>
 
+      <SafetyNet p={p} />
+
       {(r.code || r.pin || r.link) && <CodeBlock p={p} />}
 
       {p.draw && p.settleTx && <ProofLinks p={p} />}
@@ -137,6 +141,60 @@ function Waiting() {
       </p>
     </div>
   )
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/**
+ * A purchase open longer than it should be: read what the contract says, then offer the customer's
+ * own way out. Undelivered for 24 hours → reclaim the full amount; delivered but its Draw never ran →
+ * run it again. Both are the customer's own calls, which our relayer sends for free.
+ */
+function SafetyNet({ p }: { p: Purchase }) {
+  const actions = useWalletActions()
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const id = p.contractPurchaseId
+  const late = Date.now() - new Date(p.createdAt).getTime() > 10 * 60_000
+  const onchain = useQuery({
+    queryKey: ["onchain-purchase", id],
+    queryFn: () => view<{ status: string; created_at: number } | null>(contractId, "get_purchase", { purchase_id: id }),
+    enabled: p.status === "pending" && id !== undefined && late,
+    staleTime: 30_000
+  })
+  const o = onchain.data
+  if (!o || id === undefined) return null
+  const act = async (f: () => Promise<boolean>) => {
+    setBusy(true)
+    if (await f()) await Promise.all([qc.invalidateQueries({ queryKey: ["purchases"] }), qc.invalidateQueries({ queryKey: ["onchain-purchase", id] })])
+    setBusy(false)
+  }
+  if (o.status === "Pending") {
+    const opens = o.created_at / 1e6 + DAY_MS
+    if (Date.now() < opens) {
+      return (
+        <p className="flex items-start gap-2 text-sm text-muted">
+          <LifeBuoy size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+          Taking longer than usual. If it isn't delivered by {new Date(opens).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}, you can take back the full amount right here.
+        </p>
+      )
+    }
+    return (
+      <div className="flex flex-col gap-3 rounded-[1.25rem] bg-warn-soft p-4 text-warn sm:flex-row sm:items-center">
+        <p className="flex-1 text-[15px] font-medium">This wasn't delivered within 24 hours, so the full amount you paid is yours to take back.</p>
+        <Button size="sm" loading={busy} onClick={() => act(() => actions.reclaim(id))}><LifeBuoy />Reclaim it</Button>
+      </div>
+    )
+  }
+  if (o.status === "Drawing") {
+    return (
+      <div className="flex flex-col gap-3 rounded-[1.25rem] bg-lilac-soft p-4 sm:flex-row sm:items-center">
+        <p className="flex-1 text-[15px] font-medium">Your card is delivered, but its Draw didn't run. Run it now: it's free.</p>
+        <Button size="sm" loading={busy} onClick={() => act(() => actions.retryDraw(id))}>Run the Draw</Button>
+      </div>
+    )
+  }
+  return null
 }
 
 export function CodeBlock({ p }: { p: Purchase }) {
@@ -258,6 +316,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
                 <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{p.status === "delivered" ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
+              <SafetyNet p={p} />
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code. This updates by itself.</p>}
               {p.status === "waiting" && (
                 <p className="text-sm text-muted">We're topping up our gift card supply for this one; usually a few minutes. If it can't be done in time you won't pay anything.</p>

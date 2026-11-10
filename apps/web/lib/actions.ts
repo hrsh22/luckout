@@ -67,6 +67,22 @@ export function useWalletActions() {
         method: "set_limits",
         args: { per_purchase: String(perPurchase), daily: String(daily) },
         deposit: ONE_YOCTO
+      }),
+    /** A purchase neither delivered nor cancelled within 24 hours: the full amount comes back. */
+    reclaim: (purchaseId: number) =>
+      run("Reclaiming your purchase", "The full amount is back in your balance", {
+        receiverId: contractId,
+        method: "reclaim",
+        args: { purchase_id: purchaseId },
+        tgas: 30
+      }),
+    /** A delivered Lucky Buy whose Draw didn't run (e.g. out of gas): run it again. */
+    retryDraw: (purchaseId: number) =>
+      run("Running the Draw again", "The Draw ran: see the result below", {
+        receiverId: contractId,
+        method: "retry_draw",
+        args: { purchase_id: purchaseId },
+        tgas: 60
       })
   }
 }

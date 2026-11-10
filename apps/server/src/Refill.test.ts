@@ -6,7 +6,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill, type DepositState } from "./Bitrefill.ts"
-import { Credit, DEFAULT_CREDIT } from "./Credit.ts"
+import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { OneClick, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
@@ -134,7 +134,9 @@ const world = (o: {
     )),
     Layer.provideMerge(DbMemory)
   )
-  const run = <A, E>(e: Effect.Effect<A, E, Refill | Credit | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
+  // These tests size refills in tens of dollars: give them testnet-sized limits (mainnet starts at $30).
+  const run = <A, E>(e: Effect.Effect<A, E, Refill | Credit | SqlClient.SqlClient>) =>
+    Effect.runPromise(Effect.scoped(Effect.andThen(Effect.flatMap(Credit, (c) => c.configure(CREDIT_DEFAULTS.testnet, "test")), e)).pipe(Effect.provide(layer)))
   return { s, txs, resumed, alerts, run }
 }
 
@@ -277,7 +279,7 @@ test("a refill never takes the credit above the ceiling", async () => {
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     return yield* Effect.flatMap(Refill, (r) => r.request(200_000_000, "boss.testnet"))
   }))
-  assert.equal(v.amount, DEFAULT_CREDIT.ceiling - 450_000_000)
+  assert.equal(v.amount, CREDIT_DEFAULTS.testnet.ceiling - 450_000_000)
 })
 
 test("refills stop by themselves when switched off, and only on mainnet with a treasury", async () => {
@@ -322,3 +324,9 @@ test("quotes are checked against exactly what we asked for", () => {
   assert.match(quoteProblem(base({ deadline: new Date(Date.now() + 60_000).toISOString() }), want) ?? "", /deadline/)
   assert.match(quoteProblem({ quote: base().quote }, want) ?? "", /didn't echo/)
 })
+
+test("mainnet starts small: a $30 ceiling, $15 largest order, $40 of refills a day", () => {
+  const m = CREDIT_DEFAULTS.mainnet
+  assert.deepEqual([m.floor, m.ceiling, m.maxOrder, m.dailyRefill], [10_000_000, 30_000_000, 15_000_000, 40_000_000])
+})
+

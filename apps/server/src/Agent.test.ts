@@ -46,7 +46,8 @@ const deps = {
       ])
   },
   near: { view: () => Effect.succeed(rich) },
-  web: "https://luckout.test"
+  web: "https://luckout.test",
+  shopOpen: Effect.succeed(true)
 } as never
 
 // An account that can afford the $15 test purchase, within its limits.

@@ -65,6 +65,16 @@ const toOutcome = (hash: string, tx: Tx): Effect.Effect<Outcome, ContractRejecte
 /** testnet or mainnet. Anything else refuses to start, so a typo can't switch off the testnet guards. */
 export const Network = Config.Literals(["testnet", "mainnet"], "NEAR_NETWORK").pipe(Config.withDefault("testnet"))
 
+/** Settings that name NEAR accounts: on mainnet none may end in .testnet, and on testnet none in .near. */
+const ACCOUNT_SETTINGS = ["LUCKOUT_CONTRACT_ID", "USDC_CONTRACT_ID", "OPERATOR_ACCOUNT_ID", "RELAYER_ACCOUNT_ID", "TREASURY_ACCOUNT_ID", "ADMIN_ACCOUNTS"]
+
+/** Account names in this .env that belong to the other network: a mixed-up .env. */
+export const otherNetworkAccounts = (network: "testnet" | "mainnet", env: Record<string, string | undefined>) =>
+  ACCOUNT_SETTINGS.flatMap((k) =>
+    (env[k] ?? "").split(",").map((a) => a.trim()).filter((a) => (network === "mainnet" ? a.endsWith(".testnet") : a.endsWith(".near")))
+      .map((a) => `${k}=${a}`)
+  )
+
 const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION/.test(String(e))
 /** NEAR's own error kinds for a transaction that can no longer execute. */
 const isDeadTx = (e: unknown) => /InvalidNonce|\bExpired\b|InvalidTransaction.*Expired/.test(String(e))

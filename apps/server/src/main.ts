@@ -14,10 +14,11 @@ import { Auth } from "./Auth.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
 import { Monitor } from "./Monitor.ts"
-import { Near, Network } from "./Near.ts"
+import { Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { rateLimit } from "./RateLimit.ts"
 import { Relay } from "./Relay.ts"
+import { Sales } from "./Sales.ts"
 import { Telegram } from "./Telegram.ts"
 import { TopUp } from "./TopUp.ts"
 
@@ -26,7 +27,11 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    return handlers.handle("health", () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid))
+    const sales = yield* Sales
+    return handlers.handleAll({
+      health: () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid),
+      status: () => sales.status
+    })
   })
 )
 
@@ -111,6 +116,7 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       me: () => Effect.asVoid(signedInAdmin),
       overview: () => Effect.andThen(signedInAdmin, admin.overview),
       relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
+      sales: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.setSales(payload.open, by)),
       credit: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureCredit(payload, by)),
       refill: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.refill(payload.amount, by)),
       resolveRefill: ({ params, payload }) =>
@@ -137,7 +143,7 @@ const AuthorizationLive = Layer.effect(
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
-  Layer.provideMerge(Refill.layer),
+  Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
   Layer.provideMerge(Layer.mergeAll(Credit.layer, TopUp.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
@@ -153,8 +159,12 @@ const MAINNET_REQUIRES = [
   "LUCKOUT_CONTRACT_ID",
   "OPERATOR_ACCOUNT_ID",
   "OPERATOR_PRIVATE_KEY",
-  "BITREFILL_API_KEY"
+  "BITREFILL_API_KEY",
+  // Real money: alerts must reach a human, and someone must be able to open the admin panel.
+  "ALERT_TELEGRAM_CHAT_ID",
+  "ADMIN_ACCOUNTS"
 ]
+
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
   Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
@@ -166,6 +176,8 @@ const Server = Layer.unwrap(
   Effect.gen(function*() {
     const missing = (yield* Network) === "mainnet" ? MAINNET_REQUIRES.filter((k) => !process.env[k]) : []
     if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
+    const mixed = otherNetworkAccounts(yield* Network, process.env)
+    if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)
