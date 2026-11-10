@@ -55,3 +55,12 @@ export const useTelegram = (token: string | undefined, waiting = false) =>
     refetchOnWindowFocus: true,
     refetchInterval: (q) => (waiting && !q.state.data?.linked ? 2000 : false)
   })
+
+/** Whether the signed-in account may open the admin panel; decides the menu link. */
+export const useIsAdmin = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["admin-me", token],
+    queryFn: () => api((c) => c.admin.me(), token).then(() => true, () => false),
+    enabled: !!token,
+    staleTime: Infinity
+  }).data === true

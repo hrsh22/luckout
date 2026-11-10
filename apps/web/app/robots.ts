@@ -2,5 +2,5 @@ import { siteUrl } from "@/lib/site"
 import type { MetadataRoute } from "next"
 
 export default function robots(): MetadataRoute.Robots {
-  return { rules: { userAgent: "*", allow: "/", disallow: ["/purchases", "/wallet"] }, sitemap: `${siteUrl}/sitemap.xml` }
+  return { rules: { userAgent: "*", allow: "/", disallow: ["/purchases", "/wallet", "/admin"] }, sitemap: `${siteUrl}/sitemap.xml` }
 }

@@ -1,5 +1,6 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { Api, Authorization, CurrentAccount, NotFound } from "@luckout/api"
+import { Api, Authorization, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
+import { Admin } from "./Admin.ts"
 import { Config, Effect, Layer, Redacted } from "effect"
 import { HttpRouter } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
@@ -94,6 +95,26 @@ const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
   })
 )
 
+// Admins only; to anyone else the endpoints look like they don't exist.
+const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
+  Effect.gen(function*() {
+    const admin = yield* Admin
+    const signedInAdmin = Effect.gen(function*() {
+      const { accountId } = yield* CurrentAccount
+      if (!admin.isAdmin(accountId)) return yield* new NotFound()
+      return accountId
+    })
+    return handlers.handleAll({
+      me: () => Effect.asVoid(signedInAdmin),
+      overview: () => Effect.andThen(signedInAdmin, admin.overview),
+      relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
+      retry: ({ params }) =>
+        Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
+          UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
+    })
+  })
+)
+
 const AuthorizationLive = Layer.effect(
   Authorization,
   Effect.gen(function*() {
@@ -106,7 +127,7 @@ const AuthorizationLive = Layer.effect(
   })
 )
 
-const Services = Layer.mergeAll(Telegram.layer, Monitor).pipe(
+const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
@@ -126,7 +147,7 @@ const MAINNET_REQUIRES = [
 ]
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers]),
+  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
   Layer.provide(AuthorizationLive),
   Layer.provide(Services)
 )

@@ -46,7 +46,7 @@ interface QuoteView {
 /** Thrown on to stop a run; the reconciler picks the purchase up again later. */
 type Unknown = NearUnavailable | BitrefillUnavailable
 
-const OPEN_STEPS = ["admit", "ordering", "delivery", "confirm", "fail"]
+export const OPEN_STEPS = ["admit", "ordering", "delivery", "confirm", "fail"]
 /** About six hours of retries with backoff (30s doubling, capped at an hour). */
 const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */

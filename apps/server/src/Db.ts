@@ -110,6 +110,17 @@ const migrations = Migrator.fromRecord({
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`
     yield* sql`CREATE INDEX relays_created ON relays (created_at)`
+  }),
+  // Switches changed from the admin panel, such as the relayer's on/off and caps.
+  "0007_settings": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
   })
 })
 

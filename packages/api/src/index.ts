@@ -267,4 +267,73 @@ export class RelayApi extends HttpApiGroup.make("relay").add(
   })
 ).middleware(Authorization) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi) {}
+// ---------- admin (whitelisted accounts only; everyone else gets NotFound) ----------
+
+/** The relayer's switch and free-relay caps, changed from the admin panel. */
+export class RelaySettings extends Schema.Class<RelaySettings>("RelaySettings")({
+  enabled: Schema.Boolean,
+  /** Free relays per account per rolling day. */
+  perAccountDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
+  /** Free relays for everyone together per rolling day. */
+  allDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100_000 }))
+}) {}
+
+const Yocto = Schema.String
+
+/** A purchase that needs a look: stuck for a human, or open longer than it should be. */
+export class AttentionPurchase extends Schema.Class<AttentionPurchase>("AttentionPurchase")({
+  id: Schema.String,
+  accountId: Schema.String,
+  voucherName: Schema.String,
+  value: Schema.String,
+  step: Schema.String,
+  error: Schema.optional(Schema.String),
+  attempts: Schema.Int,
+  createdAt: Schema.String,
+  /** "Retry now" is safe for it: an open purchase, or one that gave up at a step NEAR can repeat. */
+  retryable: Schema.Boolean
+}) {}
+
+export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")({
+  network: Schema.Literals(["testnet", "mainnet"]),
+  contract: Schema.Struct({ id: Schema.String, owner: Schema.String, operator: Schema.String, usdc: Schema.String, paused: Schema.Boolean }),
+  reserve: Schema.Struct({ free: MicroUsdc, locked: MicroUsdc, discountCap: MicroUsdc, proceeds: MicroUsdc, maxCashback: MicroUsdc }),
+  stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
+  /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
+  gas: Schema.Array(Schema.Struct({
+    role: Schema.Literals(["operator", "relayer", "contract"]),
+    accountId: Schema.String,
+    spendable: Yocto,
+    alertBelow: Yocto
+  })),
+  relay: Schema.Struct({
+    configured: Schema.Boolean,
+    settings: RelaySettings,
+    usedToday: Schema.Int,
+    topAccounts: Schema.Array(Schema.Struct({ accountId: Schema.String, count: Schema.Int }))
+  }),
+  purchases: Schema.Struct({
+    today: Schema.Int,
+    deliveredToday: Schema.Int,
+    /** Bitrefill orders placed in the last 24 hours, against the account's daily cap. */
+    bitrefillOrders: Schema.Int,
+    bitrefillCap: Schema.Int,
+    attention: Schema.Array(AttentionPurchase)
+  }),
+  /** Bitrefill's USD store credit, which pays for every voucher; undefined if Bitrefill didn't answer. */
+  bitrefillUsd: Schema.optional(Schema.String)
+}) {}
+
+export class AdminApi extends HttpApiGroup.make("admin").add(
+  /** 204 for an admin, NotFound for everyone else: decides whether the menu shows the Admin link. */
+  HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
+  HttpApiEndpoint.get("overview", "/admin", { success: AdminOverview, error: NotFound }),
+  HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelaySettings, success: RelaySettings, error: NotFound }),
+  HttpApiEndpoint.post("retry", "/admin/purchases/:id/retry", {
+    params: { id: Schema.String },
+    success: HttpApiSchema.NoContent,
+    error: [NotFound, PurchaseInvalid]
+  })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi) {}

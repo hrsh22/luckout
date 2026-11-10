@@ -48,7 +48,8 @@ const world = (opts: { account?: typeof account | null; confirm?: "ok" | "refuse
     voucher: () =>
       Effect.succeed(new Voucher({ id: "test-card", name: "Test Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: 10_000_000 }] })),
     order: () => Effect.sync(() => (calls.push("order"), { _tag: "Ordered" as const, invoiceId: "inv-1" })),
-    delivery: () => Effect.succeed({ _tag: "Delivered" as const, invoiceId: "inv-1", orderId: "o-1", redemption: { code: "ABC-123" } })
+    delivery: () => Effect.succeed({ _tag: "Delivered" as const, invoiceId: "inv-1", orderId: "o-1", redemption: { code: "ABC-123" } }),
+    usdBalance: Effect.succeed("0.00")
   })
   const layer = Purchases.layer.pipe(
     Layer.provide(Layer.mergeAll(

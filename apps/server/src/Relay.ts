@@ -1,8 +1,8 @@
-import { RelayFailed, RelayUnavailable } from "@luckout/api"
+import { RelayFailed, RelaySettings, RelayUnavailable } from "@luckout/api"
 import { deserialize } from "borsh"
-import { Config, Context, Effect, Layer } from "effect"
+import { Config, Context, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/sql"
-import { baseEncode, encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
+import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
 import { Near, Network, type SignedDelegate } from "./Near.ts"
 import { MAINNET_USDC } from "./TopUp.ts"
@@ -10,11 +10,11 @@ import { MAINNET_USDC } from "./TopUp.ts"
 // The relayer (NEP-366, ADR-0008): customers sign their own calls in the wallet without sending
 // them, and our relayer account sends them and pays the network fee. It only pays for our own
 // calls with the exact deposit each needs, checks everything it can for free before paying, and
-// stops for the day once an account (or everyone together) has used the free relays.
+// stops for the day once an account (or everyone together) has used the free relays. The admin
+// panel can switch it off and change both caps.
 
-/** Free relays per account, and for everyone together, per rolling day. */
-export const PER_ACCOUNT_DAILY = 20
-export const ALL_DAILY = 500
+/** Until an admin changes them: on, 20 free relays per account and 500 in all per rolling day. */
+export const DEFAULT_SETTINGS = new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 500 })
 const MAX_GAS = 100_000_000_000_000n // 100 Tgas, what a deposit's ft_transfer_call needs
 /** USDC's storage registration fee: the only deposit besides 1 yoctoNEAR. */
 export const USDC_REGISTRATION = 1_250_000_000_000_000_000_000n
@@ -81,6 +81,9 @@ export class Relay extends Context.Service<Relay, {
   available(accountId: string): Effect.Effect<boolean>
   /** Checks a base64 borsh SignedDelegate, sends it from the relayer, and waits until it has run. */
   send(accountId: string, signedDelegate: string): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
+  readonly settings: Effect.Effect<RelaySettings>
+  /** Saves new settings; they apply to the next relay. */
+  configure(settings: RelaySettings, by: string): Effect.Effect<RelaySettings>
 }>()("luckout/Relay") {
   static readonly layer = Layer.effect(
     Relay,
@@ -90,13 +93,28 @@ export class Relay extends Context.Service<Relay, {
       const testnet = (yield* Network) === "testnet"
       const usdcId = yield* Config.String("USDC_CONTRACT_ID").pipe(Config.withDefault(testnet ? "usdc.luckout.testnet" : MAINNET_USDC))
 
+      const settings = sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'relay'`.pipe(
+        Effect.flatMap(([row]) => (row ? Schema.decodeUnknownEffect(RelaySettings)(row.value) : Effect.succeed(DEFAULT_SETTINGS))),
+        Effect.orDie
+      )
+
+      const configure = (next: RelaySettings, by: string) =>
+        sql`INSERT INTO settings (key, value, updated_by) VALUES ('relay', ${JSON.stringify(next)}::jsonb, ${by})
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`.pipe(
+          Effect.orDie,
+          Effect.as(next)
+        )
+
       const usedToday = (accountId: string) =>
         sql<{ mine: number; everyone: number }>`
           SELECT count(*) FILTER (WHERE account_id = ${accountId})::int AS mine, count(*)::int AS everyone
           FROM relays WHERE created_at > now() - interval '1 day'`.pipe(Effect.map((r) => r[0] ?? { mine: 0, everyone: 0 }))
 
+      /** Whether the relayer is on and this account (and everyone) has free relays left today. */
       const quotaLeft = (accountId: string) =>
-        usedToday(accountId).pipe(Effect.map((u) => u.mine < PER_ACCOUNT_DAILY && u.everyone < ALL_DAILY))
+        Effect.all([settings, usedToday(accountId)]).pipe(
+          Effect.map(([s, u]) => s.enabled && u.mine < s.perAccountDaily && u.everyone < s.allDaily)
+        )
 
       const available = (accountId: string) =>
         near.relayerId ? quotaLeft(accountId).pipe(Effect.orElseSucceed(() => false)) : Effect.succeed(false)
@@ -122,7 +140,7 @@ export class Relay extends Context.Service<Relay, {
             ? yield* near.resume(seen.signed_tx)
             : yield* Effect.gen(function*() {
               if (!(yield* quotaLeft(accountId))) {
-                return yield* new RelayUnavailable({ message: "You've used today's free transactions, so your wallet pays this one's network fee." })
+                return yield* new RelayUnavailable({ message: "Luckout isn't paying this network fee right now, so your wallet pays it." })
               }
               // Everything the network would refuse, refused here for free.
               const key = publicKeyOf(d)
@@ -153,7 +171,7 @@ export class Relay extends Context.Service<Relay, {
           })
         )
 
-      return Relay.of({ available, send })
+      return Relay.of({ available, send, settings, configure })
     })
   )
 }

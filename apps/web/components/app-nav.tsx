@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
-import { ChevronDown, Copy, LogOut, ReceiptText, Wallet } from "lucide-react"
+import { useIsAdmin } from "@/lib/queries"
+import { ChevronDown, Copy, LogOut, ReceiptText, ShieldCheck, Wallet } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
@@ -71,7 +72,8 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
 }
 
 function AccountMenu({ id }: { id: string }) {
-  const { signOut } = useSession()
+  const { signOut, token } = useSession()
+  const isAdmin = useIsAdmin(token)
   const router = useRouter()
   const item =
     "flex min-h-11 cursor-pointer items-center gap-3 rounded-2xl px-3 text-[15px] font-medium outline-none select-none data-[highlighted]:bg-soft"
@@ -104,6 +106,11 @@ function AccountMenu({ id }: { id: string }) {
             <Menu.Item className={item} onClick={() => router.push("/purchases")}>
               <ReceiptText size={18} className="text-muted" />Your purchases
             </Menu.Item>
+            {isAdmin && (
+              <Menu.Item className={item} onClick={() => router.push("/admin")}>
+                <ShieldCheck size={18} className="text-muted" />Admin
+              </Menu.Item>
+            )}
             <Menu.Separator className="mx-3 my-1 h-px bg-line" />
             <Menu.Item className={`${item} text-bad`} onClick={() => signOut().then(() => router.push("/shop"))}>
               <LogOut size={18} />Sign out

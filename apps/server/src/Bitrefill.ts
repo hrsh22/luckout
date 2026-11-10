@@ -18,6 +18,10 @@ const Product = Schema.Struct({
   logo_background: Schema.optional(Schema.String),
   packages: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String, amount: Schema.optional(Schema.Number) })))
 })
+const Balances = Schema.Struct({
+  balances: Schema.Array(Schema.Struct({ payment_method: Schema.String, balance_currency: Schema.String, amount: Schema.String }))
+})
+
 const McpProduct = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
@@ -88,6 +92,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   order(id: string, value: string): Effect.Effect<Order, BitrefillUnavailable>
   /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). */
   delivery(invoiceId: string): Effect.Effect<Delivery, BitrefillUnavailable>
+  /** The USD store credit that pays for every voucher, e.g. "120.50". */
+  readonly usdBalance: Effect.Effect<string, BitrefillUnavailable>
 }>()("luckout/Bitrefill") {
   static readonly layer = Layer.effect(
     Bitrefill,
@@ -262,7 +268,13 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         return yield* Effect.fail(unavailable(`invoice ${invoiceId} is still ${invoice.status}`))
       })
 
-      return Bitrefill.of({ search, voucher, order, delivery })
+      // Only MCP sees the USD sub-account; REST reports the primary (BTC) one.
+      const usdBalance = mcp("get-balances", {}, Balances).pipe(
+        Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
+        Effect.map((r) => r.balances.find((b) => b.payment_method === "balance" && b.balance_currency === "USD")?.amount ?? "0.00")
+      )
+
+      return Bitrefill.of({ search, voucher, order, delivery, usdBalance })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

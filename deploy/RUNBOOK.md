@@ -1,5 +1,7 @@
 # Runbook
 
+Most of this is also on the admin panel (`/admin`, for accounts in `ADMIN_ACCOUNTS`): gas for each account with a Send NEAR button, the reserve and proceeds, the shop switch, the relayer's switch and caps, Bitrefill's USD credit and daily orders, and stuck purchases with **Retry now** where that's safe (open purchases, and ones that gave up at `confirm` or `fail`). Anything it marks **Manual check** needs the steps below.
+
 ## A purchase is stuck
 
 The Monitor alerts when a purchase reaches `stuck`, or is still unfinished after 15 minutes. Find it:

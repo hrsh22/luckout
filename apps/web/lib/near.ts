@@ -40,6 +40,13 @@ export async function send(expected: string, ...calls: Array<Call>) {
   return (await walletOn(expected)).signAndSendTransactions({ transactions: calls.map(toTransaction) })
 }
 
+/** Sends NEAR (yoctoNEAR) from the connected wallet, which pays the fee. */
+export async function sendNear(expected: string, receiverId: string, yocto: string) {
+  return (await walletOn(expected)).signAndSendTransactions({
+    transactions: [{ receiverId, actions: [{ type: "Transfer" as const, params: { deposit: yocto } }] }]
+  })
+}
+
 /** Whether the connected wallet can sign without sending (NEP-366), so our relayer can send and pay. */
 export const canSignForRelay = () =>
   near().wallet().then((w) => w.manifest.features?.signDelegateActions === true, () => false)

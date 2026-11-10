@@ -16,7 +16,7 @@ import { useEffect, useState } from "react"
 const dollars = (micro: number) => (micro / 1e6).toFixed(micro % 1e6 ? 2 : 0)
 
 /** An amount field with quick picks. Everything stays in micro-USDC except what's typed. */
-function AmountField({ value, onChange, picks, label }: {
+export function AmountField({ value, onChange, picks, label }: {
   value: string
   onChange: (v: string) => void
   picks: ReadonlyArray<{ label: string; micro: number }>
