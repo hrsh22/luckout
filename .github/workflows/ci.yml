@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, testnet]
   pull_request:
 
 jobs:
@@ -35,4 +35,24 @@ jobs:
           key: cargo-${{ hashFiles('contract/Cargo.lock', 'contract/rust-toolchain.toml') }}
       # rustup reads contract/rust-toolchain.toml
       - run: cargo test --workspace
+
+  # Deploys the server after both jobs pass: the testnet branch to the testnet site, main to the
+  # mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
+  # fixes the branch per site, so this key can't deploy anything else (deploy/remote-deploy.sh).
+  deploy:
+    if: github.event_name == 'push' && ((github.ref == 'refs/heads/testnet' && vars.DEPLOY_TESTNET == 'on') || (github.ref == 'refs/heads/main' && vars.DEPLOY_MAINNET == 'on'))
+    needs: [apps, contract]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ github.ref_name }}
+    steps:
+      - name: Deploy over SSH
+        env:
+          KEY: ${{ github.ref == 'refs/heads/main' && secrets.MAINNET_DEPLOY_KEY || secrets.TESTNET_DEPLOY_KEY }}
+          TARGET: ${{ github.ref == 'refs/heads/main' && vars.MAINNET_SSH_TARGET || vars.TESTNET_SSH_TARGET }}
+          KNOWN_HOSTS: ${{ vars.VM_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$TARGET"
 

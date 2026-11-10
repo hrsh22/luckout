@@ -105,13 +105,34 @@ function useAdminTx(): Tx {
   }
 }
 
-type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | { gas: AdminOverview["gas"][number] }
+type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | { gas: AdminOverview["gas"][number] }
+
+/** NEAR account ids: lowercase parts joined by dots, 2 to 64 characters. */
+const NEAR_ACCOUNT = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/
 
 function Dashboard({ o }: { o: AdminOverview }) {
-  const { accountId } = useSession()
+  const { accountId, token } = useSession()
+  const qc = useQueryClient()
   const tx = useAdminTx()
   const [open, setOpen] = useState<Open>()
   const isOwner = accountId === o.contract.owner
+  const proposedToMe = accountId !== undefined && o.contract.pendingOwner === accountId
+  // Owner-only actions stay clickable: someone else learns why, instead of staring at a grey button.
+  const asOwner = (f: () => void) => () =>
+    isOwner
+      ? f()
+      : toast(`That needs the owner's wallet: ${o.contract.owner}`, {
+        description: `You're signed in as ${shortAccount(accountId ?? "")}. Sign in with the owner's account to do this.`
+      })
+  const setSales = async (openSales: boolean) => {
+    try {
+      await api((c) => c.admin.sales({ payload: { open: openSales } }), token)
+      toast.success(openSales ? "Sales restarted" : "Sales stopped: no new purchases until you restart them")
+      await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), qc.invalidateQueries({ queryKey: ["shop-status"] })])
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
   const contractCall = (method: string, args: object, tgas = 30): Call => ({ receiverId: o.contract.id, method, args, deposit: "1", tgas })
   const average = liveAverage({ lucky_settled: o.stats.luckySettled, lucky_amount_total: String(o.stats.luckyAmountTotal), lucky_paid_total: String(o.stats.luckyPaidTotal) })
   const close = () => setOpen(undefined)
@@ -124,6 +145,11 @@ function Dashboard({ o }: { o: AdminOverview }) {
             <span className="pill bg-white! text-ink"><ShieldCheck size={14} aria-hidden="true" />Admin</span>
             <span className={`pill ${o.network === "mainnet" ? "bg-bad-soft! text-bad" : "bg-gold-soft! text-gold-ink"}`}>{o.network}</span>
             <span className="pill bg-white!">{shortAccount(accountId ?? "")}{isOwner ? " · owner" : ""}</span>
+            {isOwner && (
+              <button type="button" className="pill bg-white/60! text-muted transition-colors hover:bg-white! hover:text-ink" onClick={() => setOpen("owner")}>
+                Transfer ownership
+              </button>
+            )}
           </p>
           <h1 className="font-display mt-3 text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">Control room</h1>
           {average !== undefined && (
@@ -132,19 +158,50 @@ function Dashboard({ o }: { o: AdminOverview }) {
             </p>
           )}
         </div>
-        <ShopSwitch paused={o.contract.paused} isOwner={isOwner} onPause={() => setOpen("pause")} onResume={() =>
-          tx("Opening the shop", "The shop is open", (id) => send(id, contractCall("set_paused", { paused: false })))} />
+        <ShopControls
+          salesStopped={o.salesStopped}
+          paused={o.contract.paused}
+          onSales={setSales}
+          onPause={asOwner(() => setOpen("pause"))}
+          onResume={asOwner(() => void tx("Resuming the contract", "The contract is running again", (id) => send(id, contractCall("set_paused", { paused: false }))))}
+        />
       </header>
 
-      {!isOwner && (
-        <p className="flex items-start gap-3 rounded-[1.5rem] bg-lilac-soft p-5 text-[15px]">
-          <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <span>
-            Reserve, proceeds and the shop switch need the contract owner, <b>{o.contract.owner}</b>. You're signed in as {shortAccount(accountId ?? "")}, so
-            those buttons are off. Sending NEAR for gas and the relayer settings work from any admin account.
-          </span>
-        </p>
-      )}
+      {proposedToMe
+        ? (
+          <div className="flex flex-col gap-4 rounded-[1.5rem] bg-lilac-soft p-5 sm:flex-row sm:items-center">
+            <p className="flex flex-1 items-start gap-3 text-[15px]">
+              <ShieldCheck size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
+              <span>
+                <b>{o.contract.owner}</b> proposed you as the contract's owner. Accept with your wallet to take over pausing, the reserve, proceeds and the
+                treasury.
+              </span>
+            </p>
+            <Button onClick={() => tx("Accepting ownership", "You own the contract now", (id) => send(id, contractCall("accept_owner", {})))}>
+              Accept ownership
+            </Button>
+          </div>
+        )
+        : isOwner && o.contract.pendingOwner
+        ? (
+          <div className="flex flex-col gap-4 rounded-[1.5rem] bg-soft p-5 sm:flex-row sm:items-center">
+            <p className="flex-1 text-[15px] text-ink-soft">
+              You proposed <b className="text-ink">{o.contract.pendingOwner}</b> as owner. Nothing changes until they accept from their own wallet.
+            </p>
+            <Button variant="light" size="sm" onClick={() => tx("Withdrawing the proposal", "Proposal withdrawn", (id) => send(id, contractCall("propose_owner", { new_owner: null })))}>
+              Withdraw the proposal
+            </Button>
+          </div>
+        )
+        : !isOwner && (
+          <p className="flex items-start gap-3 rounded-[1.5rem] bg-lilac-soft p-5 text-[15px]">
+            <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
+            <span>
+              The reserve, proceeds, the contract's pause and the treasury's mode need the owner's wallet, <b>{o.contract.owner}</b>. Any admin can stop
+              sales, send gas, and change the relayer and credit settings.
+            </span>
+          </p>
+        )}
 
       <section className="grid gap-4 lg:grid-cols-3">
         <div className="relative overflow-hidden rounded-[2.25rem] bg-ink p-8 text-white lg:col-span-2">
@@ -158,8 +215,8 @@ function Dashboard({ o }: { o: AdminOverview }) {
               {o.reserve.discountCap < o.reserve.maxCashback ? `: the reserve needs ${usd(o.reserve.maxCashback * 5)} free for the full ${usd(o.reserve.maxCashback)}.` : "."}
             </p>
             <div className="mt-auto flex flex-wrap gap-2 pt-8">
-              <Button variant="gold" disabled={!isOwner} onClick={() => setOpen("fund")}><Plus />Fund</Button>
-              <Button variant="onColor" className="text-white!" disabled={!isOwner || !o.reserve.free} onClick={() => setOpen("withdraw-reserve")}>Withdraw</Button>
+              <Button variant="gold" onClick={asOwner(() => setOpen("fund"))}><Plus />Fund</Button>
+              <Button variant="onColor" className="text-white!" disabled={!o.reserve.free} onClick={asOwner(() => setOpen("withdraw-reserve"))}>Withdraw</Button>
             </div>
           </div>
         </div>
@@ -169,13 +226,13 @@ function Dashboard({ o }: { o: AdminOverview }) {
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.proceeds} /></p>
           <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills Bitrefill from it.</p>
           <div className="mt-auto pt-6">
-            <Button variant="soft" disabled={!isOwner || !o.reserve.proceeds} onClick={() => setOpen("withdraw-proceeds")}>Withdraw</Button>
+            <Button variant="soft" disabled={!o.reserve.proceeds} onClick={asOwner(() => setOpen("withdraw-proceeds"))}>Withdraw</Button>
           </div>
         </div>
 
       </section>
 
-      <CreditSection o={o} isOwner={isOwner} tx={tx} />
+      <CreditSection o={o} asOwner={asOwner} tx={tx} />
 
       <section className="flex flex-col gap-4">
         <SectionTitle title="Gas" body="NEAR our accounts spend on the network. Each alerts below its line; any admin can top it up." />
@@ -213,21 +270,23 @@ function Dashboard({ o }: { o: AdminOverview }) {
         onWithdraw={(m) => tx(`Withdrawing ${usd(m)} of proceeds`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
           send(id, contractCall("withdraw_proceeds", { amount: String(m) }, 60)))}
       />
-      <Sheet open={open === "pause"} onOpenChange={(v) => !v && close()} title="Pause the shop?">
+      <Sheet open={open === "pause"} onOpenChange={(v) => !v && close()} title="Pause the contract?">
         <div className="flex flex-col gap-5">
           <ul className="flex flex-col gap-2 text-ink-soft">
-            <li>Nobody can start a new purchase, on the web or in Telegram.</li>
+            <li>The contract refuses every new purchase, whoever sends it.</li>
             <li>Purchases already in progress still finish and draw.</li>
             <li>Withdrawals and reclaims keep working.</li>
+            <li>For a quick stop, <b className="text-ink">Stop sales</b> needs no wallet. This is the hard stop.</li>
           </ul>
           <Button size="lg" variant="danger" onClick={async () => {
             close()
-            await tx("Pausing the shop", "The shop is paused", (id) => send(id, contractCall("set_paused", { paused: true })))
+            await tx("Pausing the contract", "The contract is paused", (id) => send(id, contractCall("set_paused", { paused: true })))
           }}>
-            <Pause />Pause new purchases
+            <Pause />Pause the contract
           </Button>
         </div>
       </Sheet>
+      <TransferOwnerSheet open={open === "owner"} onClose={close} o={o} tx={tx} contractCall={contractCall} />
       <SendNearSheet target={typeof open === "object" ? open.gas : undefined} onClose={close} tx={tx} />
     </div>
   )
@@ -242,18 +301,74 @@ function SectionTitle({ title, body }: { title: string; body: string }) {
   )
 }
 
-function ShopSwitch({ paused, isOwner, onPause, onResume }: { paused: boolean; isOwner: boolean; onPause: () => void; onResume: () => void }) {
+/**
+ * Two ways to stop new purchases: Stop sales (any admin, on the server, instant) and the contract's
+ * pause (the owner's wallet, the hard stop). The pill says which, if any, is on.
+ */
+function ShopControls({ salesStopped, paused, onSales, onPause, onResume }: {
+  salesStopped: boolean
+  paused: boolean
+  onSales: (open: boolean) => Promise<void>
+  onPause: () => void
+  onResume: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const state = paused
+    ? { text: "Contract paused", box: "bg-bad-soft text-bad", dot: "bg-bad" }
+    : salesStopped
+    ? { text: "Sales stopped", box: "bg-warn-soft text-warn", dot: "bg-warn" }
+    : { text: "Shop open", box: "bg-good-soft text-good", dot: "bg-good" }
   return (
-    <div className={`flex items-center gap-3 rounded-full p-1.5 pl-5 ${paused ? "bg-warn-soft text-warn" : "bg-good-soft text-good"}`}>
-      <span className="relative flex size-2.5" aria-hidden="true">
-        {!paused && <span className="absolute inline-flex size-full animate-ping rounded-full bg-good opacity-50" />}
-        <span className={`relative inline-flex size-2.5 rounded-full ${paused ? "bg-warn" : "bg-good"}`} />
-      </span>
-      <span className="font-semibold">{paused ? "Shop paused" : "Shop open"}</span>
-      <Button size="sm" variant="light" disabled={!isOwner} onClick={paused ? onResume : onPause}>
-        {paused ? <><Play />Resume</> : <><Pause />Pause</>}
-      </Button>
+    <div className="flex flex-col items-start gap-2 sm:items-end">
+      <div className={`flex items-center gap-3 rounded-full p-1.5 pl-5 ${state.box}`}>
+        <span className="relative flex size-2.5" aria-hidden="true">
+          {!paused && !salesStopped && <span className="absolute inline-flex size-full animate-ping rounded-full bg-good opacity-50" />}
+          <span className={`relative inline-flex size-2.5 rounded-full ${state.dot}`} />
+        </span>
+        <span className="font-semibold">{state.text}</span>
+        <Button size="sm" variant="light" loading={busy} onClick={async () => {
+          setBusy(true)
+          await onSales(salesStopped)
+          setBusy(false)
+        }}>
+          {salesStopped ? <><Play />Restart sales</> : <><Pause />Stop sales</>}
+        </Button>
+      </div>
+      <button type="button" className="px-2 text-sm text-muted underline-offset-4 hover:text-ink hover:underline" onClick={paused ? onResume : onPause}>
+        {paused ? "Resume the contract" : "Pause the contract"} <span className="text-xs">(owner)</span>
+      </button>
     </div>
+  )
+}
+
+function TransferOwnerSheet({ open, onClose, o, tx, contractCall }: {
+  open: boolean
+  onClose: () => void
+  o: AdminOverview
+  tx: Tx
+  contractCall: (method: string, args: object) => Call
+}) {
+  const [to, setTo] = useState("")
+  useEffect(() => {
+    if (open) setTo("")
+  }, [open])
+  const account = to.trim().toLowerCase()
+  const valid = NEAR_ACCOUNT.test(account) && account !== o.contract.owner
+  return (
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Transfer ownership" description="The new owner accepts from their own wallet, here in the admin panel. Nothing changes until they do.">
+      <div className="flex flex-col gap-4">
+        <label className="flex flex-col gap-1.5">
+          <span className="text-sm font-semibold">New owner's NEAR account</span>
+          <input className="field" value={to} onChange={(e) => setTo(e.target.value)} placeholder={o.network === "mainnet" ? "name.near" : "name.testnet"} autoCapitalize="none" spellCheck={false} />
+          <span className="text-xs text-muted">The operator and the treasury can never own the contract; the contract refuses them.</span>
+        </label>
+        <Button size="lg" disabled={!valid} onClick={async () => {
+          if (await tx(`Proposing ${account}`, `${account} can now accept ownership`, (id) => send(id, contractCall("propose_owner", { new_owner: account })))) onClose()
+        }}>
+          Propose {valid ? account : "the new owner"}
+        </Button>
+      </div>
+    </Sheet>
   )
 }
 

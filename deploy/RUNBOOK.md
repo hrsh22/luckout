@@ -43,6 +43,11 @@ The alert says "was delivered but closed onchain as Reclaimed". The customer has
 - Contract under 1 NEAR free: send NEAR to the contract account. New purchases fail when storage can't be paid.
 - Relayer under 0.5 NEAR: send NEAR to the relayer account. Until then customers' wallets pay their own fees (the web app falls back by itself), and customers with no NEAR can't deposit or withdraw.
 
+## Stopping purchases
+
+- **Something looks wrong, stop new purchases now:** Admin → **Stop sales**. Any admin can, no wallet needed. The web shows a "paused for a few minutes" banner, the Buy button explains, and the Telegram bot stops offering Buy buttons. Purchases already in progress finish; waiting ones keep their place; withdrawals and reclaims keep working. **Restart sales** undoes it.
+- **The hard stop:** Admin → **Pause the contract**, signed by the owner's wallet. The contract itself then refuses every new purchase, whoever sends it.
+
 ## Bitrefill credit and refills (ADR-0009)
 
 The admin panel's Bitrefill credit section shows the credit against its target, the treasury, and every refill step by step.

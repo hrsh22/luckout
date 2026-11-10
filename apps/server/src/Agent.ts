@@ -125,6 +125,8 @@ export const makeAgent = (deps: {
   bitrefill: Bitrefill["Service"]
   purchases: Purchases["Service"]
   near: Near["Service"]
+  /** Whether new purchases can start (an admin may have stopped sales, or the owner paused the contract). */
+  shopOpen: Effect.Effect<boolean>
   testnet: boolean
   web: string
   apiKey: string
@@ -190,6 +192,7 @@ export const makeAgent = (deps: {
         const m = resolveMode(a, mode)
         const [voucher, q] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m))])
         // A button that would fail on tap is worse than no button: say what's in the way instead.
+        if (!(yield* deps.shopOpen)) return { error: "Purchases are paused for a few minutes; their balance is safe. Suggest trying again soon." }
         const why = blocker(a, q.maxPrice, deps.web)
         if (why) return { error: why }
         prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice })

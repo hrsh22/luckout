@@ -13,7 +13,7 @@ import { usd, usdUp } from "@/lib/format"
 import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { useQuote, useSummary, voucherQuery } from "@/lib/queries"
+import { useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -228,7 +228,15 @@ function Receipt({ shown, exact, info, error, children }: {
 /** One button that knows what's in the way: signing in, funds, or limits, and fixes it on the spot. */
 function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
   const { accountId, account } = useSession()
+  const shop = useShopStatus().data
   const [adding, setAdding] = useState(false)
+  if (shop && !shop.open) {
+    return (
+      <p className="rounded-2xl bg-warn-soft p-4 text-[15px] font-medium text-warn">
+        Purchases are paused for a few minutes. Your balance is safe; try again soon.
+      </p>
+    )
+  }
   if (!accountId) return <SignInButton size="lg" label="Sign in to buy" />
   if (account === undefined) return <span className="skeleton h-14 rounded-full" />
   const balance = Number(account?.balance ?? 0)

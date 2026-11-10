@@ -98,7 +98,10 @@ function useSaveCredit() {
   }
 }
 
-export function CreditSection({ o, isOwner, tx }: { o: AdminOverview; isOwner: boolean; tx: Tx }) {
+/** Runs `f` if the signed-in account owns the contract; otherwise explains who must do it. */
+type AsOwner = (f: () => void) => () => void
+
+export function CreditSection({ o, asOwner, tx }: { o: AdminOverview; asOwner: AsOwner; tx: Tx }) {
   return (
     <section className="flex flex-col gap-4">
       <div>
@@ -109,8 +112,19 @@ export function CreditSection({ o, isOwner, tx }: { o: AdminOverview; isOwner: b
         </p>
       </div>
       <div className="grid items-start gap-4 lg:grid-cols-[1.5fr_1fr]">
-        <CreditCard c={o.credit} ordersToday={o.purchases.bitrefillOrders} cap={o.purchases.bitrefillCap} />
-        <TreasuryCard o={o} isOwner={isOwner} tx={tx} />
+        {o.network === "testnet"
+          ? (
+            <div className="card flex flex-col gap-3 p-7">
+              <p className="flex items-center gap-2 text-ink-soft"><Store size={18} aria-hidden="true" />USD credit at Bitrefill</p>
+              <p className="font-display text-3xl font-extrabold">Not used on testnet</p>
+              <p className="text-ink-soft">
+                Testnet sells only Bitrefill's test cards, which are free, so there's no credit to track, refill or alert on. On mainnet this shows the
+                credit against its target, purchases waiting for it, and the settings.
+              </p>
+            </div>
+          )
+          : <CreditCard c={o.credit} ordersToday={o.purchases.bitrefillOrders} cap={o.purchases.bitrefillCap} />}
+        <TreasuryCard o={o} asOwner={asOwner} tx={tx} />
       </div>
       {o.refills.length > 0 && <RefillsCard refills={o.refills} />}
     </section>
@@ -286,7 +300,7 @@ function RefillNowSheet({ open, onClose, c }: { open: boolean; onClose: () => vo
   )
 }
 
-function TreasuryCard({ o, isOwner, tx }: { o: AdminOverview; isOwner: boolean; tx: Tx }) {
+function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: AsOwner; tx: Tx }) {
   const t = o.treasury
   const mode = treasuryMode(t)
   const [sheet, setSheet] = useState<"mode" | "move">()
@@ -323,10 +337,10 @@ function TreasuryCard({ o, isOwner, tx }: { o: AdminOverview; isOwner: boolean; 
         </p>
       )}
       <div className="mt-auto flex flex-wrap gap-2">
-        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={!isOwner || !t.accountId} onClick={() => setSheet("mode")}>
+        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={!t.accountId} onClick={asOwner(() => setSheet("mode"))}>
           {mode === "mismatch" ? "Fix it" : "Change mode"}
         </Button>
-        <Button size="sm" variant={t.needs ? "primary" : "soft"} disabled={!isOwner || mode === "none" || mode === "mismatch" || !o.reserve.proceeds} onClick={() => setSheet("move")}>
+        <Button size="sm" variant={t.needs ? "primary" : "soft"} disabled={mode === "none" || mode === "mismatch" || !o.reserve.proceeds} onClick={asOwner(() => setSheet("move"))}>
           Move proceeds here
         </Button>
       </div>

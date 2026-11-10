@@ -3,6 +3,7 @@ import { PgliteClient } from "@effect/sql-pglite"
 import { Config, Effect, Layer, Option } from "effect"
 import { Migrator, SqlClient } from "effect/sql"
 import { mkdirSync } from "node:fs"
+import { Network } from "./Near.ts"
 
 // Exactly one server process per database (ADR-0006): a second one would poll Telegram twice
 // and race the operator's transaction nonces. The lock lives as long as this connection.
@@ -157,7 +158,24 @@ const migrations = Migrator.fromRecord({
 
 const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
 
-export const DbLive = Migrations.pipe(Layer.provideMerge(Client))
+/**
+ * A database belongs to one network for good: the first server to start records it, and a server
+ * for the other network refuses to start against it, so testnet and mainnet data can never mix.
+ */
+const NetworkLock = Layer.effectDiscard(
+  Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const network = yield* Network
+    yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('network', ${JSON.stringify(network)}::jsonb, 'server')
+               ON CONFLICT (key) DO NOTHING`
+    const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'network'`
+    if (row?.value !== network) {
+      return yield* Effect.die(`This database belongs to ${String(row?.value)}, but NEAR_NETWORK is ${network}. Point DATABASE_URL at the ${network} database.`)
+    }
+  }).pipe(Effect.orDie)
+)
+
+export const DbLive = NetworkLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
 
 /** A fresh in-memory database, for tests. */
 export const DbMemory = Migrations.pipe(Layer.provideMerge(PgliteClient.layer({})))

@@ -6,6 +6,7 @@ import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
+import { CLOSED_MESSAGE, Sales } from "./Sales.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 
 // A purchase walks these steps (ADR-0001). Every step is saved before its side effect,
@@ -87,6 +88,7 @@ export class Purchases extends Context.Service<Purchases, {
       const bitrefill = yield* Bitrefill
       const credit = yield* Credit
       const refill = yield* Refill
+      const sales = yield* Sales
       const alerts = yield* Alerts
       const keyHex = yield* Config.option(Config.Redacted("REDEMPTION_KEY"))
       const testnet = (yield* Network) === "testnet"
@@ -319,6 +321,7 @@ export class Purchases extends Context.Service<Purchases, {
           ...(row.redemption && row.step === "settled" ? openRedemption(row) : {}),
           ...(row.admit_tx ? { admitTx: row.admit_tx.hash } : {}),
           ...(row.settle_tx ? { settleTx: row.settle_tx.hash } : {}),
+          ...(row.contract_purchase_id !== null ? { contractPurchaseId: Number(row.contract_purchase_id) } : {}),
           createdAt: new Date(row.created_at).toISOString()
         })
       }
@@ -365,6 +368,8 @@ export class Purchases extends Context.Service<Purchases, {
 
       const create = Effect.fn("Purchases.create")(function*(accountId: string, input: NewPurchase) {
         if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
+        // A retry of a purchase already made still returns it below; only new ones are held back.
+        const open = (yield* sales.status).open
         // Testnet balances are test money: never let them buy a real voucher paid from our real Bitrefill balance.
         if (testnet && !input.voucherId.startsWith("test-")) {
           return yield* new PurchaseInvalid({ message: "On testnet only Bitrefill test vouchers can be bought" })
@@ -373,6 +378,7 @@ export class Purchases extends Context.Service<Purchases, {
         const existing = yield* sql<{ id: string }>`SELECT id FROM purchases WHERE account_id = ${accountId} AND idempotency_key = ${input.idempotencyKey}`
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
+        if (!open) return yield* new PurchaseInvalid({ message: CLOSED_MESSAGE })
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
@@ -454,6 +460,8 @@ export class Purchases extends Context.Service<Purchases, {
       // admission, refunded in full through fail_purchase if it did.
       const promote = Effect.gen(function*() {
         const { waitMinutes } = yield* credit.settings
+        // While sales are closed, nothing new is admitted; waiting purchases keep their place (and their timer).
+        const open = (yield* sales.status).open
         const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step IN ${sql.in(WAITING_STEPS)} ORDER BY created_at LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
           // Measured from creation, so bouncing between ordering and restock can't extend it.
@@ -467,6 +475,7 @@ export class Purchases extends Context.Service<Purchases, {
             }
             continue
           }
+          if (row.step === "waiting" && !open) continue
           const next: Step = row.step === "waiting" ? "admit" : "ordering"
           const go = yield* credit.guard((free) => (free >= Number(row.reference_price) ? move(row, { step: next, error: null }) : Effect.succeed(false)))
           // The customer may have left: tell them in Telegram how it ended.
@@ -474,6 +483,18 @@ export class Purchases extends Context.Service<Purchases, {
         }
       }).pipe(Effect.catchCause((cause) => Effect.logError("waiting purchases pass failed", cause)))
       yield* promote.pipe(Effect.repeat(Schedule.spaced("10 seconds")), Effect.forkScoped)
+
+      // A stuck purchase the customer reclaimed (or that was failed) onchain is over: say so here too.
+      const settleClosed = Effect.gen(function*() {
+        const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step = 'stuck' AND contract_purchase_id IS NOT NULL LIMIT 50`.pipe(Effect.orDie)
+        for (const row of rows) {
+          const onchain = yield* near.view<{ status: string } | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
+          if (onchain?.status === "Reclaimed" || onchain?.status === "Failed") {
+            if (yield* move(row, { step: "failed", error: onchain.status === "Reclaimed" ? "Reclaimed" : row.error })) yield* notify(yield* load(row.id))
+          }
+        }
+      }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
+      yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
       return Purchases.of({ quote, create, list, get, promoteWaiting: promote })
     })

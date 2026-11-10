@@ -119,6 +119,8 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   redemption: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   admitTx: Schema.optional(Schema.String),
   settleTx: Schema.optional(Schema.String),
+  /** The purchase's id in the contract, once admitted: what reclaim and retry_draw take. */
+  contractPurchaseId: Schema.optional(Schema.Int),
   createdAt: Schema.String
 }) {}
 
@@ -141,8 +143,15 @@ export class PurchaseInvalid extends Schema.TaggedError<PurchaseInvalid>()(
 
 export class NotFound extends Schema.TaggedError<NotFound>()("NotFound", {}, { httpApiStatus: 404 }) {}
 
+/** Whether new purchases can start: "stopped" by an admin on the server, or "paused" in the contract by the owner. */
+export class ShopStatus extends Schema.Class<ShopStatus>("ShopStatus")({
+  open: Schema.Boolean,
+  reason: Schema.optional(Schema.Literals(["stopped", "paused"]))
+}) {}
+
 export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).add(
-  HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent })
+  HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent }),
+  HttpApiEndpoint.get("status", "/status", { success: ShopStatus })
 ) {}
 
 export class CatalogApi extends HttpApiGroup.make("catalog").add(
@@ -335,7 +344,17 @@ export class AttentionPurchase extends Schema.Class<AttentionPurchase>("Attentio
 
 export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")({
   network: Schema.Literals(["testnet", "mainnet"]),
-  contract: Schema.Struct({ id: Schema.String, owner: Schema.String, operator: Schema.String, usdc: Schema.String, paused: Schema.Boolean }),
+  contract: Schema.Struct({
+    id: Schema.String,
+    owner: Schema.String,
+    /** Proposed by the owner; becomes the owner when it accepts. */
+    pendingOwner: Schema.optional(Schema.String),
+    operator: Schema.String,
+    usdc: Schema.String,
+    paused: Schema.Boolean
+  }),
+  /** An admin stopped new purchases on the server (any admin can, unlike the contract's pause). */
+  salesStopped: Schema.Boolean,
   reserve: Schema.Struct({ free: MicroUsdc, locked: MicroUsdc, discountCap: MicroUsdc, proceeds: MicroUsdc, maxCashback: MicroUsdc }),
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
   /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
@@ -398,6 +417,8 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
   HttpApiEndpoint.get("overview", "/admin", { success: AdminOverview, error: NotFound }),
   HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelaySettings, success: RelaySettings, error: NotFound }),
+  /** Stops or restarts new purchases on the server, at once, without the owner's wallet. */
+  HttpApiEndpoint.post("sales", "/admin/sales", { payload: Schema.Struct({ open: Schema.Boolean }), success: ShopStatus, error: NotFound }),
   HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditSettings, success: CreditSettings, error: [NotFound, AdminInvalid] }),
   /** Refill now, outside the schedule; `amount` defaults to what the target and waiting purchases need. */
   HttpApiEndpoint.post("refill", "/admin/refills", {

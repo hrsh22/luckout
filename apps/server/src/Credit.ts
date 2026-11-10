@@ -3,6 +3,7 @@ import { Context, Effect, Layer, Option, Ref, Schedule, Semaphore } from "effect
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
+import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
 // Bitrefill credit (ADR-0009). Every real card is paid from our USD store credit, which can't be
@@ -12,14 +13,14 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // One lock covers "is there credit for this card?" and recording the answer, so two purchases can
 // never both count on the same dollars. Test cards are free and never touch any of this.
 
-export const DEFAULT_CREDIT = new CreditSettings({
-  autoRefill: true,
-  floor: 100_000_000,
-  ceiling: 500_000_000,
-  maxOrder: 300_000_000,
-  dailyRefill: 1_000_000_000,
-  waitMinutes: 30
-})
+/**
+ * Until an admin changes them. Mainnet starts small, enough to prove every path with pocket money,
+ * and grows from the admin panel as it proves itself.
+ */
+export const CREDIT_DEFAULTS = {
+  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, maxOrder: 15_000_000, dailyRefill: 40_000_000, waitMinutes: 30 }),
+  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, maxOrder: 300_000_000, dailyRefill: 1_000_000_000, waitMinutes: 30 })
+} as const
 
 /** Steps after which a real card's price will soon leave the credit (it's being admitted or ordered). */
 const HELD_STEPS = ["admit", "ordering"]
@@ -85,10 +86,13 @@ export class Credit extends Context.Service<Credit, {
       const sql = yield* SqlClient.SqlClient
       const bitrefill = yield* Bitrefill
       const alerts = yield* Alerts
+      const network = yield* Network
+      // Testnet sells only test cards, which are free: no credit to track, refill or alert on.
+      const tracked = network === "mainnet"
       const lock = yield* Semaphore.make(1)
       const snapshot = yield* Ref.make<Snapshot | undefined>(undefined)
 
-      const settings = readSetting("credit", CreditSettings, DEFAULT_CREDIT).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+      const settings = readSetting("credit", CreditSettings, CREDIT_DEFAULTS[network]).pipe(Effect.provideService(SqlClient.SqlClient, sql))
       const configure = (next: CreditSettings, by: string) =>
         writeSetting("credit", CreditSettings, next, by).pipe(Effect.provideService(SqlClient.SqlClient, sql))
 
@@ -114,6 +118,7 @@ export class Credit extends Context.Service<Credit, {
         )
 
       const refresh = Effect.gen(function*() {
+        if (!tracked) return Option.none<Snapshot>()
         const readAt = new Date()
         const read = yield* bitrefill.credit.pipe(Effect.timeout("15 seconds"), Effect.option)
         if (Option.isNone(read)) return Option.none<Snapshot>()
@@ -169,11 +174,13 @@ export class Credit extends Context.Service<Credit, {
       const guard = <A, E, R>(f: (free: number) => Effect.Effect<A, E, R>) =>
         lock.withPermits(1)(Effect.flatMap(Effect.flatMap(current, freeFrom), f))
 
-      yield* refresh.pipe(
-        Effect.catchCause((cause) => Effect.as(Effect.logError("credit refresh failed", cause), Option.none())),
-        Effect.repeat(Schedule.spaced("2 minutes")),
-        Effect.forkScoped
-      )
+      if (tracked) {
+        yield* refresh.pipe(
+          Effect.catchCause((cause) => Effect.as(Effect.logError("credit refresh failed", cause), Option.none())),
+          Effect.repeat(Schedule.spaced("2 minutes")),
+          Effect.forkScoped
+        )
+      }
 
       return Credit.of({ settings, configure, refresh, view, guard })
     })

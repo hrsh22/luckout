@@ -206,6 +206,9 @@ pub struct Contract {
     sweep_daily_cap: u128,
     sweep_day: u64,
     swept_today: u128,
+    /// Proposed by the owner; becomes the owner only when it accepts, so a typo can't hand the
+    /// contract to an account nobody controls.
+    pending_owner: Option<AccountId>,
 }
 
 #[near]
@@ -232,6 +235,7 @@ impl Contract {
             sweep_daily_cap: 0,
             sweep_day: 0,
             swept_today: 0,
+            pending_owner: None,
         };
         for v in default_game_versions() {
             c.push_version(v);
@@ -582,7 +586,10 @@ impl Contract {
         self.assert_owner();
         if let Some(t) = &treasury {
             require!(
-                *t != env::current_account_id() && *t != self.usdc && *t != self.operator,
+                *t != env::current_account_id()
+                    && *t != self.usdc
+                    && *t != self.operator
+                    && *t != self.owner,
                 "The treasury must be its own account"
             );
         } else {
@@ -593,6 +600,47 @@ impl Contract {
         emit(
             "treasury_set",
             json!({ "treasury": treasury, "daily_cap": daily_cap }),
+        );
+    }
+
+    /// The owner proposes a new owner, or withdraws the proposal with `None`. Nothing changes
+    /// until the proposed account accepts with its own signature.
+    #[payable]
+    pub fn propose_owner(&mut self, new_owner: Option<AccountId>) {
+        self.assert_owner();
+        if let Some(o) = &new_owner {
+            require!(*o != self.owner, "Already the owner");
+            // The server holds the operator's and the treasury's keys: neither may ever own the contract.
+            require!(
+                *o != env::current_account_id()
+                    && *o != self.operator
+                    && Some(o) != self.treasury.as_ref(),
+                "That account can't own the contract"
+            );
+        }
+        self.pending_owner = new_owner.clone();
+        emit("owner_proposed", json!({ "new_owner": new_owner }));
+    }
+
+    /// The proposed owner takes over, with its own full-access signature (1 yoctoNEAR).
+    #[payable]
+    pub fn accept_owner(&mut self) {
+        assert_one_yocto();
+        let caller = env::predecessor_account_id();
+        require!(
+            self.pending_owner.as_ref() == Some(&caller),
+            "Not the proposed owner"
+        );
+        // The treasury may have been set after the proposal: still never the owner.
+        require!(
+            Some(&caller) != self.treasury.as_ref(),
+            "That account can't own the contract"
+        );
+        let previous = std::mem::replace(&mut self.owner, caller.clone());
+        self.pending_owner = None;
+        emit(
+            "owner_changed",
+            json!({ "previous": previous, "owner": caller }),
         );
     }
 
@@ -701,6 +749,7 @@ impl Contract {
     pub fn get_config(&self) -> Value {
         json!({
             "owner": self.owner,
+            "pending_owner": self.pending_owner,
             "operator": self.operator,
             "usdc": self.usdc,
             "paused": self.paused,
@@ -942,7 +991,7 @@ fn emit(event: &str, data: Value) {
 #[cfg(test)]
 mod tests;
 
-/// One-time upgrade of a deployed contract from the layout before the treasury (ADR-0009).
+/// One-time upgrade of a deployed contract from the previous layout (before `pending_owner`).
 /// Compiled only with `--features migrate` and deployed together with the `migrate` call;
 /// the normal build is deployed right after, so the method never stays on chain.
 #[cfg(feature = "migrate")]
@@ -966,6 +1015,10 @@ mod migrate {
         lucky_amount_total: u128,
         lucky_paid_total: u128,
         orders: LookupMap<String, u64>,
+        treasury: Option<AccountId>,
+        sweep_daily_cap: u128,
+        sweep_day: u64,
+        swept_today: u128,
     }
 
     #[near]
@@ -991,10 +1044,11 @@ mod migrate {
                 lucky_amount_total: b.lucky_amount_total,
                 lucky_paid_total: b.lucky_paid_total,
                 orders: b.orders,
-                treasury: None,
-                sweep_daily_cap: 0,
-                sweep_day: 0,
-                swept_today: 0,
+                treasury: b.treasury,
+                sweep_daily_cap: b.sweep_daily_cap,
+                sweep_day: b.sweep_day,
+                swept_today: b.swept_today,
+                pending_owner: None,
             }
         }
     }
@@ -1042,6 +1096,10 @@ mod migrate {
                 lucky_amount_total: 40,
                 lucky_paid_total: 37,
                 orders: LookupMap::new(Key::Orders),
+                treasury: Some("treasury.near".parse().unwrap()),
+                sweep_daily_cap: 500,
+                sweep_day: 3,
+                swept_today: 9,
             });
             let c = Contract::migrate();
             assert_eq!(c.owner.as_str(), "owner.near");
@@ -1068,7 +1126,12 @@ mod migrate {
                     .0,
                 7
             );
-            assert_eq!((c.treasury.clone(), c.sweep_daily_cap), (None, 0));
+            assert_eq!(
+                c.treasury.as_ref().map(|t| t.as_str()),
+                Some("treasury.near")
+            );
+            assert_eq!((c.sweep_daily_cap, c.sweep_day, c.swept_today), (500, 3, 9));
+            assert_eq!(c.pending_owner, None);
         }
     }
 }
