@@ -243,7 +243,9 @@ export class Refill extends Context.Service<Refill, {
               const q = r.quote
               yield* move(row, {
                 step: "fund",
-                swap: { depositAddress: q.depositAddress!, amountIn: q.amountIn, minAmountIn: q.minAmountIn ?? q.amountIn, deadline: q.deadline! }
+                // Our deadline, when 1Click starts refunding an unfilled swap. The quote's own `deadline`
+                // is when the deposit address dies (days later), too late to re-quote or call it stuck.
+                swap: { depositAddress: q.depositAddress!, amountIn: q.amountIn, minAmountIn: q.minAmountIn ?? q.amountIn, deadline: deadline.toISOString() }
               })
               return "next"
             }
