@@ -13,7 +13,7 @@ import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
 import type { Mode } from "@luckout/api"
 import { Plus } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
 
 export default function WalletPage() {
@@ -22,6 +22,8 @@ export default function WalletPage() {
   const [adding, setAdding] = useState(false)
   const [withdrawing, setWithdrawing] = useState(false)
   const [saving, setSaving] = useState<Mode>()
+  // The pre-deposit pick lives in localStorage, which doesn't re-render: nudge it.
+  const [, rerender] = useReducer((n: number) => n + 1, 0)
 
   if (ready && !accountId) {
     return (
@@ -43,6 +45,7 @@ export default function WalletPage() {
     // Before the first deposit the contract has no account to save it on; it's saved with the deposit.
     if (!account) {
       setPendingMode(accountId, m)
+      rerender()
       toast.success(`${modeName(m)} it is`, { description: "It's saved as your default with your first deposit." })
       return
     }
