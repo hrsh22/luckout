@@ -65,7 +65,7 @@ export class Admin extends Context.Service<Admin, {
           accountId
             ? spendable(near, accountId).pipe(Effect.map((s) => [{ role, accountId, spendable: String(s), alertBelow: String(GAS_ALERT[role]) }]))
             : Effect.succeed([])
-        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop] = yield* Effect.all([
+        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop, held] = yield* Effect.all([
           near.view<{ owner: string; pending_owner?: string | null; operator: string; usdc: string; paused: boolean; max_cashback: string }>("get_config"),
           near.view<{ free: string; locked: string; discount_cap: string; proceeds: string }>("get_reserve"),
           near.view<{ lucky_settled: number; lucky_amount_total: string; lucky_paid_total: string }>("get_stats"),
@@ -89,11 +89,12 @@ export class Admin extends Context.Service<Admin, {
             FROM purchases WHERE created_at > now() - interval '1 day'`,
           sql<Row>`
             SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at FROM purchases
-            WHERE step = 'stuck' OR (step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')
+            WHERE step IN ('stuck', 'waiting', 'restock') OR (step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')
             ORDER BY created_at DESC LIMIT 20`,
           credit.view,
           refills.status,
-          sales.status
+          sales.status,
+          near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId)
         ], { concurrency: "unbounded" })
         const p = purchases[0] ?? { today: 0, delivered: 0, ordered: 0 }
         return new AdminOverview({
@@ -112,7 +113,9 @@ export class Admin extends Context.Service<Admin, {
             locked: Number(reserve.locked),
             discountCap: Number(reserve.discount_cap),
             proceeds: Number(reserve.proceeds),
-            maxCashback: Number(config.max_cashback)
+            maxCashback: Number(config.max_cashback),
+            held: Number(held),
+            customers: Number(held) - Number(reserve.free) - Number(reserve.locked) - Number(reserve.proceeds)
           },
           stats: { luckySettled: stats.lucky_settled, luckyAmountTotal: Number(stats.lucky_amount_total), luckyPaidTotal: Number(stats.lucky_paid_total) },
           gas,

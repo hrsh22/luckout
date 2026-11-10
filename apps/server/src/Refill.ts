@@ -210,6 +210,9 @@ export class Refill extends Context.Service<Refill, {
           step: r.step,
           ...(r.error ? { error: r.error } : {}),
           ...(r.send_tx ? { sendTx: r.send_tx.hash } : {}),
+          ...(r.swap ? { swap: r.swap.depositAddress } : {}),
+          ...(r.pay_tx?.hash ? { payTx: r.pay_tx.hash } : {}),
+          ...(r.invoice_id ? { invoiceId: r.invoice_id } : {}),
           createdAt: new Date(r.created_at).toISOString(),
           updatedAt: new Date(r.updated_at).toISOString()
         })
@@ -418,7 +421,8 @@ export class Refill extends Context.Service<Refill, {
             }
             case "swapping": {
               const status = yield* oneClick.status(row.swap!.depositAddress)
-              yield* save(row.id, { swap_status: status })
+              // A check that answered clears any earlier network error, so the panel shows only what's current.
+              yield* save(row.id, { swap_status: status, error: null })
               if (status === "SUCCESS") {
                 yield* move(row, { step: "invoice" })
                 return "next"
@@ -436,6 +440,7 @@ export class Refill extends Context.Service<Refill, {
               // Only now, with the USDC in our wallet, does Bitrefill get asked for an invoice.
               const w = yield* base.balances
               if (w.usdc < amount) {
+                if (row.error) yield* save(row.id, { error: null })
                 // 1Click reported success; the transfer can take a few blocks to show.
                 if (Date.now() - time(row.updated_at) > WALLET_WAIT_MS) {
                   return yield* stop(row, `the Base wallet holds ${usd(w.usdc)}, short of the ${usd(amount)} this refill pays`)
@@ -466,7 +471,7 @@ export class Refill extends Context.Service<Refill, {
                 return yield* stop(row, "the Bitrefill payment was signed but couldn't be sent before its invoice nearly expired, so it was never sent")
               }
               const status = yield* base.send(p as BasePayment & { raw: Hex; hash: Hex })
-              if (!row.paid_at) yield* save(row.id, { paid_at: new Date().toISOString() })
+              if (!row.paid_at || row.error) yield* save(row.id, { paid_at: row.paid_at ?? new Date().toISOString(), error: null })
               if (status === "success") {
                 yield* move(row, { step: "crediting", error: null })
                 return "next"

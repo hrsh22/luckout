@@ -25,7 +25,9 @@ const near = fakeNear({
     Effect.succeed(({
       get_config: { owner: "luckout.testnet", operator: "server.test", usdc: "usdc.test", paused: false, max_cashback: "50000000" },
       get_reserve: { free: "1000000000", locked: "5000000", discount_cap: "200000000", proceeds: "236000000" },
-      get_stats: { lucky_settled: 4, lucky_amount_total: "40000000", lucky_paid_total: "37200000" }
+      get_stats: { lucky_settled: 4, lucky_amount_total: "40000000", lucky_paid_total: "37200000" },
+      // The contract's USDC: customers' $120 plus the reserve and proceeds above.
+      ft_balance_of: "1361000000"
     } as Record<string, unknown>)[method] as A),
   account: (id) => Effect.succeed({ amount: id === "relayer.test" ? NEAR / 4n : 2n * NEAR, storageUsage: 100 })
 })
@@ -79,6 +81,7 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
     assert.equal(o.contract.owner, "luckout.testnet")
     assert.equal(o.reserve.free, 1_000_000_000)
     assert.equal(o.reserve.proceeds, 236_000_000)
+    assert.equal(o.reserve.customers, 120_000_000, "what the contract holds minus the reserve and proceeds")
     assert.deepEqual(o.gas.map((g) => [g.role, BigInt(g.spendable) < BigInt(g.alertBelow) ? "low" : "ok"]), [["operator", "ok"], ["relayer", "low"], ["contract", "ok"]])
     assert.equal(o.relay.settings.enabled, true)
     assert.equal(o.purchases.today, 2)
