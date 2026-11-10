@@ -98,6 +98,18 @@ const migrations = Migrator.fromRecord({
   "0005_draw_cashback": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`UPDATE purchases SET draw = (draw - 'refund') || jsonb_build_object('cashback', draw->'refund') WHERE draw ? 'refund'`
+  }),
+  // Relayed customer transactions (ADR-0008): dedupe by signature, daily quotas, resume after a crash.
+  "0006_relays": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE relays (
+        delegate_hash TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        signed_tx JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    yield* sql`CREATE INDEX relays_created ON relays (created_at)`
   })
 })
 

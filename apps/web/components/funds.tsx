@@ -71,9 +71,9 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
  * chosen before the first deposit is saved right after it, with one more approval.
  */
 export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onDone: (ok: boolean) => void }) {
-  const { accountId, walletUsdc, walletNear } = useSession()
-  // Every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
-  const noGas = walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
+  const { accountId, walletUsdc, walletNear, gasFree } = useSession()
+  // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
+  const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
   const actions = useWalletActions()
   const [amount, setAmount] = useState(() => (need ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000) : "25"))
   const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
@@ -144,7 +144,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
               ]}
             />
             <p className="text-sm text-muted">
-              {accountId && `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `}Deposits start at $1.
+              {accountId && `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `}Deposits start at $1.{gasFree && " No network fee: Luckout pays it."}
             </p>
             <Button
               size="lg"

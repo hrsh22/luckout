@@ -14,8 +14,8 @@ const CLOUDFLARE = [
 const trustedProxies = ["127.0.0.0/8", "::1/128", ...CLOUDFLARE].map(IpNetwork.fromStringUnsafe)
 
 const WINDOW_MS = 60_000
-/** Requests per IP per minute. Sign-in is tighter: each challenge writes a row. */
-const limitFor = (path: string) => (path.startsWith("/auth/") ? 20 : path.startsWith("/telegram/") ? 20 : 120)
+/** Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer (it spends NEAR). */
+const limitFor = (path: string) => (path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") ? 20 : 120)
 
 // ponytail: fixed window in memory, one process; move to Redis or the proxy if we run several.
 const windows = new Map<string, { count: number; resetAt: number }>()

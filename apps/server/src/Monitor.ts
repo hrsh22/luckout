@@ -22,6 +22,9 @@ export const Monitor = Layer.effectDiscard(
       if (near.operatorId && (yield* spendable(near.operatorId)) < NEAR / 2n) {
         yield* alerts.admin(`operator ${near.operatorId} has under 0.5 NEAR left for gas`)
       }
+      if (near.relayerId && (yield* spendable(near.relayerId)) < NEAR / 2n) {
+        yield* alerts.admin(`relayer ${near.relayerId} has under 0.5 NEAR left; customers' wallets pay their own fees when it runs out`)
+      }
       if ((yield* spendable(near.contractId)) < NEAR) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
       }

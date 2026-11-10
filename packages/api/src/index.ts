@@ -241,4 +241,30 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   })
 ).middleware(Authorization) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi) {}
+// ---------- relayer (NEP-366, ADR-0008) ----------
+
+/** We won't pay for this one, or it ran and failed: nothing to retry with the wallet as is. */
+export class RelayFailed extends Schema.TaggedError<RelayFailed>()(
+  "RelayFailed",
+  { message: Schema.String },
+  { httpApiStatus: 400 }
+) {}
+
+/** Not paying fees right now (switched off, or today's free relays are used): send it from the wallet instead. */
+export class RelayUnavailable extends Schema.TaggedError<RelayUnavailable>()(
+  "RelayUnavailable",
+  { message: Schema.String },
+  { httpApiStatus: 503 }
+) {}
+
+export class RelayApi extends HttpApiGroup.make("relay").add(
+  HttpApiEndpoint.get("status", "/relay", { success: Schema.Struct({ available: Schema.Boolean }) }),
+  HttpApiEndpoint.post("send", "/relay", {
+    /** base64 of a borsh SignedDelegate, as the wallet's signDelegateActions returns it. */
+    payload: Schema.Struct({ signedDelegate: Schema.String.check(Schema.isMaxLength(8192)) }),
+    success: Schema.Struct({ hash: Schema.String }),
+    error: [RelayFailed, RelayUnavailable]
+  })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi) {}

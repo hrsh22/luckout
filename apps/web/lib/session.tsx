@@ -3,7 +3,7 @@
 import { type Mode, SignedChallenge } from "@luckout/api"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 import { api, cancelled, errorMessage, UNAUTHORIZED } from "./api"
-import { contractId, near, nearBalance, usdcId, view } from "./near"
+import { type Call, canSignForRelay, contractId, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
 export interface ContractAccount {
@@ -36,14 +36,18 @@ interface Session {
   account: ContractAccount | null | undefined
   /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
-  /** NEAR in the wallet, in yoctoNEAR: it pays the network fee on every transaction */
+  /** NEAR in the wallet, in yoctoNEAR: it pays the network fee unless our relayer does */
   walletNear: string | undefined
+  /** Our relayer pays this account's network fees: the wallet can sign for it and today's free relays aren't used up. */
+  gasFree: boolean | undefined
   signing: SignInStep | undefined
   signInError: SignInProblem | undefined
   /** Resolves undefined once signed in, or why it didn't happen. */
   signIn(): Promise<SignInProblem | undefined>
   signOut(): Promise<void>
   refresh(): Promise<void>
+  /** Signs the calls in one wallet approval and sends them, fee paid by our relayer when it can. */
+  send(...calls: Array<Call>): Promise<void>
 }
 
 const STORAGE = "luckout.session"
@@ -55,6 +59,9 @@ const readAccount = (id: string) =>
     view<string>(usdcId, "ft_balance_of", { account_id: id }),
     nearBalance(id).catch(() => undefined)
   ])
+/** Whether our relayer will pay this account's next fee (ADR-0008). */
+const relayable = (token: string) =>
+  Promise.all([canSignForRelay(), api((c) => c.relay.status(), token).then((s) => s.available, () => false)]).then(([a, b]) => a && b)
 const SessionContext = createContext<Session | null>(null)
 
 // ponytail: the token sits in localStorage; move to an HttpOnly cookie on .gamified.trade if XSS risk grows.
@@ -78,6 +85,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [account, setAccount] = useState<ContractAccount | null>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
   const [walletNear, setWalletNear] = useState<string>()
+  const [gasFree, setGasFree] = useState<boolean>()
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
@@ -88,15 +96,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setAccount(undefined)
     setWalletUsdc(undefined)
     setWalletNear(undefined)
+    setGasFree(undefined)
   }, [])
 
+  const token = session?.token
   const refresh = useCallback(async () => {
-    if (!accountId) return
-    const [a, w, n] = await readAccount(accountId)
+    if (!accountId || !token) return
+    const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token)])
     setAccount(a)
     setWalletUsdc(w)
     setWalletNear(n)
-  }, [accountId])
+    setGasFree(free)
+  }, [accountId, token])
 
   // Restore the saved session only if the wallet is still on the same account.
   useEffect(() => {
@@ -152,10 +163,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       } catch {}
       // Read the account before switching to signed in, so the page settles once: a new customer
       // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
-      const [a, w, n] = await readAccount(s.accountId).catch(() => [undefined, undefined, undefined] as const)
+      const [[a, w, n], free] = await Promise.all([
+        readAccount(s.accountId).catch(() => [undefined, undefined, undefined] as const),
+        relayable(s.token)
+      ])
       setAccount(a)
       setWalletUsdc(w)
       setWalletNear(n)
+      setGasFree(free)
       setSession({ accountId: s.accountId, token: s.token })
       return undefined
     } catch (e) {
@@ -170,6 +185,34 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
+  const send = async (...calls: Array<Call>) => {
+    if (!session) throw new Error("Sign in first.")
+    if (gasFree) {
+      let signed: Array<string> | undefined
+      try {
+        signed = await signForRelay(session.accountId, ...calls)
+      } catch (e) {
+        // Backing out stops here; a wallet that turns out unable to sign for the relayer pays itself below.
+        if (cancelled(e)) throw e
+      }
+      if (signed) {
+        for (const [i, signedDelegate] of signed.entries()) {
+          try {
+            await api((c) => c.relay.send({ payload: { signedDelegate } }), session.token, "90 seconds")
+          } catch (e) {
+            // Nothing was sent: the relayer is off or today's free relays are used, so the wallet sends the rest.
+            if ((e as { _tag?: string })?._tag !== "RelayUnavailable") throw e
+            setGasFree(false)
+            await walletSend(session.accountId, ...calls.slice(i))
+            return
+          }
+        }
+        return
+      }
+    }
+    await walletSend(session.accountId, ...calls)
+  }
+
   const signOut = async () => {
     clear()
     await near().disconnect().catch(() => {})
@@ -177,7 +220,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SessionContext
-      value={{ accountId, token: session?.token, ready, account, walletUsdc, walletNear, signing, signInError, signIn, signOut, refresh }}
+      value={{ accountId, token, ready, account, walletUsdc, walletNear, gasFree, signing, signInError, signIn, signOut, refresh, send }}
     >
       {children}
     </SessionContext>

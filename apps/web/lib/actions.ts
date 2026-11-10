@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { cancelled, errorMessage } from "./api"
 import { usd } from "./format"
 import { modeName } from "./modes"
-import { type Call, contractId, send, usdcId } from "./near"
+import { type Call, contractId, usdcId } from "./near"
 import { useSession } from "./session"
 
 const ONE_YOCTO = "1"
@@ -24,13 +24,13 @@ export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {}
  * re-reads the balance, and resolves false (never throws) if the wallet refused or it failed.
  */
 export function useWalletActions() {
-  const { accountId, refresh } = useSession()
+  const { accountId, refresh, send } = useSession()
 
   const run = async (pending: string, done: string, ...calls: Array<Call>) => {
     if (!accountId) return false
     const id = toast.loading(pending, { description: "Approve it in your wallet." })
     try {
-      await send(accountId, ...calls)
+      await send(...calls)
       await refresh().catch(() => {})
       toast.success(done, { id, description: undefined })
       return true

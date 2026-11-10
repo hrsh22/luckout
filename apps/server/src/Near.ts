@@ -1,5 +1,6 @@
 import { Config, Context, Data, Effect, Layer, Option, Redacted, Semaphore } from "effect"
 import {
+  type Action,
   actions,
   base64Decode,
   base64Encode,
@@ -33,6 +34,8 @@ export interface Outcome {
   readonly value: unknown
   /** Luckout `EVENT_JSON` events, in order. */
   readonly events: ReadonlyArray<{ readonly event: string; readonly data: ReadonlyArray<Record<string, unknown>> }>
+  /** Why any receipt in the transaction failed, even one whose failure didn't fail the whole transaction. */
+  readonly failures: ReadonlyArray<string>
 }
 
 type Tx = Awaited<ReturnType<JsonRpcProvider["viewTransactionStatus"]>>
@@ -52,7 +55,11 @@ const toOutcome = (hash: string, tx: Tx): Effect.Effect<Outcome, ContractRejecte
     .filter((l) => l.startsWith("EVENT_JSON:"))
     .map((l) => JSON.parse(l.slice("EVENT_JSON:".length)))
     .filter((e) => e.standard === "luckout")
-  return Effect.succeed({ hash, value: raw ? JSON.parse(raw) : null, events })
+  const failures = tx.receipts_outcome
+    .map((r) => r.outcome.status as Record<string, unknown>)
+    .filter((st) => st && typeof st === "object" && "Failure" in st)
+    .map((st) => panicMessage(st.Failure))
+  return Effect.succeed({ hash, value: raw ? JSON.parse(raw) : null, events, failures })
 }
 
 /** testnet or mainnet. Anything else refuses to start, so a typo can't switch off the testnet guards. */
@@ -62,18 +69,42 @@ const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION/.test(String(e))
 /** NEAR's own error kinds for a transaction that can no longer execute. */
 const isDeadTx = (e: unknown) => /InvalidNonce|\bExpired\b|InvalidTransaction.*Expired/.test(String(e))
 
+/** A customer's signed NEP-366 delegate action, as borsh decodes it. */
+export interface SignedDelegate {
+  readonly delegateAction: {
+    readonly senderId: string
+    readonly receiverId: string
+    readonly actions: ReadonlyArray<Action>
+    readonly nonce: bigint
+    readonly maxBlockHeight: bigint
+    readonly publicKey: Record<string, { readonly data: ArrayLike<number> }>
+  }
+  readonly signature: Record<string, { readonly data: ArrayLike<number> }>
+}
+
 export class Near extends Context.Service<Near, {
   readonly contractId: string
   readonly operatorId: string | undefined
-  view<A>(method: string, args?: Record<string, unknown>): Effect.Effect<A, NearUnavailable>
+  /** The account that pays customers' network fees (NEP-366 relayer), when configured. */
+  readonly relayerId: string | undefined
+  view<A>(method: string, args?: Record<string, unknown>, contract?: string): Effect.Effect<A, NearUnavailable>
   /** Signs `method` with the operator's function-call key, lets `persist` save it, then sends it. */
   call<E>(
     method: string,
     args: object,
     persist: (signed: Signed) => Effect.Effect<void, E>
   ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
+  /** Sends a customer's signed delegate from the relayer, which pays its gas and any deposit. */
+  relay<E>(
+    delegate: SignedDelegate,
+    persist: (signed: Signed) => Effect.Effect<void, E>
+  ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
   /** The outcome of a transaction signed earlier, re-sending it if the network never saw it. */
   resume(signed: Signed): Effect.Effect<Outcome, ContractRejected | NearUnavailable | TxExpired>
+  /** An access key's nonce and whether it is full-access; undefined if the account has no such key. */
+  accessKey(accountId: string, publicKey: string): Effect.Effect<{ readonly nonce: bigint; readonly fullAccess: boolean } | undefined, NearUnavailable>
+  /** The latest final block height. */
+  readonly height: Effect.Effect<bigint, NearUnavailable>
   /** An account's NEAR balance and storage, for monitoring. */
   account(accountId: string): Effect.Effect<{ readonly amount: bigint; readonly storageUsage: number }, NearUnavailable>
   /** NEP-413 check: a valid signature by a full-access key of `accountId`. */
@@ -98,14 +129,10 @@ export class Near extends Context.Service<Near, {
       )
       const operatorId = yield* Config.option(Config.String("OPERATOR_ACCOUNT_ID"))
       const operatorKey = yield* Config.option(Config.Redacted("OPERATOR_PRIVATE_KEY"))
+      const relayerId = yield* Config.option(Config.String("RELAYER_ACCOUNT_ID"))
+      const relayerKey = yield* Config.option(Config.Redacted("RELAYER_PRIVATE_KEY"))
 
       const provider = new JsonRpcProvider({ url: rpcUrl })
-      const operator = Option.isSome(operatorId) && Option.isSome(operatorKey)
-        ? {
-          id: operatorId.value,
-          signer: KeyPairSigner.fromSecretKey(Redacted.value(operatorKey.value) as KeyPairString)
-        }
-        : undefined
 
       // Every RPC call has a deadline: one hung request must not hold the send lock forever.
       const rpc = <A>(what: string, f: () => Promise<A>) =>
@@ -113,79 +140,107 @@ export class Near extends Context.Service<Near, {
           Effect.timeoutOrElse({ duration: "30 seconds", orElse: () => Effect.fail(new NearUnavailable({ message: `${what}: timed out` })) })
         )
 
-      // One key means one nonce sequence: sign and send one transaction at a time, until
-      // it is included, so a later nonce can never land first and void an earlier one.
-      // ponytail: serial sends (~1 tx per block); rotate several function-call keys if volume needs it.
-      const sendLock = yield* Semaphore.make(1)
-      let lastNonce = 0n
+      /**
+       * One account's key, sending one transaction at a time until it is included, so a later
+       * nonce can never land first and void an earlier one.
+       * ponytail: serial sends (~1 tx per block per key); rotate several keys if volume needs it.
+       */
+      const sender = (id: string, key: Redacted.Redacted<string>) =>
+        Effect.gen(function*() {
+          const signer = KeyPairSigner.fromSecretKey(Redacted.value(key) as KeyPairString)
+          const lock = yield* Semaphore.make(1)
+          let lastNonce = 0n
 
-      const executed = (hash: string) =>
-        rpc("tx status", () =>
-          provider.viewTransactionStatus({ txHash: hash, accountId: operator!.id, waitUntil: "EXECUTED_OPTIMISTIC" })
-        ).pipe(Effect.flatMap((tx) => toOutcome(hash, tx)))
+          const executed = (hash: string) =>
+            rpc("tx status", () => provider.viewTransactionStatus({ txHash: hash, accountId: id, waitUntil: "EXECUTED_OPTIMISTIC" })).pipe(
+              Effect.flatMap((tx) => toOutcome(hash, tx))
+            )
 
-      const view = <A>(method: string, args: Record<string, unknown> = {}) =>
-        rpc(`view ${method}`, () => provider.callFunction({ contractId, method, args })).pipe(
+          const send = <E>(receiverId: string, txActions: Array<Action>, persist: (signed: Signed) => Effect.Effect<void, E>) =>
+            Effect.gen(function*() {
+              const hash = yield* lock.withPermits(1)(Effect.gen(function*() {
+                const publicKey = yield* rpc("key", () => signer.getPublicKey())
+                const [key, block] = yield* Effect.all([
+                  rpc("access key", () => provider.viewAccessKey({ accountId: id, publicKey, finalityQuery: { finality: "optimistic" } })),
+                  rpc("block", () => provider.viewBlock({ finality: "final" }))
+                ])
+                const nonce = (BigInt(key.nonce) > lastNonce ? BigInt(key.nonce) : lastNonce) + 1n
+                const tx = createTransaction(id, publicKey, receiverId, nonce, txActions, baseDecode(block.header.hash))
+                const { txHash, signedTransaction } = yield* rpc("sign", () => signer.signTransaction(tx))
+                const signed = { hash: baseEncode(txHash), bytes: base64Encode(signedTransaction.encode()) }
+                yield* persist(signed)
+                lastNonce = nonce
+                yield* rpc("send", () => provider.sendTransactionUntil(signedTransaction, "INCLUDED"))
+                return signed.hash
+              }))
+              return yield* executed(hash)
+            })
+
+          const resume = (signed: Signed) =>
+            Effect.gen(function*() {
+              const seen = yield* executed(signed.hash).pipe(
+                Effect.map(Option.some),
+                Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e)))
+              )
+              if (Option.isSome(seen)) return seen.value
+              // Never seen: send the same bytes again (same hash, so it can't execute twice).
+              const tx = SignedTransaction.decode(base64Decode(signed.bytes))
+              const resent = yield* lock.withPermits(1)(
+                rpc("resend", () => provider.sendTransactionUntil(tx, "INCLUDED")).pipe(
+                  Effect.as(true),
+                  Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
+                )
+              )
+              if (!resent) {
+                // A dead nonce can also mean this very transaction already ran and the first lookup
+                // hit a lagging node. Ask again at final finality before calling it expired.
+                const final = yield* rpc("final tx status", () =>
+                  provider.viewTransactionStatus({ txHash: signed.hash, accountId: id, waitUntil: "FINAL" })
+                ).pipe(Effect.map(Option.some), Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e))))
+                if (Option.isSome(final)) return yield* toOutcome(signed.hash, final.value)
+                return yield* new TxExpired({ hash: signed.hash })
+              }
+              return yield* executed(signed.hash)
+            })
+
+          return { id, send, resume }
+        })
+
+      const operator = Option.isSome(operatorId) && Option.isSome(operatorKey) ? yield* sender(operatorId.value, operatorKey.value) : undefined
+      const relayer = Option.isSome(relayerId) && Option.isSome(relayerKey) ? yield* sender(relayerId.value, relayerKey.value) : undefined
+
+      const view = <A>(method: string, args: Record<string, unknown> = {}, contract = contractId) =>
+        rpc(`view ${method}`, () => provider.callFunction({ contractId: contract, method, args })).pipe(
           Effect.map((v) => v as A)
         )
 
       const call = <E>(method: string, args: object, persist: (signed: Signed) => Effect.Effect<void, E>) =>
-        Effect.gen(function*() {
-          if (!operator) return yield* new NearUnavailable({ message: "OPERATOR_ACCOUNT_ID / OPERATOR_PRIVATE_KEY not set" })
-          const hash = yield* sendLock.withPermits(1)(Effect.gen(function*() {
-            const publicKey = yield* rpc("key", () => operator.signer.getPublicKey())
-            const [key, block] = yield* Effect.all([
-              rpc("access key", () =>
-                provider.viewAccessKey({ accountId: operator.id, publicKey, finalityQuery: { finality: "optimistic" } })
-              ),
-              rpc("block", () => provider.viewBlock({ finality: "final" }))
-            ])
-            const nonce = (BigInt(key.nonce) > lastNonce ? BigInt(key.nonce) : lastNonce) + 1n
-            const tx = createTransaction(
-              operator.id,
-              publicKey,
-              contractId,
-              nonce,
-              [actions.functionCall(method, args, teraToGas("100"), 0n)],
-              baseDecode(block.header.hash)
-            )
-            const { txHash, signedTransaction } = yield* rpc("sign", () => operator.signer.signTransaction(tx))
-            const signed = { hash: baseEncode(txHash), bytes: base64Encode(signedTransaction.encode()) }
-            yield* persist(signed)
-            lastNonce = nonce
-            yield* rpc("send", () => provider.sendTransactionUntil(signedTransaction, "INCLUDED"))
-            return signed.hash
-          }))
-          return yield* executed(hash)
-        })
+        operator
+          ? operator.send(contractId, [actions.functionCall(method, args, teraToGas("100"), 0n)], persist)
+          : Effect.fail(new NearUnavailable({ message: "OPERATOR_ACCOUNT_ID / OPERATOR_PRIVATE_KEY not set" }))
 
-      const resume = (signed: Signed) =>
-        Effect.gen(function*() {
-          if (!operator) return yield* new NearUnavailable({ message: "operator not configured" })
-          const seen = yield* executed(signed.hash).pipe(
-            Effect.map(Option.some),
-            Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e)))
-          )
-          if (Option.isSome(seen)) return seen.value
-          // Never seen: send the same bytes again (same hash, so it can't execute twice).
-          const tx = SignedTransaction.decode(base64Decode(signed.bytes))
-          const resent = yield* sendLock.withPermits(1)(
-            rpc("resend", () => provider.sendTransactionUntil(tx, "INCLUDED")).pipe(
-              Effect.as(true),
-              Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
-            )
-          )
-          if (!resent) {
-            // A dead nonce can also mean this very transaction already ran and the first lookup
-            // hit a lagging node. Ask again at final finality before calling it expired.
-            const final = yield* rpc("final tx status", () =>
-              provider.viewTransactionStatus({ txHash: signed.hash, accountId: operator.id, waitUntil: "FINAL" })
-            ).pipe(Effect.map(Option.some), Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e))))
-            if (Option.isSome(final)) return yield* toOutcome(signed.hash, final.value)
-            return yield* new TxExpired({ hash: signed.hash })
-          }
-          return yield* executed(signed.hash)
-        })
+      // The outer transaction goes from the relayer to the customer's account; the network checks
+      // the customer's signature and runs their actions as them (NEP-366).
+      const relay = <E>(delegate: SignedDelegate, persist: (signed: Signed) => Effect.Effect<void, E>) =>
+        relayer
+          ? relayer.send(delegate.delegateAction.senderId, [actions.signedDelegate(delegate as never)], persist)
+          : Effect.fail(new NearUnavailable({ message: "RELAYER_ACCOUNT_ID / RELAYER_PRIVATE_KEY not set" }))
+
+      // Whichever of our accounts signed it resumes it, under that account's send lock.
+      const resume = (signed: Signed) => {
+        const signerId = SignedTransaction.decode(base64Decode(signed.bytes)).transaction.signerId
+        const by = [operator, relayer].find((s) => s?.id === signerId)
+        return by ? by.resume(signed) : Effect.fail(new NearUnavailable({ message: `no key configured for ${signerId}` }))
+      }
+
+      const accessKey = (accountId: string, publicKey: string) =>
+        rpc("access key", () => provider.viewAccessKey({ accountId, publicKey, finalityQuery: { finality: "optimistic" } })).pipe(
+          Effect.map((k) => ({ nonce: BigInt(k.nonce), fullAccess: k.permission === "FullAccess" })),
+          Effect.catchTag("NearUnavailable", (e) =>
+            /UNKNOWN_ACCESS_KEY|UNKNOWN_ACCOUNT|does not exist/i.test(e.message) ? Effect.succeed(undefined) : Effect.fail(e))
+        )
+
+      const height = rpc("block", () => provider.viewBlock({ finality: "final" })).pipe(Effect.map((b) => BigInt(b.header.height)))
 
       const account = (accountId: string) =>
         rpc("account", () => provider.viewAccount({ accountId, blockQuery: { finality: "optimistic" } })).pipe(
@@ -203,7 +258,7 @@ export class Near extends Context.Service<Near, {
           })
         ).pipe(Effect.as(true), Effect.orElseSucceed(() => false))
 
-      return Near.of({ contractId, operatorId: operator?.id, view, call, resume, account, verifySignIn })
+      return Near.of({ contractId, operatorId: operator?.id, relayerId: relayer?.id, view, call, relay, resume, accessKey, height, account, verifySignIn })
     })
   )
 }

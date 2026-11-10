@@ -17,7 +17,7 @@ const account = { balance: "100000000", per_purchase_limit: "50000000", daily_li
 const world = (opts: { account?: typeof account | null; confirm?: "ok" | "refused"; onchain?: string } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
-  const outcome = (value: unknown, events: Outcome["events"] = []): Outcome => ({ hash: "h", value, events })
+  const outcome = (value: unknown, events: Outcome["events"] = []): Outcome => ({ hash: "h", value, events, failures: [] })
   const near = Near.of({
     contractId: "app.test",
     operatorId: "server.test",
@@ -36,6 +36,10 @@ const world = (opts: { account?: typeof account | null; confirm?: "ok" | "refuse
         return outcome(null)
       }),
     resume: () => Effect.die("not used"),
+    relayerId: undefined,
+    relay: () => Effect.die("not used"),
+    accessKey: () => Effect.die("not used"),
+    height: Effect.die("not used"),
     account: () => Effect.die("not used"),
     verifySignIn: () => Effect.succeed(false)
   })

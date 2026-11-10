@@ -39,6 +39,7 @@ The alert says "was delivered but closed onchain as Reclaimed". The customer has
 
 - Operator under 0.5 NEAR: send NEAR to the operator account. Purchases stop when it runs out.
 - Contract under 1 NEAR free: send NEAR to the contract account. New purchases fail when storage can't be paid.
+- Relayer under 0.5 NEAR: send NEAR to the relayer account. Until then customers' wallets pay their own fees (the web app falls back by itself), and customers with no NEAR can't deposit or withdraw.
 
 ## The server won't start
 

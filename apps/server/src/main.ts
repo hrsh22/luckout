@@ -13,6 +13,7 @@ import { Monitor } from "./Monitor.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { rateLimit } from "./RateLimit.ts"
+import { Relay } from "./Relay.ts"
 import { Telegram } from "./Telegram.ts"
 import { TopUp } from "./TopUp.ts"
 
@@ -83,6 +84,16 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
   })
 )
 
+const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
+  Effect.gen(function*() {
+    const relay = yield* Relay
+    return handlers.handleAll({
+      status: () => CurrentAccount.use((a) => relay.available(a.accountId).pipe(Effect.map((available) => ({ available })))),
+      send: ({ payload }) => CurrentAccount.use((a) => relay.send(a.accountId, payload.signedDelegate))
+    })
+  })
+)
+
 const AuthorizationLive = Layer.effect(
   Authorization,
   Effect.gen(function*() {
@@ -96,7 +107,7 @@ const AuthorizationLive = Layer.effect(
 )
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor).pipe(
-  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer)),
+  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
@@ -115,7 +126,7 @@ const MAINNET_REQUIRES = [
 ]
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers]),
+  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers]),
   Layer.provide(AuthorizationLive),
   Layer.provide(Services)
 )

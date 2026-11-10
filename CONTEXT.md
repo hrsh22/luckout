@@ -36,6 +36,10 @@ _Avoid_: Custodian, operator, wallet
 The browser storefront where a customer connects their NEAR wallet, tops up, sets Spending Limits, links Telegram, buys, watches Draws, and reads purchase history and Redemption Data.
 _Avoid_: Dashboard, admin console
 
+**Relayer**:
+The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.
+_Avoid_: Paymaster, gas station, sponsor
+
 **Spending Limit**:
 A per-purchase or per-day cap the customer sets on their own Balance, enforced by the contract against every Agent action.
 _Avoid_: Admission Policy, allowance

@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { toMicro, usd } from "@/lib/format"
-import { contractId, send, usdcId, view } from "@/lib/near"
+import { contractId, usdcId, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 import { useEffect, useState } from "react"
@@ -13,7 +13,7 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 
 /** Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit. */
 export function TopUp() {
-  const { accountId, token, refresh } = useSession()
+  const { accountId, token, refresh, send, gasFree } = useSession()
   const [registered, setRegistered] = useState<boolean>()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [asset, setAsset] = useState("")
@@ -50,10 +50,10 @@ export function TopUp() {
   if (registered === false) {
     return (
       <Button variant="light" className="self-start" disabled={busy} onClick={() => step(async () => {
-        await send(accountId!, { receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
+        await send({ receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
         setRegistered(true)
       })}>
-        Enable USDC on your account (0.00125 NEAR, once)
+        Enable USDC on your account (once{gasFree ? ", fee on us" : ", 0.00125 NEAR"})
       </Button>
     )
   }
@@ -91,7 +91,7 @@ export function TopUp() {
           <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
           {status === "SUCCESS" && (
             <Button className="self-start" disabled={busy} onClick={() => step(async () => {
-              await send(accountId!, {
+              await send({
                 receiverId: usdcId,
                 method: "ft_transfer_call",
                 args: { receiver_id: contractId, amount: String(quote.usdcOut), msg: "" },
