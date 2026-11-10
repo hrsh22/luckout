@@ -74,8 +74,8 @@ export const usdToMicro = (usd: string): number => {
   return Number(m[1]) * 1_000_000 + Number((m[2] ?? "").padEnd(6, "0"))
 }
 
-/** The contract refuses purchases under 1 USDC (MIN_REFERENCE_PRICE), so smaller amounts are never offered. */
-export const MIN_PRICE = 1_000_000
+/** The contract refuses purchases under 0.5 USDC (MIN_REFERENCE_PRICE), so smaller amounts are never offered. */
+export const MIN_PRICE = 500_000
 export const forSale = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc >= MIN_PRICE)
 /** Amounts Bitrefill sells that Luckout can't, because they're under the minimum. */
 export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc < MIN_PRICE)

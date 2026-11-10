@@ -28,14 +28,15 @@ test("test card is delivered with Redemption Data", liveBuy, async () => {
   assert.ok(d._tag === "Delivered" && typeof d.redemption.code === "string")
 })
 
-test("real vouchers are priced in USD from Bitrefill, and amounts under $1 aren't for sale", live, async () => {
+test("real vouchers are priced in USD from Bitrefill, and amounts under $0.50 aren't for sale", live, async () => {
   // Real products are only priced on mainnet.
   const v = await run((b) => b.voucher("swiggy-money-india"), { NEAR_NETWORK: "mainnet" })
   const p500 = v.packages.find((p) => p.value === "500")
   // ₹500 is about $5.5; a sats-derived or face-value price would be far off.
   assert.ok(p500 && p500.priceMicroUsdc > 4_000_000 && p500.priceMicroUsdc < 8_000_000, String(p500?.priceMicroUsdc))
-  assert.ok(v.packages.every((p) => p.priceMicroUsdc >= 1_000_000), "the contract refuses purchases under 1 USDC")
-  assert.ok(v.tooSmall?.some((p) => p.value === "50"), "₹50 is listed as too small, not silently dropped")
+  assert.ok(v.packages.every((p) => p.priceMicroUsdc >= 500_000), "the contract refuses purchases under 0.5 USDC")
+  assert.ok(v.tooSmall?.every((p) => p.priceMicroUsdc < 500_000) ?? true, "only amounts under the minimum are listed as too small")
+  assert.ok(v.packages.some((p) => p.value === "50"), "₹50 (about $0.56) is for sale")
 })
 
 test("on testnet only test cards are offered or priced", live, async () => {

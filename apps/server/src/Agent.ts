@@ -62,7 +62,7 @@ const system = (testnet: boolean, web: string) => `You're Luckout's shopping ass
 What you know:
 - Normal pays exactly the price.
 - Lucky modes cost more up front, then a fair draw on NEAR may pay cashback: Lite +10% (23% get cashback, 1% get it free), Classic +20% (40%, 2% free; the one we recommend), Jackpot +50% (56%, 10% free). Cashback comes in fixed slabs and any cashback means they paid less than the price. Each lucky mode averages 5.6% above the price over many buys. They always get the card.
-- One purchase gets at most $50 back, so on big buys only part of the price plays (the quote's lucky_part). Purchases start at $1, so smaller amounts aren't sold.
+- One purchase gets at most $50 back, so on big buys only part of the price plays (the quote's lucky_part). Purchases start at $0.50, so smaller amounts aren't sold.
 - Add funds or change limits: ${web}/wallet. Browse: ${web}/shop.
 
 How you talk:
@@ -155,7 +155,7 @@ export const makeAgent = (deps: {
         currency: v.currency,
         amounts: v.packages.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })),
         ...(v.tooSmall?.length
-          ? { not_sold_under_1_dollar_minimum: v.tooSmall.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })) }
+          ? { not_sold_under_50_cent_minimum: v.tooSmall.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })) }
           : {})
       })))),
     get_balance: () =>

@@ -136,7 +136,7 @@ export function VoucherPage() {
               {voucher.data?.tooSmall?.map((p) => (
                 <span
                   key={p.value}
-                  title="Under the $1 minimum purchase"
+                  title="Under the $0.50 minimum purchase"
                   className="flex h-12 items-center rounded-full border-[1.5px] border-dashed border-line px-5 font-semibold text-muted"
                 >
                   {p.value} {voucher.data?.currency}
@@ -144,7 +144,7 @@ export function VoucherPage() {
               ))}
             </div>
             {!!voucher.data?.tooSmall?.length && (
-              <p className="text-sm text-muted">Dashed amounts are under our $1 minimum purchase, so they can't be bought here.</p>
+              <p className="text-sm text-muted">Dashed amounts are under our $0.50 minimum purchase, so they can't be bought here.</p>
             )}
             {voucher.data?.packages.length === 0 && <p className="text-ink-soft">This card has no fixed amounts we can sell right now.</p>}
           </section>

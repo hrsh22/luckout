@@ -663,13 +663,13 @@ fn an_order_id_is_bound_to_its_customer_and_price() {
 }
 
 #[test]
-#[should_panic(expected = "Purchases start at 1 USDC")]
-fn purchases_start_at_one_usdc() {
+#[should_panic(expected = "Purchases start at 0.5 USDC")]
+fn purchases_start_at_half_a_usdc() {
     let mut c = setup(0, 100 * USDC);
     as_(operator());
     c.purchase(
         alice(),
-        U128(999_999),
+        U128(499_999),
         Some(Mode::Normal),
         "o-tiny".into(),
         U128(u128::MAX),
