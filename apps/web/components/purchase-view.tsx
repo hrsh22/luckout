@@ -2,10 +2,11 @@
 
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { api } from "@/lib/api"
+import { api, errorMessage } from "@/lib/api"
 import { safeLink, usd, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
+import { useSession } from "@/lib/session"
 import { keyPalette, modePalette } from "@/lib/palette"
 import type { Purchase } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
@@ -39,7 +40,7 @@ const headline = (p: Purchase) =>
   p.status === "pending"
     ? "Getting your code"
     : p.status === "waiting"
-    ? "A few minutes"
+    ? "Getting it ready"
     : p.status === "failed"
     ? "Not delivered, refunded"
     : p.status === "rejected"
@@ -77,7 +78,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
           </p>
         )}
         {p.status === "pending" && <Progress />}
-        {p.status === "waiting" && <Waiting />}
+        {p.status === "waiting" && <Waiting id={p.id} />}
         {p.error && <p className="mt-2 text-[15px] opacity-85">{p.error}</p>}
         {p.draw && (
           <>
@@ -122,11 +123,36 @@ export function Progress() {
   )
 }
 
+const WAITING_TEXT =
+  "We're topping up our gift card supply for this one: usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then."
+
+/** Cancels a purchase still waiting for credit; nothing was charged. The page's polling shows the result. */
+function CancelWaiting({ id }: { id: string }) {
+  const { token } = useSession()
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Button size="sm" variant="light" className="self-start" loading={busy} disabled={!token} onClick={async () => {
+      setBusy(true)
+      try {
+        await api((c) => c.purchases.cancel({ params: { id } }), token)
+        toast.success("Cancelled. You weren't charged.")
+        await qc.invalidateQueries({ queryKey: ["purchases"] })
+      } catch (e) {
+        toast.error(errorMessage(e))
+      }
+      setBusy(false)
+    }}>
+      Cancel
+    </Button>
+  )
+}
+
 /**
- * We're topping up our Bitrefill credit for this card (ADR-0009). Usually a minute or two; the
- * customer pays nothing if it can't be done in time.
+ * We're topping up our Bitrefill credit for this card (ADR-0009): usually minutes, longer for a big
+ * card. The customer is charged only once it's ready, and can cancel until then.
  */
-function Waiting() {
+function Waiting({ id }: { id: string }) {
   return (
     <div className="mt-4 flex flex-col gap-2">
       <div className="relative h-1.5 overflow-hidden rounded-full bg-white/50">
@@ -136,9 +162,8 @@ function Waiting() {
           transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
         />
       </div>
-      <p className="text-[15px] opacity-85">
-        We're topping up our gift card supply for this one. This page updates by itself, and if it can't be done in time you won't pay anything.
-      </p>
+      <p className="text-[15px] opacity-85">{WAITING_TEXT}</p>
+      <CancelWaiting id={id} />
     </div>
   )
 }
@@ -319,7 +344,10 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               <SafetyNet p={p} />
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code. This updates by itself.</p>}
               {p.status === "waiting" && (
-                <p className="text-sm text-muted">We're topping up our gift card supply for this one; usually a few minutes. If it can't be done in time you won't pay anything.</p>
+                <>
+                  <p className="text-sm text-muted">{WAITING_TEXT}</p>
+                  <CancelWaiting id={p.id} />
+                </>
               )}
               {redemption(p).code || redemption(p).pin || redemption(p).link ? <CodeBlock p={p} /> : null}
               {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (

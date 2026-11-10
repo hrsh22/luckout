@@ -121,7 +121,7 @@ test("credit settings that don't hang together are refused, and changes are anno
     const admin = yield* Admin
     const credit = yield* Credit
     const s = yield* credit.settings
-    const bad = yield* admin.configureCredit(new CreditSettings({ ...s, maxOrder: s.ceiling + 1 }), "boss.testnet").pipe(Effect.flip)
+    const bad = yield* admin.configureCredit(new CreditSettings({ ...s, floor: s.ceiling + 1 }), "boss.testnet").pipe(Effect.flip)
     assert.equal(bad._tag, "AdminInvalid")
     yield* admin.configureCredit(new CreditSettings({ ...s, ceiling: 800_000_000 }), "boss.testnet")
     assert.equal((yield* credit.settings).ceiling, 800_000_000)

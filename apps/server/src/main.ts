@@ -67,6 +67,10 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
       get: ({ params }) =>
         UUID.test(params.id)
           ? CurrentAccount.use((a) => purchases.get(a.accountId, params.id))
+          : Effect.fail(new NotFound()),
+      cancel: ({ params }) =>
+        UUID.test(params.id)
+          ? CurrentAccount.use((a) => purchases.cancel(a.accountId, params.id))
           : Effect.fail(new NotFound())
     })
   })

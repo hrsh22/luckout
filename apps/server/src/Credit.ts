@@ -14,13 +14,16 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // never both count on the same dollars. Test cards are free and never touch any of this.
 
 /**
- * Until an admin changes them. Mainnet starts small, enough to prove every path with pocket money,
- * and grows from the admin panel as it proves itself.
+ * Until an admin changes them. Idle credit stays small (it can't be refunded); no order is refused
+ * for its size: a big one waits, uncharged, for a refill sized for it, for up to a day.
  */
 export const CREDIT_DEFAULTS = {
-  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, maxOrder: 15_000_000, dailyRefill: 40_000_000, waitMinutes: 30 }),
-  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, maxOrder: 300_000_000, dailyRefill: 1_000_000_000, waitMinutes: 30 })
+  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 300_000_000, waitMinutes: 1440 }),
+  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, dailyRefill: 1_000_000_000, waitMinutes: 1440 })
 } as const
+
+/** Smaller refills cost relatively more and churn invoices. */
+export const MIN_REFILL = 10_000_000
 
 /** Steps after which a real card's price will soon leave the credit (it's being admitted or ordered). */
 const HELD_STEPS = ["admit", "ordering"]
@@ -28,18 +31,27 @@ const HELD_STEPS = ["admit", "ordering"]
 export const WAITING_STEPS = ["waiting", "restock"]
 /** A balance older than this is read again before deciding on a purchase. */
 const STALE_MS = 10 * 60_000
-/** Days of sales the target covers, and the refill line as a share of it. */
+/** Days of sales the target covers. */
 const TARGET_DAYS = 2
 
 /** Why settings are refused, or undefined when they hang together. */
 export const settingsProblem = (s: CreditSettings) =>
   s.floor > s.ceiling
     ? "The floor can't be above the ceiling."
-    : s.maxOrder > s.ceiling
-    ? "The largest order can't be above the ceiling: a refill could never cover it."
-    : s.maxOrder < 500_000
-    ? "The largest order must be at least $0.50, the smallest purchase."
+    : s.dailyRefill < MIN_REFILL
+    ? "The daily refill limit must be at least $10, the smallest refill."
     : undefined
+
+/**
+ * The credit to aim for, and the line below which a refill starts. The target covers two days of
+ * sales, and the biggest card bought lately plus a refill's worth; the line never sits below that
+ * card, so cards of the usual size buy at once. Both stay within the floor and the ceiling.
+ */
+export const levels = (s: Pick<CreditSettings, "floor" | "ceiling">, avgDaily: number, biggest: number) => {
+  const target = Math.min(s.ceiling, Math.max(s.floor, TARGET_DAYS * avgDaily, biggest + MIN_REFILL))
+  const refillBelow = Math.max(Math.floor(target / 2), Math.min(biggest, target - MIN_REFILL))
+  return { target, refillBelow }
+}
 
 export interface Snapshot {
   /** USD credit at Bitrefill, micro-USDC. */
@@ -59,7 +71,9 @@ export interface CreditView {
   readonly waiting: { readonly count: number; readonly total: number }
   /** Average real-card spend per day over the last 7 days. */
   readonly avgDaily: number
-  /** The credit we aim to hold: two days of sales, between the floor and the ceiling. */
+  /** The biggest real card ordered in the last 7 days. */
+  readonly biggest: number
+  /** The credit we aim to hold (see `levels`). */
   readonly target: number
   /** Below this a refill starts. */
   readonly refillBelow: number
@@ -98,13 +112,14 @@ export class Credit extends Context.Service<Credit, {
 
       // Real cards only: test cards are free on Bitrefill.
       const ledger = (since: Date) =>
-        sql<{ held: string; ordered_since: string; waiting: number; waiting_total: string; week: string; today: number }>`
+        sql<{ held: string; ordered_since: string; waiting: number; waiting_total: string; week: string; biggest: string; today: number }>`
           SELECT
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(HELD_STEPS)}), 0)::text AS held,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > ${since}), 0)::text AS ordered_since,
             count(*) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)})::int AS waiting,
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)}), 0)::text AS waiting_total,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > now() - interval '7 days'), 0)::text AS week,
+            COALESCE(max(reference_price) FILTER (WHERE ordered_at > now() - interval '7 days'), 0)::text AS biggest,
             count(*) FILTER (WHERE ordered_at > now() - interval '1 day')::int AS today
           FROM purchases WHERE voucher_id NOT LIKE 'test-%'`.pipe(
           Effect.map(([r]) => ({
@@ -112,6 +127,7 @@ export class Credit extends Context.Service<Credit, {
             orderedSince: Number(r?.ordered_since ?? 0),
             waiting: { count: r?.waiting ?? 0, total: Number(r?.waiting_total ?? 0) },
             week: Number(r?.week ?? 0),
+            biggest: Number(r?.biggest ?? 0),
             today: r?.today ?? 0
           })),
           Effect.orDie
@@ -157,7 +173,6 @@ export class Credit extends Context.Service<Credit, {
         const snap = yield* Ref.get(snapshot)
         const l = yield* ledger(snap?.readAt ?? new Date(0))
         const avgDaily = Math.ceil(l.week / 7)
-        const target = Math.min(s.ceiling, Math.max(s.floor, TARGET_DAYS * avgDaily))
         return {
           settings: s,
           snapshot: snap,
@@ -165,8 +180,8 @@ export class Credit extends Context.Service<Credit, {
           held: l.held,
           waiting: l.waiting,
           avgDaily,
-          target,
-          refillBelow: Math.floor(target / 2),
+          biggest: l.biggest,
+          ...levels(s, avgDaily, l.biggest),
           ordersToday: l.today
         } satisfies CreditView
       })

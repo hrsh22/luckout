@@ -185,7 +185,9 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
     error: [BitrefillUnavailable, PurchaseInvalid]
   }),
   HttpApiEndpoint.get("list", "/purchases", { success: Schema.Array(Purchase) }),
-  HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound })
+  HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound }),
+  /** Cancels a purchase still waiting for credit; nothing was charged. */
+  HttpApiEndpoint.post("cancel", "/purchases/:id/cancel", { params: { id: Schema.String }, success: Purchase, error: [NotFound, PurchaseInvalid] })
 ).middleware(Authorization) {}
 
 export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
@@ -298,14 +300,15 @@ export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings
   autoRefill: Schema.Boolean,
   /** Keep at least this much, whatever sales did. */
   floor: Usd,
-  /** Never hold more than this, refills included: the most that can ever sit unused at Bitrefill. */
+  /**
+   * Idle credit never goes above this: the most that can sit unused at Bitrefill. A refill for
+   * purchases already waiting may go past it, since that credit is spent within minutes.
+   */
   ceiling: Usd,
-  /** The most one purchase may cost; above it the purchase is refused up front. */
-  maxOrder: Usd,
   /** The most the server refills in a rolling day. */
   dailyRefill: Usd,
-  /** How long a purchase may wait for credit before it's cancelled, uncharged. */
-  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 120 }))
+  /** How long a purchase may wait for credit before it's cancelled, uncharged (up to a day). */
+  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 }))
 }) {}
 
 /** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */

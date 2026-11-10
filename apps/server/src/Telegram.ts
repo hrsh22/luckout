@@ -191,7 +191,7 @@ export class Telegram extends Context.Service<Telegram, {
 
       const result = (p: Purchase) => {
         if (p.status === "waiting") {
-          return `Your ${p.voucherName} ${p.value} needs a few minutes: we're topping up our gift card supply. I'll message you here when it's ready, and if it can't be done in time you won't pay anything.`
+          return `Your ${p.voucherName} ${p.value} needs a little time: we're topping up our gift card supply, usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then in the app under Purchases. I'll message you here when it's ready.`
         }
         if (p.status !== "delivered") return p.error ?? `Purchase ${p.status}.`
         const paid = p.draw ? p.draw.finalPrice : p.referencePrice
