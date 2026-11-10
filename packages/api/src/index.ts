@@ -99,7 +99,8 @@ export class Draw extends Schema.Class<Draw>("Draw")({
   cashback: MicroUsdc
 }) {}
 
-export const PurchaseStatus = Schema.Literals(["pending", "delivered", "failed", "rejected"])
+/** "waiting": we're topping up our Bitrefill credit for this card; the customer isn't charged until it's ordered. */
+export const PurchaseStatus = Schema.Literals(["pending", "waiting", "delivered", "failed", "rejected"])
 
 export class Purchase extends Schema.Class<Purchase>("Purchase")({
   id: Schema.String,
@@ -280,6 +281,44 @@ export class RelaySettings extends Schema.Class<RelaySettings>("RelaySettings")(
 
 const Yocto = Schema.String
 
+const Usd = MicroUsdc.check(Schema.isBetween({ minimum: 0, maximum: 2_000_000_000 }))
+
+/** How much Bitrefill credit to keep (ADR-0009). All amounts micro-USDC. */
+export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings")({
+  /** Refill by itself; off, the panel and alerts only say when to. */
+  autoRefill: Schema.Boolean,
+  /** Keep at least this much, whatever sales did. */
+  floor: Usd,
+  /** Never hold more than this, refills included: the most that can ever sit unused at Bitrefill. */
+  ceiling: Usd,
+  /** The most one purchase may cost; above it the purchase is refused up front. */
+  maxOrder: Usd,
+  /** The most the server refills in a rolling day. */
+  dailyRefill: Usd,
+  /** How long a purchase may wait for credit before it's cancelled, uncharged. */
+  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 120 }))
+}) {}
+
+/** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
+export class RefillView extends Schema.Class<RefillView>("RefillView")({
+  id: Schema.String,
+  amount: MicroUsdc,
+  /** target, waiting (a purchase needed it) or manual. */
+  reason: Schema.String,
+  /** invoice, quote, fund, send, swapping, crediting, done, refunded, failed, stuck or resolved. */
+  step: Schema.String,
+  error: Schema.optional(Schema.String),
+  sendTx: Schema.optional(Schema.String),
+  createdAt: Schema.String,
+  updatedAt: Schema.String
+}) {}
+
+export class AdminInvalid extends Schema.TaggedError<AdminInvalid>()(
+  "AdminInvalid",
+  { message: Schema.String },
+  { httpApiStatus: 400 }
+) {}
+
 /** A purchase that needs a look: stuck for a human, or open longer than it should be. */
 export class AttentionPurchase extends Schema.Class<AttentionPurchase>("AttentionPurchase")({
   id: Schema.String,
@@ -301,7 +340,7 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
   /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
   gas: Schema.Array(Schema.Struct({
-    role: Schema.Literals(["operator", "relayer", "contract"]),
+    role: Schema.Literals(["operator", "relayer", "treasury", "contract"]),
     accountId: Schema.String,
     spendable: Yocto,
     alertBelow: Yocto
@@ -320,8 +359,38 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     bitrefillCap: Schema.Int,
     attention: Schema.Array(AttentionPurchase)
   }),
-  /** Bitrefill's USD store credit, which pays for every voucher; undefined if Bitrefill didn't answer. */
-  bitrefillUsd: Schema.optional(Schema.String)
+  credit: Schema.Struct({
+    settings: CreditSettings,
+    /** Last balance Bitrefill reported, and when; missing if it hasn't answered yet. */
+    balance: Schema.optional(MicroUsdc),
+    readAt: Schema.optional(Schema.String),
+    /** How much more Bitrefill lets the account hold. */
+    room: MicroUsdc,
+    free: MicroUsdc,
+    held: MicroUsdc,
+    waitingCount: Schema.Int,
+    waitingTotal: MicroUsdc,
+    avgDaily: MicroUsdc,
+    target: MicroUsdc,
+    refillBelow: MicroUsdc,
+    refilledToday: MicroUsdc,
+    /** Why automatic refills are paused, if they are. */
+    paused: Schema.optional(Schema.String),
+    /** Refills need NEAR Intents, which only runs on mainnet. */
+    refillsAvailable: Schema.Boolean
+  }),
+  treasury: Schema.Struct({
+    /** The account the server signs refills with. */
+    accountId: Schema.optional(Schema.String),
+    /** The account the contract lets pull proceeds; it should match. */
+    contractTreasury: Schema.optional(Schema.String),
+    dailyCap: MicroUsdc,
+    sweptToday: MicroUsdc,
+    usdc: MicroUsdc,
+    /** In manual mode: what an open refill is waiting for you to move in. */
+    needs: Schema.optional(MicroUsdc)
+  }),
+  refills: Schema.Array(RefillView)
 }) {}
 
 export class AdminApi extends HttpApiGroup.make("admin").add(
@@ -329,6 +398,20 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
   HttpApiEndpoint.get("overview", "/admin", { success: AdminOverview, error: NotFound }),
   HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelaySettings, success: RelaySettings, error: NotFound }),
+  HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditSettings, success: CreditSettings, error: [NotFound, AdminInvalid] }),
+  /** Refill now, outside the schedule; `amount` defaults to what the target and waiting purchases need. */
+  HttpApiEndpoint.post("refill", "/admin/refills", {
+    payload: Schema.Struct({ amount: Schema.optional(Usd) }),
+    success: RefillView,
+    error: [NotFound, AdminInvalid]
+  }),
+  /** After checking a stuck refill by hand: closes it, which lets automatic refills run again. */
+  HttpApiEndpoint.post("resolveRefill", "/admin/refills/:id/resolve", {
+    params: { id: Schema.String },
+    payload: Schema.Struct({ note: Schema.String.check(Schema.isMinLength(3), Schema.isMaxLength(500)) }),
+    success: HttpApiSchema.NoContent,
+    error: [NotFound, AdminInvalid]
+  }),
   HttpApiEndpoint.post("retry", "/admin/purchases/:id/retry", {
     params: { id: Schema.String },
     success: HttpApiSchema.NoContent,

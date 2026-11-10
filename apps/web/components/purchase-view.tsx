@@ -18,10 +18,10 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
   const [live, setLive] = useState(p)
   useEffect(() => setLive(p), [p])
   useEffect(() => {
-    if (!live || live.status !== "pending" || !token) return
+    if (!live || (live.status !== "pending" && live.status !== "waiting") || !token) return
     const t = setTimeout(() => {
       api((c) => c.purchases.get({ params: { id: live.id } }), token).then(setLive, () => {})
-    }, 3000)
+    }, live.status === "waiting" ? 5000 : 3000)
     return () => clearTimeout(t)
   }, [live, token])
   return live
@@ -36,6 +36,8 @@ const redemption = (p: Purchase) => {
 const headline = (p: Purchase) =>
   p.status === "pending"
     ? "Getting your code"
+    : p.status === "waiting"
+    ? "A few minutes"
     : p.status === "failed"
     ? "Not delivered, refunded"
     : p.status === "rejected"
@@ -73,6 +75,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
           </p>
         )}
         {p.status === "pending" && <Progress />}
+        {p.status === "waiting" && <Waiting />}
         {p.error && <p className="mt-2 text-[15px] opacity-85">{p.error}</p>}
         {p.draw && (
           <>
@@ -111,6 +114,27 @@ export function Progress() {
         <motion.div className="h-full rounded-full bg-current" initial={{ width: "4%" }} animate={{ width: "88%" }} transition={{ duration: 14, ease: [0.1, 0.6, 0.3, 1] }} />
       </div>
       <p className="text-sm opacity-80">Bitrefill sends the code, then the Draw runs on NEAR. {seconds}s</p>
+    </div>
+  )
+}
+
+/**
+ * We're topping up our Bitrefill credit for this card (ADR-0009). Usually a minute or two; the
+ * customer pays nothing if it can't be done in time.
+ */
+function Waiting() {
+  return (
+    <div className="mt-4 flex flex-col gap-2">
+      <div className="relative h-1.5 overflow-hidden rounded-full bg-white/50">
+        <motion.div
+          className="absolute inset-y-0 w-1/3 rounded-full bg-current"
+          animate={{ left: ["-33%", "100%"] }}
+          transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+        />
+      </div>
+      <p className="text-[15px] opacity-85">
+        We're topping up our gift card supply for this one. This page updates by itself, and if it can't be done in time you won't pay anything.
+      </p>
     </div>
   )
 }
@@ -177,7 +201,13 @@ function ProofLinks({ p }: { p: Purchase }) {
   )
 }
 
-const STATUS: Record<Purchase["status"], string> = { pending: "In progress", delivered: "Delivered", failed: "Refunded", rejected: "Not bought" }
+const STATUS: Record<Purchase["status"], string> = {
+  pending: "In progress",
+  waiting: "Getting it ready",
+  delivered: "Delivered",
+  failed: "Refunded",
+  rejected: "Not bought"
+}
 
 /** One line of history; open it for the code and the proof. */
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
@@ -202,7 +232,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
         <span className="flex shrink-0 flex-col items-end gap-1">
           {p.status === "delivered"
             ? <span className="font-display text-xl font-extrabold">{usdUp(paid)}</span>
-            : <span className={`text-sm font-semibold ${p.status === "pending" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
+            : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
               {p.draw.finalPrice === 0 ? "Free" : `${usd(p.draw.cashback)} back`}
@@ -229,6 +259,9 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code. This updates by itself.</p>}
+              {p.status === "waiting" && (
+                <p className="text-sm text-muted">We're topping up our gift card supply for this one; usually a few minutes. If it can't be done in time you won't pay anything.</p>
+              )}
               {redemption(p).code || redemption(p).pin || redemption(p).link ? <CodeBlock p={p} /> : null}
               {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (
                 <a href={explorer(p.settleTx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start`}>

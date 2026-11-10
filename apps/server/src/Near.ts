@@ -84,7 +84,11 @@ export interface SignedDelegate {
 
 export class Near extends Context.Service<Near, {
   readonly contractId: string
+  /** The USDC token contract (test USDC on testnet). */
+  readonly usdcId: string
   readonly operatorId: string | undefined
+  /** The server-held account that refills Bitrefill (ADR-0009), when configured. */
+  readonly treasuryId: string | undefined
   /** The account that pays customers' network fees (NEP-366 relayer), when configured. */
   readonly relayerId: string | undefined
   view<A>(method: string, args?: Record<string, unknown>, contract?: string): Effect.Effect<A, NearUnavailable>
@@ -97,6 +101,12 @@ export class Near extends Context.Service<Near, {
   /** Sends a customer's signed delegate from the relayer, which pays its gas and any deposit. */
   relay<E>(
     delegate: SignedDelegate,
+    persist: (signed: Signed) => Effect.Effect<void, E>
+  ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
+  /** Signs `actions` to `receiverId` with the treasury's key, lets `persist` save it, then sends it. */
+  treasurySend<E>(
+    receiverId: string,
+    actions: Array<Action>,
     persist: (signed: Signed) => Effect.Effect<void, E>
   ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
   /** The outcome of a transaction signed earlier, re-sending it if the network never saw it. */
@@ -131,6 +141,11 @@ export class Near extends Context.Service<Near, {
       const operatorKey = yield* Config.option(Config.Redacted("OPERATOR_PRIVATE_KEY"))
       const relayerId = yield* Config.option(Config.String("RELAYER_ACCOUNT_ID"))
       const relayerKey = yield* Config.option(Config.Redacted("RELAYER_PRIVATE_KEY"))
+      const treasuryIdConfig = yield* Config.option(Config.String("TREASURY_ACCOUNT_ID"))
+      const treasuryKey = yield* Config.option(Config.Redacted("TREASURY_PRIVATE_KEY"))
+      const usdcId = yield* Config.String("USDC_CONTRACT_ID").pipe(
+        Config.withDefault(testnet ? "usdc.luckout.testnet" : "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1")
+      )
 
       const provider = new JsonRpcProvider({ url: rpcUrl })
 
@@ -208,6 +223,9 @@ export class Near extends Context.Service<Near, {
 
       const operator = Option.isSome(operatorId) && Option.isSome(operatorKey) ? yield* sender(operatorId.value, operatorKey.value) : undefined
       const relayer = Option.isSome(relayerId) && Option.isSome(relayerKey) ? yield* sender(relayerId.value, relayerKey.value) : undefined
+      const treasury = Option.isSome(treasuryIdConfig) && Option.isSome(treasuryKey)
+        ? yield* sender(treasuryIdConfig.value, treasuryKey.value)
+        : undefined
 
       const view = <A>(method: string, args: Record<string, unknown> = {}, contract = contractId) =>
         rpc(`view ${method}`, () => provider.callFunction({ contractId: contract, method, args })).pipe(
@@ -226,10 +244,15 @@ export class Near extends Context.Service<Near, {
           ? relayer.send(delegate.delegateAction.senderId, [actions.signedDelegate(delegate as never)], persist)
           : Effect.fail(new NearUnavailable({ message: "RELAYER_ACCOUNT_ID / RELAYER_PRIVATE_KEY not set" }))
 
+      const treasurySend = <E>(receiverId: string, txActions: Array<Action>, persist: (signed: Signed) => Effect.Effect<void, E>) =>
+        treasury
+          ? treasury.send(receiverId, txActions, persist)
+          : Effect.fail(new NearUnavailable({ message: "TREASURY_ACCOUNT_ID / TREASURY_PRIVATE_KEY not set" }))
+
       // Whichever of our accounts signed it resumes it, under that account's send lock.
       const resume = (signed: Signed) => {
         const signerId = SignedTransaction.decode(base64Decode(signed.bytes)).transaction.signerId
-        const by = [operator, relayer].find((s) => s?.id === signerId)
+        const by = [operator, relayer, treasury].find((s) => s?.id === signerId)
         return by ? by.resume(signed) : Effect.fail(new NearUnavailable({ message: `no key configured for ${signerId}` }))
       }
 
@@ -258,7 +281,22 @@ export class Near extends Context.Service<Near, {
           })
         ).pipe(Effect.as(true), Effect.orElseSucceed(() => false))
 
-      return Near.of({ contractId, operatorId: operator?.id, relayerId: relayer?.id, view, call, relay, resume, accessKey, height, account, verifySignIn })
+      return Near.of({
+        contractId,
+        usdcId,
+        operatorId: operator?.id,
+        relayerId: relayer?.id,
+        treasuryId: treasury?.id,
+        view,
+        call,
+        relay,
+        treasurySend,
+        resume,
+        accessKey,
+        height,
+        account,
+        verifySignIn
+      })
     })
   )
 }

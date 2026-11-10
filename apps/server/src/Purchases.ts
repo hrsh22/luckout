@@ -4,16 +4,22 @@ import { SqlClient } from "effect/sql"
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
+import { Credit, WAITING_STEPS } from "./Credit.ts"
+import { Refill } from "./Refill.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 
 // A purchase walks these steps (ADR-0001). Every step is saved before its side effect,
 // so after a crash the reconciler resumes it without buying or charging twice:
-//   admit → ordering → delivery → confirm → settled
+//   (waiting →) admit → ordering → delivery → confirm → settled
 //                    ↘ fail → failed          (admit refused → rejected)
+// A real card our Bitrefill credit can't cover yet starts as "waiting": nothing is charged, a
+// refill starts, and it moves on once the credit is there, or is cancelled after waitMinutes
+// (ADR-0009). If Bitrefill still says the credit is too low at ordering, it waits as "restock"
+// (charged, not yet ordered) and is refunded in full if the credit doesn't come in time.
 // "ordering" found by the reconciler means we may have paid Bitrefill without saving the
 // invoice id; it becomes "stuck" for a human, and the customer can still Reclaim after 24h.
 // The reconciler backs off on each retry and gives up (stuck, with an alert) after MAX_ATTEMPTS.
-type Step = "admit" | "ordering" | "delivery" | "confirm" | "fail" | "settled" | "failed" | "rejected" | "stuck"
+type Step = "waiting" | "admit" | "ordering" | "restock" | "delivery" | "confirm" | "fail" | "settled" | "failed" | "rejected" | "stuck"
 
 interface Row {
   id: string
@@ -34,6 +40,7 @@ interface Row {
   settle_tx: Signed | null
   draw: Record<string, unknown> | null
   created_at: Date | string
+  updated_at: Date | string
 }
 
 interface QuoteView {
@@ -52,6 +59,8 @@ const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */
 const MAX_OPEN_PER_ACCOUNT = 3
 const DAY_MS = 24 * 60 * 60 * 1000
+const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+const time = (v: Date | string) => new Date(v).getTime()
 
 /** The contract's view of a customer (amounts in micro-USDC strings). */
 interface ContractAccount {
@@ -67,6 +76,8 @@ export class Purchases extends Context.Service<Purchases, {
   create(accountId: string, input: NewPurchase): Effect.Effect<Purchase, BitrefillUnavailable | PurchaseInvalid>
   list(accountId: string): Effect.Effect<ReadonlyArray<Purchase>>
   get(accountId: string, id: string): Effect.Effect<Purchase, NotFound>
+  /** One pass over purchases waiting for credit (also runs every 10 seconds by itself). */
+  readonly promoteWaiting: Effect.Effect<void>
 }>()("luckout/Purchases") {
   static readonly layer = Layer.effect(
     Purchases,
@@ -74,6 +85,8 @@ export class Purchases extends Context.Service<Purchases, {
       const sql = yield* SqlClient.SqlClient
       const near = yield* Near
       const bitrefill = yield* Bitrefill
+      const credit = yield* Credit
+      const refill = yield* Refill
       const alerts = yield* Alerts
       const keyHex = yield* Config.option(Config.Redacted("REDEMPTION_KEY"))
       const testnet = (yield* Network) === "testnet"
@@ -155,9 +168,16 @@ export class Purchases extends Context.Service<Purchases, {
                 return false
               }
               const order = yield* bitrefill.order(row.voucher_id, row.package_value)
-              return yield* order._tag === "Ordered"
-                ? move(row, { step: "delivery", invoice_id: order.invoiceId })
-                : move(row, { step: "fail", error: `Bitrefill refused: ${order.reason}` })
+              if (order._tag === "Ordered") {
+                return yield* move(row, { step: "delivery", invoice_id: order.invoiceId, ordered_at: new Date().toISOString() })
+              }
+              if (order._tag === "NoCredit") {
+                // Nothing was ordered or paid: wait for credit instead of refunding straight away.
+                yield* move(row, { step: "restock", error: order.reason })
+                yield* Effect.all([credit.refresh, refill.kick], { discard: true })
+                return false
+              }
+              return yield* move(row, { step: "fail", error: `Bitrefill refused: ${order.reason}` })
             }
             case "delivery": {
               const d = yield* bitrefill.delivery(row.invoice_id!)
@@ -221,17 +241,19 @@ export class Purchases extends Context.Service<Purchases, {
           ? `Your ${what} couldn't be delivered. The full amount is back in your Luckout balance.`
           : row.step === "stuck"
           ? `Your ${what} needs a manual check by our team. We'll sort it out; you can also reclaim the full amount 24 hours after purchase.`
+          : row.step === "rejected"
+          ? `Your ${what} wasn't bought. ${row.error ?? ""}`.trim()
           : undefined
         return text ? alerts.customer(row.account_id, text) : Effect.void
       }
 
-      const advance = (id: string, resumed: boolean) =>
+      const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>
         Effect.gen(function*() {
           if (running.has(id)) return
           running.add(id)
           let first = true
           while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
-          if (resumed) yield* Effect.flatMap(load(id), notify)
+          if (notifyAfter) yield* Effect.flatMap(load(id), notify)
         }).pipe(
           Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
           // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
@@ -256,6 +278,8 @@ export class Purchases extends Context.Service<Purchases, {
           ? "delivered"
           : row.step === "failed" || row.step === "rejected"
           ? row.step
+          : WAITING_STEPS.includes(row.step)
+          ? "waiting"
           : "pending"
         const d = row.draw
         return new Purchase({
@@ -326,7 +350,7 @@ export class Purchases extends Context.Service<Purchases, {
       const preflight = Effect.fn("Purchases.preflight")(function*(accountId: string, referencePrice: number, maxPrice: number) {
         const invalid = (message: string) => new PurchaseInvalid({ message })
         const [open] = yield* sql<{ n: number }>`
-          SELECT count(*)::int AS n FROM purchases WHERE account_id = ${accountId} AND step IN ${sql.in(OPEN_STEPS)}`.pipe(Effect.orDie)
+          SELECT count(*)::int AS n FROM purchases WHERE account_id = ${accountId} AND step IN ${sql.in([...OPEN_STEPS, ...WAITING_STEPS])}`.pipe(Effect.orDie)
         if ((open?.n ?? 0) >= MAX_OPEN_PER_ACCOUNT) return yield* invalid("You have purchases still in progress; try again when they finish")
         if (maxPrice < referencePrice) return yield* invalid("Price changed since you confirmed; please confirm again")
         const a = yield* near.view<ContractAccount | null>("get_account", { account_id: accountId }).pipe(
@@ -350,18 +374,39 @@ export class Purchases extends Context.Service<Purchases, {
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
+        // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
+        const real = !voucher.id.startsWith("test-")
+        if (real) {
+          const { maxOrder } = yield* credit.settings
+          if (referencePrice > maxOrder) {
+            return yield* new PurchaseInvalid({ message: `The most Luckout sells in one purchase right now is ${usd(maxOrder)}.` })
+          }
+        }
         yield* preflight(accountId, referencePrice, input.maxPrice)
-        const inserted = yield* sql<{ id: string }>`
-          INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step)
-          VALUES (${accountId}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value},
-                  ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, 'admit')
-          ON CONFLICT (account_id, idempotency_key) DO NOTHING
-          RETURNING id`.pipe(Effect.orDie)
+        // Deciding "go or wait" and recording it happen under one lock, so two purchases can never
+        // both count on the same credit.
+        const inserted = yield* credit.guard((free) =>
+          Effect.gen(function*() {
+            const wait = real && free < referencePrice
+            if (wait) {
+              const [w] = yield* sql<{ n: number }>`
+                SELECT count(*)::int AS n FROM purchases WHERE account_id = ${accountId} AND step IN ${sql.in(WAITING_STEPS)}`.pipe(Effect.orDie)
+              if ((w?.n ?? 0) > 0) return yield* new PurchaseInvalid({ message: "You already have a card on its way; try again when it's ready." })
+            }
+            return yield* sql<{ id: string; step: Step }>`
+              INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step)
+              VALUES (${accountId}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value},
+                      ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${wait ? "waiting" : "admit"})
+              ON CONFLICT (account_id, idempotency_key) DO NOTHING
+              RETURNING id, step`.pipe(Effect.orDie)
+          })
+        )
         // Two requests with the same key at once: the second returns the first's purchase.
         const id = inserted[0]?.id ??
           (yield* sql<{ id: string }>`SELECT id FROM purchases WHERE account_id = ${accountId} AND idempotency_key = ${input.idempotencyKey}`
             .pipe(Effect.orDie))[0]!.id
-        if (inserted.length > 0) yield* Fiber.join(yield* FiberSet.run(workflows, advance(id, false)))
+        if (inserted[0]?.step === "waiting") yield* refill.kick
+        else if (inserted.length > 0) yield* Fiber.join(yield* FiberSet.run(workflows, advance(id, false)))
         return view(yield* load(id))
       })
 
@@ -404,7 +449,33 @@ export class Purchases extends Context.Service<Purchases, {
       )
       yield* reconcile.pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get })
+      // Purchases waiting for credit: each goes on as soon as the credit covers it (under the same
+      // lock as new purchases), or is cancelled after waitMinutes: uncharged if it never reached
+      // admission, refunded in full through fail_purchase if it did.
+      const promote = Effect.gen(function*() {
+        const { waitMinutes } = yield* credit.settings
+        const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step IN ${sql.in(WAITING_STEPS)} ORDER BY created_at LIMIT 50`.pipe(Effect.orDie)
+        for (const row of rows) {
+          // Measured from creation, so bouncing between ordering and restock can't extend it.
+          if (Date.now() - time(row.created_at) > waitMinutes * 60_000) {
+            if (row.step === "waiting") {
+              if (yield* move(row, { step: "rejected", error: "We couldn't get this card ready in time, so we cancelled it. You weren't charged." })) {
+                yield* notify(yield* load(row.id))
+              }
+            } else if (yield* move(row, { step: "fail", error: "Bitrefill credit didn't arrive in time" })) {
+              yield* FiberSet.run(workflows, advance(row.id, false, true))
+            }
+            continue
+          }
+          const next: Step = row.step === "waiting" ? "admit" : "ordering"
+          const go = yield* credit.guard((free) => (free >= Number(row.reference_price) ? move(row, { step: next, error: null }) : Effect.succeed(false)))
+          // The customer may have left: tell them in Telegram how it ended.
+          if (go) yield* FiberSet.run(workflows, advance(row.id, false, true))
+        }
+      }).pipe(Effect.catchCause((cause) => Effect.logError("waiting purchases pass failed", cause)))
+      yield* promote.pipe(Effect.repeat(Schedule.spaced("10 seconds")), Effect.forkScoped)
+
+      return Purchases.of({ quote, create, list, get, promoteWaiting: promote })
     })
   )
 }

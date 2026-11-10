@@ -173,6 +173,10 @@ pub enum Payout {
     Customer(AccountId),
     Reserve,
     Proceeds,
+    /// Proceeds the treasury pulled on `day` (ADR-0009); a failed transfer also gives back the cap.
+    Sweep {
+        day: u64,
+    },
 }
 
 #[near(contract_state)]
@@ -196,6 +200,12 @@ pub struct Contract {
     lucky_paid_total: u128,
     /// The server's order id → purchase id, so admitting the same order twice is a no-op.
     orders: LookupMap<String, u64>,
+    /// The account that refills Bitrefill (ADR-0009). Only it can pull proceeds, and only to itself.
+    treasury: Option<AccountId>,
+    /// The most proceeds the treasury may pull per UTC day. 0: only the owner moves proceeds.
+    sweep_daily_cap: u128,
+    sweep_day: u64,
+    swept_today: u128,
 }
 
 #[near]
@@ -218,6 +228,10 @@ impl Contract {
             lucky_amount_total: 0,
             lucky_paid_total: 0,
             orders: LookupMap::new(Key::Orders),
+            treasury: None,
+            sweep_daily_cap: 0,
+            sweep_day: 0,
+            swept_today: 0,
         };
         for v in default_game_versions() {
             c.push_version(v);
@@ -543,13 +557,78 @@ impl Contract {
         self.send(self.owner.clone(), amount.0, Payout::Reserve)
     }
 
+    /// Proceeds go to the owner, or with `to_treasury` straight to the treasury (no daily cap: the owner signed it).
     #[payable]
-    pub fn withdraw_proceeds(&mut self, amount: U128) -> Promise {
+    pub fn withdraw_proceeds(&mut self, amount: U128, to_treasury: Option<bool>) -> Promise {
         self.assert_owner();
+        require!(amount.0 > 0, "Nothing to withdraw");
         require!(self.proceeds >= amount.0, "Exceeds proceeds");
+        let to = if to_treasury.unwrap_or(false) {
+            self.treasury
+                .clone()
+                .unwrap_or_else(|| env::panic_str("No treasury is set"))
+        } else {
+            self.owner.clone()
+        };
         self.proceeds -= amount.0;
-        emit("proceeds_withdrawn", json!({ "amount": amount }));
-        self.send(self.owner.clone(), amount.0, Payout::Proceeds)
+        emit("proceeds_withdrawn", json!({ "amount": amount, "to": to }));
+        self.send(to, amount.0, Payout::Proceeds)
+    }
+
+    /// Sets the treasury and how much of the proceeds it may pull per UTC day (ADR-0009).
+    /// A cap of 0 turns automatic pulls off: proceeds then move only when the owner signs.
+    #[payable]
+    pub fn set_treasury(&mut self, treasury: Option<AccountId>, daily_cap: U128) {
+        self.assert_owner();
+        if let Some(t) = &treasury {
+            require!(
+                *t != env::current_account_id() && *t != self.usdc && *t != self.operator,
+                "The treasury must be its own account"
+            );
+        } else {
+            require!(daily_cap.0 == 0, "A daily cap needs a treasury");
+        }
+        self.treasury = treasury.clone();
+        self.sweep_daily_cap = daily_cap.0;
+        emit(
+            "treasury_set",
+            json!({ "treasury": treasury, "daily_cap": daily_cap }),
+        );
+    }
+
+    // ---------- treasury ----------
+
+    /// The treasury pulls proceeds to itself to refill Bitrefill, within the owner's daily cap.
+    /// Needs the treasury's full-access signature (1 yoctoNEAR); the money can go nowhere else.
+    #[payable]
+    pub fn sweep_proceeds(&mut self, amount: U128) -> Promise {
+        assert_one_yocto();
+        let treasury = self
+            .treasury
+            .clone()
+            .unwrap_or_else(|| env::panic_str("No treasury is set"));
+        require!(
+            env::predecessor_account_id() == treasury,
+            "Only the treasury"
+        );
+        require!(amount.0 > 0, "Nothing to sweep");
+        require!(self.proceeds >= amount.0, "Exceeds proceeds");
+        let day = env::block_timestamp() / DAY_NS;
+        if self.sweep_day != day {
+            self.sweep_day = day;
+            self.swept_today = 0;
+        }
+        require!(
+            self.swept_today + amount.0 <= self.sweep_daily_cap,
+            "Over the treasury's daily cap"
+        );
+        self.swept_today += amount.0;
+        self.proceeds -= amount.0;
+        emit(
+            "proceeds_swept",
+            json!({ "amount": amount, "to": treasury, "swept_today": U128(self.swept_today) }),
+        );
+        self.send(treasury, amount.0, Payout::Sweep { day })
     }
 
     #[private]
@@ -575,6 +654,12 @@ impl Contract {
             }
             Payout::Reserve => self.free_reserve += amount.0,
             Payout::Proceeds => self.proceeds += amount.0,
+            Payout::Sweep { day } => {
+                self.proceeds += amount.0;
+                if self.sweep_day == day {
+                    self.swept_today = self.swept_today.saturating_sub(amount.0);
+                }
+            }
         }
     }
 
@@ -620,6 +705,9 @@ impl Contract {
             "usdc": self.usdc,
             "paused": self.paused,
             "max_cashback": U128(MAX_CASHBACK),
+            "treasury": self.treasury,
+            "sweep_daily_cap": U128(self.sweep_daily_cap),
+            "swept_today": U128(if self.sweep_day == env::block_timestamp() / DAY_NS { self.swept_today } else { 0 }),
         })
     }
 }
@@ -853,3 +941,134 @@ fn emit(event: &str, data: Value) {
 
 #[cfg(test)]
 mod tests;
+
+/// One-time upgrade of a deployed contract from the layout before the treasury (ADR-0009).
+/// Compiled only with `--features migrate` and deployed together with the `migrate` call;
+/// the normal build is deployed right after, so the method never stays on chain.
+#[cfg(feature = "migrate")]
+mod migrate {
+    use super::*;
+
+    #[near(serializers = [borsh])]
+    struct Before {
+        owner: AccountId,
+        operator: AccountId,
+        usdc: AccountId,
+        paused: bool,
+        accounts: LookupMap<AccountId, Account>,
+        versions: Vector<GameVersion>,
+        purchases: LookupMap<u64, Purchase>,
+        next_purchase_id: u64,
+        free_reserve: u128,
+        locked_reserve: u128,
+        proceeds: u128,
+        lucky_settled: u64,
+        lucky_amount_total: u128,
+        lucky_paid_total: u128,
+        orders: LookupMap<String, u64>,
+    }
+
+    #[near]
+    impl Contract {
+        #[private]
+        #[init(ignore_state)]
+        pub fn migrate() -> Self {
+            let b: Before =
+                env::state_read().unwrap_or_else(|| env::panic_str("No state to migrate"));
+            Self {
+                owner: b.owner,
+                operator: b.operator,
+                usdc: b.usdc,
+                paused: b.paused,
+                accounts: b.accounts,
+                versions: b.versions,
+                purchases: b.purchases,
+                next_purchase_id: b.next_purchase_id,
+                free_reserve: b.free_reserve,
+                locked_reserve: b.locked_reserve,
+                proceeds: b.proceeds,
+                lucky_settled: b.lucky_settled,
+                lucky_amount_total: b.lucky_amount_total,
+                lucky_paid_total: b.lucky_paid_total,
+                orders: b.orders,
+                treasury: None,
+                sweep_daily_cap: 0,
+                sweep_day: 0,
+                swept_today: 0,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use near_sdk::test_utils::VMContextBuilder;
+        use near_sdk::testing_env;
+
+        #[test]
+        fn migrate_keeps_every_field() {
+            let me: AccountId = "luckout.near".parse().unwrap();
+            testing_env!(VMContextBuilder::new()
+                .current_account_id(me.clone())
+                .predecessor_account_id(me)
+                .build());
+            let mut versions = Vector::new(Key::Versions);
+            for v in default_game_versions() {
+                versions.push(v);
+            }
+            versions.flush();
+            let mut accounts = LookupMap::new(Key::Accounts);
+            accounts.insert(
+                "alice.near".parse().unwrap(),
+                Account {
+                    balance: U128(7),
+                    ..Default::default()
+                },
+            );
+            accounts.flush();
+            env::state_write(&Before {
+                owner: "owner.near".parse().unwrap(),
+                operator: "server.near".parse().unwrap(),
+                usdc: "usdc.near".parse().unwrap(),
+                paused: true,
+                accounts,
+                versions,
+                purchases: LookupMap::new(Key::Purchases),
+                next_purchase_id: 42,
+                free_reserve: 1_000,
+                locked_reserve: 50,
+                proceeds: 236,
+                lucky_settled: 4,
+                lucky_amount_total: 40,
+                lucky_paid_total: 37,
+                orders: LookupMap::new(Key::Orders),
+            });
+            let c = Contract::migrate();
+            assert_eq!(c.owner.as_str(), "owner.near");
+            assert_eq!(c.operator.as_str(), "server.near");
+            assert!(c.paused);
+            assert_eq!(
+                (
+                    c.next_purchase_id,
+                    c.free_reserve,
+                    c.locked_reserve,
+                    c.proceeds
+                ),
+                (42, 1_000, 50, 236)
+            );
+            assert_eq!(
+                (c.lucky_settled, c.lucky_amount_total, c.lucky_paid_total),
+                (4, 40, 37)
+            );
+            assert_eq!(c.versions.len(), 3);
+            assert_eq!(
+                c.get_account("alice.near".parse().unwrap())
+                    .unwrap()
+                    .balance
+                    .0,
+                7
+            );
+            assert_eq!((c.treasury.clone(), c.sweep_daily_cap), (None, 0));
+        }
+    }
+}

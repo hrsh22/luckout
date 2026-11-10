@@ -1,6 +1,9 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { Api, Authorization, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
+import { type AdminInvalid, Api, Authorization, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
 import { Admin } from "./Admin.ts"
+import { Credit } from "./Credit.ts"
+import { OneClick } from "./OneClick.ts"
+import { Refill } from "./Refill.ts"
 import { Config, Effect, Layer, Redacted } from "effect"
 import { HttpRouter } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
@@ -108,6 +111,11 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       me: () => Effect.asVoid(signedInAdmin),
       overview: () => Effect.andThen(signedInAdmin, admin.overview),
       relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
+      credit: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureCredit(payload, by)),
+      refill: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.refill(payload.amount, by)),
+      resolveRefill: ({ params, payload }) =>
+        Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | AdminInvalid> =>
+          UUID.test(params.id) ? admin.resolveRefill(params.id, payload.note, by) : Effect.fail(new NotFound())),
       retry: ({ params }) =>
         Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
           UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
@@ -129,7 +137,9 @@ const AuthorizationLive = Layer.effect(
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, TopUp.layer, Alerts.layer)),
+  Layer.provideMerge(Refill.layer),
+  Layer.provideMerge(Layer.mergeAll(Credit.layer, TopUp.layer)),
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
 

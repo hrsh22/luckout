@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
 import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
+import { fakeNear } from "./testing.ts"
 import { Near, type Outcome } from "./Near.ts"
 import { RelaySettings } from "@luckout/api"
 import { DEFAULT_SETTINGS, refusal, Relay, USDC_REGISTRATION } from "./Relay.ts"
@@ -72,12 +73,11 @@ const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; fai
   const relayed: Array<string> = []
   const resumed: Array<string> = []
   const outcome = (hash: string): Outcome => ({ hash, value: null, events: [], failures: o.failures ?? [] })
-  const near = Near.of({
+  const near = fakeNear({
     contractId: APP,
-    operatorId: "server.test",
+    usdcId: USDC,
     relayerId: o.relayer === false ? undefined : "relayer.test",
     view: <A>() => Effect.succeed(null as A),
-    call: () => Effect.die("not used"),
     relay: (sd, persist) =>
       Effect.gen(function*() {
         const hash = `tx-${relayed.length + 1}`
@@ -88,9 +88,7 @@ const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; fai
     resume: (signed) => Effect.sync(() => (resumed.push(signed.hash), outcome(signed.hash))),
     accessKey: (_, publicKey) =>
       Effect.succeed(publicKey === key.getPublicKey().toString() ? { nonce: o.nonce ?? 10n, fullAccess: o.fullAccess ?? true } : undefined),
-    height: Effect.succeed(500n),
-    account: () => Effect.die("not used"),
-    verifySignIn: () => Effect.succeed(false)
+    height: Effect.succeed(500n)
   })
   const layer = Relay.layer.pipe(Layer.provide(Layer.succeed(Near, near)), Layer.provideMerge(DbMemory))
   const send = (b64: string) => Relay.use((r) => r.send(ALICE, b64))

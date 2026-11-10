@@ -121,6 +121,37 @@ const migrations = Migrator.fromRecord({
         updated_by TEXT NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`
+  }),
+  // Bitrefill credit (ADR-0009): purchases may wait for credit, and refills are tracked step by step.
+  "0008_credit_and_refills": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE purchases ADD COLUMN ordered_at TIMESTAMPTZ`
+    yield* sql`CREATE INDEX purchases_ordered ON purchases (ordered_at) WHERE ordered_at IS NOT NULL`
+    yield* sql`CREATE INDEX purchases_waiting ON purchases (created_at) WHERE step IN ('waiting', 'restock')`
+    yield* sql`
+      CREATE TABLE refills (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        amount BIGINT NOT NULL,
+        reason TEXT NOT NULL,
+        requested_by TEXT,
+        step TEXT NOT NULL,
+        invoice_id TEXT,
+        pay_address TEXT,
+        invoice_at TIMESTAMPTZ,
+        swap JSONB,
+        sweep_tx JSONB,
+        send_tx JSONB,
+        swap_status TEXT,
+        sent_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ,
+        error TEXT,
+        attempts INT NOT NULL DEFAULT 0,
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    // At most one refill runs at a time: the database enforces it, not just the code.
+    yield* sql`CREATE UNIQUE INDEX refills_one_open ON refills ((true)) WHERE step IN ('invoice', 'quote', 'fund', 'send', 'swapping', 'crediting')`
   })
 })
 

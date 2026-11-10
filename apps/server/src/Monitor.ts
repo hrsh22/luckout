@@ -8,7 +8,7 @@ const NEAR = 10n ** 24n
 const PER_BYTE = 10n ** 19n
 
 /** Below these, each of our accounts gets an alert (the admin panel shows the same lines). */
-export const GAS_ALERT = { operator: NEAR / 2n, relayer: NEAR / 2n, contract: NEAR } as const
+export const GAS_ALERT = { operator: NEAR / 2n, relayer: NEAR / 2n, treasury: NEAR / 10n, contract: NEAR } as const
 
 /** NEAR an account can spend: its balance minus what its storage locks. */
 export const spendable = (near: Near["Service"], id: string) =>
@@ -30,6 +30,9 @@ export const Monitor = Layer.effectDiscard(
       }
       if (near.relayerId && (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer) {
         yield* alerts.admin(`relayer ${near.relayerId} has under 0.5 NEAR left; customers' wallets pay their own fees when it runs out`)
+      }
+      if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
+        yield* alerts.admin(`treasury ${near.treasuryId} has under 0.1 NEAR left for gas; Bitrefill refills stop when it runs out`)
       }
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)

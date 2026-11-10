@@ -1,11 +1,11 @@
 import { RelayFailed, RelaySettings, RelayUnavailable } from "@luckout/api"
 import { deserialize } from "borsh"
-import { Config, Context, Effect, Layer, Schema } from "effect"
+import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
 import { Near, Network, type SignedDelegate } from "./Near.ts"
-import { MAINNET_USDC } from "./TopUp.ts"
+import { readSetting, writeSetting } from "./Settings.ts"
 
 // The relayer (NEP-366, ADR-0008): customers sign their own calls in the wallet without sending
 // them, and our relayer account sends them and pays the network fee. It only pays for our own
@@ -91,19 +91,11 @@ export class Relay extends Context.Service<Relay, {
       const sql = yield* SqlClient.SqlClient
       const near = yield* Near
       const testnet = (yield* Network) === "testnet"
-      const usdcId = yield* Config.String("USDC_CONTRACT_ID").pipe(Config.withDefault(testnet ? "usdc.luckout.testnet" : MAINNET_USDC))
+      const usdcId = near.usdcId
 
-      const settings = sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'relay'`.pipe(
-        Effect.flatMap(([row]) => (row ? Schema.decodeUnknownEffect(RelaySettings)(row.value) : Effect.succeed(DEFAULT_SETTINGS))),
-        Effect.orDie
-      )
-
+      const settings = readSetting("relay", RelaySettings, DEFAULT_SETTINGS).pipe(Effect.provideService(SqlClient.SqlClient, sql))
       const configure = (next: RelaySettings, by: string) =>
-        sql`INSERT INTO settings (key, value, updated_by) VALUES ('relay', ${JSON.stringify(next)}::jsonb, ${by})
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`.pipe(
-          Effect.orDie,
-          Effect.as(next)
-        )
+        writeSetting("relay", RelaySettings, next, by).pipe(Effect.provideService(SqlClient.SqlClient, sql))
 
       const usedToday = (accountId: string) =>
         sql<{ mine: number; everyone: number }>`

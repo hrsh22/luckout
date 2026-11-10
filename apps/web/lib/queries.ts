@@ -36,7 +36,7 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     staleTime: 20_000
   })
 
-const pending = (p: Purchase) => p.status === "pending"
+const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting"
 
 export const usePurchases = (token: string | undefined) =>
   useQuery({

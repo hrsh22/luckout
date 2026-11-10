@@ -1,11 +1,14 @@
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { test } from "node:test"
+import { Layer } from "effect"
+import { OneClick } from "./OneClick.ts"
 import { TopUp } from "./TopUp.ts"
 
 // Live dry-run quotes against 1Click mainnet (no funds move, no key needed).
 const run = <A, E>(f: (t: TopUp["Service"]) => Effect.Effect<A, E>) =>
-  Effect.runPromise(TopUp.use(f).pipe(Effect.provide(TopUp.layer)))
+  Effect.runPromise(TopUp.use(f).pipe(Effect.provide(layer)))
+const layer = TopUp.layer.pipe(Layer.provide(OneClick.layer))
 const live = { skip: process.env.CI ? "no network calls to 1Click in CI" : false }
 
 test("lists supported origin tokens, never USDC on NEAR itself", live, async () => {
@@ -21,6 +24,6 @@ test("quotes exactly the USDC asked for, delivered to the customer's NEAR accoun
 })
 
 test("refuses amounts outside 1–2,000 USDC", async () => {
-  const r = await Effect.runPromise(TopUp.use((t) => t.quote("root.near", "x", 500_000, true)).pipe(Effect.provide(TopUp.layer), Effect.flip))
+  const r = await Effect.runPromise(TopUp.use((t) => t.quote("root.near", "x", 500_000, true)).pipe(Effect.provide(layer), Effect.flip))
   assert.match(r.message, /between 1 and 2,000/)
 })

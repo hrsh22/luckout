@@ -19,8 +19,26 @@ const Product = Schema.Struct({
   packages: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String, amount: Schema.optional(Schema.Number) })))
 })
 const Balances = Schema.Struct({
-  balances: Schema.Array(Schema.Struct({ payment_method: Schema.String, balance_currency: Schema.String, amount: Schema.String }))
+  balances: Schema.Array(Schema.Struct({ payment_method: Schema.String, balance_currency: Schema.String, amount: Schema.String })),
+  /** How much more each sub-account may take before Bitrefill holds a deposit for review. */
+  top_up: Schema.optional(Schema.Array(Schema.Struct({
+    currency: Schema.String,
+    max_amount: Schema.optional(Schema.Struct({ amount: Schema.String, currency: Schema.String }))
+  })))
 })
+const Deposit = Schema.Struct({
+  id: Schema.String,
+  status: Schema.String,
+  payment: Schema.Struct({
+    method: Schema.String,
+    address: Schema.String,
+    currency: Schema.String,
+    /** Base units of `currency`. */
+    price: Schema.Number,
+    commission: Schema.optional(Schema.Number)
+  })
+})
+const InvoiceState = Schema.Struct({ id: Schema.String, status: Schema.String })
 
 const McpProduct = Schema.Struct({
   id: Schema.String,
@@ -54,8 +72,23 @@ export type Delivery =
 
 export type Order =
   | { readonly _tag: "Ordered"; readonly invoiceId: string }
-  /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
+  /** Our USD credit can't cover it; nothing was created or paid, so it can be ordered again later. */
+  | { readonly _tag: "NoCredit"; readonly reason: string }
+  /** Bitrefill refused before creating or paying anything. */
   | { readonly _tag: "Refused"; readonly reason: string }
+
+/** A USD credit deposit: sending exactly `price` (USDC base units) to `address` on Base buys `amount` of credit. */
+export interface CreditDeposit {
+  readonly invoiceId: string
+  readonly address: string
+  readonly price: number
+}
+/** Where a credit deposit is. "failed" means Bitrefill gave up on it after we may have paid: a human must look. */
+export type DepositState = "pending" | "credited" | "failed"
+
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/
+/** Bitrefill's words for a balance that can't cover an order. */
+const NO_CREDIT = /balance|insufficient|not enough|top ?up/i
 
 /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
 class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }> {}
@@ -92,8 +125,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   order(id: string, value: string): Effect.Effect<Order, BitrefillUnavailable>
   /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). */
   delivery(invoiceId: string): Effect.Effect<Delivery, BitrefillUnavailable>
-  /** The USD store credit that pays for every voucher, e.g. "120.50". */
-  readonly usdBalance: Effect.Effect<string, BitrefillUnavailable>
+  /** Our USD store credit, and how much more Bitrefill lets us hold (micro-USDC). */
+  readonly credit: Effect.Effect<{ readonly balance: number; readonly room: number }, BitrefillUnavailable>
+  /** Asks for `amount` (micro-USDC, whole cents) of USD credit, paid 1:1 in USDC on Base. */
+  deposit(amount: number): Effect.Effect<CreditDeposit, BitrefillUnavailable>
+  depositState(invoiceId: string): Effect.Effect<{ readonly state: DepositState; readonly status: string }, BitrefillUnavailable>
 }>()("luckout/Bitrefill") {
   static readonly layer = Layer.effect(
     Bitrefill,
@@ -247,7 +283,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string) {
         return yield* createInvoice(id, value).pipe(
           Effect.map((invoiceId): Order => ({ _tag: "Ordered", invoiceId })),
-          Effect.catchTag("Rejected", (e) => Effect.succeed<Order>({ _tag: "Refused", reason: e.reason }))
+          Effect.catchTag("Rejected", (e) =>
+            Effect.succeed<Order>(NO_CREDIT.test(e.reason) ? { _tag: "NoCredit", reason: e.reason } : { _tag: "Refused", reason: e.reason }))
         )
       })
 
@@ -269,12 +306,61 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       })
 
       // Only MCP sees the USD sub-account; REST reports the primary (BTC) one.
-      const usdBalance = mcp("get-balances", {}, Balances).pipe(
+      const credit = mcp("get-balances", {}, Balances).pipe(
         Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
-        Effect.map((r) => r.balances.find((b) => b.payment_method === "balance" && b.balance_currency === "USD")?.amount ?? "0.00")
+        Effect.flatMap((r) =>
+          Effect.try({
+            try: () => {
+              const usd = r.balances.find((b) => b.payment_method === "balance" && b.balance_currency === "USD")
+              const room = r.top_up?.find((t) => t.currency === "USD")?.max_amount
+              return {
+                balance: usdToMicro(usd?.amount ?? "0"),
+                // Without a reported room, assume Bitrefill's usual $2,000 limit on what the account holds.
+                room: room?.currency === "USD" ? usdToMicro(room.amount) : Math.max(0, 2_000_000_000 - usdToMicro(usd?.amount ?? "0"))
+              }
+            },
+            catch: (e) => unavailable(`unreadable balances: ${e}`)
+          })
+        )
       )
 
-      return Bitrefill.of({ search, voucher, order, delivery, usdBalance })
+      // Never retried: each call creates an invoice. An unpaid one simply expires.
+      const deposit = Effect.fn("Bitrefill.deposit")(function*(amount: number) {
+        if (!Number.isInteger(amount) || amount <= 0 || amount % 10_000 !== 0) {
+          return yield* unavailable(`a credit deposit must be whole cents, not ${amount}`)
+        }
+        const d = yield* HttpClientRequest.post("/accounts/deposit").pipe(
+          HttpClientRequest.bodyJsonUnsafe({ currency: "USD", payment_method: "usdc_base", amount: amount / 1_000_000 }),
+          rest.execute,
+          // The response echoes the account's email; it's decoded here and never logged.
+          Effect.flatMap(HttpClientResponse.schemaBodyJson(data(Deposit))),
+          Effect.map((r) => r.data),
+          Effect.mapError(unavailable)
+        )
+        // Pay only what buys exactly this much credit, in USDC on Base, to a well-formed address.
+        if (d.payment.method !== "usdc_base" || d.payment.currency !== "USDC") {
+          return yield* unavailable(`deposit ${d.id} wants ${d.payment.method}/${d.payment.currency}, not USDC on Base`)
+        }
+        if (d.payment.price !== amount || (d.payment.commission ?? 0) !== 0) {
+          return yield* unavailable(`deposit ${d.id} costs ${d.payment.price} for ${amount} of credit; refusing to pay more than 1:1`)
+        }
+        if (!EVM_ADDRESS.test(d.payment.address)) return yield* unavailable(`deposit ${d.id} has a malformed address`)
+        return { invoiceId: d.id, address: d.payment.address, price: d.payment.price }
+      })
+
+      const depositState = (invoiceId: string) =>
+        get(`/invoices/${encodeURIComponent(invoiceId)}`, InvoiceState).pipe(
+          Effect.map((i) => ({
+            status: i.status,
+            state: (["all_delivered", "complete", "delivered"].includes(i.status)
+              ? "credited"
+              : ["all_error", "payment_error", "refunded"].includes(i.status)
+              ? "failed"
+              : "pending") as DepositState
+          }))
+        )
+
+      return Bitrefill.of({ search, voucher, order, delivery, credit, deposit, depositState })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

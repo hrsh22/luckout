@@ -10,6 +10,10 @@ members = ["test-usdc"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# One-time state upgrade; see `mod migrate` in src/lib.rs.
+migrate = []
+
 [dependencies]
 near-sdk = "5"
 

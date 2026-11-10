@@ -1,6 +1,7 @@
 "use client"
 
 import { shortAccount } from "@/components/avatar"
+import { ago, Bar, CreditSection, Toggle, type Tx } from "@/components/admin-credit"
 import { AmountField } from "@/components/funds"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
@@ -34,10 +35,6 @@ const nearAmount = (yocto: string | bigint) => {
 const toYocto = (s: string) => {
   const m = /^(\d+)(?:\.(\d{0,24}))?$/.exec(s.trim())
   return m ? BigInt(m[1]!) * YOCTO + BigInt((m[2] ?? "").padEnd(24, "0")) : undefined
-}
-const ago = (iso: string) => {
-  const min = Math.round((Date.now() - new Date(iso).getTime()) / 60_000)
-  return min < 60 ? `${min} min ago` : min < 48 * 60 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} days ago`
 }
 const RUNBOOK = "https://github.com/hrsh22/luckout/blob/main/deploy/RUNBOOK.md#a-purchase-is-stuck"
 /** Full cashback needs the Discount Cap (20% of free reserve) to reach the Cashback Cap. */
@@ -87,7 +84,7 @@ function Loading() {
 }
 
 /** Signs with the admin's own wallet (never the relayer), toasts the result with a link, and refreshes. */
-function useAdminTx() {
+function useAdminTx(): Tx {
   const { accountId, refresh } = useSession()
   const qc = useQueryClient()
   return async (pending: string, done: string, f: (accountId: string) => Promise<unknown>) => {
@@ -149,7 +146,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         </p>
       )}
 
-      <section className="grid gap-4 lg:grid-cols-4">
+      <section className="grid gap-4 lg:grid-cols-3">
         <div className="relative overflow-hidden rounded-[2.25rem] bg-ink p-8 text-white lg:col-span-2">
           <div className="blob -top-24 -right-16 size-72 bg-lilac opacity-50" aria-hidden="true" />
           <div className="blob -bottom-32 left-24 size-64 bg-gold opacity-30" aria-hidden="true" />
@@ -170,18 +167,19 @@ function Dashboard({ o }: { o: AdminOverview }) {
         <div className="card flex flex-col p-7">
           <p className="text-ink-soft">Proceeds</p>
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.proceeds} /></p>
-          <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. It refills Bitrefill.</p>
+          <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills Bitrefill from it.</p>
           <div className="mt-auto pt-6">
             <Button variant="soft" disabled={!isOwner || !o.reserve.proceeds} onClick={() => setOpen("withdraw-proceeds")}>Withdraw</Button>
           </div>
         </div>
 
-        <BitrefillCard o={o} />
       </section>
+
+      <CreditSection o={o} isOwner={isOwner} tx={tx} />
 
       <section className="flex flex-col gap-4">
         <SectionTitle title="Gas" body="NEAR our accounts spend on the network. Each alerts below its line; any admin can top it up." />
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {o.gas.map((g) => <GasTile key={g.role} g={g} onSend={() => setOpen({ gas: g })} />)}
         </div>
       </section>
@@ -211,7 +209,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         title="Withdraw proceeds"
         available={o.reserve.proceeds}
         to={o.contract.owner}
-        preview={() => "Then top up Bitrefill's USD balance with it, so real cards keep delivering."}
+        preview={() => "Leave enough for Bitrefill refills: the treasury pulls them from here."}
         onWithdraw={(m) => tx(`Withdrawing ${usd(m)} of proceeds`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
           send(id, contractCall("withdraw_proceeds", { amount: String(m) }, 60)))}
       />
@@ -259,40 +257,9 @@ function ShopSwitch({ paused, isOwner, onPause, onResume }: { paused: boolean; i
   )
 }
 
-function Bar({ value, tone }: { value: number; tone: "good" | "warn" | "ink" }) {
-  const bg = tone === "good" ? "bg-good" : tone === "warn" ? "bg-warn" : "bg-ink"
-  return (
-    <div className="h-2 overflow-hidden rounded-full bg-soft">
-      <motion.div className={`h-full rounded-full ${bg}`} initial={{ width: 0 }} animate={{ width: `${Math.max(2, Math.min(100, value * 100))}%` }} transition={{ duration: 0.6 }} />
-    </div>
-  )
-}
-
-function BitrefillCard({ o }: { o: AdminOverview }) {
-  const p = o.purchases
-  const left = Math.max(0, p.bitrefillCap - p.bitrefillOrders)
-  return (
-    <div className="card flex flex-col p-7">
-      <p className="text-ink-soft">Bitrefill USD credit</p>
-      <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]">
-        {o.bitrefillUsd === undefined ? <span className="text-3xl text-muted">No answer</span> : `$${o.bitrefillUsd}`}
-      </p>
-      <p className="mt-2 text-sm text-muted">
-        {o.network === "testnet" ? "Pays for real cards on mainnet. Testnet's test cards are free." : "Pays for every card. Keep it above a day of sales."}
-      </p>
-      <div className="mt-auto flex flex-col gap-2 pt-6">
-        <Bar value={p.bitrefillOrders / p.bitrefillCap} tone={left <= 3 ? "warn" : "ink"} />
-        <p className="text-sm text-muted">{left} of {p.bitrefillCap} orders left in the last 24 hours</p>
-        <a href="https://www.bitrefill.com/" target="_blank" rel="noreferrer" className={buttonVariants({ variant: "soft", size: "sm", className: "mt-2 self-start" })}>
-          Open Bitrefill<ArrowUpRight />
-        </a>
-      </div>
-    </div>
-  )
-}
-
 const GAS_COPY = {
   operator: { label: "Operator", purpose: "Sends every purchase and delivery." },
+  treasury: { label: "Treasury", purpose: "Signs Bitrefill refills; holds only the USDC they need." },
   relayer: { label: "Relayer", purpose: "Pays customers' fees for deposits, withdrawals and settings." },
   contract: { label: "Contract storage", purpose: "Each purchase stores a record; storage is paid in NEAR." }
 } as const
@@ -321,22 +288,6 @@ function GasTile({ g, onSend }: { g: AdminOverview["gas"][number]; onSend: () =>
       </p>
       <Button size="sm" variant={low ? "primary" : "soft"} className="mt-5 self-start" onClick={onSend}><Plus />Send NEAR</Button>
     </div>
-  )
-}
-
-function Toggle({ on, onChange, label, busy }: { on: boolean; onChange: (v: boolean) => void; label: string; busy?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      disabled={busy}
-      onClick={() => onChange(!on)}
-      className={`relative h-8 w-14 shrink-0 rounded-full transition-colors duration-200 ${on ? "bg-good" : "bg-[#d6d3e2]"} disabled:opacity-60`}
-    >
-      <motion.span layout transition={{ type: "spring", stiffness: 600, damping: 35 }} className={`absolute top-1 size-6 rounded-full bg-white shadow ${on ? "right-1" : "left-1"}`} />
-    </button>
   )
 }
 
@@ -483,7 +434,6 @@ function AttentionRow({ a }: { a: AttentionPurchase }) {
   )
 }
 
-type Tx = ReturnType<typeof useAdminTx>
 
 function FundReserveSheet({ open, onClose, o, tx }: { open: boolean; onClose: () => void; o: AdminOverview; tx: Tx }) {
   const { walletUsdc } = useSession()

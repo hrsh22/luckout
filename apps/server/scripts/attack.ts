@@ -59,6 +59,9 @@ await attempt("Withdraw the victim's balance to the attacker", contract, "withdr
 await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
 await attempt("Drain the Cashback Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)
 await attempt("Pause the shop", contract, "set_paused", { paused: true })
+await attempt("Pull the proceeds, as if it were the treasury", contract, "sweep_proceeds", { amount: "1000000" }, 1n)
+await attempt("Make itself the treasury, with no daily cap", contract, "set_treasury", { treasury: operatorId, daily_cap: "1000000000000" }, 1n)
+await attempt("Send the proceeds to itself through the owner's route", contract, "withdraw_proceeds", { amount: "1000000", to_treasury: true }, 1n)
 await attempt("Move test USDC out of the contract directly", process.env.USDC_CONTRACT_ID ?? "usdc.luckout.testnet", "ft_transfer", { receiver_id: operatorId, amount: "1000000" }, 1n)
 
 console.log(`\nThe most a compromised server or agent can ever do is buy vouchers for ${victim}, within the limits they set.`)

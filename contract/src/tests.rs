@@ -683,3 +683,143 @@ fn the_premium_rounds_up() {
     let q = c.quote(U128(1_000_001), Mode::Lucky(0));
     assert_eq!(q.max_price.0, 1_100_002);
 }
+
+// ---------- treasury (ADR-0009) ----------
+
+fn treasury() -> AccountId {
+    id("treasury.near")
+}
+
+/// Alice buys and receives `n` Normal cards of 10 USDC, so the proceeds hold 10·n USDC.
+fn with_proceeds(n: u64) -> Contract {
+    let mut c = setup(0, 100 * USDC);
+    for i in 0..n {
+        as_(operator());
+        let p = c.purchase(
+            alice(),
+            U128(10 * USDC),
+            Some(Mode::Normal),
+            format!("p{i}"),
+            U128(u128::MAX),
+        );
+        deliver(&mut c, p, [0; 32]);
+    }
+    assert_eq!(c.get_reserve().proceeds.0, 10 * USDC * n as u128);
+    c
+}
+
+fn set_treasury(c: &mut Contract, cap: u128) {
+    call(owner(), DAY, [0; 32], 1);
+    c.set_treasury(Some(treasury()), U128(cap));
+}
+
+#[test]
+fn the_treasury_pulls_proceeds_up_to_its_daily_cap() {
+    let mut c = with_proceeds(5);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(20 * USDC));
+    let _ = c.sweep_proceeds(U128(10 * USDC));
+    assert_eq!(c.get_reserve().proceeds.0, 20 * USDC);
+    assert_eq!(c.get_config()["swept_today"], "30000000");
+    assert!(get_logs().iter().any(|l| l.contains("proceeds_swept")));
+}
+
+#[test]
+#[should_panic(expected = "Over the treasury's daily cap")]
+fn the_treasury_cannot_pull_past_its_cap() {
+    let mut c = with_proceeds(5);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(20 * USDC));
+    let _ = c.sweep_proceeds(U128(10 * USDC + 1));
+}
+
+#[test]
+fn the_cap_starts_over_the_next_day() {
+    let mut c = with_proceeds(5);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(30 * USDC));
+    call(treasury(), 2 * DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(20 * USDC));
+    assert_eq!(c.get_reserve().proceeds.0, 0);
+}
+
+#[test]
+#[should_panic(expected = "Only the treasury")]
+fn only_the_treasury_can_pull() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 30 * USDC);
+    call(operator(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(USDC));
+}
+
+#[test]
+#[should_panic(expected = "Over the treasury's daily cap")]
+fn a_zero_cap_means_only_the_owner_moves_proceeds() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 0);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(USDC));
+}
+
+#[test]
+#[should_panic(expected = "Exceeds proceeds")]
+fn the_treasury_cannot_pull_more_than_the_proceeds() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 100 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(10 * USDC + 1));
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn pulling_needs_a_full_access_key() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 0);
+    let _ = c.sweep_proceeds(U128(USDC));
+}
+
+#[test]
+#[should_panic(expected = "Only the owner")]
+fn only_the_owner_sets_the_treasury() {
+    let mut c = with_proceeds(0);
+    call(operator(), DAY, [0; 32], 1);
+    c.set_treasury(Some(operator()), U128(1_000 * USDC));
+}
+
+#[test]
+#[should_panic(expected = "The treasury must be its own account")]
+fn the_operator_cannot_be_the_treasury() {
+    let mut c = with_proceeds(0);
+    call(owner(), DAY, [0; 32], 1);
+    c.set_treasury(Some(operator()), U128(USDC));
+}
+
+#[test]
+fn the_owner_sends_proceeds_to_the_treasury_without_a_cap() {
+    let mut c = with_proceeds(5);
+    set_treasury(&mut c, 0);
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_proceeds(U128(50 * USDC), Some(true));
+    assert_eq!(c.get_reserve().proceeds.0, 0);
+    assert!(get_logs().iter().any(|l| l.contains("treasury.near")));
+}
+
+#[test]
+fn a_failed_pull_puts_back_the_proceeds_and_the_cap() {
+    let mut c = with_proceeds(3);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(30 * USDC));
+    call(contract(), DAY, [0; 32], 0);
+    c.on_send(
+        Payout::Sweep { day: 1 },
+        U128(30 * USDC),
+        Err(PromiseError::Failed),
+    );
+    assert_eq!(c.get_reserve().proceeds.0, 30 * USDC);
+    assert_eq!(c.get_config()["swept_today"], "0");
+}

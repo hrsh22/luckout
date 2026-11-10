@@ -1,3 +1,4 @@
+import { CreditSettings } from "@luckout/api"
 import { Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
@@ -5,18 +6,19 @@ import { test } from "node:test"
 import { Admin } from "./Admin.ts"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
+import { Credit } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near } from "./Near.ts"
+import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
+import { fakeBitrefill, fakeNear } from "./testing.ts"
 
 // The admin panel's server side on an in-memory database, with NEAR and Bitrefill faked.
 process.env.NEAR_NETWORK = "testnet"
 process.env.ADMIN_ACCOUNTS = "boss.testnet, luckout.testnet"
 
 const NEAR = 10n ** 24n
-const near = Near.of({
-  contractId: "app.test",
-  operatorId: "server.test",
+const near = fakeNear({
   relayerId: "relayer.test",
   view: <A>(method: string) =>
     Effect.succeed(({
@@ -24,32 +26,35 @@ const near = Near.of({
       get_reserve: { free: "1000000000", locked: "5000000", discount_cap: "200000000", proceeds: "236000000" },
       get_stats: { lucky_settled: 4, lucky_amount_total: "40000000", lucky_paid_total: "37200000" }
     } as Record<string, unknown>)[method] as A),
-  call: () => Effect.die("not used"),
-  relay: () => Effect.die("not used"),
-  resume: () => Effect.die("not used"),
-  accessKey: () => Effect.die("not used"),
-  height: Effect.die("not used"),
-  account: (id) => Effect.succeed({ amount: id === "relayer.test" ? NEAR / 4n : 2n * NEAR, storageUsage: 100 }),
-  verifySignIn: () => Effect.succeed(false)
+  account: (id) => Effect.succeed({ amount: id === "relayer.test" ? NEAR / 4n : 2n * NEAR, storageUsage: 100 })
 })
-const bitrefill = Bitrefill.of({
-  search: () => Effect.die("not used"),
-  voucher: () => Effect.die("not used"),
-  order: () => Effect.die("not used"),
-  delivery: () => Effect.die("not used"),
-  usdBalance: Effect.succeed("120.50")
+const bitrefill = fakeBitrefill({ credit: Effect.succeed({ balance: 120_500_000, room: 1_879_500_000 }) })
+const refill = Refill.of({
+  kick: Effect.void,
+  request: () => Effect.die("not used"),
+  resolve: () => Effect.die("not used"),
+  process: Effect.void,
+  status: Effect.succeed({
+    refills: [],
+    refilledToday: 0,
+    paused: "Refills run on mainnet: NEAR Intents doesn't run on testnet, and test cards are free.",
+    available: false,
+    needs: undefined,
+    treasury: { accountId: undefined, contractTreasury: undefined, dailyCap: 0, sweptToday: 0, proceeds: 236_000_000, usdc: 0 }
+  })
 })
 const alerts: Array<string> = []
 const layer = Admin.layer.pipe(
-  Layer.provideMerge(Relay.layer),
+  Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer)),
   Layer.provide(Layer.mergeAll(
     Layer.succeed(Near, near),
     Layer.succeed(Bitrefill, bitrefill),
+    Layer.succeed(Refill, refill),
     Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.void }))
   )),
   Layer.provideMerge(DbMemory)
 )
-const run = <A, E>(e: Effect.Effect<A, E, Admin | Relay | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
+const run = <A, E>(e: Effect.Effect<A, E, Admin | Relay | Credit | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
 
 const purchase = (id: string, step: string, error: string | null, minutesAgo = 30) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
@@ -77,7 +82,9 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
     assert.equal(o.purchases.today, 2)
     assert.equal(o.purchases.deliveredToday, 1)
     assert.deepEqual(o.purchases.attention.map((a) => [a.step, a.retryable]), [["stuck", false]])
-    assert.equal(o.bitrefillUsd, "120.50")
+    assert.equal(o.credit.balance, 120_500_000)
+    assert.equal(o.credit.target, 100_000_000, "no sales yet: the floor")
+    assert.equal(o.credit.refillsAvailable, false)
   })))
 
 test("Retry now only touches purchases NEAR can safely repeat", () =>
@@ -105,4 +112,16 @@ test("relayer changes are announced to the admin channel", () =>
     yield* admin.configureRelay({ ...(yield* relay.settings), enabled: false }, "boss.testnet")
     assert.equal((yield* relay.settings).enabled, false)
     assert.match(alerts.at(-1) ?? "", /boss\.testnet set the relayer off/)
+  })))
+
+test("credit settings that don't hang together are refused, and changes are announced", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const credit = yield* Credit
+    const s = yield* credit.settings
+    const bad = yield* admin.configureCredit(new CreditSettings({ ...s, maxOrder: s.ceiling + 1 }), "boss.testnet").pipe(Effect.flip)
+    assert.equal(bad._tag, "AdminInvalid")
+    yield* admin.configureCredit(new CreditSettings({ ...s, ceiling: 800_000_000 }), "boss.testnet")
+    assert.equal((yield* credit.settings).ceiling, 800_000_000)
+    assert.match(alerts.at(-1) ?? "", /boss\.testnet set Bitrefill credit/)
   })))

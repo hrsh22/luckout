@@ -36,6 +36,18 @@ _Avoid_: Custodian, operator, wallet
 The browser storefront where a customer connects their NEAR wallet, tops up, sets Spending Limits, links Telegram, buys, watches Draws, and reads purchase history and Redemption Data.
 _Avoid_: Dashboard, admin console
 
+**Bitrefill Credit**:
+Our USD store credit at Bitrefill, which pays for every real card and can't be refunded; kept between a floor and a ceiling at about two days of sales.
+_Avoid_: Float, balance (that's the customer's), wallet
+
+**Refill**:
+Topping up the Bitrefill Credit: an exact USD deposit paid from the Treasury through a NEAR Intents swap to Bitrefill's address on Base.
+_Avoid_: Top-Up (that's the customer's), recharge
+
+**Treasury**:
+The server-held account that pays Refills. The contract lets it pull Proceeds only to itself, within a daily cap the owner sets, or not at all in manual mode.
+_Avoid_: Hot wallet, float account
+
 **Relayer**:
 The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.
 _Avoid_: Paymaster, gas station, sponsor
