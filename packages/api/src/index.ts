@@ -317,10 +317,16 @@ export class RefillView extends Schema.Class<RefillView>("RefillView")({
   amount: MicroUsdc,
   /** target, waiting (a purchase needed it) or manual. */
   reason: Schema.String,
-  /** invoice, quote, fund, send, swapping, crediting, done, refunded, failed, stuck or resolved. */
+  /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck or resolved. */
   step: Schema.String,
   error: Schema.optional(Schema.String),
+  /** The treasury's NEAR transfer into the swap. */
   sendTx: Schema.optional(Schema.String),
+  /** The swap's NEAR Intents deposit address (its explorer page). */
+  swap: Schema.optional(Schema.String),
+  /** The Base wallet's payment to Bitrefill. */
+  payTx: Schema.optional(Schema.String),
+  invoiceId: Schema.optional(Schema.String),
   createdAt: Schema.String,
   updatedAt: Schema.String
 }) {}
@@ -358,7 +364,17 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   }),
   /** An admin stopped new purchases on the server (any admin can, unlike the contract's pause). */
   salesStopped: Schema.Boolean,
-  reserve: Schema.Struct({ free: MicroUsdc, locked: MicroUsdc, discountCap: MicroUsdc, proceeds: MicroUsdc, maxCashback: MicroUsdc }),
+  reserve: Schema.Struct({
+    free: MicroUsdc,
+    locked: MicroUsdc,
+    discountCap: MicroUsdc,
+    proceeds: MicroUsdc,
+    maxCashback: MicroUsdc,
+    /** USDC the contract holds in all. */
+    held: MicroUsdc,
+    /** Customers' money in the contract: what it holds minus the reserve and proceeds. Negative means it holds less than it owes. */
+    customers: Schema.Int
+  }),
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
   /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
   gas: Schema.Array(Schema.Struct({

@@ -210,6 +210,9 @@ export class Refill extends Context.Service<Refill, {
           step: r.step,
           ...(r.error ? { error: r.error } : {}),
           ...(r.send_tx ? { sendTx: r.send_tx.hash } : {}),
+          ...(r.swap ? { swap: r.swap.depositAddress } : {}),
+          ...(r.pay_tx?.hash ? { payTx: r.pay_tx.hash } : {}),
+          ...(r.invoice_id ? { invoiceId: r.invoice_id } : {}),
           createdAt: new Date(r.created_at).toISOString(),
           updatedAt: new Date(r.updated_at).toISOString()
         })

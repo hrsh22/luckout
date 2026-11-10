@@ -43,6 +43,17 @@ export const Monitor = Layer.effectDiscard(
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
       }
+      // The contract owes customers' balances, the reserve and the proceeds. Customer balances aren't summed
+      // onchain, so what it holds must at least cover the other two; below that, customers' money is gone
+      // (a bug or an attack). The admin panel shows the customers' share.
+      const [held, owed] = yield* Effect.all([
+        near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
+        near.view<{ free: string; locked: string; proceeds: string }>("get_reserve")
+      ])
+      const house = BigInt(owed.free) + BigInt(owed.locked) + BigInt(owed.proceeds)
+      if (BigInt(held) < house) {
+        yield* alerts.admin(`contract ${near.contractId} holds ${Number(held) / 1e6} USDC, less than its reserve and proceeds alone (${Number(house) / 1e6}). Pause the contract and investigate now.`)
+      }
       if (refills && base.configured) {
         // A Base RPC hiccup only skips this check.
         const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))

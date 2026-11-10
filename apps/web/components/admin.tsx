@@ -225,6 +225,11 @@ function Dashboard({ o }: { o: AdminOverview }) {
           <p className="text-ink-soft">Proceeds</p>
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.proceeds} /></p>
           <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills Bitrefill from it.</p>
+          <p className={`mt-4 text-sm ${o.reserve.customers < 0 ? "font-semibold text-bad" : "text-muted"}`}>
+            {o.reserve.customers < 0
+              ? `The contract holds ${usd(o.reserve.held)}, less than the reserve and proceeds alone. Pause it and investigate now.`
+              : `Customers hold ${usd(o.reserve.customers)} in Luckout, theirs to withdraw any time. The contract holds ${usd(o.reserve.held)} in all.`}
+          </p>
           <div className="mt-auto pt-6">
             <Button variant="soft" disabled={!o.reserve.proceeds} onClick={asOwner(() => setOpen("withdraw-proceeds"))}>Withdraw</Button>
           </div>
@@ -235,9 +240,10 @@ function Dashboard({ o }: { o: AdminOverview }) {
       <CreditSection o={o} asOwner={asOwner} tx={tx} />
 
       <section className="flex flex-col gap-4">
-        <SectionTitle title="Gas" body="NEAR our accounts spend on the network. Each alerts below its line; any admin can top it up." />
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <SectionTitle title="Gas" body="What our accounts spend on network fees: NEAR on NEAR, ETH on Base. Each alerts below its line; any admin can top it up." />
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {o.gas.map((g) => <GasTile key={g.role} g={g} onSend={() => setOpen({ gas: g })} />)}
+          {o.treasury.wallet && <BaseGasTile w={o.treasury.wallet} />}
         </div>
       </section>
 
@@ -402,6 +408,46 @@ function GasTile({ g, onSend }: { g: AdminOverview["gas"][number]; onSend: () =>
         <a href={explorerAccount(g.accountId)} target="_blank" rel="noreferrer" className="underline underline-offset-2">{shortAccount(g.accountId)}</a>
       </p>
       <Button size="sm" variant={low ? "primary" : "soft"} className="mt-5 self-start" onClick={onSend}><Plus />Send NEAR</Button>
+    </div>
+  )
+}
+
+/**
+ * The Base wallet's ETH, which pays for every Bitrefill payment on Base. It has no NEAR key to send
+ * to from here: top it up by sending ETH on Base to its address from any wallet or exchange.
+ */
+function BaseGasTile({ w }: { w: NonNullable<AdminOverview["treasury"]["wallet"]> }) {
+  const low = BigInt(w.eth) < BigInt(w.alertBelow)
+  const fill = Number((BigInt(w.eth) * 1000n) / (BigInt(w.alertBelow) * 4n)) / 1000
+  const eth = (wei: string) => (Number(BigInt(wei) / 10n ** 12n) / 1e6).toFixed(5).replace(/0+$/, "").replace(/\.$/, "")
+  return (
+    <div className="card flex flex-col p-6">
+      <div className="flex items-center justify-between gap-3">
+        <p className="flex items-center gap-2 font-semibold"><Fuel size={18} className="text-muted" aria-hidden="true" />Base wallet</p>
+        <span className={`pill ${low ? "bg-warn-soft! text-warn" : "bg-good-soft! text-good"}`}>{low ? "Low" : "OK"}</span>
+      </div>
+      <p className="mt-1 text-sm text-muted">Pays Bitrefill on Base, a fraction of a cent each. Signed by the treasury.</p>
+      <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">
+        {eth(w.eth)} <span className="text-lg font-bold text-muted">ETH</span>
+      </p>
+      <div className="relative mt-3">
+        <Bar value={fill} tone={low ? "warn" : "good"} />
+        <span className="absolute top-[-3px] left-1/4 h-3.5 w-0.5 rounded-full bg-ink/30" aria-hidden="true" />
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Alert under {eth(w.alertBelow)} ETH ·{" "}
+        <a href={`https://${network === "testnet" ? "sepolia." : ""}basescan.org/address/${w.address}`} target="_blank" rel="noreferrer" className="underline underline-offset-2">
+          {w.address.slice(0, 6)}…{w.address.slice(-4)}
+        </a>
+      </p>
+      <Button
+        size="sm"
+        variant={low ? "primary" : "soft"}
+        className="mt-5 self-start"
+        onClick={() => navigator.clipboard.writeText(w.address).then(() => toast.success("Address copied: send ETH on Base to it"), () => toast.error("Couldn't copy"))}
+      >
+        Copy address
+      </Button>
     </div>
   )
 }

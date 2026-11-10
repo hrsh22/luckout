@@ -195,6 +195,9 @@ function CreditCard({ c, ordersToday, cap }: { c: Credit; ordersToday: number; c
         <div><dt className="text-muted">Waiting for credit</dt><dd className="text-base font-semibold">{c.waitingCount}{c.waitingCount > 0 ? ` (${usd(c.waitingTotal)})` : ""}</dd></div>
         <div><dt className="text-muted">Bitrefill orders</dt><dd className="text-base font-semibold">{ordersToday} <span className="text-muted">of {cap} today</span></dd></div>
       </dl>
+      {balance !== undefined && (
+        <p className="-mt-2 text-sm text-muted">Bitrefill lets our account hold {usd(c.room)} more; the biggest card we can buy right now is {usd(Math.max(0, c.free) + c.room)}.</p>
+      )}
 
       {!c.refillsAvailable
         ? <p className="rounded-[1.25rem] bg-soft p-4 text-sm text-ink-soft">{c.paused ?? "Refills aren't available here."}</p>
@@ -488,8 +491,18 @@ function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> }) {
               </div>
               <div className="flex shrink-0 gap-2">
                 {r.sendTx && (
-                  <a href={explorer(r.sendTx)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sm font-semibold text-ink-soft hover:text-ink">
-                    Payment<ArrowUpRight size={14} />
+                  <a href={explorer(r.sendTx)} target="_blank" rel="noreferrer" title="The treasury's USDC into the swap" className="inline-flex items-center gap-1 text-sm font-semibold text-ink-soft hover:text-ink">
+                    Deposit<ArrowUpRight size={14} />
+                  </a>
+                )}
+                {r.swap && (
+                  <a href={`https://explorer.near-intents.org/transactions/${r.swap}`} target="_blank" rel="noreferrer" title="The swap at NEAR Intents" className="inline-flex items-center gap-1 text-sm font-semibold text-ink-soft hover:text-ink">
+                    Swap<ArrowUpRight size={14} />
+                  </a>
+                )}
+                {r.payTx && (
+                  <a href={`https://${network === "testnet" ? "sepolia." : ""}basescan.org/tx/${r.payTx}`} target="_blank" rel="noreferrer" title={`Our Base wallet paying Bitrefill's invoice ${r.invoiceId ?? ""}`} className="inline-flex items-center gap-1 text-sm font-semibold text-ink-soft hover:text-ink">
+                    Bitrefill payment<ArrowUpRight size={14} />
                   </a>
                 )}
                 {r.step === "stuck" && <Button size="sm" variant="light" onClick={() => setResolving(r)}>Mark resolved</Button>}
