@@ -2,7 +2,7 @@ import { Effect, Layer, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Base } from "./Base.ts"
-import { Near } from "./Near.ts"
+import { Near, Network } from "./Near.ts"
 
 const NEAR = 10n ** 24n
 /** NEAR storage staking: 1e19 yoctoNEAR per byte. */
@@ -26,6 +26,8 @@ export const Monitor = Layer.effectDiscard(
     const sql = yield* SqlClient.SqlClient
     const near = yield* Near
     const base = yield* Base
+    // Refills, and so the Base wallet's gas, only matter where refills run.
+    const refills = (yield* Network) === "mainnet"
     const alerts = yield* Alerts
 
     const check = Effect.gen(function*() {
@@ -41,7 +43,7 @@ export const Monitor = Layer.effectDiscard(
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
       }
-      if (base.configured) {
+      if (refills && base.configured) {
         // A Base RPC hiccup only skips this check.
         const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
         if (w && w[1].eth < BASE_GAS_ALERT) {
