@@ -77,6 +77,8 @@ export class Purchases extends Context.Service<Purchases, {
   create(accountId: string, input: NewPurchase): Effect.Effect<Purchase, BitrefillUnavailable | PurchaseInvalid>
   list(accountId: string): Effect.Effect<ReadonlyArray<Purchase>>
   get(accountId: string, id: string): Effect.Effect<Purchase, NotFound>
+  /** The customer cancels a purchase still waiting for credit: nothing was charged. */
+  cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
   /** One pass over purchases waiting for credit (also runs every 10 seconds by itself). */
   readonly promoteWaiting: Effect.Effect<void>
 }>()("luckout/Purchases") {
@@ -382,10 +384,15 @@ export class Purchases extends Context.Service<Purchases, {
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
+        // No card is refused for its size: one our credit can't cover waits, uncharged, for a refill
+        // sized for it. Only one bigger than Bitrefill lets our account hold could never be bought.
         if (real) {
-          const { maxOrder } = yield* credit.settings
-          if (referencePrice > maxOrder) {
-            return yield* new PurchaseInvalid({ message: `The most Luckout sells in one purchase right now is ${usd(maxOrder)}.` })
+          // Read Bitrefill first if we haven't yet; unreadable, the card simply waits like any other.
+          if (!(yield* credit.view).snapshot) yield* credit.refresh
+          const c = yield* credit.view
+          const most = Math.max(0, c.free) + (c.snapshot?.room ?? Number.POSITIVE_INFINITY)
+          if (referencePrice > most) {
+            return yield* new PurchaseInvalid({ message: `That card is bigger than we can buy right now (up to ${usd(most)}). Please choose a smaller one.` })
           }
         }
         yield* preflight(accountId, referencePrice, input.maxPrice)
@@ -427,6 +434,17 @@ export class Purchases extends Context.Service<Purchases, {
           Effect.orDie,
           Effect.flatMap((r) => (r[0] ? Effect.succeed(view(r[0])) : Effect.fail(new NotFound())))
         )
+
+      const cancel = (accountId: string, id: string) =>
+        Effect.gen(function*() {
+          const [row] = yield* sql<Row>`SELECT * FROM purchases WHERE id = ${id} AND account_id = ${accountId}`.pipe(Effect.orDie)
+          if (!row) return yield* new NotFound()
+          // Only before admission: once charged, the purchase finishes (or is refunded) by itself.
+          if (row.step !== "waiting" || !(yield* move(row, { step: "rejected", error: "You cancelled it. You weren't charged." }))) {
+            return yield* new PurchaseInvalid({ message: "This purchase is already going through, so it can't be cancelled; if it fails you get the full amount back." })
+          }
+          return view(yield* load(id))
+        })
 
       const giveUp = (id: string) =>
         Effect.gen(function*() {
@@ -496,7 +514,7 @@ export class Purchases extends Context.Service<Purchases, {
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
       yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get, promoteWaiting: promote })
+      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote })
     })
   )
 }

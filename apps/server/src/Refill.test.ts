@@ -8,7 +8,7 @@ import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type PaymentStatus } from "./Base.ts"
 import { Bitrefill, type DepositState } from "./Bitrefill.ts"
-import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
+import { Credit, CREDIT_DEFAULTS, levels } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { OneClick, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
@@ -525,7 +525,7 @@ test("the daily cap and the proceeds bound what the treasury pulls", async () =>
   const w = world({ cap: 20_000_000 })
   const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => settle(v.id)))
   assert.equal(r.step, "fund")
-  assert.match(r.error ?? "", /allow \$20\.00/)
+  assert.match(r.error ?? "", /Today's cap allows \$20\.00 more \(\$0\.00 of \$20\.00 used\)/)
   assert.deepEqual(w.txs, [])
 })
 
@@ -587,8 +587,36 @@ test("quotes are checked against exactly what we asked for", () => {
   assert.match(quoteProblem({ quote: base().quote }, want) ?? "", /didn't echo/)
 })
 
-test("mainnet starts small: a $30 ceiling, $15 largest order, $40 of refills a day", () => {
+test("mainnet keeps idle credit between $10 and $30, refills up to $300 a day, and lets a purchase wait up to a day", () => {
   const m = CREDIT_DEFAULTS.mainnet
-  assert.deepEqual([m.floor, m.ceiling, m.maxOrder, m.dailyRefill], [10_000_000, 30_000_000, 15_000_000, 40_000_000])
+  assert.deepEqual([m.floor, m.ceiling, m.dailyRefill, m.waitMinutes], [10_000_000, 30_000_000, 300_000_000, 1440])
+})
+
+test("the refill line never sits below the biggest card bought lately, so cards of the usual size buy at once", () => {
+  const s = { floor: 10_000_000, ceiling: 30_000_000 }
+  assert.deepEqual(levels(s, 0, 0), { target: 10_000_000, refillBelow: 5_000_000 }, "no sales yet: the floor")
+  assert.deepEqual(levels(s, 0, 15_000_000), { target: 25_000_000, refillBelow: 15_000_000 }, "a $15 card: kept between $15 and $25")
+  assert.deepEqual(levels(s, 0, 50_000_000), { target: 30_000_000, refillBelow: 20_000_000 }, "a $50 card: idle credit still stops at the ceiling")
+  assert.deepEqual(levels(s, 20_000_000, 5_000_000), { target: 30_000_000, refillBelow: 15_000_000 }, "busy days: two days of sales, up to the ceiling")
+})
+
+test("a refill for purchases already waiting may go past the ceiling: that credit is spent within minutes", async () => {
+  const w = world({ credit: 450_000_000, treasuryUsdc: 1_000_000_000 })
+  const v = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '600', 600000000, 600000000, 'waiting')`
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    return yield* Effect.flatMap(Refill, (r) => r.request(undefined, "boss.testnet"))
+  }))
+  // Target $100 + the waiting $600 − $450 free; before, the $500 ceiling allowed only $50.
+  assert.equal(v.amount, 250_000_000)
+})
+
+test("pulls nearing the daily cap say so, with a cap to raise it to", async () => {
+  const w = world({ cap: 35_000_000, treasuryUsdc: 0 })
+  const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => drive(v.id)))
+  assert.equal(r.step, "done", r.error ?? "")
+  assert.ok(w.alerts.some((a) => /reached \$30\.30 of the \$35\.00 daily cap.*say to \$100\.00/.test(a)), w.alerts.join("\n"))
 })
 

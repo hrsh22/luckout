@@ -218,26 +218,24 @@ function CreditCard({ c, ordersToday, cap }: { c: Credit; ordersToday: number; c
 function CreditSettingsSheet({ open, onClose, s }: { open: boolean; onClose: () => void; s: CreditSettings }) {
   const save = useSaveCredit()
   const dollars = (m: number) => String(m / 1e6)
-  const [f, setF] = useState({ floor: "", ceiling: "", maxOrder: "", dailyRefill: "", waitMinutes: "" })
+  const [f, setF] = useState({ floor: "", ceiling: "", dailyRefill: "", waitMinutes: "" })
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    if (open) setF({ floor: dollars(s.floor), ceiling: dollars(s.ceiling), maxOrder: dollars(s.maxOrder), dailyRefill: dollars(s.dailyRefill), waitMinutes: String(s.waitMinutes) })
+    if (open) setF({ floor: dollars(s.floor), ceiling: dollars(s.ceiling), dailyRefill: dollars(s.dailyRefill), waitMinutes: String(s.waitMinutes) })
   }, [open, s])
   const next = {
     floor: toMicro(f.floor),
     ceiling: toMicro(f.ceiling),
-    maxOrder: toMicro(f.maxOrder),
     dailyRefill: toMicro(f.dailyRefill),
     waitMinutes: Number(f.waitMinutes)
   }
-  const valid = [next.floor, next.ceiling, next.maxOrder, next.dailyRefill].every((v) => v >= 0 && v <= 2_000_000_000) &&
-    Number.isInteger(next.waitMinutes) && next.waitMinutes >= 5 && next.waitMinutes <= 120
+  const valid = [next.floor, next.ceiling, next.dailyRefill].every((v) => v >= 0 && v <= 2_000_000_000) &&
+    Number.isInteger(next.waitMinutes) && next.waitMinutes >= 5 && next.waitMinutes <= 1440
   const fields: Array<{ key: keyof typeof f; label: string; hint: string; dollars: boolean }> = [
     { key: "floor", label: "Keep at least", hint: "Whatever sales did.", dollars: true },
-    { key: "ceiling", label: "Never hold more than", hint: "The most that can ever sit unused at Bitrefill.", dollars: true },
-    { key: "maxOrder", label: "Largest single order", hint: "Bigger cards are refused up front. At most the ceiling.", dollars: true },
-    { key: "dailyRefill", label: "Refill at most, per day", hint: "Across all refills in 24 hours.", dollars: true },
-    { key: "waitMinutes", label: "Minutes an order may wait", hint: "Then it's cancelled, and the customer pays nothing.", dollars: false }
+    { key: "ceiling", label: "Never hold more than", hint: "The most that can sit unused at Bitrefill. A refill for orders already waiting may go past it: that credit is spent within minutes.", dollars: true },
+    { key: "dailyRefill", label: "Refill at most, per day", hint: "Across all refills in 24 hours. Big orders wait for room here.", dollars: true },
+    { key: "waitMinutes", label: "Minutes an order may wait", hint: "Up to 1440 (a day). Then it's cancelled, and the customer pays nothing.", dollars: false }
   ]
   return (
     <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Credit settings" description="The target is two days of recent sales, between the first two numbers.">

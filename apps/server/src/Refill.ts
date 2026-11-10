@@ -6,7 +6,7 @@ import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit } from "./Credit.ts"
+import { Credit, MIN_REFILL } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Signed, TxExpired } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
@@ -37,8 +37,6 @@ import { NEAR_USDC_ASSET } from "./TopUp.ts"
 //   admin resolves it. A stuck refill is still watched, and carries on or closes when its outcome is clean.
 
 export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
-/** Smaller refills cost relatively more and churn invoices. */
-export const MIN_REFILL = 10_000_000
 /** The most a refill may cost above the credit it buys, slippage buffer included. */
 const MAX_COST_BPS = 100n
 const SLIPPAGE_BPS = 50
@@ -60,6 +58,8 @@ const INVOICE_SEND_LIMIT_MS = 50 * 60_000
 /** A sent Base payment not mined after this needs a look. */
 const PAY_CONFIRM_MS = 10 * 60_000
 const CREDIT_TIMEOUT_MS = 60 * 60_000
+/** Below this, a day's refills are never called unusual. */
+const UNUSUAL_FLOOR = 100_000_000
 /** How often a stuck swap is checked for a late refund or completion. */
 const STUCK_WATCH = "5 minutes"
 /** The treasury needs a little NEAR to sign refills. */
@@ -116,6 +116,9 @@ const cents = (micro: number) => Math.ceil(micro / 10_000) * 10_000
 /** The most a refill may cost, so what the treasury holds before it asks for a quote. */
 export const maxCost = (amount: number) => cents(Number(BigInt(amount) * (10_000n + MAX_COST_BPS) / 10_000n))
 const time = (v: Date | string | null | undefined) => (v ? new Date(v).getTime() : 0)
+/** A daily cap to suggest when demand reaches the current one: room for twice today's need, in $50 steps. */
+export const suggestedCap = (cap: number, need: number) => Math.ceil(Math.max(cap * 1.5, need * 2) / 50_000_000) * 50_000_000
+
 /** What a swap must bring to the Base wallet for a refill: 0 when the wallet already holds it. */
 export const swapFor = (amount: number, walletUsdc: number) => (walletUsdc >= amount ? 0 : Math.max(cents(amount - walletUsdc), MIN_SWAP))
 
@@ -318,10 +321,14 @@ export class Refill extends Context.Service<Refill, {
                 yield* alerts.admin(`A Bitrefill refill is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
                 return "wait"
               }
-              const allowed = Math.min(t.dailyCap - t.sweptToday, t.proceeds)
-              if (allowed < shortfall) {
-                yield* save(row.id, { error: `The treasury needs ${usd(shortfall)}; today's cap and the proceeds allow ${usd(Math.max(0, allowed))}.` })
-                yield* alerts.admin(`A Bitrefill refill needs ${usd(shortfall)} more in the treasury, but today's cap and the proceeds allow only ${usd(Math.max(0, allowed))}.`)
+              const capLeft = t.dailyCap - t.sweptToday
+              if (Math.min(capLeft, t.proceeds) < shortfall) {
+                // Says which limit binds and what lifts it; the refill carries on by itself once it lifts.
+                const fix = capLeft < shortfall
+                  ? `Today's cap allows ${usd(Math.max(0, capLeft))} more (${usd(t.sweptToday)} of ${usd(t.dailyCap)} used): raise it in Admin → Treasury → Change mode, say to ${usd(suggestedCap(t.dailyCap, t.sweptToday + shortfall))}, or it carries on when the cap resets.`
+                  : `The proceeds hold only ${usd(t.proceeds)}: it carries on as sales come in, or send USDC to ${near.treasuryId} to cover it now.`
+                yield* save(row.id, { error: `The treasury needs ${usd(shortfall)} more. ${fix}` })
+                yield* alerts.admin(`A ${usd(amount)} Bitrefill refill needs ${usd(shortfall)} more in the treasury. ${fix}`)
                 return "wait"
               }
               // Pull exactly the shortfall: the treasury never holds more than refills need.
@@ -331,6 +338,13 @@ export class Refill extends Context.Service<Refill, {
               if (pulled === "next") {
                 yield* save(row.id, { sweep_tx: null, error: null })
                 yield* alerts.admin(`Treasury pulled ${usd(shortfall)} of proceeds for refill ${row.id.slice(0, 8)}.`)
+                const used = t.sweptToday + shortfall
+                if (used >= t.dailyCap * 0.8) {
+                  yield* alerts.admin(
+                    `Today's treasury pulls reached ${usd(used)} of the ${usd(t.dailyCap)} daily cap. If that's real demand, raise it in Admin → Treasury → Change mode, ` +
+                      `say to ${usd(suggestedCap(t.dailyCap, used))}. If you didn't expect it, switch the treasury to manual.`
+                  )
+                }
               }
               return pulled
             }
@@ -552,18 +566,42 @@ export class Refill extends Context.Service<Refill, {
           const free = Math.max(0, c.free)
           const room = Math.max(0, (c.snapshot?.room ?? 0))
           const left = s.dailyRefill - (yield* refilledToday)
-          // Credit never goes above the ceiling: that bounds what can ever sit unused at Bitrefill.
-          const limit = Math.min(s.ceiling - free, room, left)
-          const wanted = requested ?? Math.min(s.ceiling, c.target + c.waiting.total) - free
+          // Idle credit stays under the ceiling, which bounds what can ever sit unused at Bitrefill.
+          // Purchases already waiting may lift it: their credit is spent within minutes.
+          const limit = Math.min(s.ceiling + c.waiting.total - free, room, left)
+          const wanted = requested ?? c.target + c.waiting.total - free
           const due = requested !== undefined || (c.waiting.total > 0 ? wanted > 0 : free < c.refillBelow)
           if (!due || wanted <= 0) return { amount: 0, why: "Credit is above the refill line." }
           const amount = Math.floor(Math.min(cents(Math.max(wanted, MIN_REFILL)), limit) / 10_000) * 10_000
           if (amount < MIN_REFILL) {
-            const cap = limit === left ? "today's refill cap" : limit === room ? "Bitrefill's account limit" : "the ceiling"
-            return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)} because of ${cap}.` }
+            const why = limit === left
+              ? `today's refills have reached the ${usd(s.dailyRefill)} daily limit. It carries on as the 24-hour window frees up, or raise the limit in Admin → Bitrefill credit → Settings.`
+              : limit === room
+              ? "Bitrefill's account holds as much credit as it allows. Ask Bitrefill to raise the account limit."
+              : "the ceiling. Raise it in Admin → Bitrefill credit → Settings."
+            return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)}: ${why}` }
           }
           return { amount, why: c.waiting.total > 0 ? "waiting" : "target" }
         })
+
+      /**
+       * Refills far above the usual are worth a look: real demand, or someone using the server's keys.
+       * Repeats at most hourly (same text).
+       */
+      const unusual = Effect.gen(function*() {
+        const [r] = yield* sql<{ today: string; usual: string }>`
+          SELECT COALESCE(sum(amount) FILTER (WHERE created_at > now() - interval '1 day'), 0)::text AS today,
+                 (COALESCE(sum(amount) FILTER (WHERE created_at <= now() - interval '1 day'), 0) / 7)::bigint::text AS usual
+          FROM refills WHERE created_at > now() - interval '8 days' AND step NOT IN ('failed', 'refunded')`.pipe(Effect.orDie)
+        const today = Number(r?.today ?? 0)
+        const usual = Number(r?.usual ?? 0)
+        if (today > Math.max(UNUSUAL_FLOOR, usual * 3)) {
+          yield* alerts.admin(
+            `Refills in the last 24 hours (${usd(today)}) are far above the usual (${usd(usual)} a day). If that's real demand, nothing to do. ` +
+              `If you didn't expect it, switch the treasury to manual in Admin → Treasury.`
+          )
+        }
+      })
 
       const start = (amount: number, reason: string, by: string | null) =>
         sql<Row>`INSERT INTO refills (amount, reason, requested_by, step) VALUES (${amount}, ${reason}, ${by}, 'fund') RETURNING *`.pipe(
@@ -580,9 +618,17 @@ export class Refill extends Context.Service<Refill, {
         }
         if (why) return
         const s = yield* size(undefined)
-        if (s.amount === 0) return
+        if (s.amount === 0) {
+          // Customers are waiting and nothing can be refilled: say why, so nobody has to watch.
+          const c = yield* credit.view
+          if (c.waiting.count > 0 && s.why !== "Credit is above the refill line.") {
+            yield* alerts.admin(`${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for credit, uncharged. ${s.why}`)
+          }
+          return
+        }
         const row = yield* start(s.amount, s.why, null)
         yield* Effect.log(`refill ${row.id} started: ${usd(s.amount)} (${s.why})`)
+        yield* unusual
         yield* Effect.forkDetach(advance(row.id))
       })).pipe(Effect.catchCause((cause) => Effect.logError("refill planning failed", cause)))
 

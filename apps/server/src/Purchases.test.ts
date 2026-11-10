@@ -186,11 +186,39 @@ test("two purchases can never count on the same credit", async () => {
   assert.deepEqual(statuses, ["delivered", "waiting"])
 })
 
-test("a card above the largest order is refused up front", async () => {
-  const w = world({ real: true, price: CREDIT_DEFAULTS.mainnet.maxOrder + 1 })
+test("a card far bigger than our credit isn't refused: it waits, uncharged, and a refill starts", async () => {
+  const w = world({ real: true, price: 250_000_000, credit: 10_000_000 })
+  const p = await w.run(w.buy())
+  assert.equal(p.status, "waiting")
+  assert.deepEqual(w.calls, [], "nothing charged yet")
+  assert.equal(w.kicks(), 1)
+})
+
+test("only a card bigger than Bitrefill lets our account hold is refused", async () => {
+  const w = world({ real: true, price: 2_100_000_000, credit: 0 })
   const e = await w.run(w.buy().pipe(Effect.flip))
-  assert.match(e.message, /most Luckout sells in one purchase/)
+  assert.match(e.message, /bigger than we can buy right now \(up to \$2000\.00\)/)
   assert.deepEqual(w.calls, [])
+})
+
+test("a waiting purchase can be cancelled, uncharged; one going through can't", async () => {
+  const w = world({ real: true, price: 12_000_000, credit: 0 })
+  const r = await w.run(Effect.gen(function*() {
+    const purchases = yield* Purchases
+    const waiting = yield* w.buy()
+    const cancelled = yield* purchases.cancel("alice.test", waiting.id)
+    w.setCredit(100_000_000)
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    const going = yield* w.buy(undefined, "bob.test")
+    const refused = yield* purchases.cancel("bob.test", going.id).pipe(Effect.flip)
+    const notYours = yield* purchases.cancel("bob.test", waiting.id).pipe(Effect.flip)
+    return { cancelled, refused, notYours }
+  }))
+  assert.equal(r.cancelled.status, "rejected")
+  assert.match(r.cancelled.error ?? "", /You cancelled it\. You weren't charged/)
+  assert.match(r.refused.message, /already going through/)
+  assert.equal(r.notYours._tag, "NotFound")
+  assert.deepEqual(w.calls.filter((c) => c === "purchase"), ["purchase"], "only bob's went through")
 })
 
 test("one account can have only one purchase waiting", async () => {
@@ -236,7 +264,7 @@ test("if Bitrefill says the credit is too low after all, the charged purchase wa
 test("credit settings are refused when they don't hang together", async () => {
   const { settingsProblem } = await import("./Credit.ts")
   assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, floor: 600_000_000 })) ?? "", /floor/)
-  assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, maxOrder: 600_000_000 })) ?? "", /largest order/)
+  assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, dailyRefill: 5_000_000 })) ?? "", /daily refill limit/)
   assert.equal(settingsProblem(CREDIT_DEFAULTS.testnet), undefined)
   assert.equal(settingsProblem(CREDIT_DEFAULTS.mainnet), undefined)
 })
