@@ -39,8 +39,12 @@ const world = (o: {
   deposit?: Array<DepositState>
   /** The treasury's transfer is saved, then the network goes quiet: outcome unknown. */
   sendLost?: boolean
+  /** The network is down when the transfer is about to be signed: nothing is signed or sent. */
+  sendDownOnce?: boolean
 } = {}) => {
   const s = { usdc: o.treasuryUsdc ?? 0, proceeds: o.proceeds ?? 236_000_000, swept: 0 }
+  const made = { invoices: 0, quotes: 0 }
+  let down = o.sendDownOnce ?? false
   const txs: Array<Tx> = []
   const resumed: Array<string> = []
   const alerts: Array<string> = []
@@ -79,6 +83,10 @@ const world = (o: {
     treasurySend: (receiver, actions, persist) =>
       Effect.gen(function*() {
         const tx = { receiver, calls: actions.map(decode) }
+        if (down && tx.calls.some((c) => c.method === "ft_transfer")) {
+          down = false
+          return yield* new NearUnavailable({ message: "access key: RPC unreachable" })
+        }
         const hash = `tx-${txs.length + 1}`
         txs.push(tx)
         yield* persist({ hash, bytes: JSON.stringify(tx, (_, v) => (typeof v === "bigint" ? String(v) : v)) })
@@ -95,10 +103,11 @@ const world = (o: {
   })
   const bitrefill = fakeBitrefill({
     credit: Effect.succeed({ balance: o.credit ?? 450_000_000, room: 1_500_000_000 }),
-    deposit: (amount) => Effect.succeed({ invoiceId: "inv-1", address: BITREFILL_ADDRESS, price: amount }),
+    deposit: (amount) => Effect.sync(() => (made.invoices++, { invoiceId: "inv-1", address: BITREFILL_ADDRESS, price: amount })),
     depositState: () => Effect.succeed({ state: deposit.shift() ?? "credited", status: "x" })
   })
   const honest = (r: QuoteRequest): QuoteResponse => ({
+    correlationId: `quote-${made.quotes}`,
     quote: {
       depositAddress: DEPOSIT_ADDRESS,
       amountIn: String(Math.ceil(Number(r.amount) * 1.005)),
@@ -116,12 +125,16 @@ const world = (o: {
       recipient: r.recipient,
       swapType: r.swapType,
       amount: r.amount,
-      refundTo: r.refundTo
+      refundTo: r.refundTo,
+      // The client always asks for these; 1Click echoes them.
+      depositType: "ORIGIN_CHAIN",
+      recipientType: "DESTINATION_CHAIN",
+      refundType: r.refundType
     }
   })
   const oneClick = OneClick.of({
     tokens: Effect.succeed([]),
-    quote: (r) => Effect.succeed((o.quote ?? honest)(r)),
+    quote: (r) => Effect.sync(() => (made.quotes++, (o.quote ?? honest)(r))),
     status: () => Effect.succeed(swap.shift() ?? "SUCCESS"),
     submitDeposit: () => Effect.void
   })
@@ -138,7 +151,7 @@ const world = (o: {
   // These tests size refills in tens of dollars: give them testnet-sized limits (mainnet starts at $30).
   const run = <A, E>(e: Effect.Effect<A, E, Refill | Credit | SqlClient.SqlClient>) =>
     Effect.runPromise(Effect.scoped(Effect.andThen(Effect.flatMap(Credit, (c) => c.configure(CREDIT_DEFAULTS.testnet, "test")), e)).pipe(Effect.provide(layer)))
-  return { s, txs, resumed, alerts, run }
+  return { s, made, txs, resumed, alerts, run }
 }
 
 /** Waits until the refill's step stops changing (the pipeline runs in its own fiber). */
@@ -170,7 +183,7 @@ const drive = (id: string) =>
   })
 const methods = (txs: ReadonlyArray<Tx>) => txs.map((t) => t.calls.map((c) => c.method).join("+"))
 
-test("a refill pulls exactly its shortfall, pays exactly the invoice through 1Click, and waits for Bitrefill's credit", async () => {
+test("a refill pulls the most it may cost before quoting, pays exactly the invoice through 1Click, and waits for Bitrefill's credit", async () => {
   const w = world({ cap: 100_000_000, treasuryUsdc: 0 })
   const r = await w.run(Effect.gen(function*() {
     const v = yield* Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet"))
@@ -179,43 +192,111 @@ test("a refill pulls exactly its shortfall, pays exactly the invoice through 1Cl
   assert.equal(r.step, "done", r.error ?? "")
   assert.deepEqual(methods(w.txs), ["sweep_proceeds", "storage_deposit+ft_transfer"])
   const pull = w.txs[0]!
-  assert.equal(pull.calls[0]!.args.amount, "30150000", "the shortfall, rounded up to the cent")
+  assert.equal(pull.calls[0]!.args.amount, "30300000", "the most a $30 refill may cost (1% over), before any quote")
   const pay = w.txs[1]!
   assert.equal(pay.receiver, "usdc.test")
   assert.deepEqual(pay.calls[1]!.args.receiver_id, DEPOSIT_ADDRESS)
-  assert.equal(pay.calls[1]!.args.amount, "30150000")
+  assert.equal(pay.calls[1]!.args.amount, "30150000", "exactly what the quote asked")
   assert.equal(pay.calls[1]!.deposit, 1n)
-  assert.equal(w.s.usdc, 0, "the treasury keeps nothing back")
+  assert.equal(w.s.usdc, 150_000, "the treasury keeps only the unused part of the 1%, for the next refill")
   assert.ok(w.alerts.some((a) => a.includes("refilled: +$30.00")))
 })
 
-test("a treasury with enough USDC pays without pulling proceeds", async () => {
+test("a treasury with enough USDC pays without pulling proceeds, under our own refund deadline", async () => {
   const w = world({ treasuryUsdc: 50_000_000 })
-  const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => drive(v.id)))
-  assert.equal(r.step, "done")
+  const r = await w.run(Effect.gen(function*() {
+    const v = yield* Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet"))
+    const row = yield* drive(v.id)
+    const [s] = yield* Effect.flatMap(SqlClient.SqlClient, (sql) =>
+      sql<{ deadline: string; quote: string }>`SELECT swap->>'deadline' AS deadline, swap->>'correlationId' AS quote FROM refills WHERE id = ${v.id}`)
+    return { row, ...s! }
+  }))
+  assert.equal(r.row.step, "done")
   assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"])
+  assert.ok(Date.parse(r.deadline) - Date.now() <= 15 * 60_000, "1Click refunds from our deadline, not the address's three days")
+  assert.equal(r.quote, "quote-1", "the quote id is kept for support")
 })
 
-test("in manual mode the refill waits for the owner, and says how much to move", async () => {
+test("in manual mode the refill waits for the owner, says how much to move, and makes no invoice or quote meanwhile", async () => {
   const w = world({ cap: 0 })
   const r = await w.run(Effect.gen(function*() {
     const refill = yield* Refill
     const v = yield* refill.request(30_000_000, "boss.testnet")
-    const row = yield* settle(v.id)
-    const [s] = yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql<{ deadline: string }>`SELECT swap->>'deadline' AS deadline FROM refills WHERE id = ${v.id}`)
-    return { row, needs: (yield* refill.status).needs, deadline: s!.deadline }
+    return { row: yield* settle(v.id), needs: (yield* refill.status).needs }
   }))
   assert.equal(r.row.step, "fund")
-  assert.equal(r.needs, 30_150_000)
-  assert.ok(Date.parse(r.deadline) - Date.now() <= 30 * 60_000, "the swap keeps our refund deadline, not the address's")
+  assert.equal(r.needs, 30_300_000)
   assert.deepEqual(w.txs, [], "nothing signed")
+  assert.deepEqual(w.made, { invoices: 0, quotes: 0 }, "nothing to go stale while it waits")
+})
+
+test("money comes first: once the owner funds the treasury, a fresh quote is paid at once", async () => {
+  const w = world({ cap: 0 })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id)
+    w.s.usdc = 30_300_000
+    yield* due
+    yield* refill.process
+    return yield* drive(v.id)
+  }))
+  assert.equal(r.step, "done", r.error ?? "")
+  assert.deepEqual(w.made, { invoices: 1, quotes: 1 })
+  assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"])
+})
+
+test("a quote older than two minutes is thrown away, never paid", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, sendDownOnce: true })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    const stalled = yield* settle(v.id)
+    // The network stayed down for a while: by the next attempt, the quote has aged.
+    yield* Effect.flatMap(SqlClient.SqlClient, (sql) =>
+      sql`UPDATE refills SET swap = jsonb_set(swap, '{quotedAt}', to_jsonb((now() - interval '3 minutes')::text)) WHERE id = ${v.id}`)
+    yield* due
+    yield* refill.process
+    return { stalled, last: yield* drive(v.id) }
+  }))
+  assert.equal(r.stalled.step, "send", "nothing was signed while the network was down")
+  assert.equal(r.last.step, "done", r.last.error ?? "")
+  assert.equal(w.made.quotes, 2, "the stale quote was replaced")
+  assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"], "and only the fresh one was paid")
+})
+
+test("a stuck swap says what to ask support for, and its later refund is reported", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, swap: ["PROCESSING", "PROCESSING", "REFUNDED"] })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id)
+    // 1Click neither fills nor refunds it, long past our deadline.
+    yield* sql`UPDATE refills SET swap = jsonb_set(swap, '{deadline}', '"2020-01-01T00:00:00.000Z"') WHERE id = ${v.id}`
+    yield* due
+    yield* refill.process
+    const stuck = yield* settle(v.id)
+    yield* due
+    yield* refill.process
+    const [after] = yield* sql<{ step: string; swap_status: string }>`SELECT step, swap_status FROM refills WHERE id = ${v.id}`
+    return { stuck, after: after! }
+  }))
+  assert.equal(r.stuck.step, "stuck")
+  const alert = w.alerts.find((a) => a.includes("needs a look")) ?? ""
+  assert.match(alert, new RegExp(`explorer\\.near-intents\\.org/transactions/${DEPOSIT_ADDRESS}`))
+  assert.match(alert, /deposit tx tx-1, quote quote-1/)
+  assert.match(alert, /refund it to treasury\.test, not to finish it/)
+  assert.ok(w.alerts.some((a) => a.includes("has refunded the swap")), "the late refund is reported")
+  assert.deepEqual(r.after, { step: "stuck", swap_status: "REFUNDED" }, "a human still resolves it")
 })
 
 test("a quote that pays anyone but Bitrefill is refused, and nothing is sent", async () => {
   const w = world({
+    treasuryUsdc: 50_000_000,
     quote: (r) => {
       const q = { quote: { depositAddress: DEPOSIT_ADDRESS, amountIn: r.amount, amountInFormatted: "", amountOut: r.amount, timeEstimate: 1, deadline: r.deadline } }
-      return { ...q, quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: "0x" + "ee".repeat(20), swapType: r.swapType, amount: r.amount, refundTo: r.refundTo } }
+      return { ...q, quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: "0x" + "ee".repeat(20), swapType: r.swapType, amount: r.amount, refundTo: r.refundTo, depositType: "ORIGIN_CHAIN", recipientType: "DESTINATION_CHAIN", refundType: "ORIGIN_CHAIN" } }
     }
   })
   const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => settle(v.id)))
@@ -260,12 +341,13 @@ test("a refunded swap ends with the money back; a failed one stops refills until
   assert.ok(failed.alerts.some((m) => m.includes("needs a look")))
 })
 
-test("a contract pointing at another treasury is never funded", async () => {
+test("a contract pointing at another treasury is never funded, and nothing is invoiced or quoted", async () => {
   const w = world({ contractTreasury: "someone-else.test" })
   const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => settle(v.id)))
   assert.equal(r.step, "fund")
   assert.match(r.error ?? "", /someone-else\.test/)
   assert.deepEqual(w.txs, [])
+  assert.deepEqual(w.made, { invoices: 0, quotes: 0 })
 })
 
 test("the daily cap and the proceeds bound what the treasury pulls", async () => {
@@ -315,6 +397,9 @@ test("quotes are checked against exactly what we asked for", () => {
       swapType: "EXACT_OUTPUT",
       amount: "30000000",
       refundTo: TREASURY,
+      depositType: "ORIGIN_CHAIN",
+      recipientType: "DESTINATION_CHAIN",
+      refundType: "ORIGIN_CHAIN",
       ...echo
     }
   })
@@ -323,6 +408,9 @@ test("quotes are checked against exactly what we asked for", () => {
   assert.match(quoteProblem(base({ amountIn: "30400000" }), want) ?? "", /over the 1% limit/)
   assert.match(quoteProblem(base({}, { refundTo: "attacker.near" }), want) ?? "", /refunds to/)
   assert.match(quoteProblem(base({}, { destinationAsset: "nep141:eth-usdc" }), want) ?? "", /wrong assets/)
+  assert.match(quoteProblem(base({}, { recipientType: "INTENTS" }), want) ?? "", /doesn't deliver on Base/)
+  assert.match(quoteProblem(base({}, { refundType: "INTENTS" }), want) ?? "", /inside NEAR Intents/)
+  assert.match(quoteProblem(base({}, { depositType: undefined }), want) ?? "", /inside NEAR Intents/)
   assert.match(quoteProblem(base({ depositAddress: "Not A NEAR Account!" }), want) ?? "", /deposit address/)
   assert.match(quoteProblem(base({ deadline: new Date(Date.now() + 60_000).toISOString() }), want) ?? "", /deadline/)
   assert.match(quoteProblem({ quote: base().quote }, want) ?? "", /didn't echo/)
