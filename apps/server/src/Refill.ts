@@ -536,7 +536,11 @@ export class Refill extends Context.Service<Refill, {
         Effect.catchCause((cause) => Effect.logError("refill pass failed", cause))
       )
 
-      /** A stuck swap can still settle at 1Click (support may refund or finish it): report when it does. */
+      /**
+       * A stuck swap can still settle at 1Click (support may refund or finish it). A clean outcome
+       * closes the refill as the pipeline would have: refunded, or credited once Bitrefill has it.
+       * Anything else is reported and left for a human.
+       */
       const watchStuck = sql<Row>`SELECT * FROM refills WHERE step = 'stuck' AND send_tx IS NOT NULL AND swap IS NOT NULL AND next_attempt_at <= now()`.pipe(
         Effect.orDie,
         Effect.flatMap((rows) =>
@@ -544,17 +548,34 @@ export class Refill extends Context.Service<Refill, {
             Effect.gen(function*() {
               yield* sql`UPDATE refills SET next_attempt_at = now() + ${STUCK_WATCH}::interval WHERE id = ${row.id}`.pipe(Effect.orDie)
               const status = yield* oneClick.status(row.swap!.depositAddress)
+              const id = row.id.slice(0, 8)
+              const was = row.error ?? ""
+              if (status === "REFUNDED") {
+                if (yield* move(row, { step: "refunded", swap_status: status, error: `${was} | 1Click refunded it later.` })) {
+                  yield* alerts.admin(`Stuck refill ${id}: 1Click has refunded the swap, so its USDC is back in the treasury. Closed it as refunded; automatic refills resume.`)
+                }
+                return
+              }
+              if (status === "SUCCESS") {
+                const d = yield* bitrefill.depositState(row.invoice_id!)
+                if (d.state === "credited") {
+                  const done = yield* move(row, { step: "done", swap_status: status, finished_at: new Date().toISOString(), error: `${was} | 1Click finished it late; Bitrefill credited it.` })
+                  if (done) {
+                    yield* credit.refresh
+                    yield* alerts.admin(`Stuck refill ${id}: 1Click finished the swap late and Bitrefill credited ${usd(Number(row.amount))}. Closed it as credited; automatic refills resume.`)
+                  }
+                  return
+                }
+                // Not credited yet: keep checking (this alert repeats at most hourly).
+                return yield* alerts.admin(
+                  `Stuck refill ${id}: 1Click finished the swap late, paying Bitrefill's invoice ${row.invoice_id}, but Bitrefill reports it ${d.status}. ` +
+                    `If that doesn't change, contact Bitrefill support with the invoice id, then resolve the refill in Admin.`
+                )
+              }
               if (status === row.swap_status) return
               yield* save(row.id, { swap_status: status })
-              const id = row.id.slice(0, 8)
-              yield* alerts.admin(
-                status === "REFUNDED"
-                  ? `Stuck refill ${id}: 1Click has refunded the swap, so its USDC is back in the treasury. Check it, then resolve the refill in Admin.`
-                  : status === "SUCCESS"
-                  ? `Stuck refill ${id}: 1Click finished the swap late, paying Bitrefill's invoice ${row.invoice_id}. Check Bitrefill credited it (if not, contact Bitrefill support with that invoice id), then resolve the refill in Admin.`
-                  : `Stuck refill ${id}: the swap is now ${status} at 1Click.`
-              )
-            }).pipe(Effect.catch((e: OneClickUnavailable) => Effect.logWarning(`stuck refill ${row.id} not checked: ${e.message}`))), { discard: true })
+              yield* alerts.admin(`Stuck refill ${id}: the swap is now ${status} at 1Click.`)
+            }).pipe(Effect.catch((e: OneClickUnavailable | BitrefillUnavailable) => Effect.logWarning(`stuck refill ${row.id} not checked: ${e.message}`))), { discard: true })
         ),
         Effect.catchCause((cause) => Effect.logError("stuck refill check failed", cause))
       )

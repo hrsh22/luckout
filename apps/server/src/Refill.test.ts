@@ -265,30 +265,54 @@ test("a quote older than two minutes is thrown away, never paid", async () => {
   assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"], "and only the fresh one was paid")
 })
 
-test("a stuck swap says what to ask support for, and its later refund is reported", async () => {
+/** A refill whose swap 1Click leaves hanging past our deadline, so it's stuck. */
+const stuckRefill = Effect.gen(function*() {
+  const refill = yield* Refill
+  const sql = yield* SqlClient.SqlClient
+  const v = yield* refill.request(30_000_000, "boss.testnet")
+  yield* settle(v.id)
+  yield* sql`UPDATE refills SET swap = jsonb_set(swap, '{deadline}', '"2020-01-01T00:00:00.000Z"') WHERE id = ${v.id}`
+  yield* due
+  yield* refill.process
+  return { id: v.id, stuck: yield* settle(v.id) }
+})
+/** Lets the stuck-swap check run once more, then reads where the refill is. */
+const checkAgain = (id: string) =>
+  Effect.gen(function*() {
+    const refill = yield* Refill
+    yield* due
+    yield* refill.process
+    const [row] = yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql<{ step: string; swap_status: string | null }>`SELECT step, swap_status FROM refills WHERE id = ${id}`)
+    return { ...row!, paused: (yield* refill.status).paused }
+  })
+
+test("a stuck swap says what to ask support for, and closes itself when 1Click refunds it later", async () => {
   const w = world({ treasuryUsdc: 50_000_000, swap: ["PROCESSING", "PROCESSING", "REFUNDED"] })
   const r = await w.run(Effect.gen(function*() {
-    const refill = yield* Refill
-    const sql = yield* SqlClient.SqlClient
-    const v = yield* refill.request(30_000_000, "boss.testnet")
-    yield* settle(v.id)
-    // 1Click neither fills nor refunds it, long past our deadline.
-    yield* sql`UPDATE refills SET swap = jsonb_set(swap, '{deadline}', '"2020-01-01T00:00:00.000Z"') WHERE id = ${v.id}`
-    yield* due
-    yield* refill.process
-    const stuck = yield* settle(v.id)
-    yield* due
-    yield* refill.process
-    const [after] = yield* sql<{ step: string; swap_status: string }>`SELECT step, swap_status FROM refills WHERE id = ${v.id}`
-    return { stuck, after: after! }
+    const s = yield* stuckRefill
+    return { stuck: s.stuck, after: yield* checkAgain(s.id) }
   }))
   assert.equal(r.stuck.step, "stuck")
   const alert = w.alerts.find((a) => a.includes("needs a look")) ?? ""
   assert.match(alert, new RegExp(`explorer\\.near-intents\\.org/transactions/${DEPOSIT_ADDRESS}`))
   assert.match(alert, /deposit tx tx-1, quote quote-1/)
   assert.match(alert, /refund it to treasury\.test, not to finish it/)
-  assert.ok(w.alerts.some((a) => a.includes("has refunded the swap")), "the late refund is reported")
-  assert.deepEqual(r.after, { step: "stuck", swap_status: "REFUNDED" }, "a human still resolves it")
+  assert.equal(r.after.step, "refunded")
+  assert.ok(w.alerts.some((a) => a.includes("has refunded the swap")))
+  assert.ok(!r.after.paused?.includes("stuck"), "refills are no longer held up by it")
+})
+
+test("a stuck swap that 1Click finishes late closes as credited once Bitrefill has it, and not before", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, swap: ["PROCESSING", "PROCESSING", "SUCCESS", "SUCCESS"], deposit: ["pending", "credited"] })
+  const r = await w.run(Effect.gen(function*() {
+    const s = yield* stuckRefill
+    return { pending: yield* checkAgain(s.id), credited: yield* checkAgain(s.id) }
+  }))
+  assert.equal(r.pending.step, "stuck", "Bitrefill hadn't credited it yet")
+  assert.ok(w.alerts.some((a) => a.includes("but Bitrefill reports it x")), "and the alert says so")
+  assert.equal(r.credited.step, "done")
+  assert.ok(w.alerts.some((a) => a.includes("finished the swap late and Bitrefill credited $30.00")))
+  assert.ok(!r.credited.paused?.includes("stuck"))
 })
 
 test("a quote that pays anyone but Bitrefill is refused, and nothing is sent", async () => {

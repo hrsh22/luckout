@@ -1,10 +1,10 @@
 # Stuck refill, 2026-11-10
 
-**Status: open.** Waiting on NEAR Intents support (ticket 81387). Tracked in GitHub issue #4.
+**Status: resolved, nothing lost.** 1Click finished the swap 53 minutes late, after NEAR Intents support (ticket 81387) stepped in, and Bitrefill credited the $10. Tracked in GitHub issue #4.
 
 ## Summary
 
-The first mainnet Bitrefill refill ($10) paid NEAR Intents 1Click at 14:37 UTC. 1Click took the deposit but never filled the swap, and didn't refund it at the 14:53 deadline we asked for. The 10.054603 USDC sits in `intents.near`, under the account 1Click controls for that swap; only 1Click can move it. No customer money was involved. The server marked the refill `stuck` at 15:23 and paused automatic refills, as designed, so no more money went in.
+The first mainnet Bitrefill refill ($10) paid NEAR Intents 1Click at 14:37 UTC. 1Click took the deposit but didn't fill the swap, and didn't refund it at the 14:53 deadline we asked for. Meanwhile the 10.054603 USDC sat in `intents.near`, under the account 1Click controls for that swap, where only 1Click could move it. No customer money was involved. The server marked the refill `stuck` at 15:23 and paused automatic refills, as designed, so no more money went in. At 15:30:44 1Click completed the swap: Bitrefill received exactly 10.00 USDC on Base and credited it, and the unused 0.051029 USDC came back to the treasury. The $10 of credit cost 10.003574 USDC.
 
 ## Identifiers
 
@@ -18,9 +18,10 @@ The first mainnet Bitrefill refill ($10) paid NEAR Intents 1Click at 14:37 UTC. 
 | Deposit address | `c144151490f8689cbc2bc035f9f22d1e3fb7a5cc06fdb2ef61875f87518c1415` |
 | Explorer | https://explorer.near-intents.org/transactions/c144151490f8689cbc2bc035f9f22d1e3fb7a5cc06fdb2ef61875f87518c1415 |
 | Quote (correlation) id | `f15881eb-9396-4d37-897d-68425e5f7fda` |
-| Where the money is | `intents.near`, owner `727f7786b2958c65d51715ea7e639a3bbcc9efe128287ff9ce7aff0907ce1449`, 10054603 of `nep141:17208628…a1` (USDC) |
-| Bitrefill deposit invoice | `7bb5b7cc-fd1d-4073-8882-5954b03b460f`, pays `0xC2bcB691B03e836d1Cb79210DCcec30aB720E77b`; made 14:23, expired 15:23 |
-| Support | Ticket 81387 (near.com chat). Asked for a refund, not completion, since the invoice has expired. |
+| Where the money waited | `intents.near`, owner `727f7786b2958c65d51715ea7e639a3bbcc9efe128287ff9ce7aff0907ce1449`, 10054603 of `nep141:17208628…a1` (USDC) |
+| Delivery to Bitrefill (Base) | `0xd2b5db612f6dee4e532d4209f0fc4c864b8e8ee11b92d31493770f2da5cd1346`; 1Click's NEAR side `FCGsWiCvVpwddEuhLf5NC6nxBXQ6UbzMvXiGGyMRtxi1` |
+| Bitrefill deposit invoice | `7bb5b7cc-fd1d-4073-8882-5954b03b460f`, pays `0xC2bcB691B03e836d1Cb79210DCcec30aB720E77b`; made 14:23, `all_delivered` at 15:31:37 (Bitrefill credited it although it came 68 minutes after the invoice was made) |
+| Support | Ticket 81387 (near.com chat). We asked for a refund; they completed the swap instead. |
 
 Check it any time: `curl "https://1click.chaindefuser.com/v0/status?depositAddress=c144151490f8689cbc2bc035f9f22d1e3fb7a5cc06fdb2ef61875f87518c1415"`.
 
@@ -39,6 +40,8 @@ Check it any time: `curl "https://1click.chaindefuser.com/v0/status?depositAddre
 | ~15:10 | Re-submitted the deposit through `/v0/deposit/submit`: no change. The explorer showed other swaps, including some from NEAR USDC, finishing in 1–4 minutes. |
 | 15:23 | Server marked the refill `stuck`, paused automatic refills, alerted on Telegram. |
 | ~15:30 | Ticket 81387 opened; details sent, then a follow-up asking for a refund. |
+| 15:30:44 | 1Click completed the swap: 10.00 USDC to Bitrefill on Base, 0.051029 USDC back to the treasury. |
+| 15:31:37 | Bitrefill marked the deposit invoice `all_delivered`; the USD credit went from $0 to $10. |
 
 ## Why
 
@@ -57,7 +60,7 @@ Ours:
 - **Faster refunds and alerts.** Our refund deadline is 15 minutes (was 30), and a swap is called stuck 20 minutes after it (was 30). The alert comes about 35 minutes after the quote, before Bitrefill's 60-minute invoice expires.
 - **Stricter quote checks.** 1Click must echo delivery on Base (`recipientType DESTINATION_CHAIN`) and deposit and refund on NEAR (`ORIGIN_CHAIN`), so it can never keep our money inside NEAR Intents.
 - **An alert that says what to do.** The stuck alert carries the explorer link, our payment's hash, the quote id, the refund address, the verified support channels, and the advice to ask for a refund rather than completion.
-- **Stuck swaps stay watched.** They're re-checked every five minutes, and a late refund or completion is reported.
+- **Stuck swaps stay watched, and close themselves when the outcome is clean.** They're re-checked every five minutes. A late refund closes the refill as refunded; a late completion closes it as credited once Bitrefill has the credit. Either way you're told and automatic refills resume. Only an unclear outcome still waits for a person.
 - **Runbook.** A stuck refill's steps, verified support channels, and the manual fallback of topping up on bitrefill.com.
 
 ## Risks that remain
@@ -66,8 +69,8 @@ Ours:
 - A payment signed but not yet broadcast when the server crashes is resumed later with the same bytes, so it is never paid twice. If the server stays down for more than two minutes at that exact moment, that payment goes out on an older quote. 1Click should still refund it from our deadline.
 - We call 1Click without an API key: 0.2% extra per swap, and no partner relationship. A key from NEAR Intents' partner portal is worth getting before volume grows.
 
-## To close this
+## How it closed
 
-- **If 1Click refunds:** the server alerts "has refunded the swap", and the treasury's USDC is back to about $25.00 (14.945397 + 10.054603). Resolve the refill in Admin with the note "1Click refunded after ticket 81387". Automatic refills resume and start a fresh refill.
-- **If 1Click completes it instead:** the USDC went to Bitrefill's expired invoice `7bb5b7cc-…`. Check whether Bitrefill credited $10; if not, contact Bitrefill support with the invoice id and the Base transaction, then resolve the refill in Admin.
-- Mark this record resolved and close issue #4.
+1Click completed the swap and Bitrefill credited it, so the money is all accounted for. The treasury paid 10.054603 USDC: 10.003574 bought the $10 of credit and 0.051029 came back, leaving the treasury at 14.996426 USDC. The refill itself is closed by the stuck-swap check from PR #5, which finds the swap succeeded and Bitrefill credited, and records it as credited.
+
+Lessons beyond the code: launch a network with the treasury set and funded before the server starts (the code now makes this order safe either way), and send support our own payment's hash: we first sent 1Click's forwarding hash by mistake.
