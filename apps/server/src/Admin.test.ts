@@ -41,7 +41,8 @@ const refill = Refill.of({
     paused: "Refills run on mainnet: NEAR Intents doesn't run on testnet, and test cards are free.",
     available: false,
     needs: undefined,
-    treasury: { accountId: undefined, contractTreasury: undefined, dailyCap: 0, sweptToday: 0, proceeds: 236_000_000, usdc: 0 }
+    treasury: { accountId: undefined, contractTreasury: undefined, dailyCap: 0, sweptToday: 0, proceeds: 236_000_000, usdc: 0 },
+    wallet: undefined
   })
 })
 const alerts: Array<string> = []

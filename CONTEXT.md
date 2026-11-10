@@ -41,12 +41,16 @@ Our USD store credit at Bitrefill, which pays for every real card and can't be r
 _Avoid_: Float, balance (that's the customer's), wallet
 
 **Refill**:
-Topping up the Bitrefill Credit: an exact USD deposit paid from the Treasury through a NEAR Intents swap to Bitrefill's address on Base.
+Topping up the Bitrefill Credit: a NEAR Intents swap from the Treasury into the Base Wallet, then an exact USD deposit paid from the Base Wallet to Bitrefill.
 _Avoid_: Top-Up (that's the customer's), recharge
 
 **Treasury**:
 The server-held account that pays Refills. The contract lets it pull Proceeds only to itself, within a daily cap the owner sets, or not at all in manual mode.
 _Avoid_: Hot wallet, float account
+
+**Base Wallet**:
+Our address on Base, derived from the Treasury through NEAR Chain Signatures, with no key of its own. Refills land here and pay Bitrefill from here, so a late swap can never pay an expired invoice.
+_Avoid_: EVM wallet, hot wallet
 
 **Relayer**:
 The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.

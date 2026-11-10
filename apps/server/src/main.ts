@@ -11,6 +11,7 @@ import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth } from "./Auth.ts"
+import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
 import { Monitor } from "./Monitor.ts"
@@ -144,7 +145,7 @@ const AuthorizationLive = Layer.effect(
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
-  Layer.provideMerge(Layer.mergeAll(Credit.layer, TopUp.layer)),
+  Layer.provideMerge(Layer.mergeAll(Credit.layer, TopUp.layer, Base.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
@@ -160,6 +161,8 @@ const MAINNET_REQUIRES = [
   "OPERATOR_ACCOUNT_ID",
   "OPERATOR_PRIVATE_KEY",
   "BITREFILL_API_KEY",
+  // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
+  "BASE_RPC_URL",
   // Real money: alerts must reach a human, and someone must be able to open the admin panel.
   "ALERT_TELEGRAM_CHAT_ID",
   "ADMIN_ACCOUNTS"

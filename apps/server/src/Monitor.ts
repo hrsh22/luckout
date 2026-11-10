@@ -1,6 +1,7 @@
 import { Effect, Layer, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
+import { Base } from "./Base.ts"
 import { Near } from "./Near.ts"
 
 const NEAR = 10n ** 24n
@@ -9,6 +10,8 @@ const PER_BYTE = 10n ** 19n
 
 /** Below these, each of our accounts gets an alert (the admin panel shows the same lines). */
 export const GAS_ALERT = { operator: NEAR / 2n, relayer: NEAR / 2n, treasury: NEAR / 10n, contract: NEAR } as const
+/** The Base wallet's ETH (wei): about 150 Bitrefill payments' worth of gas. */
+export const BASE_GAS_ALERT = 100_000_000_000_000n // 0.0001 ETH
 
 /** NEAR an account can spend: its balance minus what its storage locks. */
 export const spendable = (near: Near["Service"], id: string) =>
@@ -22,6 +25,7 @@ export const Monitor = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const near = yield* Near
+    const base = yield* Base
     const alerts = yield* Alerts
 
     const check = Effect.gen(function*() {
@@ -36,6 +40,13 @@ export const Monitor = Layer.effectDiscard(
       }
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
+      }
+      if (base.configured) {
+        // A Base RPC hiccup only skips this check.
+        const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
+        if (w && w[1].eth < BASE_GAS_ALERT) {
+          yield* alerts.admin(`the Base wallet ${w[0]} has under 0.0001 ETH left for gas; Bitrefill refills stop when it runs out (send about $1 of ETH on Base)`)
+        }
       }
       const [r] = yield* sql<{ stuck: number; late: number }>`
         SELECT count(*) FILTER (WHERE step = 'stuck')::int AS stuck,

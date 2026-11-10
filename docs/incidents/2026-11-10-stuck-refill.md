@@ -73,4 +73,6 @@ Ours:
 
 1Click completed the swap and Bitrefill credited it, so the money is all accounted for. The treasury paid 10.054603 USDC: 10.003574 bought the $10 of credit and 0.051029 came back, leaving the treasury at 14.996426 USDC. The refill itself is closed by the stuck-swap check from PR #5, which finds the swap succeeded and Bitrefill credited, and records it as credited.
 
+Follow-up the same day: refills now land in our own Base wallet first and pay Bitrefill only once the USDC is there (ADR-0009, amended "Base wallet"), so a late completion like this one can't reach an expired invoice at all.
+
 Lessons beyond the code: launch a network with the treasury set and funded before the server starts (the code now makes this order safe either way), and send support our own payment's hash: we first sent 1Click's forwarding hash by mistake.

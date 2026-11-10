@@ -3,7 +3,7 @@ import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Credit, settingsProblem } from "./Credit.ts"
-import { GAS_ALERT, spendable } from "./Monitor.ts"
+import { BASE_GAS_ALERT, GAS_ALERT, spendable } from "./Monitor.ts"
 import { Near, Network } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
@@ -162,7 +162,8 @@ export class Admin extends Context.Service<Admin, {
             dailyCap: r.treasury.dailyCap,
             sweptToday: r.treasury.sweptToday,
             usdc: r.treasury.usdc,
-            ...(r.needs !== undefined ? { needs: r.needs } : {})
+            ...(r.needs !== undefined ? { needs: r.needs } : {}),
+            ...(r.wallet ? { wallet: { address: r.wallet.address, usdc: r.wallet.usdc, eth: String(r.wallet.eth), alertBelow: String(BASE_GAS_ALERT) } } : {})
           },
           refills: r.refills
         })
