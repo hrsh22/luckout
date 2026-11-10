@@ -69,12 +69,13 @@ export class OneClick extends Context.Service<OneClick, {
     OneClick,
     Effect.gen(function*() {
       const baseUrl = yield* Config.String("ONECLICK_API_URL").pipe(Config.withDefault("https://1click.chaindefuser.com/v0"))
-      // Optional: without a key 1Click charges an extra 0.2%.
+      // Optional partner key from partners.near-intents.org; quotes are priced the same without it.
       const key = yield* Config.option(Config.Redacted("ONECLICK_API_KEY"))
       const http = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest((r) => {
           const req = HttpClientRequest.acceptJson(HttpClientRequest.prependUrl(r, baseUrl))
-          return Option.isSome(key) ? HttpClientRequest.bearerToken(req, Redacted.value(key.value)) : req
+          // X-API-Key is 1Click's recommended partner header (Authorization: Bearer is the legacy one).
+          return Option.isSome(key) ? HttpClientRequest.setHeader(req, "X-API-Key", Redacted.value(key.value)) : req
         }),
         HttpClient.timeout("20 seconds")
       )
