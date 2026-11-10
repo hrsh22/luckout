@@ -823,3 +823,105 @@ fn a_failed_pull_puts_back_the_proceeds_and_the_cap() {
     assert_eq!(c.get_reserve().proceeds.0, 30 * USDC);
     assert_eq!(c.get_config()["swept_today"], "0");
 }
+
+// ---------- ownership ----------
+
+fn heir() -> AccountId {
+    id("heir.near")
+}
+
+fn propose(c: &mut Contract, to: Option<AccountId>) {
+    call(owner(), DAY, [0; 32], 1);
+    c.propose_owner(to);
+}
+
+#[test]
+fn ownership_moves_only_when_the_new_owner_accepts() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    assert_eq!(
+        c.get_config()["owner"],
+        "owner.near",
+        "nothing changes on a proposal"
+    );
+    assert_eq!(c.get_config()["pending_owner"], "heir.near");
+    call(heir(), DAY, [0; 32], 1);
+    c.accept_owner();
+    assert_eq!(c.get_config()["owner"], "heir.near");
+    assert!(c.get_config()["pending_owner"].is_null());
+    assert!(get_logs().iter().any(|l| l.contains("owner_changed")));
+    call(heir(), DAY, [0; 32], 1);
+    c.set_paused(true);
+}
+
+#[test]
+#[should_panic(expected = "Only the owner")]
+fn the_old_owner_loses_its_powers() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    call(heir(), DAY, [0; 32], 1);
+    c.accept_owner();
+    call(owner(), DAY, [0; 32], 1);
+    c.set_paused(true);
+}
+
+#[test]
+#[should_panic(expected = "Not the proposed owner")]
+fn only_the_proposed_account_can_accept() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    call(alice(), DAY, [0; 32], 1);
+    c.accept_owner();
+}
+
+#[test]
+#[should_panic(expected = "Not the proposed owner")]
+fn a_withdrawn_proposal_can_no_longer_be_accepted() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    propose(&mut c, None);
+    call(heir(), DAY, [0; 32], 1);
+    c.accept_owner();
+}
+
+#[test]
+#[should_panic(expected = "Only the owner")]
+fn only_the_owner_proposes() {
+    let mut c = with_proceeds(0);
+    call(operator(), DAY, [0; 32], 1);
+    c.propose_owner(Some(operator()));
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn accepting_needs_a_full_access_key() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    call(heir(), DAY, [0; 32], 0);
+    c.accept_owner();
+}
+
+#[test]
+#[should_panic(expected = "That account can't own the contract")]
+fn the_operator_can_never_own_the_contract() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(operator()));
+}
+
+#[test]
+#[should_panic(expected = "That account can't own the contract")]
+fn the_treasury_can_never_own_the_contract() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(treasury()));
+    set_treasury(&mut c, USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    c.accept_owner();
+}
+
+#[test]
+#[should_panic(expected = "The treasury must be its own account")]
+fn the_owner_can_never_be_the_treasury() {
+    let mut c = with_proceeds(0);
+    call(owner(), DAY, [0; 32], 1);
+    c.set_treasury(Some(owner()), U128(USDC));
+}
