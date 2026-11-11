@@ -182,6 +182,26 @@ const migrations = Migrator.fromRecord({
                SELECT account_id FROM purchases UNION SELECT account_id FROM relays UNION SELECT account_id FROM telegram_links
                ON CONFLICT DO NOTHING`
     yield* sql`CREATE TABLE session_resets (account_id TEXT PRIMARY KEY, after TIMESTAMPTZ NOT NULL)`
+  }),
+  // EVM wallets (ADR-0011): 1Click swaps into or out of a customer's NEAR Intents account. An inward
+  // Top-Up's signed move-in waits here until its swap lands; an outward quote is what a transfer may pay.
+  "0012_intents_swaps": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE intents_swaps (
+        deposit_address TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+        usdc BIGINT NOT NULL,
+        move_in JSONB,
+        move TEXT CHECK (move IN ('waiting', 'moved', 'failed')),
+        move_detail TEXT,
+        checked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    yield* sql`CREATE INDEX intents_swaps_waiting ON intents_swaps (checked_at NULLS FIRST) WHERE move = 'waiting'`
+    // A Top-Up's own move-in is paid for but not counted against the daily caps.
+    yield* sql`ALTER TABLE relays ADD COLUMN counted BOOLEAN NOT NULL DEFAULT true`
   })
 })
 

@@ -2,6 +2,8 @@
 export const network = process.env.NEXT_PUBLIC_NEAR_NETWORK === "mainnet" ? "mainnet" : "testnet"
 export const contractId = process.env.NEXT_PUBLIC_LUCKOUT_CONTRACT_ID || "app.luckout.testnet"
 export const usdcId = process.env.NEXT_PUBLIC_USDC_CONTRACT_ID || "usdc.luckout.testnet"
+/** NEAR Intents, where an EVM wallet's money waits outside Luckout (ADR-0011); fixed per network, as in the contract. */
+export const intentsId = network === "mainnet" ? "intents.near" : "intents.luckout.testnet"
 // Tried in order when one is down, slow or rate-limited: the same providers as the server's defaults (apps/server/src/Near.ts).
 const rpcUrls = network === "mainnet"
   ? ["https://free.rpc.fastnear.com", "https://near.drpc.org"]
@@ -38,6 +40,9 @@ async function rpc<T>(method: string, params: object, urls = rpcUrls): Promise<T
 /** Liquid NEAR on an account, in yoctoNEAR: what pays network fees. */
 export const nearBalance = (accountId: string) =>
   rpc<{ amount: string }>("query", { request_type: "view_account", finality: "optimistic", account_id: accountId }).then((r) => r.amount)
+
+/** USDC (micro, as a string) in an account's NEAR Intents balance. */
+export const intentsUsdc = (accountId: string) => view<string>(intentsId, "mt_balance_of", { account_id: accountId, token_id: `nep141:${usdcId}` })
 
 /** The code deployed on an account (base58 of the wasm's sha256): it changes only with an upgrade. */
 export const codeHash = (accountId: string) =>

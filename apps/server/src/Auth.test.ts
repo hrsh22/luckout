@@ -1,4 +1,5 @@
-import { SignedChallenge } from "@luckout/api"
+import { evmSignInMessage, SignedChallenge, SignedEvmChallenge } from "@luckout/api"
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { Effect, Layer } from "effect"
 import assert from "node:assert/strict"
 import { createHmac } from "node:crypto"
@@ -52,4 +53,23 @@ test("signing out everywhere ends every earlier session; a new sign-in works", (
     yield* Effect.sleep("5 millis")
     const after = yield* signIn
     assert.equal(yield* auth.authenticate(after.token), "bob.testnet")
+  })))
+
+test("an EVM wallet signs in as its lowercase address, once per challenge, and only with its own key", () =>
+  run(Effect.gen(function*() {
+    const auth = yield* Auth
+    const wallet = privateKeyToAccount(generatePrivateKey())
+    const sign = (c: { message: string; nonce: string }, by = wallet) => Effect.promise(() => by.signMessage({ message: evmSignInMessage(c) }))
+    const c = yield* auth.challenge
+    const signature = yield* sign(c)
+    const s = yield* auth.verifyEvm(new SignedEvmChallenge({ address: wallet.address, signature, nonce: c.nonce }))
+    assert.equal(s.accountId, wallet.address.toLowerCase())
+    assert.equal(yield* auth.authenticate(s.token), wallet.address.toLowerCase())
+
+    const again = yield* auth.verifyEvm(new SignedEvmChallenge({ address: wallet.address, signature, nonce: c.nonce })).pipe(Effect.flip)
+    assert.match(again.message, /expired/, "a challenge signs in once")
+    const c2 = yield* auth.challenge
+    const someoneElse = yield* sign(c2, privateKeyToAccount(generatePrivateKey()))
+    const forged = yield* auth.verifyEvm(new SignedEvmChallenge({ address: wallet.address, signature: someoneElse, nonce: c2.nonce })).pipe(Effect.flip)
+    assert.equal(forged._tag, "Unauthorized")
   })))
