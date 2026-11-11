@@ -69,7 +69,8 @@ const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
     const auth = yield* Auth
     return handlers.handleAll({
       challenge: () => auth.challenge,
-      verify: ({ payload }) => auth.verify(payload)
+      verify: ({ payload }) => auth.verify(payload),
+      verifyEvm: ({ payload }) => auth.verifyEvm(payload)
     })
   })
 )
@@ -118,7 +119,9 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
     return handlers.handleAll({
       assets: () => topup.assets,
       quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc)),
-      status: ({ query }) => topup.status(query.depositAddress)
+      status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
+      move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
+      exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc))
     })
   })
 )
@@ -128,7 +131,8 @@ const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
     const relay = yield* Relay
     return handlers.handleAll({
       status: () => CurrentAccount.use((a) => relay.available(a.accountId).pipe(Effect.map((available) => ({ available })))),
-      send: ({ payload }) => CurrentAccount.use((a) => relay.send(a.accountId, payload.signedDelegate))
+      send: ({ payload }) => CurrentAccount.use((a) => relay.send(a.accountId, payload.signedDelegate)),
+      intent: ({ payload }) => CurrentAccount.use((a) => relay.sendIntent(a.accountId, payload.signed))
     })
   })
 )
@@ -171,10 +175,10 @@ const AuthorizationLive = Layer.effect(
   })
 )
 
-const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
+const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
-  Layer.provideMerge(Layer.mergeAll(Credit.layer, TopUp.layer, Base.layer)),
+  Layer.provideMerge(Layer.mergeAll(Credit.layer, Base.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )

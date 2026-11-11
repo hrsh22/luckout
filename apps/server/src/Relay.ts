@@ -1,9 +1,10 @@
-import { RelayFailed, RelaySettings, RelayUnavailable } from "@luckout/api"
+import { RelayFailed, RelaySettings, RelayUnavailable, type SignedIntent } from "@luckout/api"
 import { deserialize, serialize } from "borsh"
 import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
+import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
 import { Near, Network, type SignedDelegate } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
@@ -86,6 +87,11 @@ export class Relay extends Context.Service<Relay, {
   available(accountId: string): Effect.Effect<boolean>
   /** Checks a base64 borsh SignedDelegate, sends it from the relayer, and waits until it has run. */
   send(accountId: string, signedDelegate: string): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
+  /**
+   * EVM wallets (ADR-0011): checks one signed NEAR Intents payload, sends it to `intents.near` from the
+   * relayer, and waits until it has run. `counted: false` skips the daily caps, for a Top-Up's own move-in.
+   */
+  sendIntent(accountId: string, signed: SignedIntent, o?: { counted?: boolean }): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
   readonly settings: Effect.Effect<RelaySettings>
   /** Saves new settings; they apply to the next relay. */
   configure(settings: RelaySettings, by: string): Effect.Effect<RelaySettings>
@@ -178,7 +184,47 @@ export class Relay extends Context.Service<Relay, {
           })
         )
 
-      return Relay.of({ available, send, settings, configure })
+      const sendIntent = (accountId: string, signed: SignedIntent, o: { counted?: boolean } = {}) =>
+        Effect.gen(function*() {
+          if (!near.relayerId) return yield* new RelayUnavailable({ message: "Luckout can't send this right now. Try again later." })
+          const p = parsePayload(signed.payload)
+          const first = p?.intents[0]
+          // A transfer may only pay a 1Click withdrawal we quoted for this account, and exactly its amount.
+          const exitAmount = first?.intent === "transfer"
+            ? (yield* sql<{ usdc: string }>`
+                SELECT usdc::text AS usdc FROM intents_swaps
+                WHERE deposit_address = ${String(first.receiver_id)} AND account_id = ${accountId} AND direction = 'out'`)[0]?.usdc
+            : undefined
+          const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId, exitAmount, now: new Date() })
+          if (why) return yield* failed(why)
+          if (!(yield* Effect.promise(() => signedBy(signed, accountId)))) return yield* failed("The signature doesn't match your account.")
+
+          // The payload holds its nonce, so the same payload twice is the same intent: the first result, not a second fee.
+          const hash = createHash("sha256").update(signed.payload).digest("hex")
+          const outcome = yield* lock.withPermits(1)(Effect.gen(function*() {
+            const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
+            if (seen) return yield* near.resume(seen.signed_tx)
+            if (o.counted !== false && !(yield* quotaLeft(accountId))) {
+              return yield* new RelayUnavailable({ message: "You've used today's free actions. Try again tomorrow." })
+            }
+            const used = yield* near.view<boolean>("is_nonce_used", { account_id: accountId, nonce: p!.nonce }, near.intentsId)
+            if (used) return yield* failed("That approval was already used. Try again.")
+            return yield* near.relayerCall(near.intentsId, "execute_intents", { signed: [signed] }, (tx) =>
+              sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(tx)}::jsonb)
+                  ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
+          }))
+          if (outcome.failures[0]) return yield* failed(readable(outcome.failures[0]))
+          return { hash: outcome.hash }
+        }).pipe(
+          Effect.catchTags({
+            ContractRejected: (e) => Effect.fail(failed(readable(e.message))),
+            NearUnavailable: () => Effect.fail(failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")),
+            TxExpired: () => Effect.fail(failed("It expired before it went through. Try again.")),
+            SqlError: (e) => Effect.die(e)
+          })
+        )
+
+      return Relay.of({ available, send, sendIntent, settings, configure })
     })
   )
 }

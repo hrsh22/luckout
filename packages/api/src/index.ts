@@ -1,6 +1,8 @@
 import { Context, Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 
+export * from "./intents.ts"
+
 /** Whole micro-USDC (6 decimals), never floats (ADR-0004). */
 export const MicroUsdc = Schema.Int
 
@@ -89,6 +91,28 @@ export class SignedChallenge extends Schema.Class<SignedChallenge>("SignedChalle
   signature: Schema.String,
   nonce: Schema.String
 }) {}
+
+/** EVM sign-in (ADR-0011): the wallet signs this text with `personal_sign`; it can't move money. */
+export const evmSignInMessage = (challenge: { message: string; nonce: string }) =>
+  `${challenge.message}\n\nThis only signs you in. It can't move money.\n\nNonce: ${challenge.nonce}`
+
+export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("SignedEvmChallenge")({
+  /** 0x address, any case */
+  address: Schema.String,
+  /** 0x hex of the 65-byte personal_sign signature */
+  signature: Schema.String,
+  nonce: Schema.String
+}) {}
+
+/** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), as `intents.near` takes it. */
+export const SignedIntent = Schema.Struct({
+  standard: Schema.Literal("erc191"),
+  /** The signed JSON text: signer_id, verifying_contract, deadline, nonce, intents. */
+  payload: Schema.String.check(Schema.isMaxLength(4096)),
+  /** secp256k1:<base58 of r, s and a recovery bit> */
+  signature: Schema.String.check(Schema.isMaxLength(200))
+})
+export type SignedIntent = typeof SignedIntent.Type
 
 export class Session extends Schema.Class<Session>("Session")({
   accountId: Schema.String,
@@ -217,7 +241,8 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
 
 export class AuthApi extends HttpApiGroup.make("auth").add(
   HttpApiEndpoint.post("challenge", "/auth/challenge", { success: Challenge }),
-  HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized })
+  HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized }),
+  HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized })
 ) {}
 
 /** Ends every session of the signed-in account, on every device (a lost phone, a shared computer). */
@@ -274,10 +299,26 @@ export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
   amountInFormatted: Schema.String,
   symbol: Schema.String,
   chain: Schema.String,
-  /** USDC (micro) that lands in the customer's NEAR account. */
+  /** USDC (micro) that lands in the customer's NEAR account, or their NEAR Intents account for an EVM wallet. */
   usdcOut: MicroUsdc,
   timeEstimateSeconds: Schema.Number,
   deadline: Schema.String
+}) {}
+
+/** Where an EVM customer's money leaves for (ADR-0011): send `usdcIn` from their NEAR Intents account to `depositAddress`. */
+export class ExitQuote extends Schema.Class<ExitQuote>("ExitQuote")({
+  depositAddress: Schema.String,
+  usdcIn: MicroUsdc,
+  amountOutFormatted: Schema.String,
+  symbol: Schema.String,
+  chain: Schema.String,
+  timeEstimateSeconds: Schema.Number
+}) {}
+
+/** 1Click's status, and for an EVM Top-Up, whether its USDC has moved on into Luckout. */
+export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({
+  status: Schema.String,
+  move: Schema.optional(Schema.Literals(["waiting", "moved", "failed"]))
 }) {}
 
 export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
@@ -295,7 +336,19 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   }),
   HttpApiEndpoint.get("status", "/topup/status", {
     query: { depositAddress: Schema.String },
-    success: Schema.Struct({ status: Schema.String }),
+    success: TopUpStatus,
+    error: TopUpUnavailable
+  }),
+  /** EVM wallets: the signed intent that moves this Top-Up into Luckout once it lands; the server sends it then. */
+  HttpApiEndpoint.post("move", "/topup/move", {
+    payload: Schema.Struct({ depositAddress: Schema.String, signed: SignedIntent }),
+    success: HttpApiSchema.NoContent,
+    error: TopUpUnavailable
+  }),
+  /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
+  HttpApiEndpoint.post("exit", "/topup/exit", {
+    payload: Schema.Struct({ destinationAsset: Schema.String, usdc: MicroUsdc }),
+    success: ExitQuote,
     error: TopUpUnavailable
   })
 ).middleware(Authorization) {}
@@ -321,6 +374,12 @@ export class RelayApi extends HttpApiGroup.make("relay").add(
   HttpApiEndpoint.post("send", "/relay", {
     /** base64 of a borsh SignedDelegate, as the wallet's signDelegateActions returns it. */
     payload: Schema.Struct({ signedDelegate: Schema.String.check(Schema.isMaxLength(8192)) }),
+    success: Schema.Struct({ hash: Schema.String }),
+    error: [RelayFailed, RelayUnavailable]
+  }),
+  /** EVM wallets (ADR-0011): one signed NEAR Intents payload, sent by our relayer to `intents.near`. */
+  HttpApiEndpoint.post("intent", "/relay/intent", {
+    payload: Schema.Struct({ signed: SignedIntent }),
     success: Schema.Struct({ hash: Schema.String }),
     error: [RelayFailed, RelayUnavailable]
   })

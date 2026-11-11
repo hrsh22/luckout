@@ -136,6 +136,8 @@ export class Near extends Context.Service<Near, {
   readonly treasuryId: string | undefined
   /** The account that pays customers' network fees (NEP-366 relayer), when configured. */
   readonly relayerId: string | undefined
+  /** NEAR Intents (ADR-0011), fixed per network exactly as the contract fixes it. */
+  readonly intentsId: string
   view<A>(method: string, args?: Record<string, unknown>, contract?: string): Effect.Effect<A, NearUnavailable>
   /** Signs `method` with the operator's function-call key, lets `persist` save it, then sends it. */
   call<E>(
@@ -146,6 +148,13 @@ export class Near extends Context.Service<Near, {
   /** Sends a customer's signed delegate from the relayer, which pays its gas and any deposit. */
   relay<E>(
     delegate: SignedDelegate,
+    persist: (signed: Signed) => Effect.Effect<void, E>
+  ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
+  /** Signs a call to `receiverId` with the relayer's key, which pays its gas; `persist` saves it before it's sent. */
+  relayerCall<E>(
+    receiverId: string,
+    method: string,
+    args: object,
     persist: (signed: Signed) => Effect.Effect<void, E>
   ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
   /** Signs `actions` to `receiverId` with the treasury's key, lets `persist` save it, then sends it. */
@@ -287,6 +296,12 @@ export class Near extends Context.Service<Near, {
           ? relayer.send(delegate.delegateAction.senderId, [actions.signedDelegate(delegate as never)], persist)
           : Effect.fail(new NearUnavailable({ message: "RELAYER_ACCOUNT_ID / RELAYER_PRIVATE_KEY not set" }))
 
+      // Customers' signed NEAR Intents payloads (ADR-0011) go in one execute_intents call, gas on us.
+      const relayerCall = <E>(receiverId: string, method: string, args: object, persist: (signed: Signed) => Effect.Effect<void, E>) =>
+        relayer
+          ? relayer.send(receiverId, [actions.functionCall(method, args, teraToGas("300"), 0n)], persist)
+          : Effect.fail(new NearUnavailable({ message: "RELAYER_ACCOUNT_ID / RELAYER_PRIVATE_KEY not set" }))
+
       const treasurySend = <E>(receiverId: string, txActions: Array<Action>, persist: (signed: Signed) => Effect.Effect<void, E>) =>
         treasury
           ? treasury.send(receiverId, txActions, persist)
@@ -330,9 +345,11 @@ export class Near extends Context.Service<Near, {
         operatorId: operator?.id,
         relayerId: relayer?.id,
         treasuryId: treasury?.id,
+        intentsId: testnet ? "intents.luckout.testnet" : "intents.near",
         view,
         call,
         relay,
+        relayerCall,
         treasurySend,
         resume,
         accessKey,

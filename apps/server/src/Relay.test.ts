@@ -7,7 +7,9 @@ import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
 import { Near, type Outcome } from "./Near.ts"
-import { RelaySettings } from "@luckout/api"
+import { intentPayload, intentSignature, moveInIntent, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
+import { randomBytes } from "node:crypto"
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { refusal, Relay, RELAY_DEFAULTS, USDC_REGISTRATION } from "./Relay.ts"
 
 // The relayer pays only for our own calls, exactly as the app makes them, and checks what the
@@ -187,4 +189,99 @@ test("the admin switch and caps apply to the next relay", async () => {
   }))
   assert.deepEqual({ ...r, saved: { ...r.saved } }, { off: false, sent: "RelayUnavailable", noQuota: false, back: true, saved: { ...RELAY_DEFAULTS.testnet } })
   assert.deepEqual(w.relayed, [])
+})
+
+// ---------- EVM wallets: signed NEAR Intents payloads (ADR-0011) ----------
+
+const evmKey = privateKeyToAccount(generatePrivateKey())
+const EVM = evmKey.address.toLowerCase()
+const INTENTS = "intents.luckout.testnet"
+
+const signIntent = async (intent: object, nonce = randomBytes(32).toString("base64")): Promise<SignedIntent> => {
+  const payload = intentPayload({ signer: EVM, intentsId: INTENTS, deadline: new Date(Date.now() + 600_000), nonce, intents: [intent] })
+  return { standard: "erc191", payload, signature: intentSignature(await evmKey.signMessage({ message: payload })) }
+}
+
+const intentWorld = (o: { nonceUsed?: boolean } = {}) => {
+  const sent: Array<{ receiver: string; method: string; args: unknown }> = []
+  const near = fakeNear({
+    contractId: APP,
+    usdcId: USDC,
+    intentsId: INTENTS,
+    relayerId: "relayer.test",
+    view: <A>(method: string) => Effect.succeed((method === "is_nonce_used" ? (o.nonceUsed ?? false) : null) as A),
+    relayerCall: (receiver, method, args, persist) =>
+      Effect.gen(function*() {
+        const hash = `tx-${sent.length + 1}`
+        sent.push({ receiver, method, args })
+        yield* persist({ hash, bytes: "" })
+        return { hash, value: null, events: [], failures: [] }
+      }),
+    resume: (signed) => Effect.succeed({ hash: signed.hash, value: null, events: [], failures: [] })
+  })
+  const layer = Relay.layer.pipe(Layer.provide(Layer.succeed(Near, near)), Layer.provideMerge(DbMemory))
+  const run = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) => Effect.runPromise(e.pipe(Effect.provide(layer)))
+  const tag = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) =>
+    run(e.pipe(Effect.match({ onFailure: (err) => (err as { _tag: string; message: string }), onSuccess: () => ({ _tag: "ok", message: "" }) })))
+  const send = (s: SignedIntent, counted = true) => Relay.use((r) => r.sendIntent(EVM, s, { counted }))
+  return { sent, run, tag, send }
+}
+
+const moveIn = (amount = "5000000") => moveInIntent({ usdcId: USDC, contractId: APP, account: EVM, amount })
+
+test("an EVM customer's signed intent goes to NEAR Intents once; the same payload again gets the first result", async () => {
+  const w = intentWorld()
+  const s = await signIntent(moveIn())
+  const [a, b] = await w.run(Effect.gen(function*() {
+    return [yield* w.send(s), yield* w.send(s)]
+  }))
+  assert.equal(a.hash, "tx-1")
+  assert.equal(b.hash, "tx-1")
+  assert.equal(w.sent.length, 1)
+  assert.deepEqual(w.sent[0], { receiver: INTENTS, method: "execute_intents", args: { signed: [s] } })
+})
+
+test("a used nonce, a forged signature or someone else's account is refused before we pay", async () => {
+  const used = intentWorld({ nonceUsed: true })
+  assert.equal((await used.tag(used.send(await signIntent(moveIn()))))._tag, "RelayFailed")
+  assert.equal(used.sent.length, 0)
+
+  const w = intentWorld()
+  const s = await signIntent(moveIn())
+  const forged = { ...s, payload: s.payload.replace("5000000", "6000000") }
+  assert.equal((await w.tag(w.send(forged)))._tag, "RelayFailed")
+  const theirs = await w.tag(Relay.use((r) => r.sendIntent("0x" + "3".repeat(40), s)))
+  assert.equal(theirs._tag, "RelayFailed")
+  assert.equal(w.sent.length, 0)
+})
+
+test("a transfer pays only a withdrawal quoted for this account, for exactly its amount", async () => {
+  const w = intentWorld()
+  const address = "c".repeat(64)
+  const transfer = (amount: string) => transferIntent({ receiverId: address, usdcId: USDC, amount })
+  const before = await w.tag(w.send(await signIntent(transfer("2000000"))))
+  assert.equal(before._tag, "RelayFailed", "not quoted yet")
+  const results = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc) VALUES (${address}, ${EVM}, 'out', 2000000)`
+    const more = yield* Effect.flip(w.send(yield* Effect.promise(() => signIntent(transfer("3000000")))))
+    const exact = yield* w.send(yield* Effect.promise(() => signIntent(transfer("2000000"))))
+    return { more: more._tag, exact: exact.hash }
+  }))
+  assert.deepEqual(results, { more: "RelayFailed", exact: "tx-1" })
+})
+
+test("daily caps count intents too, except a Top-Up's own move-in", async () => {
+  const w = intentWorld()
+  const tags = await w.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet"))
+    const one = yield* Effect.promise(() => signIntent(moveIn("1000000")))
+    const two = yield* Effect.promise(() => signIntent(moveIn("2000000")))
+    const three = yield* Effect.promise(() => signIntent(moveIn("3000000")))
+    yield* w.send(one)
+    const capped = yield* Effect.flip(w.send(two))
+    const own = yield* w.send(three, false)
+    return [capped._tag, own.hash]
+  }))
+  assert.deepEqual(tags, ["RelayUnavailable", "tx-2"])
 })
