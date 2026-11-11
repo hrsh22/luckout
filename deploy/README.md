@@ -11,7 +11,7 @@
 | Telegram | the testnet bot | the mainnet bot |
 | Bitrefill | its own account (test cards are free) | its own account and key |
 
-Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK`. By hand: `pnpm deploy:testnet` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
+Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK`, or one that has moved past the commit CI tested. By hand: `pnpm deploy:testnet` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
 
 The steps below set up one site; repeat them per environment with its own user, port, database and `.env`.
 
@@ -74,6 +74,14 @@ git pull && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 re
 ```
 
 From a machine with the `luckout-milesvm` / `luckout-testnet-api-milesvm` SSH aliases, `pnpm deploy:mainnet` / `pnpm deploy:testnet` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs && pm2 save`.
+
+## Upgrading the contract
+
+Upgrades happen in place: same account, same state, new code, so balances never move. The new code must read the old state as it is (no change to the stored types).
+
+1. Merge the release into `main`. CI's `contract-wasm` job builds the contract reproducibly and uploads it as `luckout-wasm-<commit>`; its summary shows the code hash.
+2. `gh run download <run id> -n luckout-wasm-<commit>`.
+3. `./contract/upgrade.sh mainnet luckout.wasm` shows the current and new code hashes and the reserve; `GO=1` deploys, then checks the chain reports the new hash and still reads the state. Keep the previous wasm to roll back with the same script. Testnet first: `./contract/upgrade.sh testnet <wasm>`.
 
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 

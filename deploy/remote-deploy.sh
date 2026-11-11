@@ -3,6 +3,8 @@
 # ~/.ssh/authorized_keys (which fixes the branch per site, so CI can't choose it), or by hand:
 #   bash deploy/remote-deploy.sh testnet     # luckout-testnet-api.gamified.trade
 #   bash deploy/remote-deploy.sh main        # luckout-api.gamified.trade (mainnet)
+# CI sends the commit it tested as the SSH command, which the forced command leaves in
+# SSH_ORIGINAL_COMMAND; then the branch must still point at it. By hand, there's no such check.
 set -euo pipefail
 branch="${1:?usage: remote-deploy.sh <branch>}"
 cd "$(dirname "$0")/.."
@@ -15,6 +17,10 @@ case "$branch:$network" in
   *) echo "refusing to deploy $branch on a $network site" >&2; exit 1 ;;
 esac
 git fetch -q origin "$branch"
+tested="${SSH_ORIGINAL_COMMAND:-}"
+if [[ "$tested" =~ ^[0-9a-f]{40}$ ]] && [ "$(git rev-parse "origin/$branch")" != "$tested" ]; then
+  echo "refusing: origin/$branch is no longer $tested, the commit CI tested" >&2; exit 1
+fi
 git checkout -q -B "$branch" "origin/$branch"
 pnpm install --frozen-lockfile --filter @luckout/server... >/dev/null
 pm2 startOrReload deploy/ecosystem.config.cjs --update-env >/dev/null && pm2 save >/dev/null
