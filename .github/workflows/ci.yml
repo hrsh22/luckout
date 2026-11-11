@@ -4,6 +4,12 @@ on:
     branches: [main, testnet]
   pull_request:
 
+# A new push to a PR cancels that PR's run still in progress. Pushes to main and testnet each get
+# their own group (head_ref is empty there), so every one of their commits is still tested and deployed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 # Read-only token: nothing here writes to the repository.
 permissions:
   contents: read
@@ -44,8 +50,9 @@ jobs:
   # The contract built reproducibly (in the Docker image pinned in contract/Cargo.toml), so anyone can
   # rebuild it byte for byte. Its code hash is what `contract/upgrade.sh` deploys and checks onchain,
   # and what /fair shows. Download it with: gh run download <run id> -n luckout-wasm-<commit>
+  # It runs alongside the tests rather than after them (the slowest job, ~2 min); a commit whose
+  # tests fail has a red run, and only green commits reach main to be released.
   contract-wasm:
-    needs: contract
     runs-on: ubuntu-latest
     defaults:
       run:
