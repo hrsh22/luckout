@@ -3,22 +3,22 @@
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { EVM_CHAIN_IDS, sendFromWallet } from "@/lib/evm"
+import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet } from "@/lib/evm"
 import { toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import { toast } from "sonner"
 
 const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
-const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain" }
 
 /**
  * An EVM wallet's Top-Up (ADR-0011): 1Click swaps the token into exact USDC in the customer's own NEAR
  * Intents account, and the intent they sign before sending moves it into Luckout once it lands. The
  * transfer on their own chain is the only fee they pay.
  */
-export function TopUpEvm() {
+export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   const { accountId, token, refresh, signIntent } = useSession()
   const actions = useWalletActions()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
@@ -40,6 +40,11 @@ export function TopUpEvm() {
     }, (e) => setError(errorMessage(e)))
   }, [token])
 
+  // The caller's onDone changes every render: read it through a ref, so the poll isn't restarted, and run it once.
+  const finished = useRef(onDone)
+  finished.current = onDone
+  const reported = useRef(false)
+
   // Poll until the swap settles and its USDC has moved into Luckout (or couldn't).
   const waiting = !!quote && signed && !(status && DONE.has(status.status) && status.move !== "waiting")
   useEffect(() => {
@@ -47,7 +52,13 @@ export function TopUpEvm() {
     const t = setInterval(() => {
       api((c) => c.topup.status({ query: { depositAddress: quote.depositAddress } }), token).then((s) => {
         setStatus(s)
-        if (s.move === "moved") refresh().catch(() => {})
+        if (s.move === "moved" && !reported.current) {
+          reported.current = true
+          refresh().catch(() => {})
+          toast.success(`${usd(quote.usdcOut)} added to your balance`)
+          // Like a wallet deposit: a mode chosen before the first one is saved now, and Welcome moves on.
+          finished.current?.(true)
+        }
       }, () => {})
     }, 5000)
     return () => clearInterval(t)
@@ -147,7 +158,7 @@ export function TopUpEvm() {
           </>
         )}
       {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "")) && (
-        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuote(undefined), setSigned(false), setStatus(undefined))}>
+        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuote(undefined), setSigned(false), setStatus(undefined), (reported.current = false))}>
           Top up again
         </Button>
       )}

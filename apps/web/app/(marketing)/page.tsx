@@ -31,7 +31,7 @@ const FAQ = [
     a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why one Draw can pay back at most ${usd(MAX_CASHBACK)}, and never more than a share of the reserve.`
   },
   { q: "Can the Telegram bot spend my money?", a: "Only when you tap Confirm, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it." },
-  { q: "Which wallets work?", a: "NEAR wallets (HOT, Meteor, Intear, MyNearWallet, Ledger and the others in NEAR Connect; HOT also works inside Telegram), and EVM wallets like MetaMask and Rabby, which need no NEAR at all: Luckout pays every NEAR fee." }
+  { q: "Which wallets work?", a: "NEAR wallets (HOT, Meteor, Intear, Ledger and the others in NEAR Connect; HOT also works inside Telegram), and EVM wallets like MetaMask and Rabby, which need no NEAR at all: Luckout pays every NEAR fee." }
 ]
 
 export default async function Home() {

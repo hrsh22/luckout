@@ -115,7 +115,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               <div className="card flex flex-col items-start gap-3 p-6">
                 <SignInButton size="lg" label="Sign in" inline />
                 {signInError && <p role="alert" className={`text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
-                <p className="text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, MyNearWallet) and EVM wallets (MetaMask, Rabby) both work.</p>
+                <p className="text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, Intear) and EVM wallets (MetaMask, Rabby) both work.</p>
               </div>
             </>
           )}

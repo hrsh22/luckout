@@ -8,12 +8,16 @@ import { usdcId, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 import { useEffect, useState } from "react"
+import { toast } from "sonner"
 
 const STORAGE_DEPOSIT = "1250000000000000000000" // 0.00125 NEAR, USDC's registration fee
 const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 
-/** Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit. */
-export function TopUp() {
+/**
+ * Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit.
+ * `onDone` runs once it's in the balance, like a wallet deposit (a mode chosen before it is saved then).
+ */
+export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   const { accountId, token, refresh, send, gasFree } = useSession()
   const [registered, setRegistered] = useState<boolean>()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
@@ -99,6 +103,8 @@ export function TopUp() {
               await send(depositCall(micro)).finally(() => refresh().catch(() => {}))
               setQuote(undefined)
               setStatus(undefined)
+              toast.success(`${usd(micro)} added to your balance`)
+              onDone?.(true)
             })}>
               Deposit {usd(quote.usdcOut)} into Luckout
             </Button>
