@@ -57,6 +57,10 @@ await attempt("Bundle a confirmation with a call that reverts unlucky Draws", co
 await attempt("Run a Draw directly, picking the moment", contract, "on_draw", { purchase_id: 0 })
 await attempt("Withdraw the victim's balance to the attacker", contract, "withdraw", { amount: account.balance }, 1n)
 await attempt("Raise the victim's Spending Limits", contract, "set_limits", { per_purchase: "1000000000000", daily: "1000000000000" }, 1n)
+await attempt("Act for an EVM customer as if NEAR Intents vouched for it (ADR-0011)", contract, "on_auth", {
+  signer_id: "0x53a19a03679e8d5e9253a998dcde6c71dbb002a2",
+  msg: JSON.stringify({ withdraw: { amount: "1000000" } })
+})
 await attempt("Drain the Cashback Reserve", contract, "withdraw_reserve", { amount: "1000000" }, 1n)
 await attempt("Pause the shop", contract, "set_paused", { paused: true })
 await attempt("Pull the proceeds, as if it were the treasury", contract, "sweep_proceeds", { amount: "1000000" }, 1n)
