@@ -75,7 +75,7 @@ function Row({ t }: { t: Transfer }) {
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <p className="font-semibold">{title}</p>
-        <p className="text-sm text-ink-soft">{say(t, evm)}</p>
+        <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
 
         {(t.phase === "awaiting-transfer" || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-1 rounded-2xl bg-soft p-3 text-sm">
@@ -122,7 +122,7 @@ function Row({ t }: { t: Transfer }) {
 }
 
 /** One sentence: where the money is right now, and what happens next. */
-function say(t: Transfer, evm: boolean) {
+function say(t: Transfer, evm: boolean, canDeposit: boolean) {
   const usual = minutes(t.timeEstimateSeconds)
   switch (t.phase) {
     case "awaiting-transfer":
@@ -138,7 +138,7 @@ function say(t: Transfer, evm: boolean) {
     case "moving":
       return "Landed. Moving it into your Luckout balance now."
     case "in-wallet":
-      return "Landed in your NEAR wallet. Deposit it to use it in Luckout."
+      return canDeposit ? "Landed in your NEAR wallet. Deposit it to use it in Luckout." : "Landed in your NEAR wallet."
     case "in-intents":
       return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
     case "done":
