@@ -2,7 +2,7 @@ import { ConfigProvider, Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
   assert.equal(usdToMicro("5.53"), 5_530_000)
@@ -137,4 +137,33 @@ test("the catalog lists only cards we can deliver, filtered just by what the cus
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+test("popular cards: the brands people know, one each, from the visitor's own country first", () => {
+  const card = (id: string, base_name: string, country_code: string, categories = ["games"]) => ({ id, name: id, base_name, country_code, categories })
+  const brands = popularBrands([
+    card("applebees-usa", "Applebee's", "US", ["restaurants"]),
+    card("steamrex-denmark", "Steamrex", "DK"),
+    card("uber-aed-international", "Uber Rides Voucher United Arab Emirates", "XI", ["travel"]),
+    card("amazon-prime-india", "Amazon Prime Subscription", "IN", ["streaming"]),
+    card("netflix-eu", "Netflix Europe", "EU", ["streaming"]),
+    card("netflix-germany", "Netflix", "DE", ["streaming"]),
+    card("steam-usa", "Steam", "US"),
+    card("steam-india", "Steam", "IN"),
+    card("roblox-usa", "Roblox USD", "XI"),
+    card("flipkart-india", "Flipkart", "IN", ["online-marketplaces"]),
+    card("apple-united-kingdom", "Apple", "GB", ["entertainment"]),
+    card("itunes-india", "App Store & iTunes", "IN", ["entertainment"])
+  ])
+  const ids = (country?: string, category?: "games") => pickPopular(brands, country, category).map((p) => p.id)
+
+  // Look-alikes, subscriptions and Uber's vouchers in dirhams aren't the brands people mean.
+  assert.deepEqual(ids("IN"), ["steam-india", "itunes-india", "flipkart-india", "roblox-usa"], "India's own, most wanted first, then worldwide")
+  assert.deepEqual(ids("US"), ["steam-usa", "roblox-usa"])
+  assert.deepEqual(ids("FR"), ["netflix-eu", "roblox-usa"], "an EU member gets Europe-wide cards")
+  assert.deepEqual(ids("DE"), ["netflix-germany", "roblox-usa"], "a country's own card beats the Europe-wide one")
+  assert.deepEqual(ids("IN", "games"), ["steam-india", "roblox-usa"], "a category narrows it")
+  assert.deepEqual(ids(), ["roblox-usa"], "no country: worldwide cards only")
+  const many = popularBrands(Array.from({ length: 30 }, (_, i) => card(`steam-${i}`, "Steam", "XI")))
+  assert.deepEqual(pickPopular(many, "US").map((p) => p.id), ["steam-0"], "one card per brand")
 })

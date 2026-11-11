@@ -15,6 +15,8 @@ const Product = Schema.Struct({
   country_code: Schema.String,
   country_name: Schema.optional(Schema.String),
   currency: Schema.String,
+  /** The brand without its country: "Steam", "Amazon.de", "PlayStation Store". */
+  base_name: Schema.optional(Schema.String),
   categories: Schema.optional(Schema.Array(Schema.String)),
   /** "none" for a code; "phone_number" or "account" for top-ups that need one, which we can't send. */
   recipient_type: Schema.optional(Schema.String),
@@ -127,7 +129,7 @@ const CATEGORY_MAP: Record<Category, ReadonlyArray<string>> = {
   food: ["food", "restaurants", "groceries", "food-delivery"],
   games: ["games", "game-stores"],
   entertainment: ["entertainment", "streaming", "experiences"],
-  travel: ["travel", "accommodation", "flights", "online-travel-agencies", "cruises"]
+  travel: ["travel", "accommodation", "flights", "online-travel-agencies", "cruises", "transportation"]
 }
 /** EU members: Bitrefill's Europe-wide cards ("EU") work in each of them too. */
 const EU_MEMBERS = new Set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split(" "))
@@ -139,6 +141,63 @@ const ALL_GIFT_CARDS = [...Object.values(CATEGORY_MAP).flat(), "pets", "pharmacy
 /** Bitrefill's page size, and the fewest cards a catalog page tries to return after filtering. */
 const PAGE = 50
 const MIN_PAGE_ITEMS = 12
+
+/**
+ * The brands customers look for first, most wanted first. Bitrefill has no popularity data, so this list
+ * is ours. Each pattern matches Bitrefill's brand name (`base_name`), leaving out look-alikes (Applebee's,
+ * Steamrex), subscriptions, Uber's vouchers in another country's currency, and Riot's Latin America cards,
+ * which Bitrefill marks worldwide. A country gets whichever of these Bitrefill sells there.
+ */
+const POPULAR_BRANDS: ReadonlyArray<RegExp> = [
+  // Known everywhere.
+  /^amazon(\.[a-z.]+)?$/i,
+  /^steam( usd)?$/i,
+  /^(apple( itunes| sa)?|app store & itunes( uae)?)$/i,
+  /^google play\b/i,
+  /^(sony )?playstation( store)?$/i,
+  /^xbox( live)?$/i,
+  /^netflix\b/i,
+  /^uber( eats| money [a-z]{3})?$/i,
+  /^airbnb\b/i,
+  // Each country's own favourites.
+  /^flipkart\b/i, /^swiggy\b/i, /^zomato\b/i, /^myntra\b/i, /^bigbasket\b/i, /^makemytrip\b/i,
+  /^tesco\b/i, /^argos\b/i, /^deliveroo\b/i, /^just eat\b/i,
+  /^zalando\b/i, /^media ?markt\b/i, /^lieferando\b/i,
+  /^target\b/i, /^best buy\b/i, /^tim hortons\b/i, /^woolworths\b/i, /^coles\b/i,
+  /^shopee\b/i, /^grab/i, /^carrefour\b/i, /^ikea\b/i,
+  // Then games and other brands people know.
+  /^nintendo eshop\b/i, /^roblox\b/i, /^valorant\b(?!.*latam)/i, /^league of legends\b(?!.*latam)/i, /^fortnite\b/i,
+  /^minecraft\b/i, /^pubg\b/i, /^razer gold\b/i,
+  /^starbucks\b/i, /^hotels\.com\b/i, /^nike\b/i, /^adidas\b/i, /^sephora\b/i, /^decathlon\b/i, /^disney\b/i
+]
+const POPULAR_LIMIT = 12
+
+interface Branded {
+  readonly name: string
+  readonly base_name?: string | undefined
+  readonly country_code: string
+  readonly categories?: ReadonlyArray<string> | undefined
+}
+/** Gift cards grouped by popular brand, in POPULAR_BRANDS order. */
+export const popularBrands = <P extends Branded>(cards: ReadonlyArray<P>) =>
+  POPULAR_BRANDS.map((brand) => cards.filter((p) => brand.test(p.base_name ?? p.name)))
+
+/**
+ * Up to 12 popular cards, one per brand: the country's own card, else a Europe-wide one in an EU member,
+ * else a worldwide one (as regionsFor). With no country, worldwide cards only.
+ */
+export const pickPopular = <P extends Branded>(brands: ReadonlyArray<ReadonlyArray<P>>, country?: string, category?: Category) => {
+  const regions = country ? regionsFor(country) : ["XI"]
+  const cats = category ? CATEGORY_MAP[category] : undefined
+  const picks: Array<P> = []
+  for (const brand of brands) {
+    const cards = cats ? brand.filter((p) => (p.categories ?? []).some((c) => cats.includes(c))) : brand
+    const pick = regions.map((r) => cards.find((p) => p.country_code === r)).find((p) => p !== undefined)
+    if (pick) picks.push(pick)
+    if (picks.length === POPULAR_LIMIT) break
+  }
+  return picks
+}
 
 /** Only cards delivered as a code can be bought here: top-ups need a phone number or account we can't send. */
 const sellable = (p: { recipient_type?: string | undefined; in_stock?: boolean | undefined }) =>
@@ -164,6 +223,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
   /** The catalog a page at a time, filtered only by what the customer chose. */
   browse(opts: BrowseOptions): Effect.Effect<CatalogPage, BitrefillUnavailable>
+  /** Up to 12 popular cards that work in `country` (see pickPopular); none on testnet or before the first catalog copy. */
+  popular(country?: string, category?: Category): Effect.Effect<ReadonlyArray<VoucherSummary>>
   /**
    * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
    * the lookup may use the whole budget, not just browsing's share.
@@ -303,6 +364,28 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       })
       const browse = (opts: BrowseOptions) =>
         Cache.get(browseCache, JSON.stringify({ q: opts.q?.trim().toLowerCase() || undefined, country: opts.country, category: opts.category, start: opts.start ?? 0 }))
+
+      // Popular cards come from our own copy of the gift-card catalog (about 100 pages), refreshed twice a
+      // day instead of read on every visit. Testnet sells only test cards, so it has none.
+      let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = []
+      const copyCatalog = Effect.gen(function*() {
+        const cards: Array<typeof Product.Type> = []
+        for (let start = 0;; start += PAGE) {
+          const page = yield* get("/products", Schema.Array(Product), { start: String(start), limit: String(PAGE), category: ALL_GIFT_CARDS.join(",") })
+          cards.push(...page.filter(sellable))
+          if (page.length < PAGE) break
+        }
+        brands = popularBrands(cards)
+      })
+      if (!testnet && Option.isSome(apiKey)) {
+        yield* copyCatalog.pipe(
+          Effect.tapCause((cause) => Effect.logWarning("copying Bitrefill's catalog for popular cards failed", cause)),
+          Effect.retry({ schedule: Schedule.spaced("5 minutes") }),
+          Effect.repeat(Schedule.spaced("12 hours")),
+          Effect.forkScoped
+        )
+      }
+      const popular = (country?: string, category?: Category) => Effect.sync(() => pickPopular(brands, country, category).map(summary))
 
       // ponytail: fixed one-minute window in memory, one process.
       let budget = { used: 0, resetAt: 0 }
@@ -468,7 +551,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           }))
         )
 
-      return Bitrefill.of({ search, browse, voucher, order, delivery, credit, deposit, depositState })
+      return Bitrefill.of({ search, browse, popular, voucher, order, delivery, credit, deposit, depositState })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

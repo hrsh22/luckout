@@ -4,14 +4,14 @@ import { GiftCard } from "@/components/gift-card"
 import { errorMessage } from "@/lib/api"
 import { COUNTRIES, countryName, flag } from "@/lib/countries"
 import { network } from "@/lib/near"
-import { rememberSummary, type ShopFilters, useBrowse, voucherQuery } from "@/lib/queries"
+import { rememberSummary, type ShopFilters, useBrowse, usePopular, viewedCards, voucherQuery } from "@/lib/queries"
 import { CATEGORIES, type Category, type VoucherSummary } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { Search, X } from "lucide-react"
 import { motion } from "motion/react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
-import { useEffect, useRef, useState } from "react"
+import { type ReactNode, useEffect, useRef, useState } from "react"
 
 const CATEGORY_NAMES: Record<Category, string> = {
   shopping: "Shopping",
@@ -80,6 +80,20 @@ export function Catalog() {
 
   const filtered = !!(filters.q || filters.country || filters.category)
 
+  // Above the full list unless the customer is searching: what they opened lately, and the brands people
+  // buy most where they are. Testnet sells only test cards, so it has no popular ones.
+  const popularOn = network !== "testnet" && !filters.q
+  const popular = usePopular(filters, popularOn)
+  // Not isLoading: it depends on fetching, which differs between the server render and the first client one.
+  const popularPending = popularOn && popular.isPending
+  const popularItems = popular.data?.items ?? []
+  const near = popular.data?.country
+  // Read after mount: the server render has no browser storage.
+  const [viewed, setViewed] = useState<Array<VoucherSummary>>([])
+  useEffect(() => setViewed(viewedCards()), [])
+  const showViewed = !filtered && viewed.length > 0
+  const shelves = !filters.q && (showViewed || popularPending || popularItems.length > 0)
+
   return (
     <section className="flex flex-col gap-8">
       <div className="flex flex-col gap-3">
@@ -120,7 +134,8 @@ export function Catalog() {
               onChange={(e) => update({ country: e.target.value })}
             >
               <option value="">🌐 All countries</option>
-              {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{flag(c.code)} {c.name}</option>)}
+              {/* Node and browsers name a few places differently ("Falkland Islands (Islas Malvinas)"); either is fine. */}
+              {COUNTRIES.map((c) => <option key={c.code} value={c.code} suppressHydrationWarning>{flag(c.code)} {c.name}</option>)}
             </select>
             <span className="pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 text-muted" aria-hidden="true">▾</span>
           </label>
@@ -145,6 +160,31 @@ export function Catalog() {
           </p>
         )}
       </div>
+
+      {shelves && (
+        <>
+          {showViewed && <Shelf title="Recently viewed" items={viewed} />}
+          {popularPending
+            ? <Shelf title="Popular" />
+            : popularItems.length > 0 && (
+              <Shelf
+                title={near ? `Popular in ${flag(near)} ${countryName(near)}` : "Popular worldwide"}
+                items={popularItems}
+                dim={popular.isPlaceholderData}
+                action={!filters.country && near && (
+                  <button
+                    type="button"
+                    onClick={() => update({ country: near })}
+                    className="h-9 rounded-full bg-white/80 px-4 text-sm font-semibold text-ink-soft transition-colors hover:text-ink"
+                  >
+                    Show only cards for {flag(near)} {countryName(near)}
+                  </button>
+                )}
+              />
+            )}
+          <h2 className="font-display text-2xl font-extrabold">All cards</h2>
+        </>
+      )}
 
       {results.error && <p role="alert" className="font-medium text-bad">{errorMessage(results.error)}</p>}
 
@@ -189,11 +229,39 @@ export function Catalog() {
   )
 }
 
-function Tile({ v, index }: { v: VoucherSummary; index: number }) {
+const SHELF_ITEM = "w-40 shrink-0 snap-start sm:w-48 lg:w-auto"
+
+/** A row of cards: it scrolls sideways on small screens and wraps into rows of six on wide ones. Without items, a placeholder. */
+function Shelf({ title, action, items, dim = false }: { title: string; action?: ReactNode; items?: ReadonlyArray<VoucherSummary>; dim?: boolean }) {
+  return (
+    <section className="flex flex-col gap-3" aria-label={title}>
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <h2 className="font-display text-2xl font-extrabold">{title}</h2>
+        {action}
+      </div>
+      <ul
+        className={`-mx-4 -my-2 flex snap-x scroll-px-4 gap-4 overflow-x-auto px-4 py-2 transition-opacity sm:-mx-10 sm:scroll-px-10 sm:px-10 lg:mx-0 lg:grid lg:grid-cols-6 lg:overflow-visible lg:px-0 ${dim ? "opacity-60" : ""}`}
+        aria-busy={!items}
+      >
+        {items
+          ? items.map((v, i) => <Tile key={v.id} v={v} index={i} className={SHELF_ITEM} />)
+          : Array.from({ length: 6 }, (_, i) => (
+            <li key={i} className={`flex flex-col gap-3 ${SHELF_ITEM}`}>
+              <span className="skeleton aspect-[1.6] rounded-[1.25rem]" />
+              <span className="skeleton h-4 w-2/3 rounded-full" />
+            </li>
+          ))}
+      </ul>
+    </section>
+  )
+}
+
+function Tile({ v, index, className }: { v: VoucherSummary; index: number; className?: string }) {
   const qc = useQueryClient()
   const warm = () => qc.prefetchQuery(voucherQuery(v.id))
   return (
     <motion.li
+      className={className}
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 30, delay: Math.min(index % 24, 11) * 0.025 }}
