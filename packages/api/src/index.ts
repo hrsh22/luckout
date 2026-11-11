@@ -341,14 +341,20 @@ export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings
   /** The most the server refills in a rolling day. */
   dailyRefill: Usd,
   /** How long a purchase may wait for credit before it's cancelled, uncharged (up to a day). */
-  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 }))
+  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 })),
+  /**
+   * USDC kept ready in our Base wallet, so a refill pays Bitrefill in about a minute instead of waiting
+   * on a swap; topped back up in the background. 0 turns it off. Missing (saved before it existed): the
+   * network's default.
+   */
+  baseFloat: Schema.optional(Usd)
 }) {}
 
 /** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
 export class RefillView extends Schema.Class<RefillView>("RefillView")({
   id: Schema.String,
   amount: MicroUsdc,
-  /** target, waiting (a purchase needed it) or manual. */
+  /** target, waiting (a purchase needed it), manual, or float (tops up the Base wallet; no Bitrefill credit). */
   reason: Schema.String,
   /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck or resolved. */
   step: Schema.String,

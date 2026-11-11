@@ -18,8 +18,9 @@ import { readSetting, writeSetting } from "./Settings.ts"
  * for its size: a big one waits, uncharged, for a refill sized for it, for up to a day.
  */
 export const CREDIT_DEFAULTS = {
-  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 300_000_000, waitMinutes: 1440 }),
-  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, dailyRefill: 1_000_000_000, waitMinutes: 1440 })
+  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 300_000_000, waitMinutes: 1440, baseFloat: 50_000_000 }),
+  // Refills don't run on testnet, so neither does the float.
+  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, dailyRefill: 1_000_000_000, waitMinutes: 1440, baseFloat: 0 })
 } as const
 
 /** Smaller refills cost relatively more and churn invoices. */
@@ -34,8 +35,10 @@ const HELD_STEPS = ["admit", "ordering"]
 export const WAITING_STEPS = ["waiting", "restock"]
 /** A balance older than this is read again before deciding on a purchase. */
 const STALE_MS = 10 * 60_000
-/** Days of sales the target covers. */
-const TARGET_DAYS = 2
+/** USDC kept ready on Base (`CreditSettings.baseFloat`); 0 when off. */
+export const floatOf = (s: Pick<CreditSettings, "baseFloat">) => s.baseFloat ?? 0
+/** Days of sales the target covers: one when a Base float makes refills fast, else two. */
+const targetDays = (s: Pick<CreditSettings, "baseFloat">) => (floatOf(s) > 0 ? 1 : 2)
 
 /** Why settings are refused, or undefined when they hang together. */
 export const settingsProblem = (s: CreditSettings) =>
@@ -47,11 +50,12 @@ export const settingsProblem = (s: CreditSettings) =>
 
 /**
  * The credit to aim for, and the line below which a refill starts. The target covers two days of
- * sales, and the biggest card bought lately plus a refill's worth; the line never sits below that
- * card, so cards of the usual size buy at once. Both stay within the floor and the ceiling.
+ * sales (one with a Base float: Bitrefill credit can't be refunded, and refills then take a minute),
+ * and the biggest card bought lately plus a refill's worth; the line never sits below that card, so
+ * cards of the usual size buy at once. Both stay within the floor and the ceiling.
  */
-export const levels = (s: Pick<CreditSettings, "floor" | "ceiling">, avgDaily: number, biggest: number) => {
-  const target = Math.min(s.ceiling, Math.max(s.floor, TARGET_DAYS * avgDaily, biggest + MIN_REFILL))
+export const levels = (s: Pick<CreditSettings, "floor" | "ceiling" | "baseFloat">, avgDaily: number, biggest: number) => {
+  const target = Math.min(s.ceiling, Math.max(s.floor, targetDays(s) * avgDaily, biggest + MIN_REFILL))
   const refillBelow = Math.max(Math.floor(target / 2), Math.min(biggest, target - MIN_REFILL))
   return { target, refillBelow }
 }
@@ -110,7 +114,11 @@ export class Credit extends Context.Service<Credit, {
       const lock = yield* Semaphore.make(1)
       const snapshot = yield* Ref.make<Snapshot | undefined>(undefined)
 
-      const settings = readSetting("credit", CreditSettings, CREDIT_DEFAULTS[network]).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+      const settings = readSetting("credit", CreditSettings, CREDIT_DEFAULTS[network]).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+        // Settings saved before the float existed get the network's default for it, keeping the rest.
+        Effect.map((s) => (s.baseFloat === undefined ? new CreditSettings({ ...s, baseFloat: CREDIT_DEFAULTS[network].baseFloat }) : s))
+      )
       const configure = (next: CreditSettings, by: string) =>
         writeSetting("credit", CreditSettings, next, by).pipe(Effect.provideService(SqlClient.SqlClient, sql))
 

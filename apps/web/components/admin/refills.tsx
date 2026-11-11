@@ -37,7 +37,10 @@ export function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> })
       <h3 className="font-display text-2xl font-extrabold">Refills</h3>
       <ul className="flex flex-col divide-y divide-line">
         {refills.map((r) => {
-          const step = STEP[r.step] ?? { label: r.step, tone: "muted" as const }
+          // A float top-up ends with the USDC in our wallet, not as Bitrefill credit.
+          const step = r.reason === "float" && r.step === "done"
+            ? { label: "In our Base wallet", tone: "good" as const }
+            : STEP[r.step] ?? { label: r.step, tone: "muted" as const }
           return (
             <li key={r.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center">
               <div className="min-w-0 flex-1">
@@ -47,7 +50,7 @@ export function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> })
                     {step.tone === "busy" && <motion.span className="size-1.5 rounded-full bg-current" animate={{ opacity: [1, 0.3, 1] }} transition={{ duration: 1.2, repeat: Infinity }} />}
                     {step.label}
                   </span>
-                  <span className="text-sm font-normal text-muted">{r.reason === "waiting" ? "for a waiting order" : r.reason === "manual" ? "by hand" : "to the target"} · {ago(r.createdAt)}</span>
+                  <span className="text-sm font-normal text-muted">{r.reason === "waiting" ? "for a waiting order" : r.reason === "manual" ? "by hand" : r.reason === "float" ? "to top up the Base float" : "to the target"} · {ago(r.createdAt)}</span>
                 </p>
                 {r.error && <p className="mt-1 line-clamp-2 text-sm text-ink-soft">{r.error}</p>}
               </div>

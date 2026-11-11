@@ -6,7 +6,7 @@ import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit, MIN_REFILL, usd } from "./Credit.ts"
+import { Credit, floatOf, MIN_REFILL, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
@@ -36,6 +36,10 @@ import { NEAR_USDC_ASSET } from "./TopUp.ts"
 //   resumes without paying twice: the NEAR transfer is resent as the same bytes, and the Base payment
 //   keeps one nonce. One refill runs at a time, and anything unclear stops automatic refills until an
 //   admin resolves it. A stuck refill is still watched, and carries on or closes when its outcome is clean.
+// - A float of USDC kept in the Base wallet (CreditSettings.baseFloat) lets a refill skip the swap and pay
+//   Bitrefill in about a minute. When no refill is due and the wallet holds under half the float, a
+//   "float" refill swaps exactly the missing amount in, through the same steps, and ends once it lands:
+//   fund → quote → send → swapping → done. It never touches Bitrefill, and a real refill always goes first.
 
 export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
 /** The most a refill may cost above the credit it buys, slippage buffer included. */
@@ -120,6 +124,12 @@ export const maxCost = (amount: number) => cents(Number(BigInt(amount) * (10_000
 const time = (v: Date | string | null | undefined) => (v ? new Date(v).getTime() : 0)
 /** A daily cap to suggest when demand reaches the current one: room for twice today's need, in $50 steps. */
 export const suggestedCap = (cap: number, need: number) => Math.ceil(Math.max(cap * 1.5, need * 2) / 50_000_000) * 50_000_000
+
+/** A refill that only tops up the Base float: it swaps its whole amount in and never pays Bitrefill. */
+const isFloat = (row: { readonly reason: string }) => row.reason === "float"
+/** The float top-up due now: the wallet is under half the float, so swap it back up; 0 when not due. */
+export const floatTopUp = (float: number, walletUsdc: number) =>
+  float > 0 && walletUsdc < float / 2 ? Math.max(cents(float - walletUsdc), MIN_SWAP) : 0
 
 /** What a swap must bring to the Base wallet for a refill: 0 when the wallet already holds it. */
 export const swapFor = (amount: number, walletUsdc: number) => (walletUsdc >= amount ? 0 : Math.max(cents(amount - walletUsdc), MIN_SWAP))
@@ -239,6 +249,15 @@ export class Refill extends Context.Service<Refill, {
           `since it pays our own Base wallet, and the refill carries on by itself. Meanwhile you can top up the credit on bitrefill.com by hand.`
       }
 
+      /** A float top-up's USDC is in our wallet: it's done (it never pays Bitrefill). */
+      const floatLanded = (row: Row, note: string) =>
+        Effect.gen(function*() {
+          if (yield* move(row, { step: "done", swap_status: "SUCCESS", finished_at: new Date().toISOString(), error: note || null })) {
+            yield* alerts.admin(`The Base float was topped up by ${usd(Number(row.amount))}: refills pay Bitrefill from it in about a minute.`)
+          }
+          return "wait" as Next
+        })
+
       const stop = (row: Row, error: string) =>
         Effect.gen(function*() {
           if (yield* move(row, { step: "stuck", stuck_at: row.step, error })) {
@@ -311,9 +330,11 @@ export class Refill extends Context.Service<Refill, {
                 yield* alerts.admin(`The Base wallet ${wallet} is out of ETH for gas; send it about $1 of ETH on Base.`)
                 return "wait"
               }
-              const out = swapFor(amount, w.usdc)
+              // A refill uses what the wallet holds first (the float, or a swap that finished late); a float
+              // top-up brings its whole amount in.
+              const out = isFloat(row) ? amount : swapFor(amount, w.usdc)
               if (out === 0) {
-                // The wallet already holds it (say, from a swap that finished late): no swap needed.
+                // The wallet already holds it: no swap needed.
                 yield* move(row, { step: "invoice", error: null })
                 return "next"
               }
@@ -363,7 +384,7 @@ export class Refill extends Context.Service<Refill, {
             }
             case "quote": {
               const [wallet, w] = yield* Effect.all([base.address, base.balances])
-              const out = swapFor(amount, w.usdc)
+              const out = isFloat(row) ? amount : swapFor(amount, w.usdc)
               if (out === 0) {
                 yield* move(row, { step: "invoice", error: null })
                 return "next"
@@ -449,6 +470,8 @@ export class Refill extends Context.Service<Refill, {
               // A check that answered clears any earlier network error, so the panel shows only what's current.
               yield* save(row.id, { swap_status: status, error: null })
               if (status === "SUCCESS") {
+                // A float top-up is done once its USDC is in our wallet; a refill goes on to pay Bitrefill.
+                if (isFloat(row)) return yield* floatLanded(row, "")
                 yield* move(row, { step: "invoice" })
                 return "next"
               }
@@ -568,7 +591,7 @@ export class Refill extends Context.Service<Refill, {
       const recent = sql<Row>`SELECT * FROM refills ORDER BY created_at DESC LIMIT 10`.pipe(Effect.orDie)
       const refilledToday = sql<{ total: string }>`
         SELECT COALESCE(sum(amount), 0)::text AS total FROM refills
-        WHERE created_at > now() - interval '1 day' AND step NOT IN ('failed', 'refunded')`.pipe(
+        WHERE created_at > now() - interval '1 day' AND step NOT IN ('failed', 'refunded') AND reason <> 'float'`.pipe(
         Effect.map(([r]) => Number(r?.total ?? 0)),
         Effect.orDie
       )
@@ -627,7 +650,7 @@ export class Refill extends Context.Service<Refill, {
         const [r] = yield* sql<{ today: string; usual: string }>`
           SELECT COALESCE(sum(amount) FILTER (WHERE created_at > now() - interval '1 day'), 0)::text AS today,
                  (COALESCE(sum(amount) FILTER (WHERE created_at <= now() - interval '1 day'), 0) / 7)::bigint::text AS usual
-          FROM refills WHERE created_at > now() - interval '8 days' AND step NOT IN ('failed', 'refunded')`.pipe(Effect.orDie)
+          FROM refills WHERE created_at > now() - interval '8 days' AND step NOT IN ('failed', 'refunded') AND reason <> 'float'`.pipe(Effect.orDie)
         const today = Number(r?.today ?? 0)
         const usual = Number(r?.usual ?? 0)
         if (today > Math.max(UNUSUAL_FLOOR, usual * 3)) {
@@ -658,6 +681,14 @@ export class Refill extends Context.Service<Refill, {
           const c = yield* credit.view
           if (c.waiting.count > 0 && s.why !== "Credit is above the refill line.") {
             yield* alerts.admin(`${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for credit, uncharged. ${s.why}`)
+          }
+          // No refill due: top the Base float back up, so the next one pays Bitrefill in a minute.
+          const w = yield* base.balances.pipe(Effect.orElseSucceed(() => undefined))
+          const top = w ? floatTopUp(floatOf(c.settings), w.usdc) : 0
+          if (top > 0) {
+            const row = yield* start(top, "float", null)
+            yield* Effect.log(`refill ${row.id} started: ${usd(top)} to top up the Base float`)
+            yield* FiberSet.run(workflows, advance(row.id))
           }
           return
         }
@@ -759,6 +790,7 @@ export class Refill extends Context.Service<Refill, {
                 return
               }
               if (status === "SUCCESS") {
+                if (isFloat(row)) return void (yield* floatLanded(row, `${was} | 1Click finished it late.`))
                 // The USDC lands in our own wallet: once it's there, the refill simply carries on to Bitrefill.
                 if ((yield* base.balances).usdc < Number(row.amount)) return
                 if (yield* move(row, { step: "invoice", swap_status: status, error: `${was} | 1Click finished it late; carried on.` })) {
