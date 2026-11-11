@@ -1,15 +1,16 @@
 import { AdminInvalid, BitrefillUnavailable, RefillView } from "@luckout/api"
-import { Context, Effect, Layer, Schedule, Semaphore } from "effect"
+import { Context, Effect, FiberSet, Layer, Schedule, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { actions, teraToGas } from "near-api-js"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit, MIN_REFILL } from "./Credit.ts"
+import { Credit, MIN_REFILL, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
-import { ContractRejected, Near, NearUnavailable, Network, type Signed, TxExpired } from "./Near.ts"
+import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
+import { stepRows } from "./Rows.ts"
 import { USDC_REGISTRATION } from "./Relay.ts"
 import { NEAR_USDC_ASSET } from "./TopUp.ts"
 
@@ -53,7 +54,7 @@ const QUOTE_MIN_LEFT_MS = 10 * 60_000
 const SWAP_GRACE_MS = 20 * 60_000
 /** After 1Click reports success, how long the USDC may take to show in our wallet. */
 const WALLET_WAIT_MS = 10 * 60_000
-/** A Base payment not first sent by this long after its invoice is never sent: the invoice is about to expire. */
+/** This long after its invoice, a Base payment is never sent, first or again: the invoice is about to expire. */
 const INVOICE_SEND_LIMIT_MS = 50 * 60_000
 /** A sent Base payment not mined after this needs a look. */
 const PAY_CONFIRM_MS = 10 * 60_000
@@ -98,9 +99,11 @@ interface Row {
   sent_at: Date | string | null
   /** The Base payment to Bitrefill: fixed, then signed, then sent. */
   pay_tx: BasePayment | null
-  /** When the Base payment was first sent. */
+  /** When the Base payment was first sent, saved just before sending it. */
   paid_at: Date | string | null
   error: string | null
+  /** The step a stuck refill stopped at. */
+  stuck_at: string | null
   attempts: number
   created_at: Date | string
   updated_at: Date | string
@@ -111,7 +114,6 @@ type Unknown = NearUnavailable | OneClickUnavailable | BitrefillUnavailable | Ba
 type Next = "next" | "wait"
 
 const NEAR_ACCOUNT = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/
-const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed(2)}`
 const cents = (micro: number) => Math.ceil(micro / 10_000) * 10_000
 /** The most a refill may cost, so what the treasury holds before it asks for a quote. */
 export const maxCost = (amount: number) => cents(Number(BigInt(amount) * (10_000n + MAX_COST_BPS) / 10_000n))
@@ -191,16 +193,11 @@ export class Refill extends Context.Service<Refill, {
       const mainnet = (yield* Network) === "mainnet"
       const planLock = yield* Semaphore.make(1)
       const running = new Set<string>()
+      // Refills run in fibers owned by this service, so a shutdown waits for the step in progress.
+      const workflows = yield* FiberSet.make<void, never>()
 
       const load = (id: string) => sql<Row>`SELECT * FROM refills WHERE id = ${id}`.pipe(Effect.map((r) => r[0]), Effect.orDie)
-      const json = (v: unknown) => (v === null || typeof v !== "object" || v instanceof Date ? v : JSON.stringify(v))
-      const save = (id: string, fields: Record<string, unknown>) =>
-        sql`UPDATE refills SET ${sql.update(Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)])))}, updated_at = now() WHERE id = ${id}`
-          .pipe(Effect.asVoid, Effect.orDie)
-      /** Moves on from the step it was loaded at; false if something else already did. */
-      const move = (row: Row, fields: Record<string, unknown> & { step: string }) =>
-        sql`UPDATE refills SET ${sql.update(Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)])))}, attempts = 0, updated_at = now()
-            WHERE id = ${row.id} AND step = ${row.step} RETURNING id`.pipe(Effect.map((r) => r.length === 1), Effect.orDie)
+      const { save, move } = stepRows(sql, "refills")
 
       const toView = (r: Row) =>
         new RefillView({
@@ -244,7 +241,7 @@ export class Refill extends Context.Service<Refill, {
 
       const stop = (row: Row, error: string) =>
         Effect.gen(function*() {
-          if (yield* move(row, { step: "stuck", error })) {
+          if (yield* move(row, { step: "stuck", stuck_at: row.step, error })) {
             yield* alerts.admin(`Refill ${row.id.slice(0, 8)} (${usd(Number(row.amount))}) needs a look: ${error}. Automatic refills are paused until it's resolved in Admin.${support(row)}`)
           }
           return "wait" as Next
@@ -260,8 +257,9 @@ export class Refill extends Context.Service<Refill, {
               Effect.catchTag("TxExpired", (_: TxExpired) => Effect.succeed(undefined))
             )
             if (resumed) return resumed.outcome
-            // It never executed and never can: forget it so the next pass signs afresh.
-            yield* save(row.id, { [column]: null })
+            // It never executed and never can: forget a pull so the next pass signs afresh (the treasury's balance
+            // shows whether one landed). A payment to 1Click is the caller's to settle: see "send".
+            if (column === "sweep_tx") yield* save(row.id, { sweep_tx: null })
             return undefined
           }
           return yield* near.treasurySend(receiver, txActions, (signed) => save(row.id, { [column]: signed }))
@@ -272,16 +270,28 @@ export class Refill extends Context.Service<Refill, {
           const amount = Number(row.amount)
           switch (row.step) {
             case "fund": {
-              const refused = (e: ContractRejected) =>
+              const refused = (error: string) =>
                 Effect.gen(function*() {
-                  yield* save(row.id, { sweep_tx: null, error: `The contract refused the treasury's pull: ${e.message}` })
-                  yield* alerts.admin(`The treasury's pull for refill ${row.id.slice(0, 8)} was refused: ${e.message}`)
+                  yield* save(row.id, { sweep_tx: null, error })
+                  yield* alerts.admin(`Refill ${row.id.slice(0, 8)}: ${error}`)
                   return "wait" as Next
                 })
+              // The pull can succeed while its transfer fails (say, the treasury isn't registered on USDC):
+              // the contract then puts the proceeds and the cap back, and nothing reached the treasury.
+              // Retrying can't fix that and burns the treasury's gas each time, so it stops for an admin.
+              const landed = (o: Outcome | undefined) =>
+                o && o.failures.length > 0
+                  ? stop(
+                    row,
+                    `the treasury's pull didn't arrive and the contract put the proceeds back (${o.failures.join("; ")}). ` +
+                      `Is the treasury registered on USDC? scripts/treasury.ts registers it`
+                  )
+                  : Effect.succeed<Next>("next")
+              const rejected = (e: ContractRejected) => refused(`The contract refused the treasury's pull: ${e.message}`)
               if (row.sweep_tx) {
                 const done = yield* treasuryTx(row, "sweep_tx", near.contractId, []).pipe(
-                  Effect.map(() => "next" as Next),
-                  Effect.catchTag("ContractRejected", refused)
+                  Effect.flatMap(landed),
+                  Effect.catchTag("ContractRejected", rejected)
                 )
                 if (done === "next") yield* save(row.id, { sweep_tx: null })
                 return done
@@ -337,7 +347,7 @@ export class Refill extends Context.Service<Refill, {
               // Pull exactly the shortfall: the treasury never holds more than refills need.
               const pulled = yield* treasuryTx(row, "sweep_tx", near.contractId, [
                 actions.functionCall("sweep_proceeds", { amount: String(shortfall) }, teraToGas("60"), 1n)
-              ]).pipe(Effect.map(() => "next" as Next), Effect.catchTag("ContractRejected", refused))
+              ]).pipe(Effect.flatMap(landed), Effect.catchTag("ContractRejected", rejected))
               if (pulled === "next") {
                 yield* save(row.id, { sweep_tx: null, error: null })
                 yield* alerts.admin(`Treasury pulled ${usd(shortfall)} of proceeds for refill ${row.id.slice(0, 8)}.`)
@@ -408,13 +418,28 @@ export class Refill extends Context.Service<Refill, {
                 actions.functionCall("storage_deposit", { account_id: swap.depositAddress, registration_only: true }, teraToGas("10"), USDC_REGISTRATION),
                 actions.functionCall("ft_transfer", { receiver_id: swap.depositAddress, amount: swap.amountIn, memo: `Luckout refill ${row.id}` }, teraToGas("20"), 1n)
               ]).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
-              if (outcome === undefined) return "next"
+              if (outcome === undefined) {
+                // NEAR said the saved payment never ran. One node's word isn't enough to pay this deposit address
+                // again, so ask 1Click too: if it saw a deposit, it landed; if not, start over on a fresh quote (a
+                // new address), so even a payment that did land late can't be doubled on the same swap. Either
+                // way the USDC ends up in our Base wallet or back in the treasury.
+                const seen = yield* oneClick.status(swap.depositAddress)
+                if (seen !== "PENDING_DEPOSIT") {
+                  yield* move(row, { step: "swapping", sent_at: new Date().toISOString(), error: null })
+                } else {
+                  yield* move(row, { step: "quote", swap: null, send_tx: null, error: null })
+                }
+                return "next"
+              }
               if (outcome instanceof ContractRejected) {
                 // The whole transaction reverted: no USDC left the treasury.
                 yield* move(row, { step: "failed", error: `The treasury's transfer was refused: ${outcome.message}` })
                 yield* alerts.admin(`Refill ${row.id.slice(0, 8)}: the treasury's transfer was refused (${outcome.message}). Nothing was sent.`)
                 return "wait"
               }
+              // Both actions run in one receipt on USDC, so a failed transfer fails the whole transaction
+              // (above). `outcome.failures` can only be a later receipt, the storage refund, which doesn't
+              // undo the payment: 1Click has the USDC.
               yield* oneClick.submitDeposit({ txHash: outcome.hash, depositAddress: swap.depositAddress, nearSenderAccount: near.treasuryId! })
               yield* move(row, { step: "swapping", sent_at: new Date().toISOString(), error: null })
               return "next"
@@ -466,12 +491,14 @@ export class Refill extends Context.Service<Refill, {
                 // Signed for the nonce fixed above, and saved before it's sent: a retry can't pay twice.
                 p = yield* base.sign(p).pipe(Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` }))))
                 yield* save(row.id, { pay_tx: p })
-              } else if (!row.paid_at && Date.now() - time(row.invoice_at) > INVOICE_SEND_LIMIT_MS) {
-                // Signed but never sent, and the invoice is about to expire: it stays unsent.
-                return yield* stop(row, "the Bitrefill payment was signed but couldn't be sent before its invoice nearly expired, so it was never sent")
               }
-              const status = yield* base.send(p as BasePayment & { raw: Hex; hash: Hex })
-              if (!row.paid_at || row.error) yield* save(row.id, { paid_at: row.paid_at ?? new Date().toISOString(), error: null })
+              const signed = p as BasePayment & { raw: Hex; hash: Hex }
+              // Once the invoice is about to expire, nothing is sent, not even again: Base is only asked where it is.
+              const late = Date.now() - time(row.invoice_at) > INVOICE_SEND_LIMIT_MS
+              // Saved before the first send: a send the node took but never answered still counts as sent.
+              if (!late && !row.paid_at) yield* save(row.id, { paid_at: new Date().toISOString() })
+              const status = yield* (late ? base.status(signed.hash) : base.send(signed))
+              if (row.error) yield* save(row.id, { error: null })
               if (status === "success") {
                 yield* move(row, { step: "crediting", error: null })
                 return "next"
@@ -481,8 +508,11 @@ export class Refill extends Context.Service<Refill, {
                 yield* alerts.admin(`Refill ${row.id.slice(0, 8)}: the Base payment to Bitrefill reverted, so nothing was paid; the USDC stays in the Base wallet for the next refill.`)
                 return "wait"
               }
+              if (late) {
+                return yield* stop(row, `the Bitrefill payment wasn't confirmed before its invoice nearly expired, so it isn't sent again. It may have been sent: check ${signed.hash} on basescan`)
+              }
               if (row.paid_at && Date.now() - time(row.paid_at) > PAY_CONFIRM_MS) {
-                return yield* stop(row, `the Base payment ${p.hash} hasn't been mined after 10 minutes`)
+                return yield* stop(row, `the Base payment ${signed.hash} hasn't been mined after 10 minutes`)
               }
               return "wait"
             }
@@ -634,7 +664,7 @@ export class Refill extends Context.Service<Refill, {
         const row = yield* start(s.amount, s.why, null)
         yield* Effect.log(`refill ${row.id} started: ${usd(s.amount)} (${s.why})`)
         yield* unusual
-        yield* Effect.forkDetach(advance(row.id))
+        yield* FiberSet.run(workflows, advance(row.id))
       })).pipe(Effect.catchCause((cause) => Effect.logError("refill planning failed", cause)))
 
       const request = (amount: number | undefined, by: string) =>
@@ -645,7 +675,7 @@ export class Refill extends Context.Service<Refill, {
           if (s.amount === 0) return yield* new AdminInvalid({ message: s.why })
           const row = yield* start(s.amount, "manual", by)
           yield* alerts.admin(`${by} started a ${usd(s.amount)} Bitrefill refill.`)
-          yield* Effect.forkDetach(advance(row.id))
+          yield* FiberSet.run(workflows, advance(row.id))
           return toView(row)
         }))
 
@@ -684,8 +714,11 @@ export class Refill extends Context.Service<Refill, {
        * A stuck refill can still settle: 1Click may refund or finish a swap late, a Base payment may be
        * mined, Bitrefill may credit late. A clean outcome carries the refill on or closes it, as the
        * pipeline would have; anything else is reported and left for a human. Nothing is ever sent from here.
+       * Only a signed Base payment or a swap that got stuck while swapping is watched: a refill stuck for
+       * any other reason (say, the wallet came up short at the invoice) waits for an admin.
        */
-      const watchStuck = sql<Row>`SELECT * FROM refills WHERE step = 'stuck' AND (send_tx IS NOT NULL OR pay_tx IS NOT NULL) AND next_attempt_at <= now()`.pipe(
+      const watchStuck = sql<Row>`
+        SELECT * FROM refills WHERE step = 'stuck' AND (pay_tx->>'hash' IS NOT NULL OR stuck_at = 'swapping') AND next_attempt_at <= now()`.pipe(
         Effect.orDie,
         Effect.flatMap((rows) =>
           Effect.forEach(rows, (row) =>
@@ -726,7 +759,8 @@ export class Refill extends Context.Service<Refill, {
                 return
               }
               if (status === "SUCCESS") {
-                // The USDC is in our own wallet: the refill simply carries on to Bitrefill.
+                // The USDC lands in our own wallet: once it's there, the refill simply carries on to Bitrefill.
+                if ((yield* base.balances).usdc < Number(row.amount)) return
                 if (yield* move(row, { step: "invoice", swap_status: status, error: `${was} | 1Click finished it late; carried on.` })) {
                   yield* alerts.admin(`Stuck refill ${id}: 1Click finished the swap late, into our Base wallet. The refill carries on to Bitrefill by itself.`)
                 }
@@ -736,7 +770,7 @@ export class Refill extends Context.Service<Refill, {
               yield* save(row.id, { swap_status: status })
               yield* alerts.admin(`Stuck refill ${id}: the swap is now ${status} at 1Click.`)
             }).pipe(
-              Effect.catch((e: OneClickUnavailable | BitrefillUnavailable | BaseUnavailable) => Effect.logWarning(`stuck refill ${row.id} not checked: ${e.message}`))
+              Effect.catch((e: OneClickUnavailable | BitrefillUnavailable | BaseUnavailable | NearUnavailable) => Effect.logWarning(`stuck refill ${row.id} not checked: ${e.message}`))
             ), { discard: true })
         ),
         Effect.catchCause((cause) => Effect.logError("stuck refill check failed", cause))
@@ -746,7 +780,7 @@ export class Refill extends Context.Service<Refill, {
       yield* pass.pipe(Effect.repeat(Schedule.spaced("10 seconds")), Effect.forkScoped)
       yield* plan.pipe(Effect.repeat(Schedule.spaced("1 minute")), Effect.forkScoped)
 
-      return Refill.of({ kick: Effect.asVoid(Effect.forkDetach(plan)), request, resolve, status, process: pass })
+      return Refill.of({ kick: Effect.asVoid(FiberSet.run(workflows, plan)), request, resolve, status, process: pass })
     })
   )
 }

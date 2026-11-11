@@ -1,9 +1,10 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
+import { depositCall } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
 import { toMicro, usd } from "@/lib/format"
-import { contractId, usdcId, view } from "@/lib/near"
+import { usdcId, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 import { useEffect, useState } from "react"
@@ -91,16 +92,13 @@ export function TopUp() {
           <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
           {status === "SUCCESS" && (
             <Button className="self-start" disabled={busy} onClick={() => step(async () => {
-              await send({
-                receiverId: usdcId,
-                method: "ft_transfer_call",
-                args: { receiver_id: contractId, amount: String(quote.usdcOut), msg: "" },
-                deposit: "1",
-                tgas: 100
-              })
+              // The swap can deliver less than quoted: deposit what actually arrived, never more than the quote.
+              const arrived = Number(await view<string>(usdcId, "ft_balance_of", { account_id: accountId }))
+              const micro = Math.min(arrived, quote.usdcOut)
+              if (!(micro > 0)) throw new Error("No USDC has arrived in your NEAR wallet yet. Try again in a minute.")
+              await send(depositCall(micro)).finally(() => refresh().catch(() => {}))
               setQuote(undefined)
               setStatus(undefined)
-              await refresh()
             })}>
               Deposit {usd(quote.usdcOut)} into Luckout
             </Button>

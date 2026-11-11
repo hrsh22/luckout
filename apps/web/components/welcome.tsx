@@ -16,7 +16,7 @@ import { useSession } from "@/lib/session"
 import type { Mode } from "@luckout/api"
 import { Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
 
 const STEPS = ["Sign in", "Choose a mode", "Add funds", "Ready"] as const
@@ -31,8 +31,6 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
   const { accountId, account, signInError } = useSession()
   const actions = useWalletActions()
   const router = useRouter()
-  const next = useSearchParams().get("next")
-  const leave = next && next.startsWith("/") && !next.startsWith("//") ? next : "/shop"
   // Already signed in: start at the first real decision, with no step-to-step animation on open.
   const signedIn = !!accountId && account !== undefined
   const [step, setStep] = useState<Step>(signedIn ? 1 : 0)
@@ -171,8 +169,8 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               </div>
               <TelegramLink />
               <div>
-                <Button size="lg" onClick={() => (onDone ? onDone() : router.push(leave))}>
-                  {onDone ? "Start shopping" : leave === "/shop" ? "Find a card" : "Back to your card"}
+                <Button size="lg" onClick={() => (onDone ? onDone() : router.push("/shop"))}>
+                  {onDone ? "Start shopping" : "Find a card"}
                 </Button>
               </div>
             </>

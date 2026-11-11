@@ -55,3 +55,40 @@ test("a refusal from Bitrefill is a definite Refused, not an unknown", live, asy
   const o = await run((b) => b.order("swiggy-money-india", "999999"))
   assert.equal(o._tag, "Refused", JSON.stringify(o))
 })
+
+test("junk ids spend no lookups, and browsing can never use up the ones a purchase needs", async () => {
+  const looked: Array<string> = []
+  const realFetch = globalThis.fetch
+  // Bitrefill's MCP endpoint, faked: every product costs $10.
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const body = typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array)
+    const id: string = JSON.parse(body).params.arguments.product_id
+    looked.push(id)
+    const product = { id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: "10.00", payment_currency: "USD" }] }
+    return new Response(`data: ${JSON.stringify({ result: { content: [{ text: JSON.stringify(product) }] } })}\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    })
+  }) as typeof fetch
+  try {
+    const r = await run((b) =>
+      Effect.gen(function*() {
+        const junk = yield* b.voucher("../admin").pipe(Effect.flip)
+        // Browsing (catalog pages, quotes) uses its share of the minute's lookups...
+        for (let i = 0; i < 12; i++) yield* b.voucher(`card-${i}`)
+        const busy = yield* b.voucher("amazon-us").pipe(Effect.flip)
+        // ...and a purchase still gets its price, even for the id browsing was just refused.
+        const bought = yield* b.voucher("amazon-us", { purchase: true })
+        // That price is then cached for browsing too.
+        const browsed = yield* b.voucher("amazon-us")
+        return { junk, busy, bought, browsed }
+      }), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    assert.match(r.junk.message, /No such voucher/)
+    assert.match(r.busy.message, /busy/)
+    assert.equal(r.bought.packages[0]?.priceMicroUsdc, 10_000_000)
+    assert.equal(r.browsed.id, "amazon-us")
+    assert.equal(looked.length, 13, "twelve for browsing, one for the purchase, none for the junk id or the cached price")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})

@@ -1,6 +1,6 @@
 import { RelayFailed, RelaySettings, RelayUnavailable } from "@luckout/api"
-import { deserialize } from "borsh"
-import { Config, Context, Effect, Layer } from "effect"
+import { deserialize, serialize } from "borsh"
+import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
@@ -119,13 +119,22 @@ export class Relay extends Context.Service<Relay, {
         near.relayerId ? quotaLeft(accountId).pipe(Effect.orElseSucceed(() => false)) : Effect.succeed(false)
 
       const failed = (message: string) => new RelayFailed({ message })
+      // ponytail: one global lock around dedupe, caps, checks and send, so parallel requests can't all
+      // pass the caps (or both register USDC) before either is saved. Fine while the relayer sends one
+      // at a time from one process (ADR-0006); per-account locks if throughput matters.
+      const lock = yield* Semaphore.make(1)
 
       const send = (accountId: string, signedDelegate: string) =>
         Effect.gen(function*() {
           if (!near.relayerId) return yield* new RelayUnavailable({ message: "Luckout isn't paying network fees right now." })
           const bytes = Buffer.from(signedDelegate, "base64")
           const sd = yield* Effect.try({
-            try: () => deserialize(SCHEMA.SignedDelegate, bytes) as unknown as SignedDelegate,
+            try: () => {
+              const decoded = deserialize(SCHEMA.SignedDelegate, bytes) as unknown as SignedDelegate
+              // borsh ignores trailing bytes: only the exact encoding, or a padded copy would dodge the dedupe below.
+              if (!Buffer.from(serialize(SCHEMA.SignedDelegate, decoded as never)).equals(bytes)) throw new Error("not canonical")
+              return decoded
+            },
             catch: () => failed("That isn't a signed NEAR action.")
           })
           const d = sd.delegateAction
@@ -134,31 +143,30 @@ export class Relay extends Context.Service<Relay, {
 
           // The same signature sent twice (a retry, a double click) gets the first result, not a second fee.
           const hash = createHash("sha256").update(bytes).digest("hex")
-          const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
-          const outcome = seen
-            ? yield* near.resume(seen.signed_tx)
-            : yield* Effect.gen(function*() {
-              if (!(yield* quotaLeft(accountId))) {
-                return yield* new RelayUnavailable({ message: "Luckout isn't paying this network fee right now, so your wallet pays it." })
-              }
-              // Everything the network would refuse, refused here for free.
-              const key = publicKeyOf(d)
-              if (!key) return yield* failed("That wallet key type isn't supported.")
-              const [access, height] = yield* Effect.all([near.accessKey(d.senderId, key.toString()), near.height], { concurrency: 2 })
-              if (!access) return yield* failed("That key isn't on your NEAR account. Sign in again with your wallet.")
-              if (!access.fullAccess) return yield* failed("Approve it with your wallet's full-access key.")
-              if (BigInt(d.nonce) <= access.nonce) return yield* failed("That approval was already used. Try again.")
-              if (BigInt(d.maxBlockHeight) < height) return yield* failed("That approval expired. Try again.")
-              if (!signatureValid(sd, key)) return yield* failed("The signature doesn't match your account.")
-              // A second registration would refund its deposit to the customer: a free drip from us.
-              if (d.actions[0]!.functionCall!.methodName === "storage_deposit") {
-                const registered = yield* near.view<unknown>("storage_balance_of", { account_id: accountId }, usdcId)
-                if (registered !== null) return yield* failed("USDC is already enabled on your account.")
-              }
-              return yield* near.relay(sd, (signed) =>
-                sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(signed)}::jsonb)
-                    ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
-            })
+          const outcome = yield* lock.withPermits(1)(Effect.gen(function*() {
+            const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
+            if (seen) return yield* near.resume(seen.signed_tx)
+            if (!(yield* quotaLeft(accountId))) {
+              return yield* new RelayUnavailable({ message: "Luckout isn't paying this network fee right now, so your wallet pays it." })
+            }
+            // Everything the network would refuse, refused here for free.
+            const key = publicKeyOf(d)
+            if (!key) return yield* failed("That wallet key type isn't supported.")
+            const [access, height] = yield* Effect.all([near.accessKey(d.senderId, key.toString()), near.height], { concurrency: 2 })
+            if (!access) return yield* failed("That key isn't on your NEAR account. Sign in again with your wallet.")
+            if (!access.fullAccess) return yield* failed("Approve it with your wallet's full-access key.")
+            if (BigInt(d.nonce) <= access.nonce) return yield* failed("That approval was already used. Try again.")
+            if (BigInt(d.maxBlockHeight) < height) return yield* failed("That approval expired. Try again.")
+            if (!signatureValid(sd, key)) return yield* failed("The signature doesn't match your account.")
+            // A second registration would refund its deposit to the customer: a free drip from us.
+            if (d.actions[0]!.functionCall!.methodName === "storage_deposit") {
+              const registered = yield* near.view<unknown>("storage_balance_of", { account_id: accountId }, usdcId)
+              if (registered !== null) return yield* failed("USDC is already enabled on your account.")
+            }
+            return yield* near.relay(sd, (signed) =>
+              sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(signed)}::jsonb)
+                  ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
+          }))
           if (outcome.failures[0]) return yield* failed(readable(outcome.failures[0]))
           return { hash: outcome.hash }
         }).pipe(

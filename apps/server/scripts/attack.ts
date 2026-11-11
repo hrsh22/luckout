@@ -12,7 +12,7 @@ if (!operatorId || !key) throw new Error("Set OPERATOR_ACCOUNT_ID and OPERATOR_P
 
 const provider = new JsonRpcProvider({ url: process.env.NEAR_RPC_URL?.split(",")[0]?.trim() || "https://test.rpc.fastnear.com" })
 const operator = new Account(operatorId, provider, key)
-const view = (method: string, args: object = {}) => provider.callFunction({ contractId: contract, method, args })
+const view = (method: string, args: Record<string, unknown> = {}) => provider.callFunction({ contractId: contract, method, args })
 
 type Act = { method: string; args: object; deposit?: bigint }
 const attempt = async (title: string, receiverId: string, method: string | Array<Act>, args: object = {}, deposit = 0n) => {
@@ -20,7 +20,7 @@ const attempt = async (title: string, receiverId: string, method: string | Array
   try {
     await operator.signAndSendTransaction({
       receiverId,
-      actions: acts.map((a) => actions.functionCall(a.method, a.args, teraToGas(String(Math.floor(240 / acts.length))), a.deposit ?? 0n))
+      actions: acts.map((a) => actions.functionCall(a.method, a.args, teraToGas(Math.floor(240 / acts.length)), a.deposit ?? 0n))
     })
     console.log(`✗ ${title}: IT WORKED (this should never happen)`)
     process.exitCode = 1
@@ -31,7 +31,7 @@ const attempt = async (title: string, receiverId: string, method: string | Array
   }
 }
 
-const account = (await view("get_account", { account_id: victim })) as Record<string, string> | null
+const account = (await view("get_account", { account_id: victim })) as { balance: string; per_purchase_limit: string; daily_limit: string } | null
 if (!account) throw new Error(`${victim} has no Luckout balance`)
 const usd = (micro: string | number) => `$${(Number(micro) / 1e6).toFixed(2)}`
 console.log(`Attacker holds ${operatorId}'s key. Victim ${victim}: balance ${usd(account.balance)}, limit ${usd(account.per_purchase_limit)} per purchase, ${usd(account.daily_limit)} per day.\n`)
@@ -64,4 +64,4 @@ await attempt("Make itself the treasury, with no daily cap", contract, "set_trea
 await attempt("Send the proceeds to itself through the owner's route", contract, "withdraw_proceeds", { amount: "1000000", to_treasury: true }, 1n)
 await attempt("Move test USDC out of the contract directly", process.env.USDC_CONTRACT_ID ?? "usdc.luckout.testnet", "ft_transfer", { receiver_id: operatorId, amount: "1000000" }, 1n)
 
-console.log(`\nThe most a compromised server or agent can ever do is buy vouchers for ${victim}, within the limits they set.`)
+console.log(`\nWith only the operator's key, the most a compromised server or agent can do is buy for ${victim}, within the limits they set (with the treasury's key too, proceeds up to the owner's daily cap: ADR-0009).`)

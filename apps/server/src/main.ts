@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, Authorization, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
+import { type AdminInvalid, Api, Authorization, BitrefillUnavailable, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
@@ -40,10 +40,17 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
     const purchases = yield* Purchases
+    // Anyone can call these: a transport failure's details (URLs, upstream text) stay in our logs.
+    const quiet = <A, E>(self: Effect.Effect<A, E>) =>
+      self.pipe(Effect.mapError((e) => {
+        if (!(e instanceof BitrefillUnavailable) || !e.message.startsWith("Bitrefill request failed")) return e
+        console.warn(e.message)
+        return new BitrefillUnavailable({ message: "Bitrefill isn't answering right now. Try again in a moment." }) as E
+      }))
     return handlers.handleAll({
-      search: ({ query }) => bitrefill.search(query.q),
-      voucher: ({ params }) => bitrefill.voucher(params.id),
-      quote: ({ query }) => purchases.quote(query.voucherId, query.value, query.game)
+      search: ({ query }) => quiet(bitrefill.search(query.q)),
+      voucher: ({ params }) => quiet(bitrefill.voucher(params.id)),
+      quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game))
     })
   })
 )
@@ -54,6 +61,15 @@ const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
     return handlers.handleAll({
       challenge: () => auth.challenge,
       verify: ({ payload }) => auth.verify(payload)
+    })
+  })
+)
+
+const SessionHandlers = HttpApiBuilder.group(Api, "session", (handlers) =>
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return handlers.handleAll({
+      signOutEverywhere: () => CurrentAccount.use((a) => auth.signOutEverywhere(a.accountId))
     })
   })
 )
@@ -108,7 +124,7 @@ const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
   })
 )
 
-// Admins only; to anyone else the endpoints look like they don't exist.
+// Admins only; to anyone else the endpoints answer NotFound, and /openapi.json leaves them out.
 const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
   Effect.gen(function*() {
     const admin = yield* Admin
@@ -167,21 +183,29 @@ const MAINNET_REQUIRES = [
   "BITREFILL_API_KEY",
   // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
   "BASE_RPC_URL",
-  // Real money: alerts must reach a human, and someone must be able to open the admin panel.
+  // Real money: alerts must reach a human (through the bot), and someone must be able to open the admin panel.
+  "TELEGRAM_BOT_TOKEN",
   "ALERT_TELEGRAM_CHAT_ID",
   "ADMIN_ACCOUNTS"
 ]
 
+/** What a mainnet .env lacks: missing values, and keys too weak to use. */
+const mainnetProblems = (env: Record<string, string | undefined>) => [
+  ...MAINNET_REQUIRES.filter((k) => !env[k]),
+  // Purchases decodes it as hex and can't seal codes unless that gives 32 bytes.
+  ...(env.REDEMPTION_KEY && Buffer.from(env.REDEMPTION_KEY, "hex").length !== 32 ? ["REDEMPTION_KEY as 64 hex characters"] : []),
+  ...(env.SESSION_SECRET && env.SESSION_SECRET.length < 32 ? ["SESSION_SECRET of at least 32 characters"] : [])
+]
 
 const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
+  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
   Layer.provide(AuthorizationLive),
   Layer.provide(Services)
 )
 
 const Server = Layer.unwrap(
   Effect.gen(function*() {
-    const missing = (yield* Network) === "mainnet" ? MAINNET_REQUIRES.filter((k) => !process.env[k]) : []
+    const missing = (yield* Network) === "mainnet" ? mainnetProblems(process.env) : []
     if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
     const mixed = otherNetworkAccounts(yield* Network, process.env)
     if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)

@@ -4,13 +4,17 @@ on:
     branches: [main, testnet]
   pull_request:
 
+# Read-only token: nothing here writes to the repository.
+permissions:
+  contents: read
+
 jobs:
   apps:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: pnpm
@@ -26,8 +30,8 @@ jobs:
       run:
         working-directory: contract
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -35,6 +39,27 @@ jobs:
           key: cargo-${{ hashFiles('contract/Cargo.lock', 'contract/rust-toolchain.toml') }}
       # rustup reads contract/rust-toolchain.toml
       - run: cargo test --workspace
+      - run: cargo test -p luckout --features migrate
+
+  # The contract built reproducibly (in the Docker image pinned in contract/Cargo.toml), so anyone can
+  # rebuild it byte for byte. Its code hash is what `contract/upgrade.sh` deploys and checks onchain,
+  # and what /fair shows. Download it with: gh run download <run id> -n luckout-wasm-<commit>
+  contract-wasm:
+    needs: contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh | sh
+      - run: cargo near build reproducible-wasm
+      - run: python3 code-hash.py target/near/luckout.wasm | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: luckout-wasm-${{ github.sha }}
+          path: contract/target/near/luckout.wasm
+          if-no-files-found: error
 
   # Deploys the server after both jobs pass: the testnet branch to the testnet site, main to the
   # mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
@@ -50,9 +75,11 @@ jobs:
           KEY: ${{ github.ref == 'refs/heads/main' && secrets.MAINNET_DEPLOY_KEY || secrets.TESTNET_DEPLOY_KEY }}
           TARGET: ${{ github.ref == 'refs/heads/main' && vars.MAINNET_SSH_TARGET || vars.TESTNET_SSH_TARGET }}
           KNOWN_HOSTS: ${{ vars.VM_KNOWN_HOSTS }}
+          # The commit the jobs above tested: the VM refuses to deploy anything else.
+          SHA: ${{ github.sha }}
         run: |
           install -d -m 700 ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
-          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$TARGET"
+          ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$TARGET" "$SHA"
 

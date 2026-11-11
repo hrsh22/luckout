@@ -1,4 +1,4 @@
-import { contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
+import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
 import { MAX_CASHBACK } from "@/lib/modes"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
@@ -14,9 +14,10 @@ export const metadata: Metadata = {
 interface Reserve { free: string; locked: string; discount_cap: string }
 
 export default async function Fair() {
-  const [stats, reserve] = await Promise.all([
+  const [stats, reserve, code] = await Promise.all([
     view<Stats>(contractId, "get_stats").catch(() => undefined),
-    view<Reserve>(contractId, "get_reserve").catch(() => undefined)
+    view<Reserve>(contractId, "get_reserve").catch(() => undefined),
+    codeHash(contractId).catch(() => undefined)
   ])
   const avg = stats && liveAverage(stats)
 
@@ -78,8 +79,16 @@ export default async function Fair() {
         </ul>
         <p className="max-w-[64ch] text-ink-soft">
           What it can't prove: that a code was delivered (Bitrefill isn't on chain), and that we buy in the mode you chose. Both are bounded
-          by the most you confirmed and by your limits.
+          by the most you confirmed and by your limits. And Luckout can upgrade the contract: every upgrade is a public transaction, and it
+          changes the code hash below.
         </p>
+        {code && (
+          <p className="max-w-[64ch] text-ink-soft">
+            Code hash <code className="font-mono text-sm break-all text-ink">{code}</code>. Build the contract from{" "}
+            <a href="https://github.com/hrsh22/luckout" className="font-semibold text-ink underline underline-offset-4" target="_blank" rel="noreferrer">its source</a>{" "}
+            with <code className="font-mono text-sm text-ink">cargo near build reproducible-wasm</code> and you get the same hash.
+          </p>
+        )}
       </section>
 
       <a className="self-start text-sm font-medium text-muted underline underline-offset-4 hover:text-ink" href={explorerAccount(contractId)} target="_blank" rel="noreferrer">

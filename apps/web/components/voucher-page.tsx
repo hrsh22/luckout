@@ -10,10 +10,10 @@ import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purcha
 import { Button } from "@/components/ui/button"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { usd, usdUp } from "@/lib/format"
-import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { cashbackCapAmount, modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
+import { useFreeReserve, useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -33,7 +33,13 @@ const lastSearch = () => {
   }
 }
 
+/** Keyed on the account: signing out or switching accounts drops any purchase (and its code) on screen. */
 export function VoucherPage() {
+  const { accountId } = useSession()
+  return <Voucher key={accountId ?? ""} />
+}
+
+function Voucher() {
   const id = decodeURIComponent(useParams<{ id: string }>().id)
   const params = useSearchParams()
   const router = useRouter()
@@ -58,16 +64,26 @@ export function VoucherPage() {
   const pkg = packages.find((p) => p.value === value)
   const info = modeInfo(mode)!
   const quote = useQuote(id, value, mode)
-  // Shown at once from the same tables the contract uses; the server's quote replaces it in a moment.
-  const shown: Quote | undefined = quote.data ?? (pkg ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc) } : undefined)
+  const free = useFreeReserve()
+  // Shown at once from the same tables and reserve the contract uses; the server's quote replaces it in a moment.
+  const shown: Quote | undefined = quote.data ??
+    (pkg && (info.premiumBps === 0 || free !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, free ?? 0) } : undefined)
 
   const [round, setRound] = useState(0)
   // A fresh key per choice: double clicks and retries return the same purchase instead of buying twice.
   const idempotencyKey = useMemo(() => crypto.randomUUID(), [id, value, modeSlug(mode), round]) // eslint-disable-line react-hooks/exhaustive-deps
   const buy = useMutation({
     mutationFn: async (q: Quote) => {
-      // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice.
-      const payload = new NewPurchase({ voucherId: id, value: value!, mode: q.mode, maxPrice: q.maxPrice, idempotencyKey })
+      // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice
+      // or to play a Lucky Amount other than the one shown.
+      const payload = new NewPurchase({
+        voucherId: id,
+        value: value!,
+        mode: q.mode,
+        maxPrice: q.maxPrice,
+        ...(q.mode === "normal" ? {} : { luckyAmount: q.luckyAmount }),
+        idempotencyKey
+      })
       return api((c) => c.purchases.create({ payload }), token, "150 seconds").catch((e) => {
         if (!(e instanceof TimedOut)) throw e
         // Still running on the server: the same key returns the same purchase, then we follow it.
@@ -77,6 +93,8 @@ export function VoucherPage() {
     onSettled: () => {
       refresh().catch(() => {})
       qc.invalidateQueries({ queryKey: ["purchases"] })
+      // The reserve may have moved (or been the reason for a refusal): confirming again needs a fresh quote.
+      qc.invalidateQueries({ queryKey: ["quote", id] })
     }
   })
   const live = usePolledPurchase(buy.data, token)
@@ -213,7 +231,9 @@ function Receipt({ shown, exact, info, error, children }: {
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
           {shown.luckyAmount < shown.referencePrice && (
             <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Only {usd(shown.luckyAmount)} of the price plays, because one purchase gets at most {usd(best.cashback)} back. The rest is at the normal price.
+              Only {usd(shown.luckyAmount)} of the price plays, because {shown.luckyAmount < cashbackCapAmount(info)
+                ? "one purchase can use at most 20% of the Cashback Reserve, and it's small right now"
+                : `one purchase gets at most ${usd(best.cashback)} back`}. The rest is at the normal price.
             </p>
           )}
         </div>
@@ -227,7 +247,7 @@ function Receipt({ shown, exact, info, error, children }: {
 
 /** One button that knows what's in the way: signing in, funds, or limits, and fixes it on the spot. */
 function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
-  const { accountId, account } = useSession()
+  const { accountId, account, accountError, refresh } = useSession()
   const shop = useShopStatus().data
   const [adding, setAdding] = useState(false)
   if (shop && !shop.open) {
@@ -238,6 +258,14 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
     )
   }
   if (!accountId) return <SignInButton size="lg" label="Sign in to buy" />
+  if (account === undefined && accountError) {
+    return (
+      <div className="flex flex-col gap-2">
+        <p role="alert" className="text-sm font-medium text-bad">Couldn't read your balance. {accountError}</p>
+        <Button size="lg" variant="light" onClick={() => refresh().catch(() => {})}>Try again</Button>
+      </div>
+    )
+  }
   if (account === undefined) return <span className="skeleton h-14 rounded-full" />
   const balance = Number(account?.balance ?? 0)
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0

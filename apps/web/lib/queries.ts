@@ -3,6 +3,7 @@
 import type { Mode, Purchase, VoucherSummary } from "@luckout/api"
 import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query"
 import { api } from "./api"
+import { contractId, view } from "./chain"
 import { modeSlug } from "./modes"
 
 // Every server read goes through here, so the catalog, a card and its history share one cache:
@@ -36,14 +37,27 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     staleTime: 20_000
   })
 
-const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting"
+/** The Free Reserve (micro-USDC), straight from the chain: its Discount Cap shapes every Lucky Amount. Undefined until read. */
+export const useFreeReserve = () =>
+  useQuery({
+    queryKey: ["free-reserve"],
+    queryFn: () => view<{ free: string }>(contractId, "get_reserve").then((r) => r.free),
+    staleTime: 60_000
+  }).data
 
+const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting"
+const fresh = (p: Purchase) => Date.now() - new Date(p.createdAt).getTime() < 15 * 60_000
+
+/** Every 4 s while a purchase is in progress; once the only open ones are over 15 minutes old (stuck), every minute. */
 export const usePurchases = (token: string | undefined) =>
   useQuery({
     queryKey: ["purchases", token],
     queryFn: () => api((c) => c.purchases.list(), token),
     enabled: !!token,
-    refetchInterval: (q) => (q.state.data?.some(pending) ? 4000 : false)
+    refetchInterval: (q) => {
+      const open = q.state.data?.filter(pending) ?? []
+      return open.length === 0 ? false : open.some(fresh) ? 4000 : 60_000
+    }
   })
 
 /** While `waiting` (the customer is off in Telegram tapping Start), check every 2 s until linked. */

@@ -75,11 +75,23 @@ export const pricedOutcomes = (m: ModeInfo, q: { referencePrice: number; luckyAm
 /** The single most likely price. */
 export const mostLikely = (outcomes: ReadonlyArray<PricedOutcome>) => outcomes.reduce((a, b) => (b.chanceBps > a.chanceBps ? b : a))
 
-/** Quote with no Discount Cap in play: the whole price plays, up to what the Cashback Cap allows (as in the contract). */
-export const simpleQuote = (m: ModeInfo, referencePrice: number) => {
-  const maxBackBps = 10_000 + m.premiumBps - Math.min(...m.outcomes.map((o) => o.finalBps))
-  const luckyAmount = m.premiumBps === 0 ? 0 : Math.min(referencePrice, Math.floor((MAX_CASHBACK * 10_000) / maxBackBps))
-  return { referencePrice, luckyAmount, maxPrice: referencePrice + Math.ceil((luckyAmount * m.premiumBps) / 10_000) }
+const minFinalBps = (m: ModeInfo) => BigInt(Math.min(...m.outcomes.map((o) => o.finalBps)))
+
+/** The most of a price that can play before the Cashback Cap binds: MAX_CASHBACK * BPS / max_cashback_bps() in the contract. */
+export const cashbackCapAmount = (m: ModeInfo) => Number((BigInt(MAX_CASHBACK) * 10_000n) / (10_000n + BigInt(m.premiumBps) - minFinalBps(m)))
+
+/**
+ * quote_internal in contract/src/lib.rs, in exact integers: the whole price plays, up to what the
+ * Discount Cap (20% of the Free Reserve, micro-USDC) and the Cashback Cap allow. A lucky mode with
+ * luckyAmount 0 can't be bought right now (the contract refuses it: "Reserve too small").
+ */
+export const simpleQuote = (m: ModeInfo, referencePrice: number, freeReserve: number | string) => {
+  if (m.premiumBps === 0) return { referencePrice, luckyAmount: 0, maxPrice: referencePrice }
+  const discountCap = (BigInt(freeReserve) * 2_000n) / 10_000n
+  const lucky = [BigInt(referencePrice), (discountCap * 10_000n) / (10_000n - minFinalBps(m)), BigInt(cashbackCapAmount(m))]
+    .reduce((a, b) => (b < a ? b : a))
+  const premium = (lucky * BigInt(m.premiumBps) + 9_999n) / 10_000n
+  return { referencePrice, luckyAmount: Number(lucky), maxPrice: referencePrice + Number(premium) }
 }
 
 export const percent = (bps: number) => `${bps % 100 === 0 ? bps / 100 : (bps / 100).toFixed(1)}%`

@@ -1,5 +1,6 @@
-import { CreditSettings } from "@luckout/api"
+import { Api, CreditSettings } from "@luckout/api"
 import { Effect, Layer } from "effect"
+import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
@@ -108,7 +109,14 @@ test("Retry now only touches purchases NEAR can safely repeat", () =>
     assert.equal(refused._tag, "PurchaseInvalid")
     const rows = yield* sql<{ id: string; step: string; attempts: number }>`SELECT id, step, attempts FROM purchases WHERE id IN (${open}, ${confirm}, ${ordering}) ORDER BY id`
     assert.deepEqual(rows.map((r) => [r.step, r.attempts]), [["delivery", 0], ["confirm", 0], ["stuck", 0]])
+    assert.match(alerts.at(-1) ?? "", new RegExp(`boss\\.testnet retried purchase ${confirm} at confirm`))
   })))
+
+test("the published API spec leaves the admin endpoints out", () => {
+  const paths = Object.keys(OpenApi.fromApi(Api).paths)
+  assert.ok(paths.includes("/quote"))
+  assert.deepEqual(paths.filter((p) => p.startsWith("/admin")), [])
+})
 
 test("relayer changes are announced to the admin channel", () =>
   run(Effect.gen(function*() {
