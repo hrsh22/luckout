@@ -7,7 +7,9 @@ export const MicroUsdc = Schema.Int
 export class VoucherSummary extends Schema.Class<VoucherSummary>("VoucherSummary")({
   id: Schema.String,
   name: Schema.String,
+  /** ISO 3166-1 alpha-2, or "XI" for a card that works worldwide. A card only works in its own country. */
   countryCode: Schema.String,
+  countryName: Schema.optional(Schema.String),
   currency: Schema.String,
   /** Bitrefill image path and its brand colour, for the product logo. */
   image: Schema.optional(Schema.String),
@@ -27,6 +29,16 @@ export class Voucher extends Schema.Class<Voucher>("Voucher")({
   /** Amounts Bitrefill sells that Luckout can't: under the 0.5 USDC minimum purchase. */
   tooSmall: Schema.optional(Schema.Array(VoucherPackage))
 }) {}
+
+/** One page of the catalog. `next` is the `start` of the following page; absent on the last. */
+export class CatalogPage extends Schema.Class<CatalogPage>("CatalogPage")({
+  items: Schema.Array(VoucherSummary),
+  next: Schema.optional(Schema.Number)
+}) {}
+
+/** The shop's categories, each a set of Bitrefill's own. */
+export const CATEGORIES = ["shopping", "food", "games", "entertainment", "travel"] as const
+export type Category = typeof CATEGORIES[number]
 
 export class BitrefillUnavailable extends Schema.TaggedError<BitrefillUnavailable>()(
   "BitrefillUnavailable",
@@ -160,6 +172,20 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
   HttpApiEndpoint.get("search", "/catalog", {
     query: { q: Schema.String },
     success: Schema.Array(VoucherSummary),
+    error: BitrefillUnavailable
+  }),
+  /**
+   * The whole catalog, a page at a time, filtered only by what the customer chose: a search, a
+   * country (its own cards plus worldwide ones), a category. Nothing chosen lists everything.
+   */
+  HttpApiEndpoint.get("browse", "/browse", {
+    query: {
+      q: Schema.optional(Schema.String.check(Schema.isMaxLength(100))),
+      country: Schema.optional(Schema.String.check(Schema.isPattern(/^[A-Z]{2}$/))),
+      category: Schema.optional(Schema.Literals(CATEGORIES)),
+      start: Schema.optional(Schema.NumberFromString)
+    },
+    success: CatalogPage,
     error: BitrefillUnavailable
   }),
   HttpApiEndpoint.get("voucher", "/catalog/:id", {

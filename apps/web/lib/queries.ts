@@ -1,7 +1,7 @@
 "use client"
 
-import type { Mode, Purchase, VoucherSummary } from "@luckout/api"
-import { keepPreviousData, type QueryClient, useQuery } from "@tanstack/react-query"
+import type { Category, Mode, Purchase, VoucherSummary } from "@luckout/api"
+import { keepPreviousData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
 import { modeSlug } from "./modes"
@@ -9,12 +9,33 @@ import { modeSlug } from "./modes"
 // Every server read goes through here, so the catalog, a card and its history share one cache:
 // going back to results is instant, and hovering a card has already fetched it.
 
-export const searchQuery = (q: string) => ({
-  queryKey: ["search", q.trim().toLowerCase()],
-  queryFn: () => api((c) => c.catalog.search({ query: { q } })),
-  staleTime: 5 * 60_000
-})
-export const useSearch = (q: string) => useQuery({ ...searchQuery(q), placeholderData: keepPreviousData })
+/** What the customer filtered the shop by; nothing set lists every card. */
+export interface ShopFilters {
+  readonly q: string
+  readonly country: string
+  readonly category: Category | ""
+}
+
+/** The catalog a page at a time; the server caches pages, so scrolling back is cheap. */
+export const useBrowse = (f: ShopFilters) =>
+  useInfiniteQuery({
+    queryKey: ["browse", f.q.trim().toLowerCase(), f.country, f.category],
+    queryFn: ({ pageParam }) =>
+      api((c) =>
+        c.catalog.browse({
+          query: {
+            ...(f.q.trim() ? { q: f.q.trim() } : {}),
+            ...(f.country ? { country: f.country } : {}),
+            ...(f.category ? { category: f.category } : {}),
+            ...(pageParam ? { start: pageParam } : {})
+          }
+        })
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (last) => last.next,
+    staleTime: 5 * 60_000,
+    placeholderData: keepPreviousData
+  })
 
 export const voucherQuery = (id: string) => ({
   queryKey: ["voucher", id],

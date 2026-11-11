@@ -52,7 +52,7 @@ export default async function Home() {
         <div>
           <h1 className="font-display text-[56px] leading-[0.93] font-extrabold tracking-[-0.03em] sm:text-[80px] lg:text-[88px]">Checkout, but lucky.</h1>
           <p className="mt-7 max-w-[44ch] text-lg text-ink-soft">
-            Gift cards, phone top-ups and eSIMs from thousands of brands, paid in USDC. Pay the price, or add a little for a fair chance at
+            Gift cards from thousands of brands around the world, paid in USDC. Pay the price, or add a little for a fair chance at
             cashback, sometimes all of it. Either way, the card is yours.
           </p>
           <div className="mt-9 flex flex-wrap gap-3">

@@ -27,7 +27,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: { default: "Luckout: checkout, but lucky", template: "%s | Luckout" },
   description:
-    "Gift cards, top-ups and eSIMs paid in USDC on NEAR. Pay the price, or add a little for a fair, provable chance at cashback. You always get the card.",
+    "Gift cards for stores around the world, paid in USDC on NEAR. Pay the price, or add a little for a fair, provable chance at cashback. You always get the card.",
   openGraph: { siteName: "Luckout", type: "website" }
 }
 

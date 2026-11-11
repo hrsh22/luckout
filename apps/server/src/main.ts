@@ -49,6 +49,7 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
       }))
     return handlers.handleAll({
       search: ({ query }) => quiet(bitrefill.search(query.q)),
+      browse: ({ query }) => quiet(bitrefill.browse(query)),
       voucher: ({ params }) => quiet(bitrefill.voucher(params.id)),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game))
     })
