@@ -370,7 +370,7 @@ export class RefillView extends Schema.Class<RefillView>("RefillView")({
   amount: MicroUsdc,
   /** target, waiting (a purchase needed it), manual, or float (tops up the Base wallet; no Bitrefill credit). */
   reason: Schema.String,
-  /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck or resolved. */
+  /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck, resolved, or cancelled (a float top-up that gave way). */
   step: Schema.String,
   error: Schema.optional(Schema.String),
   /** The treasury's NEAR transfer into the swap. */
