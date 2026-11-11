@@ -4,6 +4,7 @@ import { type Mode, type TopUpAsset, transferIntent } from "@luckout/api"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
 import { usd } from "./format"
+import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
 import { type Call, contractId, usdcId } from "./near"
 import { useSession } from "./session"
@@ -80,12 +81,12 @@ export function useWalletActions() {
       let arriving = ""
       return steps(`Withdrawing ${usd(micro)}`, () => arriving, async (say) => {
         await send(withdrawCall(micro))
-        say(`Sending it to ${asset.symbol} on ${asset.chain}`)
+        say(`Sending it to ${asset.symbol} on ${CHAIN_NAMES[asset.chain] ?? asset.chain}`)
         try {
           const q = await api((c) => c.topup.exit({ payload: { destinationAsset: asset.assetId, usdc: micro } }), token)
           const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, usdcId, amount: String(micro) }))
           await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
-          arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
+          arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
         } catch (e) {
           throw new Error(`${usd(micro)} is in your NEAR Intents account, but sending it on didn't work: ${errorMessage(e)} Move it back into Luckout, or send it from near.com.`)
         }

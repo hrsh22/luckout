@@ -10,7 +10,13 @@ let connector: NearConnector | undefined
  * sign the sign-in message are offered: NEAR Connect's Ethereum option can't, so EVM wallets sign in
  * through lib/evm.ts instead (ADR-0011).
  */
-export const near = () => (connector ??= new NearConnector({ network, features: { signMessage: true } }))
+export const near = () =>
+  (connector ??= new NearConnector({
+    network,
+    features: { signMessage: true },
+    // Retired: it no longer accepts new app connections (checked 2026-11-11).
+    excludedWallets: ["mynearwallet"]
+  }))
 
 export interface Call {
   receiverId: string
