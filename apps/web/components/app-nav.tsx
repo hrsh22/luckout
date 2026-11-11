@@ -11,6 +11,7 @@ import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
 import { ACTIVE_PHASES, useIsAdmin, useTransfers } from "@/lib/queries"
 import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
@@ -199,6 +200,7 @@ function SignOutEverywhere({ open, onOpenChange }: { open: boolean; onOpenChange
 /** "+$2.50" while a top-up is on its way into the balance, so it never looks like it vanished. */
 function Arriving() {
   const { token, refresh } = useSession()
+  const qc = useQueryClient()
   const transfers = useTransfers(token)
   const list = transfers.data ?? []
   // Only money 1Click has and is delivering: not a quote still waiting for its transfer, nor one paid short.
@@ -209,7 +211,10 @@ function Arriving() {
   const loaded = transfers.data !== undefined
   useEffect(() => {
     if (!loaded) return
-    if (seen.current !== undefined && seen.current !== settled) void refresh().catch(() => {})
+    if (seen.current !== undefined && seen.current !== settled) {
+      void refresh().catch(() => {})
+      void qc.invalidateQueries({ queryKey: ["held"] })
+    }
     seen.current = settled
   }, [loaded, settled, refresh])
   if (coming.length === 0) return null

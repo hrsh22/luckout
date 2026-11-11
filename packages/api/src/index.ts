@@ -336,6 +336,18 @@ export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete",
 export type TransferPhase = typeof TransferPhase.Type
 
 /** One of the customer's 1Click swaps: a Top-Up on its way in, or a withdrawal on its way out. */
+/**
+ * A token in the customer's own NEAR Intents account that Luckout doesn't use as balance: 1Click returns the
+ * extra a customer sent, and refunds, in the token they paid with. (A NEAR wallet's USDC there is listed too.)
+ */
+export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
+  assetId: Schema.String,
+  symbol: Schema.String,
+  chain: Schema.String,
+  /** Formatted, in the token's own units. */
+  amount: Schema.String
+}) {}
+
 export class Transfer extends Schema.Class<Transfer>("Transfer")({
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
@@ -393,6 +405,8 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   }),
   /** The customer's Top-Ups and withdrawals still on their way, and those that ended in the last day. */
   HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable }),
+  /** What else is in the customer's NEAR Intents account: change and refunds from 1Click, in the token paid with. */
+  HttpApiEndpoint.get("held", "/topup/held", { success: Schema.Array(HeldToken), error: TopUpUnavailable }),
   /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
   HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */

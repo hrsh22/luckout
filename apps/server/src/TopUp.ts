@@ -1,5 +1,6 @@
 import {
   ExitQuote,
+  HeldToken,
   isEvmAccount,
   type SignedIntent,
   TopUpAsset,
@@ -10,6 +11,7 @@ import {
   type TransferPhase
 } from "@luckout/api"
 import { Config, Context, Effect, Layer, Schedule } from "effect"
+import { formatUnits } from "viem"
 import { SqlClient } from "effect/sql"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
 import { Alerts } from "./Alerts.ts"
@@ -156,6 +158,8 @@ export class TopUp extends Context.Service<TopUp, {
   faucet(accountId: string): Effect.Effect<void, TopUpUnavailable>
   /** The customer's swaps still on their way, and those that ended in the last day. */
   transfers(accountId: string): Effect.Effect<ReadonlyArray<Transfer>>
+  /** What else is in the customer's NEAR Intents account (change and refunds from 1Click), so none of it is out of sight. */
+  held(accountId: string): Effect.Effect<ReadonlyArray<HeldToken>, TopUpUnavailable>
   /** One tracking pass now, as the background loop runs every 15 seconds (tests). */
   readonly trackNow: Effect.Effect<void>
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to their own address on another chain. */
@@ -451,7 +455,26 @@ export class TopUp extends Context.Service<TopUp, {
           )
         )
 
-      return TopUp.of({ assets, quote, status, move, faucet, transfers, trackNow: trackPass, exit })
+      // An EVM wallet's USDC in NEAR Intents is its Luckout wallet balance already (ADR-0011): everything else is listed.
+      const held = Effect.fn("TopUp.held")(function*(accountId: string) {
+        const nearUsdc = `nep141:${near.usdcId}`
+        const owned = yield* near.view<ReadonlyArray<{ token_id: string }>>("mt_tokens_for_owner", { account_id: accountId }, near.intentsId)
+        const ids = owned.map((t) => t.token_id).filter((id) => !(isEvmAccount(accountId) && id === nearUsdc))
+        if (ids.length === 0) return []
+        const [balances, tokens] = yield* Effect.all([
+          near.view<ReadonlyArray<string>>("mt_batch_balance_of", { account_id: accountId, token_ids: ids }, near.intentsId),
+          oneClick.tokens.pipe(Effect.orElseSucceed(() => []))
+        ])
+        return ids.flatMap((id, i) => {
+          const raw = BigInt(balances[i] ?? "0")
+          const t = id === nearUsdc ? { symbol: "USDC", blockchain: "near", decimals: 6 } : tokens.find((x) => x.assetId === id)
+          // ponytail: tokens 1Click doesn't list are skipped; nothing Luckout sends a customer is one of them.
+          if (raw === 0n || !t || t.decimals === undefined) return []
+          return [new HeldToken({ assetId: id, symbol: t.symbol, chain: t.blockchain, amount: formatUnits(raw, t.decimals) })]
+        })
+      }, Effect.mapError(unavailable))
+
+      return TopUp.of({ assets, quote, status, move, faucet, transfers, held, trackNow: trackPass, exit })
     })
   )
 }

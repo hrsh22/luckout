@@ -52,8 +52,6 @@ interface Session {
   accountError: string | undefined
   /** USDC held in the wallet, not yet deposited; for an EVM wallet, in its NEAR Intents account (ADR-0011) */
   walletUsdc: string | undefined
-  /** A NEAR wallet's USDC in its NEAR Intents account (where 1Click sends refunds); EVM wallets read theirs as walletUsdc */
-  intentsUsdc: string | undefined
   /** NEAR in the wallet, in yoctoNEAR: it pays the network fee unless our relayer does */
   walletNear: string | undefined
   /** Our relayer pays this account's network fees: the wallet can sign for it and today's free relays aren't used up. */
@@ -79,8 +77,7 @@ const readAccount = (id: string) =>
   Promise.all([
     view<ContractAccount | null>(contractId, "get_account", { account_id: id }),
     isEvmAccount(id) ? intentsUsdc(id) : view<string>(usdcId, "ft_balance_of", { account_id: id }),
-    isEvmAccount(id) ? Promise.resolve(undefined) : nearBalance(id).catch(() => undefined),
-    isEvmAccount(id) ? Promise.resolve(undefined) : intentsUsdc(id).catch(() => undefined)
+    isEvmAccount(id) ? Promise.resolve(undefined) : nearBalance(id).catch(() => undefined)
   ])
 /** Whether our relayer will pay this account's next fee (ADR-0008). An EVM wallet signs only what the relayer sends. */
 const relayable = (token: string, evm: boolean) =>
@@ -120,7 +117,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [accountError, setAccountError] = useState<string>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
   const [walletNear, setWalletNear] = useState<string>()
-  const [nearIntentsUsdc, setNearIntentsUsdc] = useState<string>()
   const [gasFree, setGasFree] = useState<boolean>()
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
@@ -137,7 +133,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setAccountError(undefined)
     setWalletUsdc(undefined)
     setWalletNear(undefined)
-    setNearIntentsUsdc(undefined)
     setGasFree(undefined)
     qc.clear()
   }, [qc])
@@ -146,11 +141,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     if (!accountId || !token) return
     try {
-      const [[a, w, n, i], free] = await Promise.all([readAccount(accountId), relayable(token, evm)])
+      const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token, evm)])
       setAccount(a)
       setWalletUsdc(w)
       setWalletNear(n)
-      setNearIntentsUsdc(i)
       setGasFree(free)
       setAccountError(undefined)
     } catch (e) {
@@ -251,7 +245,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         setAccount(read[0])
         setWalletUsdc(read[1])
         setWalletNear(read[2])
-        setNearIntentsUsdc(read[3])
         setAccountError(undefined)
       }
       setGasFree(free)
@@ -330,7 +323,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SessionContext
-      value={{ accountId, token, ready, account, accountError, walletUsdc, intentsUsdc: nearIntentsUsdc, walletNear, gasFree, evm, signing, signInError, signIn, signOut, refresh, send, signIntent }}
+      value={{ accountId, token, ready, account, accountError, walletUsdc, walletNear, gasFree, evm, signing, signInError, signIn, signOut, refresh, send, signIntent }}
     >
       {children}
     </SessionContext>
