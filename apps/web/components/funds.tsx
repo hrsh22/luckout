@@ -7,7 +7,7 @@ import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
 import { api } from "@/lib/api"
-import { EVM_CHAIN_IDS } from "@/lib/evm"
+import { CHAIN_NAMES, EVM_CHAIN_IDS } from "@/lib/evm"
 import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
@@ -130,7 +130,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
       )}
 
       {tab === "chain" && network === "mainnet"
-        ? evm ? <TopUpEvm /> : <TopUp />
+        ? evm ? <TopUpEvm onDone={done} /> : <TopUp onDone={done} />
         : (
           <div className="flex flex-col gap-4">
             {network === "testnet" && <p className="font-semibold">{evm ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
@@ -253,7 +253,7 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
           <label className="flex flex-col gap-2 text-sm">
             <span className="font-semibold">Send it to</span>
             <select className="field" value={to} onChange={(e) => setTo(e.target.value)}>
-              {assets.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {a.chain} (your address)</option>)}
+              {assets.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {CHAIN_NAMES[a.chain] ?? a.chain} (your address)</option>)}
               <option value="">Keep it in NEAR Intents</option>
             </select>
             {destination && <span className="text-muted">Withdrawals start at $1. The swap's spread comes out of what arrives; there's no fee to Luckout and no gas for you.</span>}

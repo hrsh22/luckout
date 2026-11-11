@@ -11,6 +11,8 @@ const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID || "bafd317da3819c268
 
 /** 1Click's chain names → EVM chain ids, for the chains a Top-Up or withdrawal can use. */
 export const EVM_CHAIN_IDS: Record<string, number> = { eth: 1, arb: 42161, base: 8453, pol: 137, bsc: 56 }
+/** 1Click's chain names → what people call them. */
+export const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain" }
 
 type Kit = Awaited<ReturnType<typeof setUp>>
 let kit: Promise<Kit> | undefined
