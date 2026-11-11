@@ -13,7 +13,7 @@ import { ACTIVE_PHASES, useIsAdmin, useTransfers } from "@/lib/queries"
 import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
 const LINKS = [
@@ -198,9 +198,20 @@ function SignOutEverywhere({ open, onOpenChange }: { open: boolean; onOpenChange
 
 /** "+$2.50" while a top-up is on its way into the balance, so it never looks like it vanished. */
 function Arriving() {
-  const { token } = useSession()
+  const { token, refresh } = useSession()
   const transfers = useTransfers(token)
-  const coming = (transfers.data ?? []).filter((t) => t.direction === "in" && t.phase !== "awaiting-transfer" && ACTIVE_PHASES.has(t.phase))
+  const list = transfers.data ?? []
+  // Only money 1Click has and is delivering: not a quote still waiting for its transfer, nor one paid short.
+  const coming = list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving"))
+  // When a transfer lands or is sent back, the balances it changed are read again (this is on every page).
+  const settled = list.filter((t) => !ACTIVE_PHASES.has(t.phase)).map((t) => `${t.depositAddress}:${t.phase}`).join()
+  const seen = useRef<string | undefined>(undefined)
+  const loaded = transfers.data !== undefined
+  useEffect(() => {
+    if (!loaded) return
+    if (seen.current !== undefined && seen.current !== settled) void refresh().catch(() => {})
+    seen.current = settled
+  }, [loaded, settled, refresh])
   if (coming.length === 0) return null
   const total = coming.reduce((sum, t) => sum + t.usdc, 0)
   return (

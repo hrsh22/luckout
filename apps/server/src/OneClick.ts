@@ -77,6 +77,8 @@ const StatusResponse = Schema.Struct({
     refundedAmount: Schema.optional(Schema.NullOr(Schema.String)),
     refundedAmountFormatted: Schema.optional(Schema.NullOr(Schema.String)),
     refundReason: Schema.optional(Schema.NullOr(Schema.String)),
+    depositedAmount: Schema.optional(Schema.NullOr(Schema.String)),
+    depositedAmountFormatted: Schema.optional(Schema.NullOr(Schema.String)),
     destinationChainTxHashes: Hashes
   })))
 })
@@ -87,6 +89,8 @@ export interface SwapDetails {
   readonly amountOut?: string | undefined
   readonly refunded?: string | undefined
   readonly refundReason?: string | undefined
+  /** What has reached the deposit address so far, formatted. */
+  readonly deposited?: string | undefined
   readonly deliveredTx?: string | undefined
 }
 
@@ -155,6 +159,7 @@ export class OneClick extends Context.Service<OneClick, {
               amountOut: d?.amountOutFormatted ?? undefined,
               refunded,
               refundReason: refunded ? d?.refundReason ?? undefined : undefined,
+              deposited: d?.depositedAmount && d.depositedAmount !== "0" ? d.depositedAmountFormatted ?? undefined : undefined,
               deliveredTx: d?.destinationChainTxHashes?.[0]?.hash
             }
           })

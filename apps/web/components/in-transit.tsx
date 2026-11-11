@@ -25,6 +25,8 @@ const chain = (c: string) => CHAIN_NAMES[c] ?? c
 const on = (c: string) => (c ? ` on ${chain(c)}` : "")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+/** Still before the deadline, so the rest of a short payment can be sent. */
+const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
 
 /**
  * Money on its way (Top-Ups from other chains and withdrawals to them), read from the server so it
@@ -57,17 +59,25 @@ function Row({ t }: { t: Transfer }) {
   const title = incoming
     ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${t.amountIn} ${t.symbol}` : ""}${on(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
-  const Icon = t.phase === "done" ? CircleCheck : t.phase === "refunded" ? RotateCcw : incoming ? ArrowDownLeft : ArrowUpRight
-  const tone = t.phase === "done" ? "text-good" : t.phase === "refunded" || t.late ? "text-warn" : "text-ink"
+  const Icon = t.phase === "done" || t.phase === "in-wallet"
+    ? CircleCheck
+    : t.phase === "refunded"
+    ? RotateCcw
+    : t.phase === "incomplete"
+    ? Clock
+    : incoming
+    ? ArrowDownLeft
+    : ArrowUpRight
+  const tone = t.phase === "done" || t.phase === "in-wallet" ? "text-good" : t.phase === "refunded" || t.phase === "incomplete" || t.late ? "text-warn" : "text-ink"
   const sitting = Number(walletUsdc ?? 0)
   return (
     <li className="flex gap-4 py-4">
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <p className="font-semibold">{title}</p>
-        <p className="text-sm text-ink-soft">{say(t, evm)}</p>
+        <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
 
-        {t.phase === "awaiting-transfer" && (
+        {(t.phase === "awaiting-transfer" || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-1 rounded-2xl bg-soft p-3 text-sm">
             <span className="font-mono break-all select-all">{t.depositAddress}</span>
             {t.depositMemo && <span>Memo (required): <span className="font-mono select-all">{t.depositMemo}</span></span>}
@@ -112,19 +122,23 @@ function Row({ t }: { t: Transfer }) {
 }
 
 /** One sentence: where the money is right now, and what happens next. */
-function say(t: Transfer, evm: boolean) {
+function say(t: Transfer, evm: boolean, canDeposit: boolean) {
   const usual = minutes(t.timeEstimateSeconds)
   switch (t.phase) {
     case "awaiting-transfer":
       return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
+    case "incomplete":
+      return open(t)
+        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to your NEAR Intents account.`
+        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs, too late to finish: it's going back to your NEAR Intents account.`
     case "swapping":
       return t.direction === "in"
-        ? `1Click has your ${t.symbol} and is converting it to USDC. Usually ${usual}.`
+        ? `1Click has your ${t.symbol} and is ${t.symbol === "USDC" ? "bringing it over to NEAR" : "converting it to USDC"}. Usually ${usual}.`
         : `On its way to your address${on(t.chain)}. Usually ${usual}.`
     case "moving":
       return "Landed. Moving it into your Luckout balance now."
     case "in-wallet":
-      return "Landed in your NEAR wallet. Deposit it to use it in Luckout."
+      return canDeposit ? "Landed in your NEAR wallet. Deposit it to use it in Luckout." : "Landed in your NEAR wallet."
     case "in-intents":
       return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
     case "done":
