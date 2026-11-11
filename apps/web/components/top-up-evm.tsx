@@ -8,6 +8,7 @@ import { toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
+import { useQueryClient } from "@tanstack/react-query"
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
 
@@ -21,6 +22,7 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   const { accountId, token, refresh, signIntent } = useSession()
   const actions = useWalletActions()
+  const qc = useQueryClient()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [assetId, setAssetId] = useState("")
   const [amount, setAmount] = useState("20")
@@ -97,7 +99,12 @@ export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
         <Button
           loading={busy === "quote"}
           disabled={!!busy || !assetId || !(toMicro(amount) >= 1_000_000)}
-          onClick={() => step("quote", async () => setQuote(await api((c) => c.topup.quote({ payload: { originAsset: assetId, usdc: toMicro(amount) } }), token)))}
+          onClick={() =>
+            step("quote", async () => {
+              setQuote(await api((c) => c.topup.quote({ payload: { originAsset: assetId, usdc: toMicro(amount) } }), token))
+              // Recorded on the server now: it shows under "Money on its way" even if this sheet closes.
+              void qc.invalidateQueries({ queryKey: ["transfers"] })
+            })}
         >
           Get a quote
         </Button>

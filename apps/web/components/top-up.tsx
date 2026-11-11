@@ -7,6 +7,7 @@ import { toMicro, usd } from "@/lib/format"
 import { usdcId, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
+import { useQueryClient } from "@tanstack/react-query"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
@@ -19,6 +20,7 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
  */
 export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   const { accountId, token, refresh, send, gasFree } = useSession()
+  const qc = useQueryClient()
   const [registered, setRegistered] = useState<boolean>()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [asset, setAsset] = useState("")
@@ -75,6 +77,8 @@ export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
           <Button disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
             setQuote(await api((c) => c.topup.quote({ payload: { originAsset: asset, usdc: toMicro(amount) } }), token))
             setStatus("PENDING_DEPOSIT")
+            // Recorded on the server now: it shows under "Money on its way" even if this page closes.
+            void qc.invalidateQueries({ queryKey: ["transfers"] })
           })}>
             Get deposit address
           </Button>

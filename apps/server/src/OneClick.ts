@@ -69,10 +69,32 @@ export interface QuoteRequest {
 /** Where a swap is: PENDING_DEPOSIT, KNOWN_DEPOSIT_TX, INCOMPLETE_DEPOSIT, PROCESSING, SUCCESS, REFUNDED or FAILED. */
 export type SwapStatus = string
 
+const Hashes = Schema.optional(Schema.NullOr(Schema.Array(Schema.Struct({ hash: Schema.String }))))
+const StatusResponse = Schema.Struct({
+  status: Schema.String,
+  swapDetails: Schema.optional(Schema.NullOr(Schema.Struct({
+    amountOutFormatted: Schema.optional(Schema.NullOr(Schema.String)),
+    refundedAmount: Schema.optional(Schema.NullOr(Schema.String)),
+    refundedAmountFormatted: Schema.optional(Schema.NullOr(Schema.String)),
+    refundReason: Schema.optional(Schema.NullOr(Schema.String)),
+    destinationChainTxHashes: Hashes
+  })))
+})
+
+/** A swap's status with what a customer cares about: what arrived, where, and anything sent back. */
+export interface SwapDetails {
+  readonly status: SwapStatus
+  readonly amountOut?: string | undefined
+  readonly refunded?: string | undefined
+  readonly refundReason?: string | undefined
+  readonly deliveredTx?: string | undefined
+}
+
 export class OneClick extends Context.Service<OneClick, {
   readonly tokens: Effect.Effect<ReadonlyArray<Token>, OneClickUnavailable>
   quote(request: QuoteRequest): Effect.Effect<QuoteResponse, OneClickUnavailable>
   status(depositAddress: string): Effect.Effect<SwapStatus, OneClickUnavailable>
+  details(depositAddress: string): Effect.Effect<SwapDetails, OneClickUnavailable>
   /** Tells 1Click about our deposit so it doesn't wait to notice it; best effort. */
   submitDeposit(input: { txHash: string; depositAddress: string; nearSenderAccount: string }): Effect.Effect<void>
 }>()("luckout/OneClick") {
@@ -122,11 +144,22 @@ export class OneClick extends Context.Service<OneClick, {
           Effect.flatMap(read(QuoteResponse))
         ))
 
-      const status = (depositAddress: string) =>
+      const details = (depositAddress: string) =>
         wrap(http.get("/status", { urlParams: { depositAddress } }).pipe(
-          Effect.flatMap(read(Schema.Struct({ status: Schema.String }))),
-          Effect.map((s) => s.status)
+          Effect.flatMap(read(StatusResponse)),
+          Effect.map((s): SwapDetails => {
+            const d = s.swapDetails
+            const refunded = d?.refundedAmount && d.refundedAmount !== "0" ? d.refundedAmountFormatted ?? undefined : undefined
+            return {
+              status: s.status,
+              amountOut: d?.amountOutFormatted ?? undefined,
+              refunded,
+              refundReason: refunded ? d?.refundReason ?? undefined : undefined,
+              deliveredTx: d?.destinationChainTxHashes?.[0]?.hash
+            }
+          })
         ))
+      const status = (depositAddress: string) => details(depositAddress).pipe(Effect.map((d) => d.status))
 
       const submitDeposit = (input: { txHash: string; depositAddress: string; nearSenderAccount: string }) =>
         HttpClientRequest.post("/deposit/submit").pipe(
@@ -136,7 +169,7 @@ export class OneClick extends Context.Service<OneClick, {
           Effect.catchCause((cause) => Effect.logWarning("1Click deposit/submit failed (it will notice the deposit anyway)", cause))
         )
 
-      return OneClick.of({ tokens: Cache.get(tokenCache, "all"), quote, status, submitDeposit })
+      return OneClick.of({ tokens: Cache.get(tokenCache, "all"), quote, status, details, submitDeposit })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

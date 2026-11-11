@@ -9,7 +9,7 @@ import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
-import { useIsAdmin } from "@/lib/queries"
+import { ACTIVE_PHASES, useIsAdmin, useTransfers } from "@/lib/queries"
 import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -50,6 +50,7 @@ export function AppNav() {
                 >
                   <Wallet size={16} aria-hidden="true" />
                   {account === undefined ? <span className="skeleton h-4 w-12 rounded-full" /> : <Money micro={account?.balance ?? 0} />}
+                  <Arriving />
                 </Link>
               )}
             <AccountMenu id={accountId} />
@@ -192,5 +193,19 @@ function SignOutEverywhere({ open, onOpenChange }: { open: boolean; onOpenChange
         <Button size="lg" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
       </div>
     </Sheet>
+  )
+}
+
+/** "+$2.50" while a top-up is on its way into the balance, so it never looks like it vanished. */
+function Arriving() {
+  const { token } = useSession()
+  const transfers = useTransfers(token)
+  const coming = (transfers.data ?? []).filter((t) => t.direction === "in" && t.phase !== "awaiting-transfer" && ACTIVE_PHASES.has(t.phase))
+  if (coming.length === 0) return null
+  const total = coming.reduce((sum, t) => sum + t.usdc, 0)
+  return (
+    <span className="font-medium opacity-70" title={`${coming.length === 1 ? "A top-up is" : `${coming.length} top-ups are`} on its way into your balance`}>
+      +<Money micro={total} />
+    </span>
   )
 }
