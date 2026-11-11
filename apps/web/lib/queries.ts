@@ -1,6 +1,6 @@
 "use client"
 
-import { type Category, type Mode, type Purchase, VoucherSummary } from "@luckout/api"
+import { type Category, type Mode, type Purchase, type TransferPhase, VoucherSummary } from "@luckout/api"
 import { keepPreviousData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
@@ -116,6 +116,22 @@ export const useTelegram = (token: string | undefined, waiting = false) =>
     enabled: !!token,
     refetchOnWindowFocus: true,
     refetchInterval: (q) => (waiting && !q.state.data?.linked ? 2000 : false)
+  })
+
+/** Phases where the customer's money is still moving: polled often, and counted as arriving. */
+export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "swapping", "moving"])
+
+/**
+ * The customer's Top-Ups and withdrawals through NEAR Intents (still moving, or ended in the last day),
+ * from the server so they survive a closed tab. Checked often while one is moving.
+ */
+export const useTransfers = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["transfers", token],
+    queryFn: () => api((c) => c.topup.transfers(), token),
+    enabled: !!token,
+    refetchOnWindowFocus: true,
+    refetchInterval: (q) => (q.state.data?.some((t) => ACTIVE_PHASES.has(t.phase)) ? 8000 : 60_000)
   })
 
 /** Whether the signed-in account may open the admin panel; decides the menu link. */

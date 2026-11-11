@@ -174,6 +174,7 @@ const world = (o: {
         if (st === "SUCCESS" && swapOut && o.swapLands !== false) (wallet.usdc += swapOut, swapOut = 0, events.push("swapped"))
         return st
       }),
+    details: () => Effect.die("refills only read the status"),
     submitDeposit: () => Effect.void
   })
   const settled = new Set<string>()

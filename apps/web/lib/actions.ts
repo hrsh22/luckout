@@ -1,6 +1,7 @@
 "use client"
 
 import { type Mode, type TopUpAsset, transferIntent } from "@luckout/api"
+import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
 import { usd } from "./format"
@@ -26,6 +27,7 @@ export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {}
  */
 export function useWalletActions() {
   const { accountId, token, evm, refresh, send, signIntent } = useSession()
+  const qc = useQueryClient()
 
   /** Each step may ask the wallet to approve or sign; the toast says what's happening throughout. */
   const steps = async (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>) => {
@@ -84,6 +86,7 @@ export function useWalletActions() {
         say(`Sending it to ${asset.symbol} on ${CHAIN_NAMES[asset.chain] ?? asset.chain}`)
         try {
           const q = await api((c) => c.topup.exit({ payload: { destinationAsset: asset.assetId, usdc: micro } }), token)
+          void qc.invalidateQueries({ queryKey: ["transfers"] })
           const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, usdcId, amount: String(micro) }))
           await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
           arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
