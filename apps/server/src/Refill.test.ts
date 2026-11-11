@@ -12,7 +12,7 @@ import { Credit, CREDIT_DEFAULTS, levels } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { OneClick, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
-import { BASE_USDC_ASSET, quoteProblem, Refill } from "./Refill.ts"
+import { BASE_USDC_ASSET, floatTopUp, quoteProblem, Refill } from "./Refill.ts"
 import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
 import { NEAR_USDC_ASSET } from "./TopUp.ts"
 
@@ -710,4 +710,46 @@ test("a shutdown waits for the refill step in progress", async () => {
   // The scope closes as soon as the request returns, while the refill it started is still running.
   await w.run(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")))
   assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"], "it ran on to the swap and saved it, rather than being cut off")
+})
+
+test("with a Base float, a refill pays Bitrefill from it at once, and the float is topped back up in the background", async () => {
+  // Credit above the refill line, so only the refill asked for and the float's own top-up run.
+  const w = world({ walletUsdc: 40_000_000, treasuryUsdc: 50_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const credit = yield* Credit
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), baseFloat: 40_000_000 }), "boss.testnet")
+    const paid = yield* drive((yield* refill.request(30_000_000, "boss.testnet")).id)
+    const quotesBefore = w.made.quotes
+    // The next plan sees the wallet under half the float, with no refill due: it tops the float up.
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [top] = yield* sql<{ id: string; amount: string }>`SELECT id, amount::text FROM refills WHERE reason = 'float'`
+    const topped = yield* drive(top!.id)
+    const [others] = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM refills WHERE reason <> 'float'`
+    return { paid, quotesBefore, top: top!, topped, refills: others!.n }
+  }))
+  assert.equal(r.paid.step, "done", r.paid.error ?? "")
+  assert.equal(r.quotesBefore, 0, "Bitrefill was paid from the float, with no swap to wait for")
+  assert.equal(r.top.amount, "30000000", "exactly what brings the wallet back to the float")
+  assert.equal(r.topped.step, "done", r.topped.error ?? "")
+  assert.equal(w.quotes[0]!.recipient, WALLET)
+  assert.equal(w.quotes[0]!.amount, "30000000")
+  assert.deepEqual(w.payments, [{ to: BITREFILL_ADDRESS, amount: "30000000" }], "the top-up never pays Bitrefill")
+  assert.equal(w.wallet.usdc, 40_000_000, "the float is whole again")
+  assert.equal(r.refills, 1)
+  assert.ok(w.alerts.some((a) => a.includes("The Base float was topped up by $30.00")))
+})
+
+test("the float is topped up only once the wallet holds under half of it, and with a float the credit target is one day of sales", () => {
+  assert.equal(floatTopUp(0, 0), 0, "no float, no top-up")
+  assert.equal(floatTopUp(50_000_000, 30_000_000), 0, "over half: nothing yet")
+  assert.equal(floatTopUp(50_000_000, 20_000_000), 30_000_000)
+  assert.equal(floatTopUp(50_000_000, 49_000_000), 0)
+  const s = { floor: 10_000_000, ceiling: 300_000_000 }
+  assert.equal(levels(s, 40_000_000, 0).target, 80_000_000, "two days without a float")
+  assert.equal(levels({ ...s, baseFloat: 50_000_000 }, 40_000_000, 0).target, 40_000_000, "one day with one")
+  assert.equal(CREDIT_DEFAULTS.mainnet.baseFloat, 50_000_000)
+  assert.equal(CREDIT_DEFAULTS.testnet.baseFloat, 0, "refills, and so the float, don't run on testnet")
 })
