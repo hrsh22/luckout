@@ -299,3 +299,35 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.match(byAddress.refunded!.explorer, /explorer\.near-intents\.org\/transactions\/refunded$/)
   assert.deepEqual(result.near.map((x) => [x.depositAddress, x.phase, x.deposited]), [["short", "incomplete", "0.15"], ["nearIn", "in-wallet", undefined]])
 })
+
+test("what 1Click sent back in the token paid with is listed, so no change or refund is out of sight", async () => {
+  const BASE_USDC = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+  const owned: Record<string, Array<string>> = {
+    [EVM]: [BASE_USDC, "nep141:usdc.test", "nep141:unknown.near"],
+    [NEAR]: [BASE_USDC, "nep141:usdc.test", "nep141:wrap.near"]
+  }
+  const balance: Record<string, string> = { [BASE_USDC]: "120132", "nep141:usdc.test": "2500000", "nep141:unknown.near": "5", "nep141:wrap.near": "0" }
+  const near = fakeNear({
+    view: ((method: string, args: { account_id: string; token_ids?: Array<string> }, contract?: string) => {
+      assert.equal(contract, "intents.test")
+      return Effect.succeed(method === "mt_tokens_for_owner" ? owned[args.account_id]!.map((token_id) => ({ token_id })) : args.token_ids!.map((id) => balance[id]))
+    }) as never
+  })
+  const oneClick = Layer.succeed(OneClick, OneClick.of({
+    tokens: Effect.succeed([
+      { assetId: BASE_USDC, blockchain: "base", symbol: "USDC", decimals: 6 },
+      { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
+    ]),
+    quote: () => Effect.die("quote was not expected"),
+    status: () => Effect.die("status was not expected"),
+    details: () => Effect.die("details was not expected"),
+    submitDeposit: () => Effect.void
+  }))
+  const r = await Effect.runPromise(Effect.gen(function*() {
+    const t = yield* TopUp
+    return { evm: yield* t.held(EVM), near: yield* t.held(NEAR) }
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory))))))
+  const show = (xs: ReadonlyArray<{ amount: string; symbol: string; chain: string }>) => xs.map((x) => `${x.amount} ${x.symbol} on ${x.chain}`)
+  assert.deepEqual(show(r.evm), ["0.120132 USDC on base"], "an EVM wallet's NEAR USDC is its Luckout wallet already; an unknown token is skipped")
+  assert.deepEqual(show(r.near), ["0.120132 USDC on base", "2.5 USDC on near"], "a NEAR wallet sees its NEAR USDC there too; nothing at zero")
+})

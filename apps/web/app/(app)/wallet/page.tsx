@@ -1,7 +1,7 @@
 "use client"
 
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
-import { InTransit } from "@/components/in-transit"
+import { HeldInIntents, InTransit } from "@/components/in-transit"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
@@ -18,7 +18,7 @@ import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
 
 export default function WalletPage() {
-  const { accountId, account, walletUsdc, intentsUsdc, ready, evm } = useSession()
+  const { accountId, account, walletUsdc, ready, evm } = useSession()
   const actions = useWalletActions()
   const [adding, setAdding] = useState(false)
   const [withdrawing, setWithdrawing] = useState(false)
@@ -99,16 +99,7 @@ export default function WalletPage() {
       </section>
 
       <InTransit />
-      {!evm && Number(intentsUsdc ?? 0) > 0 && (
-        <section className="card flex flex-col gap-2 p-7">
-          <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">{usd(Number(intentsUsdc))} in your NEAR Intents account</h2>
-          <p className="text-sm text-ink-soft">
-            Usually a top-up 1Click sent back. Your wallet controls it, not Luckout: sign in on{" "}
-            <a href="https://near-intents.org" target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-2">near-intents.org</a>{" "}
-            with this same wallet and withdraw it to your NEAR wallet, then deposit it here.
-          </p>
-        </section>
-      )}
+      <HeldInIntents />
 
       <section className="flex flex-col gap-4">
         <div>
