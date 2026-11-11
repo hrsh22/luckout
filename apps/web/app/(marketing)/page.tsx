@@ -31,7 +31,7 @@ const FAQ = [
     a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why one Draw can pay back at most ${usd(MAX_CASHBACK)}, and never more than a share of the reserve.`
   },
   { q: "Can the Telegram bot spend my money?", a: "Only when you tap Confirm, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it." },
-  { q: "Which wallets work?", a: "HOT, Meteor, Intear, MyNearWallet, Ledger and the other wallets in NEAR Connect. HOT also works inside Telegram." }
+  { q: "Which wallets work?", a: "NEAR wallets (HOT, Meteor, Intear, MyNearWallet, Ledger and the others in NEAR Connect; HOT also works inside Telegram), and EVM wallets like MetaMask and Rabby, which need no NEAR at all: Luckout pays every NEAR fee." }
 ]
 
 export default async function Home() {
@@ -199,7 +199,7 @@ export default async function Home() {
           <div className="blob -top-24 -right-10 size-80 bg-white opacity-50" aria-hidden="true" />
           <div className="relative text-gold-ink">
             <h2 className="max-w-[14em] font-display text-5xl leading-none font-extrabold tracking-[-0.03em] sm:text-[60px]">Your next card could be free.</h2>
-            <p className="mt-4 text-lg opacity-80">Sign in with a NEAR wallet and choose how you like to pay. It takes a minute.</p>
+            <p className="mt-4 text-lg opacity-80">Sign in with a NEAR or EVM wallet and choose how you like to pay. It takes a minute.</p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href="/welcome" className={buttonVariants({ size: "lg" })}>Create your account</Link>
               <Link href="/shop" className={buttonVariants({ size: "lg", variant: "onColor" })}>Browse cards first</Link>

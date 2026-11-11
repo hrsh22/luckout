@@ -1,8 +1,8 @@
 "use client"
 
-import type { Mode } from "@luckout/api"
+import { type Mode, type TopUpAsset, transferIntent } from "@luckout/api"
 import { toast } from "sonner"
-import { cancelled, errorMessage } from "./api"
+import { api, cancelled, errorMessage } from "./api"
 import { usd } from "./format"
 import { modeName } from "./modes"
 import { type Call, contractId, usdcId } from "./near"
@@ -24,14 +24,15 @@ export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {}
  * re-reads the balance whatever happened, and resolves false (never throws) if the wallet refused or it failed.
  */
 export function useWalletActions() {
-  const { accountId, refresh, send } = useSession()
+  const { accountId, token, evm, refresh, send, signIntent } = useSession()
 
-  const run = async (pending: string, done: string, ...calls: Array<Call>) => {
+  /** Each step may ask the wallet to approve or sign; the toast says what's happening throughout. */
+  const steps = async (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>) => {
     if (!accountId) return false
-    const id = toast.loading(pending, { description: "Approve it in your wallet." })
+    const id = toast.loading(pending, { description: evm ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
     try {
-      await send(...calls)
-      toast.success(done, { id, description: undefined })
+      await f((text) => toast.loading(text, { id }))
+      toast.success(typeof done === "string" ? done : done(), { id, description: undefined })
       return true
     } catch (e) {
       // Backing out of the wallet isn't a failure: say what happened, without the alarm.
@@ -44,18 +45,52 @@ export function useWalletActions() {
     }
   }
 
+  const run = (pending: string, done: string, ...calls: Array<Call>) => steps(pending, done, () => send(...calls))
+  const withdrawCall = (micro: number): Call => ({
+    receiverId: contractId,
+    method: "withdraw",
+    args: { amount: String(micro) },
+    deposit: ONE_YOCTO,
+    tgas: 60
+  })
+
   return {
-    /** Testnet only: 100 test USDC from the faucet, deposited in the same approval. */
-    faucet: () => run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000)),
-    deposit: (micro: number) => run(`Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro)),
+    /**
+     * Testnet only: 100 test USDC from the faucet, deposited in the same approval. An EVM wallet has no
+     * NEAR account to call the faucet from: the server puts it in its NEAR Intents account, and one
+     * signature moves it in.
+     */
+    faucet: () =>
+      evm
+        ? steps("Getting 100 test USDC", "100 test USDC added to your balance", async (say) => {
+          await api((c) => c.topup.faucet(), token)
+          say("Moving it into Luckout")
+          await send(depositCall(100_000_000))
+        })
+        : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000)),
+    /** From the NEAR wallet, or for an EVM wallet from its NEAR Intents account. */
+    deposit: (micro: number) => run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro)),
     withdraw: (micro: number) =>
-      run(`Withdrawing ${usd(micro)}`, `${usd(micro)} sent to your wallet`, {
-        receiverId: contractId,
-        method: "withdraw",
-        args: { amount: String(micro) },
-        deposit: ONE_YOCTO,
-        tgas: 60
-      }),
+      run(`Withdrawing ${usd(micro)}`, evm ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),
+    /**
+     * EVM wallets (ADR-0011): out of Luckout into their own NEAR Intents account, then, with `asset`, on to
+     * their own address on that chain through 1Click. If the second step fails, the money waits in NEAR Intents.
+     */
+    withdrawTo: (micro: number, asset: TopUpAsset) => {
+      let arriving = ""
+      return steps(`Withdrawing ${usd(micro)}`, () => arriving, async (say) => {
+        await send(withdrawCall(micro))
+        say(`Sending it to ${asset.symbol} on ${asset.chain}`)
+        try {
+          const q = await api((c) => c.topup.exit({ payload: { destinationAsset: asset.assetId, usdc: micro } }), token)
+          const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, usdcId, amount: String(micro) }))
+          await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
+          arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
+        } catch (e) {
+          throw new Error(`${usd(micro)} is in your NEAR Intents account, but sending it on didn't work: ${errorMessage(e)} Move it back into Luckout, or send it from near.com.`)
+        }
+      })
+    },
     setDefaultMode: (mode: Mode) =>
       run(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, {
         receiverId: contractId,
