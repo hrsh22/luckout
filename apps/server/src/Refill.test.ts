@@ -131,8 +131,10 @@ const world = (o: {
     resume: (signed) => Effect.sync(() => (resumed.push(signed.hash), outcome(signed.hash))),
     account: () => Effect.succeed({ amount: 10n ** 24n, storageUsage: 0 })
   })
+  /** Our Bitrefill credit; a test may lower it to make a refill due. */
+  const bitrefillCredit = { balance: o.credit ?? 450_000_000 }
   const bitrefill = fakeBitrefill({
-    credit: Effect.succeed({ balance: o.credit ?? 450_000_000, room: 1_500_000_000 }),
+    credit: Effect.sync(() => ({ balance: bitrefillCredit.balance, room: 1_500_000_000 })),
     deposit: (amount) => Effect.sync(() => (made.invoices++, events.push("invoice"), { invoiceId: `inv-${made.invoices}`, address: BITREFILL_ADDRESS, price: amount })),
     depositState: () => Effect.succeed({ state: deposit.shift() ?? "credited", status: "x" })
   })
@@ -215,7 +217,7 @@ const world = (o: {
   // These tests size refills in tens of dollars: give them testnet-sized limits (mainnet starts at $30).
   const run = <A, E>(e: Effect.Effect<A, E, Refill | Credit | SqlClient.SqlClient>) =>
     Effect.runPromise(Effect.scoped(Effect.andThen(Effect.flatMap(Credit, (c) => c.configure(CREDIT_DEFAULTS.testnet, "test")), e)).pipe(Effect.provide(layer)))
-  return { s, made, wallet, events, payments, quotes, txs, resumed, alerts, run, sends: () => sends }
+  return { s, made, wallet, events, payments, quotes, txs, resumed, alerts, run, sends: () => sends, bitrefillCredit }
 }
 
 /** Waits until the refill's step stops changing (the pipeline runs in its own fiber). */
@@ -740,6 +742,34 @@ test("with a Base float, a refill pays Bitrefill from it at once, and the float 
   assert.equal(w.wallet.usdc, 40_000_000, "the float is whole again")
   assert.equal(r.refills, 1)
   assert.ok(w.alerts.some((a) => a.includes("The Base float was topped up by $30.00")))
+})
+
+test("a float top-up waiting for money waits quietly, and gives way the moment a real refill is due", async () => {
+  // No proceeds and an empty treasury: the top-up can only wait.
+  const w = world({ walletUsdc: 0, treasuryUsdc: 0, proceeds: 0 })
+  const r = await w.run(Effect.gen(function*() {
+    const credit = yield* Credit
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), baseFloat: 40_000_000 }), "boss.testnet")
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [waiting] = yield* sql<{ id: string; step: string }>`SELECT id, step FROM refills WHERE reason = 'float'`
+    const quiet = [...w.alerts]
+    // Bitrefill credit drops under the refill line: a real refill is due.
+    w.bitrefillCredit.balance = 0
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const rows = yield* sql<{ reason: string; step: string; error: string | null }>`SELECT reason, step, error FROM refills ORDER BY created_at`
+    return { waiting: waiting!, rows, quiet }
+  }))
+  assert.equal(r.waiting.step, "fund", "it waits for money")
+  assert.ok(!r.quiet.some((a) => a.includes("more in the treasury")), "quietly: a float is never urgent")
+  assert.equal(r.rows[0]!.reason, "float")
+  assert.equal(r.rows[0]!.step, "cancelled")
+  assert.match(r.rows[0]!.error ?? "", /Gave way to a Bitrefill refill/)
+  assert.equal(r.rows[1]!.reason, "target", "the real refill took its place")
+  assert.equal(w.txs.length, 0, "nothing was signed for the top-up")
 })
 
 test("the float is topped up only once the wallet holds under half of it, and with a float the credit target is one day of sales", () => {

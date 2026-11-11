@@ -27,7 +27,8 @@ const STEP: Record<string, { label: string; tone: "good" | "warn" | "bad" | "mut
   refunded: { label: "Refunded to the treasury", tone: "warn" },
   failed: { label: "Didn't go ahead", tone: "muted" },
   stuck: { label: "Needs a look", tone: "bad" },
-  resolved: { label: "Resolved", tone: "muted" }
+  resolved: { label: "Resolved", tone: "muted" },
+  cancelled: { label: "Gave way to a refill", tone: "muted" }
 }
 
 export function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> }) {
