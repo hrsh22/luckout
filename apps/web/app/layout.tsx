@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next"
 import localFont from "next/font/local"
+import { SpeedInsights } from "@vercel/speed-insights/next"
 import { siteUrl } from "@/lib/site"
 import "./globals.css"
 
@@ -36,7 +37,10 @@ export const viewport: Viewport = { themeColor: "#F2F1F8" }
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" data-scroll-behavior="smooth" className={`${general.variable} ${cabinet.variable}`}>
-      <body className="min-h-dvh overflow-x-clip">{children}</body>
+      <body className="min-h-dvh overflow-x-clip">
+        {children}
+        <SpeedInsights />
+      </body>
     </html>
   )
 }
