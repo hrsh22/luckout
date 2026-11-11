@@ -42,6 +42,11 @@ const UNANSWERED = /didn't answer in time/
 const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 /** A quote nobody paid into is still checked this long past its deadline, in case the transfer was late. */
 const LATE_DEPOSIT_GRACE_MS = 2 * 60 * 60 * 1000
+/**
+ * When 1Click starts refunding a swap that hasn't completed: what the customer is told to beat. (1Click's own
+ * `deadline` in a quote is days later: how long the deposit address stays open, not when refunds begin.)
+ */
+const refundsBegin = () => new Date(Date.now() + 30 * 60 * 1000)
 const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana", btc: "Bitcoin", near: "NEAR" }
 const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
@@ -175,6 +180,7 @@ export class TopUp extends Context.Service<TopUp, {
         const asset = (yield* assets).find((t) => t.assetId === originAsset)
         if (!asset) return yield* fail("That token isn't supported for top-ups")
         const evm = isEvmAccount(accountId)
+        const deadline = refundsBegin()
         const { quote: q, quoteRequest: echo } = yield* oneClick.quote({
           dry,
           swapType: "EXACT_OUTPUT",
@@ -189,7 +195,7 @@ export class TopUp extends Context.Service<TopUp, {
           // their own NEAR account inside Intents.
           refundTo: accountId,
           refundType: "INTENTS",
-          deadline: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+          deadline: deadline.toISOString()
         }).pipe(Effect.mapError(unavailable))
         if (!dry && !q.depositAddress) return yield* fail("1Click returned no deposit address")
         if (evm && echo && (echo.recipient !== accountId || echo.recipientType !== "INTENTS")) {
@@ -199,7 +205,7 @@ export class TopUp extends Context.Service<TopUp, {
         if (!dry) {
           yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
                      VALUES (${q.depositAddress!}, ${accountId}, 'in', ${Number(q.amountOut)}, ${asset.symbol}, ${asset.chain}, ${q.amountInFormatted},
-                             ${q.depositMemo ?? null}, ${q.deadline ? new Date(q.deadline) : null}, ${q.timeEstimate})`.pipe(Effect.orDie)
+                             ${q.depositMemo ?? null}, ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
         }
         return new TopUpQuote({
           depositAddress: q.depositAddress ?? "",
@@ -210,7 +216,7 @@ export class TopUp extends Context.Service<TopUp, {
           chain: asset.chain,
           usdcOut: Number(q.amountOut),
           timeEstimateSeconds: q.timeEstimate,
-          deadline: q.deadline ?? ""
+          deadline: deadline.toISOString()
         })
       })
 
@@ -253,6 +259,7 @@ export class TopUp extends Context.Service<TopUp, {
         if (!Number.isInteger(usdc) || usdc < 1_000_000 || usdc > 2_000_000_000) return yield* fail("Withdraw between 1 and 2,000 USDC")
         const asset = (yield* assets).find((t) => t.assetId === destinationAsset && EVM_CHAINS.has(t.chain))
         if (!asset) return yield* fail("That token can't be withdrawn to an EVM wallet")
+        const deadline = refundsBegin()
         const { quote: q, quoteRequest: echo } = yield* oneClick.quote({
           dry: false,
           swapType: "EXACT_INPUT",
@@ -266,7 +273,7 @@ export class TopUp extends Context.Service<TopUp, {
           recipientType: "DESTINATION_CHAIN",
           refundTo: accountId,
           refundType: "INTENTS",
-          deadline: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+          deadline: deadline.toISOString()
         }).pipe(Effect.mapError(unavailable))
         if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
         if (echo && (echo.recipient.toLowerCase() !== accountId || echo.depositType !== "INTENTS")) {
@@ -274,7 +281,7 @@ export class TopUp extends Context.Service<TopUp, {
         }
         yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_out, deadline, time_estimate)
                    VALUES (${q.depositAddress}, ${accountId}, 'out', ${usdc}, ${asset.symbol}, ${asset.chain}, ${q.amountOutFormatted ?? null},
-                           ${q.deadline ? new Date(q.deadline) : null}, ${q.timeEstimate})`.pipe(Effect.orDie)
+                           ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
         return new ExitQuote({
           depositAddress: q.depositAddress,
           usdcIn: usdc,
@@ -417,7 +424,7 @@ export class TopUp extends Context.Service<TopUp, {
                 createdAt: new Date(r.created_at).toISOString(),
                 ...(r.deadline ? { deadline: new Date(r.deadline).toISOString() } : {}),
                 ...(r.time_estimate !== null ? { timeEstimateSeconds: r.time_estimate } : {}),
-                ...(r.delivered_tx ? { deliveredTx: r.delivered_tx } : {}),
+                ...(r.direction === "out" && r.delivered_tx ? { deliveredTx: r.delivered_tx } : {}),
                 ...(r.refunded ? { refunded: r.refunded } : {}),
                 ...(r.refund_reason || r.move_detail ? { detail: (r.refund_reason ?? r.move_detail)! } : {}),
                 explorer: explorerOf(r.deposit_address)

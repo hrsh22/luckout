@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { ConfigProvider, Effect } from "effect"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Layer } from "effect"
@@ -99,6 +99,35 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
 
 // ---------- money in transit stays in sight ----------
 
+test("a quote tells the customer, and records, when refunds begin (30 min), not when 1Click's address closes (days later)", async () => {
+  const threeDays = new Date(Date.now() + 3 * 86_400_000).toISOString()
+  const oneClick = Layer.succeed(OneClick, OneClick.of({
+    tokens: Effect.succeed([{ assetId: "nep141:base-usdc", blockchain: "base", symbol: "USDC", contractAddress: "0xusdc", decimals: 6 }]),
+    quote: (r) => Effect.succeed({
+      quote: { depositAddress: `dq-${r.swapType}`, amountIn: "1010224", amountInFormatted: "1.010224", amountOut: "1000000", amountOutFormatted: "0.99", timeEstimate: 35, deadline: threeDays },
+      quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: r.recipient, swapType: r.swapType, recipientType: r.recipientType, depositType: r.depositType ?? "ORIGIN_CHAIN" }
+    } as never),
+    status: () => Effect.succeed("PENDING_DEPOSIT"),
+    details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
+    submitDeposit: () => Effect.void
+  }))
+  const r = await Effect.runPromise(Effect.gen(function*() {
+    const t = yield* TopUp
+    const sql = yield* SqlClient.SqlClient
+    const q = yield* t.quote(EVM, "nep141:base-usdc", 1_000_000)
+    yield* t.exit(EVM, "nep141:base-usdc", 1_000_000)
+    const rows = yield* sql<{ deadline: Date }>`SELECT deadline FROM intents_swaps ORDER BY direction`
+    return { shown: Date.parse(q.deadline), stored: rows.map((x) => new Date(x.deadline).getTime()) }
+  }).pipe(Effect.provide(TopUp.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory)),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
+  ))))
+  const inHalfAnHour = (ms: number) => Math.abs(ms - (Date.now() + 30 * 60_000)) < 60_000
+  assert.ok(inHalfAnHour(r.shown), "the quote says to send within 30 minutes")
+  assert.equal(r.stored.length, 2)
+  assert.ok(r.stored.every(inHalfAnHour), "both the Top-Up and the withdrawal are recorded with when refunds begin")
+})
+
 const EVM = "0x" + "a".repeat(40)
 const NEAR = "alice.near"
 const row = (o: Partial<SwapRow>): SwapRow => ({
@@ -183,7 +212,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   const sent: Array<string> = []
   const checked: Array<string> = []
   const scripted: Record<string, SwapDetails> = {
-    evmIn: { status: "SUCCESS" },
+    evmIn: { status: "SUCCESS", deliveredTx: "nearTxHash" },
     nearIn: { status: "SUCCESS" },
     out: { status: "SUCCESS", amountOut: "1.419", deliveredTx: "0xbeef" },
     refunded: { status: "REFUNDED", refunded: "2.5", refundReason: "Deposit came in after the deadline" },
@@ -252,6 +281,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   const byAddress = Object.fromEntries(result.mine.map((x) => [x.depositAddress, x]))
   assert.deepEqual(Object.keys(byAddress).sort(), ["awaiting", "evmIn", "late", "out", "refunded"], "neither the abandoned quote nor the withdrawal never sent is listed")
   assert.equal(byAddress.evmIn!.phase, "done")
+  assert.equal(byAddress.evmIn!.deliveredTx, undefined, "a Top-Up's delivery is a NEAR transaction, not a link on Base")
   assert.equal(byAddress.awaiting!.phase, "awaiting-transfer")
   assert.equal(byAddress.late!.phase, "swapping")
   assert.equal(byAddress.late!.late, true)

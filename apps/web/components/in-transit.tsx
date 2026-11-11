@@ -21,6 +21,8 @@ const TX_EXPLORERS: Record<string, string> = {
 const INTENTS_APP = "https://near-intents.org"
 
 const chain = (c: string) => CHAIN_NAMES[c] ?? c
+/** " on Base", or nothing for a swap recorded before its chain was kept. */
+const on = (c: string) => (c ? ` on ${chain(c)}` : "")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 
@@ -53,8 +55,8 @@ function Row({ t }: { t: Transfer }) {
   const actions = useWalletActions()
   const incoming = t.direction === "in"
   const title = incoming
-    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${t.amountIn} ${t.symbol}` : ""} on ${chain(t.chain)}`
-    : `${usd(t.usdc)} withdrawal to ${t.symbol} on ${chain(t.chain)}`
+    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${t.amountIn} ${t.symbol}` : ""}${on(t.chain)}`
+    : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
   const Icon = t.phase === "done" ? CircleCheck : t.phase === "refunded" ? RotateCcw : incoming ? ArrowDownLeft : ArrowUpRight
   const tone = t.phase === "done" ? "text-good" : t.phase === "refunded" || t.late ? "text-warn" : "text-ink"
   const sitting = Number(walletUsdc ?? 0)
@@ -114,11 +116,11 @@ function say(t: Transfer, evm: boolean) {
   const usual = minutes(t.timeEstimateSeconds)
   switch (t.phase) {
     case "awaiting-transfer":
-      return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol} on ${chain(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
+      return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
     case "swapping":
       return t.direction === "in"
         ? `1Click has your ${t.symbol} and is converting it to USDC. Usually ${usual}.`
-        : `On its way to your address on ${chain(t.chain)}. Usually ${usual}.`
+        : `On its way to your address${on(t.chain)}. Usually ${usual}.`
     case "moving":
       return "Landed. Moving it into your Luckout balance now."
     case "in-wallet":
@@ -126,7 +128,7 @@ function say(t: Transfer, evm: boolean) {
     case "in-intents":
       return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
     case "done":
-      return t.direction === "in" ? "In your Luckout balance." : `Arrived: ${t.amountOut ?? usd(t.usdc)} ${t.symbol} on ${chain(t.chain)}.`
+      return t.direction === "in" ? "In your Luckout balance." : `Arrived: ${t.amountOut ?? usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
     case "refunded":
       return t.direction === "in"
         ? `Didn't go through${t.detail ? ` (${t.detail})` : ""}. 1Click sent ${t.refunded ? `${t.refunded} ${t.symbol}` : "it"} back to your NEAR Intents account, which your wallet controls: sign in on near-intents.org with this same wallet to send it anywhere.`
