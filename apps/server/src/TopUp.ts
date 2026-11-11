@@ -30,6 +30,8 @@ export class TopUp extends Context.Service<TopUp, {
   status(accountId: string, depositAddress: string): Effect.Effect<TopUpStatus, TopUpUnavailable>
   /** EVM wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
   move(accountId: string, depositAddress: string, signed: SignedIntent): Effect.Effect<void, TopUpUnavailable>
+  /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
+  faucet(accountId: string): Effect.Effect<void, TopUpUnavailable>
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to their own address on another chain. */
   exit(accountId: string, destinationAsset: string, usdc: number): Effect.Effect<ExitQuote, TopUpUnavailable>
 }>()("luckout/TopUp") {
@@ -47,7 +49,15 @@ export class TopUp extends Context.Service<TopUp, {
       const assets = oneClick.tokens.pipe(
         Effect.map((ts) =>
           ts.filter((t) => SYMBOLS.has(t.symbol) && CHAINS.has(t.blockchain) && t.assetId !== NEAR_USDC_ASSET)
-            .map((t) => new TopUpAsset({ assetId: t.assetId, symbol: t.symbol, chain: t.blockchain }))
+            .map((t) =>
+              new TopUpAsset({
+                assetId: t.assetId,
+                symbol: t.symbol,
+                chain: t.blockchain,
+                ...(t.contractAddress && EVM_CHAINS.has(t.blockchain) ? { contract: t.contractAddress } : {}),
+                ...(t.decimals !== undefined ? { decimals: t.decimals } : {})
+              })
+            )
         ),
         Effect.mapError(unavailable)
       )
@@ -160,6 +170,33 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
+      // An EVM wallet on testnet has no NEAR account to call the faucet from: our relayer gets the test
+      // USDC and deposits it into their NEAR Intents account, the way 1Click delivers a Top-Up on mainnet.
+      const faucet = Effect.fn("TopUp.faucet")(function*(accountId: string) {
+        if (mainnet) return yield* fail("There's no faucet on mainnet")
+        if (!isEvmAccount(accountId)) return yield* fail("NEAR wallets call the faucet themselves")
+        const day = new Date().toISOString().slice(0, 10)
+        const persist = (key: string) => (tx: { hash: string; bytes: string }) =>
+          sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${key}, ${accountId}, ${JSON.stringify(tx)}::jsonb)`.pipe(
+            Effect.asVoid,
+            Effect.orDie
+          )
+        const [used] = yield* sql`SELECT 1 FROM relays WHERE delegate_hash = ${`faucet:${accountId}:${day}`}`.pipe(Effect.orDie)
+        if (used) return yield* fail("You've had today's test USDC. Come back tomorrow.")
+        yield* near.relayerCall(near.usdcId, "faucet", {}, persist(`faucet-mint:${accountId}:${day}`)).pipe(
+          Effect.flatMap(() =>
+            near.relayerCall(
+              near.usdcId,
+              "ft_transfer_call",
+              { receiver_id: near.intentsId, amount: "100000000", msg: accountId },
+              persist(`faucet:${accountId}:${day}`),
+              1n
+            )
+          ),
+          Effect.mapError((e) => fail(`The faucet didn't go through: ${e.message}`))
+        )
+      })
+
       // Sends each waiting move-in once its swap has landed. A refunded swap, or one that never lands,
       // leaves the money in the customer's own NEAR Intents account, where the web app offers to move it.
       const settle = (r: { deposit_address: string; account_id: string; move_in: SignedIntent; old: boolean }) =>
@@ -188,7 +225,7 @@ export class TopUp extends Context.Service<TopUp, {
       )
       yield* settleWaiting.pipe(Effect.repeat(Schedule.spaced("15 seconds")), Effect.forkScoped)
 
-      return TopUp.of({ assets, quote, status, move, exit })
+      return TopUp.of({ assets, quote, status, move, faucet, exit })
     })
   )
 }

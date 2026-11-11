@@ -7,7 +7,13 @@ import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } fr
 
 export class OneClickUnavailable extends Data.TaggedError("OneClickUnavailable")<{ readonly message: string }> {}
 
-const Token = Schema.Struct({ assetId: Schema.String, blockchain: Schema.String, symbol: Schema.String })
+const Token = Schema.Struct({
+  assetId: Schema.String,
+  blockchain: Schema.String,
+  symbol: Schema.String,
+  contractAddress: Schema.optional(Schema.NullOr(Schema.String)),
+  decimals: Schema.optional(Schema.Number)
+})
 export type Token = typeof Token.Type
 
 const Quote = Schema.Struct({

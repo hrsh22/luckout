@@ -288,7 +288,10 @@ export class TelegramApi extends HttpApiGroup.make("telegram").add(
 export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   assetId: Schema.String,
   symbol: Schema.String,
-  chain: Schema.String
+  chain: Schema.String,
+  /** The token's contract on an EVM chain, so an EVM wallet can send it; absent for the chain's own coin. */
+  contract: Schema.optional(Schema.String),
+  decimals: Schema.optional(Schema.Number)
 }) {}
 
 export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
@@ -345,6 +348,8 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
+  /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
+  HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
   HttpApiEndpoint.post("exit", "/topup/exit", {
     payload: Schema.Struct({ destinationAsset: Schema.String, usdc: MicroUsdc }),
