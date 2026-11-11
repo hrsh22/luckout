@@ -53,6 +53,10 @@ const world = (o: {
   /** Base's RPC fails once: when fixing the payment (before anything is signed), or when sending it (after). */
   prepareDownOnce?: boolean
   payDownOnce?: boolean
+  /** The contract takes the pull, but its USDC transfer fails (the treasury isn't registered): the proceeds go back. */
+  sweepFails?: boolean
+  /** False: 1Click reports SUCCESS, but the USDC doesn't show in our wallet. */
+  swapLands?: boolean
 } = {}) => {
   const s = { usdc: o.treasuryUsdc ?? 0, proceeds: o.proceeds ?? 236_000_000, swept: 0 }
   const made = { invoices: 0, quotes: 0, signs: 0 }
@@ -65,6 +69,8 @@ const world = (o: {
   let swapOut = 0
   let prepareDown = o.prepareDownOnce ?? false
   let payDown = o.payDownOnce ?? false
+  /** Times the Base payment was handed to the node, whether or not it answered. */
+  let sends = 0
   let down = o.sendDownOnce ?? false
   const txs: Array<Tx> = []
   const resumed: Array<string> = []
@@ -116,6 +122,9 @@ const world = (o: {
           apply(tx)
           return yield* new NearUnavailable({ message: "send: timed out" })
         }
+        if (o.sweepFails && tx.calls.some((c) => c.method === "sweep_proceeds")) {
+          return { ...outcome(hash), failures: [`The account ${TREASURY} is not registered`] }
+        }
         apply(tx)
         return outcome(hash)
       }),
@@ -160,7 +169,7 @@ const world = (o: {
       Effect.sync(() => {
         const st = swap.shift() ?? "SUCCESS"
         // A finished swap lands in our wallet, once.
-        if (st === "SUCCESS" && swapOut) (wallet.usdc += swapOut, swapOut = 0, events.push("swapped"))
+        if (st === "SUCCESS" && swapOut && o.swapLands !== false) (wallet.usdc += swapOut, swapOut = 0, events.push("swapped"))
         return st
       }),
     submitDeposit: () => Effect.void
@@ -185,6 +194,7 @@ const world = (o: {
     sign: (p) => Effect.sync(() => (made.signs++, { ...p, raw: `0xraw${made.signs}` as Hex, hash: `0xhash${made.signs}` as Hex })),
     send: (p) =>
       Effect.suspend(() => {
+        sends++
         if (!payDown) return statusOf(p.hash, p.amount, p.to)
         payDown = false
         return Effect.fail(new BaseUnavailable({ message: "Base send: fetch failed" }))
@@ -205,7 +215,7 @@ const world = (o: {
   // These tests size refills in tens of dollars: give them testnet-sized limits (mainnet starts at $30).
   const run = <A, E>(e: Effect.Effect<A, E, Refill | Credit | SqlClient.SqlClient>) =>
     Effect.runPromise(Effect.scoped(Effect.andThen(Effect.flatMap(Credit, (c) => c.configure(CREDIT_DEFAULTS.testnet, "test")), e)).pipe(Effect.provide(layer)))
-  return { s, made, wallet, events, payments, quotes, txs, resumed, alerts, run }
+  return { s, made, wallet, events, payments, quotes, txs, resumed, alerts, run, sends: () => sends }
 }
 
 /** Waits until the refill's step stops changing (the pipeline runs in its own fiber). */
@@ -384,21 +394,26 @@ test("an invoice that got old before anything was signed is replaced, never paid
   assert.deepEqual(w.payments, [{ to: BITREFILL_ADDRESS, amount: "30000000" }])
 })
 
-test("a payment signed but not sent before its invoice nearly expires is never sent", async () => {
-  const w = world({ walletUsdc: 30_000_000, payDownOnce: true })
+test("a payment not confirmed before its invoice nearly expires is never sent again, and may have gone out", async () => {
+  const w = world({ walletUsdc: 30_000_000, payDownOnce: true, pay: ["pending"] })
   const r = await w.run(Effect.gen(function*() {
     const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
     const v = yield* refill.request(30_000_000, "boss.testnet")
     yield* settle(v.id)
+    // The node may have taken that first send before the connection dropped: it counts as sent.
+    const [first] = yield* sql<{ paid: boolean }>`SELECT paid_at IS NOT NULL AS paid FROM refills WHERE id = ${v.id}`
     // Base stayed unreachable until the invoice was 55 minutes old.
-    yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE refills SET invoice_at = now() - interval '55 minutes' WHERE id = ${v.id}`)
+    yield* sql`UPDATE refills SET invoice_at = now() - interval '55 minutes' WHERE id = ${v.id}`
     yield* due
     yield* refill.process
-    return yield* settle(v.id)
+    return { paid: first!.paid, last: yield* settle(v.id) }
   }))
-  assert.equal(r.step, "stuck")
-  assert.match(r.error ?? "", /never sent/)
-  assert.deepEqual(w.payments, [], "the signed bytes stayed unsent")
+  assert.equal(r.paid, true, "the first send was saved before it went out")
+  assert.equal(r.last.step, "stuck")
+  assert.match(r.last.error ?? "", /may have been sent: check 0xhash1 on basescan/)
+  assert.equal(w.sends(), 1, "the signed bytes weren't sent again")
+  assert.deepEqual(w.payments, [])
   assert.equal(w.wallet.usdc, 30_000_000)
 })
 
@@ -620,3 +635,79 @@ test("pulls nearing the daily cap say so, with a cap to raise it to", async () =
   assert.ok(w.alerts.some((a) => /reached \$30\.30 of the \$35\.00 daily cap.*say to \$100\.00/.test(a)), w.alerts.join("\n"))
 })
 
+
+// ---------- audit fixes ----------
+
+test("a pull whose transfer fails stops for an admin: nothing is quoted, and it isn't pulled again", async () => {
+  const w = world({ cap: 100_000_000, treasuryUsdc: 0, sweepFails: true })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    const row = yield* settle(v.id)
+    yield* due
+    yield* refill.process
+    return { row, again: yield* settle(v.id), paused: (yield* refill.status).paused }
+  }))
+  assert.equal(r.row.step, "stuck")
+  assert.match(r.row.error ?? "", /didn't arrive and the contract put the proceeds back \(The account treasury\.test is not registered\)\. Is the treasury registered on USDC\?/)
+  assert.equal(r.again.step, "stuck")
+  assert.deepEqual(methods(w.txs), ["sweep_proceeds"], "pulled once, not again and again")
+  assert.ok(r.paused, "automatic refills pause until an admin resolves it")
+  assert.ok(!w.alerts.some((a) => a.includes("Treasury pulled")), "never announced as pulled")
+  assert.equal(w.alerts.filter((a) => a.includes("registered on USDC")).length, 1)
+  assert.deepEqual(w.made, { invoices: 0, quotes: 0, signs: 0 })
+})
+
+test("a refill stuck because the wallet came up short at the invoice stays stuck for an admin, without flapping", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, swapLands: false })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id)
+    yield* due
+    yield* refill.process
+    const atInvoice = yield* settle(v.id)
+    // 1Click said SUCCESS ten minutes ago, and the wallet still doesn't show it.
+    yield* sql`UPDATE refills SET updated_at = now() - interval '11 minutes' WHERE id = ${v.id}`
+    yield* due
+    yield* refill.process
+    const stuck = yield* settle(v.id)
+    const after = [yield* checkAgain(v.id)]
+    // Even once the USDC shows up, a refill stuck at the invoice waits for an admin.
+    w.wallet.usdc = 30_000_000
+    after.push(yield* checkAgain(v.id))
+    const [row] = yield* sql<{ error: string; stuck_at: string }>`SELECT error, stuck_at FROM refills WHERE id = ${v.id}`
+    yield* refill.resolve(v.id, "Topped up on bitrefill.com by hand", "boss.testnet")
+    return { atInvoice, stuck, after, row: row!, paused: (yield* refill.status).paused }
+  }))
+  assert.equal(r.atInvoice.step, "invoice")
+  assert.equal(r.stuck.step, "stuck")
+  assert.equal(r.row.stuck_at, "invoice")
+  assert.deepEqual(r.after.map((a) => a.step), ["stuck", "stuck"], "not sent back to the invoice by 1Click's SUCCESS")
+  assert.equal(r.row.error, r.stuck.error, "and nothing appended on each pass")
+  assert.ok(!r.paused?.includes("stuck"), "an admin could resolve it")
+  assert.equal(w.made.invoices, 0)
+})
+
+test("a stuck swap 1Click reports finished carries on only once the USDC is in our wallet", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, swap: ["PROCESSING", "PROCESSING", "SUCCESS", "SUCCESS"], swapLands: false })
+  const r = await w.run(Effect.gen(function*() {
+    const s = yield* stuckRefill
+    const notYet = yield* checkAgain(s.id)
+    w.wallet.usdc = 30_000_000
+    const landed = yield* checkAgain(s.id)
+    return { notYet, landed, last: yield* drive(s.id) }
+  }))
+  assert.equal(r.notYet.step, "stuck", "1Click says done, but the wallet doesn't show it yet")
+  assert.equal(r.landed.step, "invoice")
+  assert.equal(r.last.step, "done", r.last.error ?? "")
+  assert.deepEqual(w.payments, [{ to: BITREFILL_ADDRESS, amount: "30000000" }])
+})
+
+test("a shutdown waits for the refill step in progress", async () => {
+  const w = world({ treasuryUsdc: 50_000_000 })
+  // The scope closes as soon as the request returns, while the refill it started is still running.
+  await w.run(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")))
+  assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"], "it ran on to the swap and saved it, rather than being cut off")
+})

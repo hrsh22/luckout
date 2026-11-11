@@ -1,7 +1,7 @@
 import { LinkInvalid, NewPurchase, type Purchase } from "@luckout/api"
-import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
+import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
-import { Bot, InlineKeyboard } from "grammy"
+import { Bot, GrammyError, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp } from "./Agent.ts"
@@ -13,8 +13,79 @@ import { Purchases } from "./Purchases.ts"
 
 const LINK_TTL_MINUTES = 10
 const PENDING_TTL_MS = 10 * 60 * 1000
-/** Messages per Telegram user per minute; each one can cost several LLM calls. */
+/** Messages per Telegram user per minute and per UTC day; each one can cost several LLM calls. */
 const MESSAGES_PER_MINUTE = 10
+const MESSAGES_PER_DAY = 200
+/** A chat quiet this long starts over, so its history doesn't sit in memory. */
+const IDLE_MS = 60 * 60_000
+
+/** An error for the logs. Never the object itself: a GrammyError carries the message it failed to send, voucher codes included. */
+export const describe = (e: unknown) =>
+  e instanceof GrammyError
+    ? `${e.method}: ${e.error_code} ${e.description}`
+    : e instanceof Error
+    ? `${e.name}: ${e.message}`
+    : typeof e
+
+// ponytail: counters in memory, one process; a restart resets them, and the day is UTC.
+/** Per-Telegram-user message limits: "minute" or "day" when a message is over one, undefined when it may go ahead. */
+export const messageLimits = (perMinute = MESSAGES_PER_MINUTE, perDay = MESSAGES_PER_DAY) => {
+  const minutes = new Map<number, { count: number; resetAt: number }>()
+  const days = new Map<number, { count: number; day: number }>()
+  return {
+    check: (userId: number, now = Date.now()): "minute" | "day" | undefined => {
+      const w = minutes.get(userId)
+      if (!w || w.resetAt < now) minutes.set(userId, { count: 1, resetAt: now + 60_000 })
+      else if (++w.count > perMinute) return "minute"
+      const day = Math.floor(now / 86_400_000)
+      const d = days.get(userId)
+      if (!d || d.day !== day) days.set(userId, { count: 1, day })
+      else if (++d.count > perDay) return "day"
+      return undefined
+    },
+    /** Forgets counters that no longer count. */
+    sweep: (now = Date.now()) => {
+      for (const [k, w] of minutes) if (w.resetAt < now) minutes.delete(k)
+      for (const [k, d] of days) if (d.day !== Math.floor(now / 86_400_000)) days.delete(k)
+    }
+  }
+}
+
+/** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
+export const addLinkCode = (accountId: string, code: string, expiresAt: Date) =>
+  Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`DELETE FROM telegram_link_codes WHERE expires_at < now() OR account_id = ${accountId}`
+    yield* sql`INSERT INTO telegram_link_codes (code, account_id, expires_at) VALUES (${code}, ${accountId}, ${expiresAt})`
+  }).pipe(Effect.orDie)
+
+/** Disconnects Telegram, and cancels any link not opened yet so it can't connect it again. */
+export const unlinkAccount = (accountId: string) =>
+  Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`DELETE FROM telegram_link_codes WHERE account_id = ${accountId}`
+    yield* sql`DELETE FROM telegram_links WHERE account_id = ${accountId}`
+  }).pipe(Effect.orDie)
+
+/**
+ * Links whoever opened the code. Returns the account, and the chat this replaced if it was another
+ * one; undefined if the code expired, was used, or was cancelled.
+ */
+export const redeemLinkCode = (code: string, user: { id: number; chatId: number; name: string }) =>
+  Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    return yield* sql.withTransaction(Effect.gen(function*() {
+      const [row] = yield* sql<{ account_id: string }>`
+        DELETE FROM telegram_link_codes WHERE code = ${code} AND expires_at > now() RETURNING account_id`
+      if (!row) return undefined
+      // One Telegram account per wallet: linking a new one replaces the old link.
+      const old = yield* sql<{ account_id: string; chat_id: string | number }>`
+        DELETE FROM telegram_links WHERE account_id = ${row.account_id} OR telegram_user_id = ${user.id} RETURNING account_id, chat_id`
+      yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${user.id}, ${row.account_id}, ${user.chatId}, ${user.name})`
+      const replaced = old.find((o) => o.account_id === row.account_id && String(o.chat_id) !== String(user.chatId))
+      return { accountId: row.account_id, ...(replaced ? { replacedChat: String(replaced.chat_id) } : {}) }
+    }))
+  }).pipe(Effect.orDie)
 
 interface Status {
   readonly linked: boolean
@@ -59,18 +130,16 @@ export class Telegram extends Context.Service<Telegram, {
             Effect.orDie
           )
 
+      const withSql = Effect.provideService(SqlClient.SqlClient, sql)
       const linkCode = Effect.fn("Telegram.linkCode")(function*(accountId: string) {
         if (!botUrl) return yield* new LinkInvalid({ message: "The Telegram bot is offline right now." })
         const code = randomBytes(18).toString("base64url")
         const expiresAt = Date.now() + LINK_TTL_MINUTES * 60_000
-        yield* sql`DELETE FROM telegram_link_codes WHERE expires_at < now()`.pipe(Effect.orDie)
-        yield* sql`INSERT INTO telegram_link_codes (code, account_id, expires_at) VALUES (${code}, ${accountId}, ${new Date(expiresAt)})`
-          .pipe(Effect.orDie)
+        yield* withSql(addLinkCode(accountId, code, new Date(expiresAt)))
         return { url: `${botUrl}?start=${code}`, expiresAt }
       })
 
-      const unlink = (accountId: string) =>
-        sql`DELETE FROM telegram_links WHERE account_id = ${accountId}`.pipe(Effect.asVoid, Effect.orDie)
+      const unlink = (accountId: string) => withSql(unlinkAccount(accountId))
 
       if (!bot) {
         yield* Effect.logInfo("TELEGRAM_BOT_TOKEN not set: the Telegram Agent is off")
@@ -98,7 +167,7 @@ export class Telegram extends Context.Service<Telegram, {
         : undefined
 
       // ponytail: chat history and pending confirmations live in memory (lost on restart, one process).
-      const history = new Map<number, Array<ChatCompletionMessageParam>>()
+      const history = new Map<number, { messages: Array<ChatCompletionMessageParam>; at: number }>()
       const pending = new Map<string, Pending & { telegramUserId: number; accountId: string; expires: number }>()
 
       const linkedAccount = (telegramUserId: number) =>
@@ -114,32 +183,31 @@ export class Telegram extends Context.Service<Telegram, {
       // one chat waiting never holds up another. Each chat's jobs still run in order.
       const chains = new Map<number, Promise<void>>()
       const inChat = (chatId: number, job: () => Promise<void>) => {
-        const next = (chains.get(chatId) ?? Promise.resolve()).then(job).catch((e) => console.error("telegram job failed", e))
+        const next = (chains.get(chatId) ?? Promise.resolve()).then(job).catch((e) => console.error("telegram job failed:", describe(e)))
         chains.set(chatId, next)
         void next.then(() => chains.get(chatId) === next && chains.delete(chatId))
       }
-      // ponytail: fixed one-minute window in memory, one process.
-      const windows = new Map<number, { count: number; resetAt: number }>()
-      const allowed = (userId: number) => {
+      const limits = messageLimits()
+      // Every few minutes, forget what can't matter any more: expired buttons, quiet chats, old counters.
+      yield* Effect.sync(() => {
         const now = Date.now()
-        const w = windows.get(userId)
-        if (!w || w.resetAt < now) return windows.set(userId, { count: 1, resetAt: now + 60_000 }), true
-        return ++w.count <= MESSAGES_PER_MINUTE
-      }
+        for (const [id, p] of pending) if (p.expires < now) pending.delete(id)
+        for (const [chat, h] of history) if (h.at < now - IDLE_MS) history.delete(chat)
+        limits.sweep(now)
+      }).pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
       bot.command("start", async (ctx) => {
         const code = ctx.match.trim()
         if (code) {
-          const rows = await db(sql<{ account_id: string }>`
-            DELETE FROM telegram_link_codes WHERE code = ${code} AND expires_at > now() RETURNING account_id`)
-          const accountId = rows[0]?.account_id
-          if (!accountId) return void ctx.reply(`That link expired. Open ${webOrigin}/wallet and tap "Connect Telegram" again.`)
           const name = ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name
-          // One Telegram account per wallet: linking a new one replaces the old link.
-          await db(sql.withTransaction(Effect.gen(function*() {
-            yield* sql`DELETE FROM telegram_links WHERE account_id = ${accountId} OR telegram_user_id = ${ctx.from!.id}`
-            yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${ctx.from!.id}, ${accountId}, ${ctx.chat.id}, ${name})`
-          })))
+          const linked = await db(withSql(redeemLinkCode(code, { id: ctx.from!.id, chatId: ctx.chat.id, name })))
+          if (!linked) return void ctx.reply(`That link expired. Open ${webOrigin}/wallet and tap "Connect Telegram" again.`)
+          const { accountId } = linked
+          // Best effort: the chat that just lost the link hears it from us, in case it wasn't them.
+          if (linked.replacedChat) {
+            bot.api.sendMessage(linked.replacedChat, `${accountId} connected another Telegram account, so this chat is no longer linked. If that wasn't you, open ${webOrigin}/wallet.`)
+              .catch((e) => console.error("telegram notice failed:", describe(e)))
+          }
           history.delete(ctx.chat.id)
           return void ctx.reply(
             `You're in, ${accountId}. Tell me what you want, like ${testnet ? `"a $10 test gift card" (this is the testnet demo)` : `"a ₹500 Swiggy voucher"`}. Nothing is bought until you tap Confirm.`
@@ -157,13 +225,15 @@ export class Telegram extends Context.Service<Telegram, {
       bot.command("chatid", (ctx) => ctx.reply(`This chat's id is ${ctx.chat.id}.`))
 
       bot.on("message:text", (ctx) => inChat(ctx.chat.id, async () => {
-        if (!allowed(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
+        const over = limits.check(ctx.from.id)
+        if (over === "minute") return void ctx.reply("That's a lot of messages; give me a minute.")
+        if (over === "day") return void ctx.reply(`That's all I can chat today. You can still buy in the web app: ${webOrigin}/shop`)
         const accountId = await linkedAccount(ctx.from.id)
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
         if (!agent) return void ctx.reply(offline)
         await ctx.replyWithChatAction("typing")
         let failure: unknown
-        const turn = await agent(accountId, history.get(ctx.chat.id) ?? [], ctx.message.text).catch((e) => {
+        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text).catch((e) => {
           failure = e
           console.error("agent error", e)
           return undefined
@@ -176,7 +246,7 @@ export class Telegram extends Context.Service<Telegram, {
           }
           return void ctx.reply("Sorry, something went wrong on my side. Try again in a moment.")
         }
-        history.set(ctx.chat.id, trimHistory(turn.history))
+        history.set(ctx.chat.id, { messages: trimHistory(turn.history), at: Date.now() })
         if (!turn.pending) return void ctx.reply(turn.reply || "…")
         const id = randomUUID()
         pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
@@ -230,18 +300,24 @@ export class Telegram extends Context.Service<Telegram, {
         inChat(ctx.chat!.id, async () => {
           const outcome = await Effect.runPromise(
             // The contract refuses to debit more than the maximum shown on the button.
-            purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, idempotencyKey: id! }))
+            purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, ...(p.mode === "normal" ? {} : { luckyAmount: p.luckyAmount }), idempotencyKey: id! }))
               .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: result }))
           )
           await ctx.reply(outcome)
         })
       })
 
-      bot.catch((err) => console.error("telegram error", err.error))
+      bot.catch((err) => console.error("telegram error:", describe(err.error)))
       // Long polling: no webhook or public URL needed (ADR-0006).
       yield* Effect.acquireRelease(
-        // A rejection (e.g. 409: another process polls with this token) must not crash the server.
-        Effect.sync(() => void bot.start({ drop_pending_updates: true }).catch((e) => console.error("telegram polling stopped", e))),
+        // A rejection (e.g. 409: another process polls with this token) must not crash the server,
+        // but the bot is deaf from then on, so a human has to hear about it.
+        Effect.sync(() =>
+          void bot.start({ drop_pending_updates: true }).catch((e) => {
+            console.error("telegram polling stopped:", describe(e))
+            void Effect.runPromise(alerts.admin(`Telegram polling stopped (${describe(e)}): the bot answers no one until the server restarts`))
+          })
+        ),
         () => Effect.promise(() => bot.stop())
       )
       yield* Effect.logInfo("Telegram Agent is running")

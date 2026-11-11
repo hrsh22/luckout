@@ -18,8 +18,9 @@ export const spendable = (near: Near["Service"], id: string) =>
   near.account(id).pipe(Effect.map((a) => a.amount - BigInt(a.storageUsage) * PER_BYTE))
 
 /**
- * Every 10 minutes, the things that quietly stop purchases if nobody notices.
- * ponytail: Bitrefill's USD float isn't checked (no API for the USD sub-account); add when one exists.
+ * Every 10 minutes, the things that quietly stop purchases if nobody notices. Bitrefill's USD credit
+ * isn't checked here: Credit.ts reads it every two minutes (and alerts on unexplained drops), and
+ * Refill.ts tops it up or says why it can't.
  */
 export const Monitor = Layer.effectDiscard(
   Effect.gen(function*() {
@@ -43,16 +44,25 @@ export const Monitor = Layer.effectDiscard(
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
       }
-      // The contract owes customers' balances, the reserve and the proceeds. Customer balances aren't summed
-      // onchain, so what it holds must at least cover the other two; below that, customers' money is gone
-      // (a bug or an attack). The admin panel shows the customers' share.
-      const [held, owed] = yield* Effect.all([
+      // The contract owes customers' balances, the reserve and the proceeds, and must hold at least that much;
+      // below it, customers' money is gone (a bug or an attack). Balances aren't summed onchain, so this sums
+      // every account we know of (Db: known_accounts). Missing ones only make the debt look smaller, never a
+      // false alarm. (A Draw in flight holds its premium in no bucket for a block: also never a false alarm.)
+      // ponytail: one view per known account every 10 minutes; batch or add an onchain total when there are thousands.
+      const [held, owed, known] = yield* Effect.all([
         near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
-        near.view<{ free: string; locked: string; proceeds: string }>("get_reserve")
+        near.view<{ free: string; locked: string; proceeds: string }>("get_reserve"),
+        sql<{ account_id: string }>`SELECT account_id FROM known_accounts`.pipe(Effect.orDie)
       ])
       const house = BigInt(owed.free) + BigInt(owed.locked) + BigInt(owed.proceeds)
-      if (BigInt(held) < house) {
-        yield* alerts.admin(`contract ${near.contractId} holds ${Number(held) / 1e6} USDC, less than its reserve and proceeds alone (${Number(house) / 1e6}). Pause the contract and investigate now.`)
+      const each = yield* Effect.forEach(known, ({ account_id }) =>
+        near.view<{ balance: string } | null>("get_account", { account_id }).pipe(Effect.map((a) => BigInt(a?.balance ?? 0))), { concurrency: 4 })
+      const balances = each.reduce((sum, b) => sum + b, 0n)
+      if (BigInt(held) < house + balances) {
+        yield* alerts.admin(
+          `contract ${near.contractId} holds ${Number(held) / 1e6} USDC, less than it owes: reserve and proceeds ${Number(house) / 1e6} plus ` +
+            `customers' balances ${Number(balances) / 1e6}. Pause the contract and investigate now.`
+        )
       }
       if (refills && base.configured) {
         // A Base RPC hiccup only skips this check.

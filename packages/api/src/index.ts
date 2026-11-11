@@ -1,5 +1,5 @@
 import { Context, Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity } from "effect/http-api"
+import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 
 /** Whole micro-USDC (6 decimals), never floats (ADR-0004). */
 export const MicroUsdc = Schema.Int
@@ -131,6 +131,8 @@ export class NewPurchase extends Schema.Class<NewPurchase>("NewPurchase")({
   mode: Schema.optional(Mode),
   /** The most the customer agreed to pay (the quote they saw). The contract refuses to debit more. */
   maxPrice: MicroUsdc,
+  /** A Lucky Buy's Lucky Amount in the quote they saw: the purchase plays exactly that, or is refused. */
+  luckyAmount: Schema.optional(MicroUsdc),
   /** Client-generated; retrying with the same key never buys twice. */
   idempotencyKey: Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(64))
 }) {}
@@ -177,6 +179,11 @@ export class AuthApi extends HttpApiGroup.make("auth").add(
   HttpApiEndpoint.post("challenge", "/auth/challenge", { success: Challenge }),
   HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized })
 ) {}
+
+/** Ends every session of the signed-in account, on every device (a lost phone, a shared computer). */
+export class SessionApi extends HttpApiGroup.make("session").add(
+  HttpApiEndpoint.post("signOutEverywhere", "/session/sign-out-everywhere", { success: HttpApiSchema.NoContent })
+).middleware(Authorization) {}
 
 export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.post("create", "/purchases", {
@@ -439,6 +446,7 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   refills: Schema.Array(RefillView)
 }) {}
 
+// Left out of /openapi.json: to anyone but an admin, these endpoints don't exist.
 export class AdminApi extends HttpApiGroup.make("admin").add(
   /** 204 for an admin, NotFound for everyone else: decides whether the menu shows the Admin link. */
   HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
@@ -465,6 +473,6 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     success: HttpApiSchema.NoContent,
     error: [NotFound, PurchaseInvalid]
   })
-).middleware(Authorization) {}
+).middleware(Authorization).annotate(OpenApi.Exclude, true) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi) {}
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi) {}

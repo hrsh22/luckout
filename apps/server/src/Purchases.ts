@@ -4,8 +4,9 @@ import { SqlClient } from "effect/sql"
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit, WAITING_STEPS } from "./Credit.ts"
+import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
+import { stepRows } from "./Rows.ts"
 import { CLOSED_MESSAGE, Sales } from "./Sales.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 
@@ -35,7 +36,10 @@ interface Row {
   error: string | null
   admit_tx: Signed | null
   contract_purchase_id: number | string | bigint | null
-  admitted: { mode: Mode; max_price: string; lucky_amount: string } | null
+  /** The contract's record at admission; `created_at` (nanoseconds) is when Reclaim's 24 hours start. */
+  admitted: { mode: Mode; max_price: string; lucky_amount: string; created_at?: number | string } | null
+  /** A Lucky Buy's Lucky Amount when it was accepted: admission plays exactly it, or is refused. */
+  quoted_lucky_amount: number | string | bigint | null
   invoice_id: string | null
   redemption: string | null
   settle_tx: Signed | null
@@ -51,6 +55,14 @@ interface QuoteView {
   max_price: string
 }
 
+/** A purchase as the contract records it (`get_purchase`). */
+interface OnchainPurchase {
+  status: string
+  mode: Mode
+  max_price: string
+  cashback: string
+}
+
 /** Thrown on to stop a run; the reconciler picks the purchase up again later. */
 type Unknown = NearUnavailable | BitrefillUnavailable
 
@@ -60,8 +72,22 @@ const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */
 const MAX_OPEN_PER_ACCOUNT = 3
 const DAY_MS = 24 * 60 * 60 * 1000
-const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+/** A charged purchase still waiting for credit is refunded this long before the customer could Reclaim it. */
+const RECLAIM_MARGIN_MS = 60 * 60 * 1000
+/** A purchase that waited longer than this for credit is re-priced before it's admitted. */
+const REPRICE_AFTER_MS = 10 * 60 * 1000
 const time = (v: Date | string) => new Date(v).getTime()
+/** When the contract admitted (and so charged) it; the row's creation for rows saved without it. */
+const admittedAt = (row: Row) => (row.admitted?.created_at ? Number(row.admitted.created_at) / 1e6 : time(row.created_at))
+
+/**
+ * A Lucky Buy delivered onchain whose draw event we never saw (say, the customer re-ran the Draw):
+ * the amount paid and the Cashback as the contract records them. Its seed and roll aren't known here.
+ */
+const chainDraw = (p: OnchainPurchase) =>
+  typeof p.mode === "object"
+    ? { game_version: p.mode.lucky, final_price: String(Number(p.max_price) - Number(p.cashback)), cashback: p.cashback }
+    : null
 
 /** The contract's view of a customer (amounts in micro-USDC strings). */
 interface ContractAccount {
@@ -114,24 +140,9 @@ export class Purchases extends Context.Service<Purchases, {
 
       const load = (id: string) =>
         sql<Row>`SELECT * FROM purchases WHERE id = ${id}`.pipe(Effect.map((r) => r[0]!), Effect.orDie)
-      const save = (id: string, fields: Record<string, unknown>) => {
-        const json = (v: unknown) => (v === null || typeof v !== "object" ? v : JSON.stringify(v))
-        const values = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)]))
-        return sql`UPDATE purchases SET ${sql.update(values)}, updated_at = now() WHERE id = ${id}`.pipe(
-          Effect.asVoid,
-          Effect.orDie
-        )
-      }
-      /**
-       * Moves a purchase on from the step it was loaded at. False if another worker already
-       * moved it, in which case this run stops: each step's side effect happens once.
-       */
-      const move = (row: Row, fields: Record<string, unknown> & { step: Step }) => {
-        const json = (v: unknown) => (v === null || typeof v !== "object" ? v : JSON.stringify(v))
-        const values = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)]))
-        return sql`UPDATE purchases SET ${sql.update(values)}, updated_at = now() WHERE id = ${row.id} AND step = ${row.step} RETURNING id`
-          .pipe(Effect.map((r) => r.length === 1), Effect.orDie)
-      }
+      const rows = stepRows(sql, "purchases")
+      const save = rows.save
+      const move = (row: Row, fields: Record<string, unknown> & { step: Step }) => rows.move(row, fields)
 
       /** Sends (or resumes) one contract call whose signed transaction lives in `column`. */
       const submit = (row: Row, column: "admit_tx" | "settle_tx", method: string, args: object) => {
@@ -147,14 +158,31 @@ export class Purchases extends Context.Service<Purchases, {
         Effect.gen(function*() {
           switch (row.step) {
             case "admit": {
+              // A purchase that waited for credit is admitted at today's price (CONTEXT: Reference Price is the
+              // current Bitrefill price). A higher one can't pass the customer's max_debit, so the contract refuses
+              // it, uncharged; a lower one costs them less. Only before anything is signed for it.
+              if (!row.admit_tx && Date.now() - time(row.created_at) > REPRICE_AFTER_MS) {
+                const now = yield* price(row.voucher_id, row.package_value, true).pipe(
+                  Effect.map((p) => p.referencePrice),
+                  Effect.orElseSucceed(() => Number(row.reference_price))
+                )
+                if (now !== Number(row.reference_price)) {
+                  const lucky = row.quoted_lucky_amount === null ? null : Math.min(Number(row.quoted_lucky_amount), now)
+                  yield* sql`UPDATE purchases SET reference_price = ${now}, quoted_lucky_amount = ${lucky} WHERE id = ${row.id} AND step = 'admit'`.pipe(Effect.orDie)
+                  return true
+                }
+              }
               // order_id makes admission idempotent onchain: re-sending can never debit twice.
               const outcome = yield* submit(row, "admit_tx", "purchase", {
                 customer: row.account_id,
                 reference_price: String(row.reference_price),
                 mode: row.requested_mode,
                 order_id: row.id,
-                max_debit: String(row.max_debit ?? row.reference_price)
+                max_debit: String(row.max_debit ?? row.reference_price),
+                // A contract without this argument ignores it (near-sdk drops unknown JSON fields).
+                ...(row.quoted_lucky_amount !== null ? { lucky_amount: String(row.quoted_lucky_amount) } : {})
               }).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
+              // Refused, e.g. the price or the Cashback Reserve moved since the customer confirmed: their words, nothing charged.
               if (outcome instanceof ContractRejected) {
                 yield* move(row, { step: "rejected", error: outcome.message })
                 return false
@@ -200,7 +228,7 @@ export class Purchases extends Context.Service<Purchases, {
               ).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
               if (outcome instanceof ContractRejected) {
                 // Refused: read what actually happened onchain before telling the customer anything.
-                const onchain = yield* near.view<{ status: string } | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
+                const onchain = yield* near.view<OnchainPurchase | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
                 const status = onchain?.status
                 yield* Effect.logWarning(`settlement of ${row.id} refused (${outcome.message}); onchain ${status}`)
                 if (status === "Pending" || status === "Drawing") {
@@ -209,8 +237,12 @@ export class Purchases extends Context.Service<Purchases, {
                   return false
                 }
                 if (status === "Delivered") {
-                  if (confirm) yield* move(row, { step: "settled", error: outcome.message })
-                  else {
+                  if (confirm) {
+                    // A Lucky Buy drawn by another transaction (say, the customer's retry_draw): record its result
+                    // from the chain. That transaction isn't known here, so no settle_tx stands in as its proof.
+                    const draw = chainDraw(onchain!)
+                    yield* move(row, { step: "settled", error: outcome.message, ...(draw ? { draw, settle_tx: null } : {}) })
+                  } else {
                     yield* move(row, { step: "stuck", error: `fail_purchase refused, delivered onchain: ${outcome.message}` })
                     yield* alerts.admin(`purchase ${row.id} is delivered onchain but we tried to fail it`)
                   }
@@ -309,12 +341,13 @@ export class Purchases extends Context.Service<Purchases, {
             : {}),
           ...(d
             ? {
+              // A Draw recorded from the chain (chainDraw) has no seed, random or roll: "" and 0 say so.
               draw: new Draw({
                 gameVersion: Number(d.game_version),
-                seed: String(d.seed),
-                random: String(d.random),
-                roll: Number(d.roll),
-                finalBps: Number(d.final_bps),
+                seed: String(d.seed ?? ""),
+                random: String(d.random ?? ""),
+                roll: Number(d.roll ?? 0),
+                finalBps: Number(d.final_bps ?? 0),
                 finalPrice: Number(d.final_price),
                 cashback: Number(d.cashback)
               })
@@ -328,20 +361,33 @@ export class Purchases extends Context.Service<Purchases, {
         })
       }
 
-      const price = (voucherId: string, value: string) =>
+      const price = (voucherId: string, value: string, purchase = false) =>
         Effect.gen(function*() {
-          const voucher = yield* bitrefill.voucher(voucherId)
+          const voucher = yield* bitrefill.voucher(voucherId, { purchase })
           const pkg = voucher.packages.find((p) => p.value === value)
           if (!pkg) return yield* new PurchaseInvalid({ message: `${voucher.name} has no ${value} package` })
           return { voucher, referencePrice: pkg.priceMicroUsdc }
         })
 
+      // The contract's own terms (ADR-0004): the server never works out a Lucky Amount itself.
+      const contractQuote = (referencePrice: number, mode: Mode) =>
+        near.view<QuoteView>("quote", { reference_price: String(referencePrice), mode }).pipe(
+          Effect.tapError((e) => Effect.logWarning(`quote: ${e.message}`)),
+          // The RPC's own error text (endpoint, upstream reply) stays in our logs.
+          Effect.mapError((e) =>
+            new PurchaseInvalid({
+              message: e.message.includes("Reserve too small")
+                ? "The reserve is too small for a Lucky Buy right now; use Normal"
+                // The contract's own refusal (say, under the minimum) is the customer's answer; anything else isn't.
+                : /Smart contract panicked: ([^"\\]+)/.exec(e.message)?.[1] ?? "Couldn't get a price from NEAR right now. Try again in a moment."
+            })
+          )
+        )
+
       const quote = Effect.fn("Purchases.quote")(function*(voucherId: string, value: string, game: number | undefined) {
         const { referencePrice } = yield* price(voucherId, value)
         const mode: Mode = game === undefined ? "normal" : { lucky: game }
-        const q = yield* near.view<QuoteView>("quote", { reference_price: String(referencePrice), mode }).pipe(
-          Effect.mapError((e) => new PurchaseInvalid({ message: e.message.includes("Reserve too small") ? "The reserve is too small for a Lucky Buy right now; use Normal" : e.message }))
-        )
+        const q = yield* contractQuote(referencePrice, mode)
         return new Quote({
           mode: q.mode,
           referencePrice: Number(q.reference_price),
@@ -381,7 +427,7 @@ export class Purchases extends Context.Service<Purchases, {
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
         if (!open) return yield* new PurchaseInvalid({ message: CLOSED_MESSAGE })
-        const { voucher, referencePrice } = yield* price(input.voucherId, input.value)
+        const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true)
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
         // No card is refused for its size: one our credit can't cover waits, uncharged, for a refill
@@ -396,6 +442,15 @@ export class Purchases extends Context.Service<Purchases, {
           }
         }
         yield* preflight(accountId, referencePrice, input.maxPrice)
+        // A Lucky Buy is admitted at the Lucky Amount it's accepted under, or refused: it may wait a day for
+        // credit while the reserve moves. (Default Mode isn't known here; those admit as before.)
+        // The quote the customer saw carries it; without one (an older client), the contract's quote now.
+        if (typeof input.mode === "object" && input.luckyAmount !== undefined && !(input.luckyAmount > 0 && input.luckyAmount <= referencePrice)) {
+          return yield* new PurchaseInvalid({ message: "That quote is out of date; please confirm again." })
+        }
+        const luckyAmount = typeof input.mode !== "object"
+          ? null
+          : input.luckyAmount ?? (yield* contractQuote(referencePrice, input.mode)).lucky_amount
         // Deciding "go or wait" and recording it happen under one lock, so two purchases can never
         // both count on the same credit.
         const inserted = yield* credit.guard((free) =>
@@ -407,9 +462,9 @@ export class Purchases extends Context.Service<Purchases, {
               if ((w?.n ?? 0) > 0) return yield* new PurchaseInvalid({ message: "You already have a card on its way; try again when it's ready." })
             }
             return yield* sql<{ id: string; step: Step }>`
-              INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step)
+              INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, quoted_lucky_amount, step)
               VALUES (${accountId}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value},
-                      ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${wait ? "waiting" : "admit"})
+                      ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${luckyAmount}, ${wait ? "waiting" : "admit"})
               ON CONFLICT (account_id, idempotency_key) DO NOTHING
               RETURNING id, step`.pipe(Effect.orDie)
           })
@@ -482,8 +537,14 @@ export class Purchases extends Context.Service<Purchases, {
         const open = (yield* sales.status).open
         const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step IN ${sql.in(WAITING_STEPS)} ORDER BY created_at LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
-          // Measured from creation, so bouncing between ordering and restock can't extend it.
-          if (Date.now() - time(row.created_at) > waitMinutes * 60_000) {
+          // Its own run may still be finishing the step that moved it here (refreshing the credit after
+          // Bitrefill's refusal): moving it now would leave it at "ordering" with nothing running it.
+          if (running.has(row.id)) continue
+          // Measured from creation, so bouncing between ordering and restock can't extend it. A charged one
+          // is refunded an hour before the customer could Reclaim it, so a late order never races a reclaim.
+          const late = Date.now() - time(row.created_at) > waitMinutes * 60_000 ||
+            (row.step === "restock" && Date.now() > admittedAt(row) + DAY_MS - RECLAIM_MARGIN_MS)
+          if (late) {
             if (row.step === "waiting") {
               if (yield* move(row, { step: "rejected", error: "We couldn't get this card ready in time, so we cancelled it. You weren't charged." })) {
                 yield* notify(yield* load(row.id))
@@ -495,7 +556,12 @@ export class Purchases extends Context.Service<Purchases, {
           }
           if (row.step === "waiting" && !open) continue
           const next: Step = row.step === "waiting" ? "admit" : "ordering"
-          const go = yield* credit.guard((free) => (free >= Number(row.reference_price) ? move(row, { step: next, error: null }) : Effect.succeed(false)))
+          // Bitrefill refused a restock row for credit: order it again only on a balance read since then, never
+          // on the estimate that was already wrong (that would re-order every 10 seconds, spending Bitrefill calls).
+          const fresh = (readAt: Date | undefined) => row.step === "waiting" || (readAt !== undefined && readAt.getTime() >= time(row.updated_at))
+          const go = yield* credit.guard((free, readAt) =>
+            free >= Number(row.reference_price) && fresh(readAt) ? move(row, { step: next, error: null }) : Effect.succeed(false)
+          )
           // The customer may have left: tell them in Telegram how it ended.
           if (go) yield* FiberSet.run(workflows, advance(row.id, false, true))
         }
@@ -506,9 +572,14 @@ export class Purchases extends Context.Service<Purchases, {
       const settleClosed = Effect.gen(function*() {
         const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step = 'stuck' AND contract_purchase_id IS NOT NULL LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
-          const onchain = yield* near.view<{ status: string } | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
+          const onchain = yield* near.view<OnchainPurchase | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
           if (onchain?.status === "Reclaimed" || onchain?.status === "Failed") {
             if (yield* move(row, { step: "failed", error: onchain.status === "Reclaimed" ? "Reclaimed" : row.error })) yield* notify(yield* load(row.id))
+          }
+          // Delivered after we gave up (say, the customer re-ran the Draw): their code is ready, so show it.
+          if (onchain?.status === "Delivered" && row.redemption !== null) {
+            const draw = chainDraw(onchain)
+            if (yield* move(row, { step: "settled", ...(draw ? { draw, settle_tx: null } : {}) })) yield* notify(yield* load(row.id))
           }
         }
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))

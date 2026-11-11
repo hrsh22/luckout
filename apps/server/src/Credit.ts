@@ -25,6 +25,9 @@ export const CREDIT_DEFAULTS = {
 /** Smaller refills cost relatively more and churn invoices. */
 export const MIN_REFILL = 10_000_000
 
+/** Micro-USDC as dollars, for alerts and messages. */
+export const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed(2)}`
+
 /** Steps after which a real card's price will soon leave the credit (it's being admitted or ordered). */
 const HELD_STEPS = ["admit", "ordering"]
 /** Purchases waiting for credit: before being charged, or charged and waiting to be ordered. */
@@ -88,11 +91,12 @@ export class Credit extends Context.Service<Credit, {
   readonly refresh: Effect.Effect<Option.Option<Snapshot>>
   readonly view: Effect.Effect<CreditView>
   /**
-   * Runs `f` holding the credit lock, with what's free to spend. A purchase records whether it
-   * proceeds or waits inside `f`, so the next caller already sees it. Unknown credit (Bitrefill
-   * unreachable) counts as plenty: an order Bitrefill then refuses for credit waits safely.
+   * Runs `f` holding the credit lock, with what's free to spend and when the balance behind it was
+   * read. A purchase records whether it proceeds or waits inside `f`, so the next caller already
+   * sees it. Unknown credit (Bitrefill unreachable) counts as plenty, read at no time: an order
+   * Bitrefill then refuses for credit waits safely.
    */
-  guard<A, E, R>(f: (free: number) => Effect.Effect<A, E, R>): Effect.Effect<A, E, R>
+  guard<A, E, R>(f: (free: number, readAt: Date | undefined) => Effect.Effect<A, E, R>): Effect.Effect<A, E, R>
 }>()("luckout/Credit") {
   static readonly layer = Layer.effect(
     Credit,
@@ -147,7 +151,7 @@ export class Credit extends Context.Service<Credit, {
           const unexplained = previous.balance - orderedBetween - next.balance
           if (unexplained > 1_000_000) {
             yield* alerts.admin(
-              `Bitrefill credit dropped $${(unexplained / 1e6).toFixed(2)} more than our orders explain. Check the Bitrefill account for purchases we didn't make.`
+              `Bitrefill credit dropped ${usd(unexplained)} more than our orders explain. Check the Bitrefill account for purchases we didn't make.`
             )
           }
         }
@@ -186,8 +190,8 @@ export class Credit extends Context.Service<Credit, {
         } satisfies CreditView
       })
 
-      const guard = <A, E, R>(f: (free: number) => Effect.Effect<A, E, R>) =>
-        lock.withPermits(1)(Effect.flatMap(Effect.flatMap(current, freeFrom), f))
+      const guard = <A, E, R>(f: (free: number, readAt: Date | undefined) => Effect.Effect<A, E, R>) =>
+        lock.withPermits(1)(Effect.flatMap(current, (s) => Effect.flatMap(freeFrom(s), (free) => f(free, s?.readAt))))
 
       if (tracked) {
         yield* refresh.pipe(

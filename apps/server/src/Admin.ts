@@ -190,7 +190,7 @@ export class Admin extends Context.Service<Admin, {
           // updated_at in the past lets the reconciler pick it up on its next pass (it skips rows touched in the last 30s).
           yield* sql`UPDATE purchases SET step = ${step}, error = NULL, attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute'
                      WHERE id = ${id} AND step = ${row.step}`
-          yield* Effect.log(`admin ${by} retried purchase ${id} at ${step}`)
+          yield* alerts.admin(`${by} retried purchase ${id} at ${step}`)
         }).pipe(Effect.catchTag("SqlError", Effect.die))
 
       const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`

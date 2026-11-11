@@ -127,6 +127,25 @@ test("what the network would refuse is refused before we pay", async () => {
   }
 })
 
+test("a padded copy of a signed call is refused, so it can't dodge the dedupe", async () => {
+  const w = world()
+  const padded = Buffer.concat([Buffer.from(withdraw(), "base64"), Buffer.from([0])]).toString("base64")
+  assert.equal((await w.tag(w.send(padded)))._tag, "RelayFailed")
+  assert.deepEqual(w.relayed, [])
+})
+
+test("parallel requests can't all pass the cap before one is saved", async () => {
+  const w = world()
+  const tags = await w.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet"))
+    const sends = [11n, 12n, 13n, 14n, 15n].map((nonce) =>
+      w.send(withdraw({ nonce })).pipe(Effect.match({ onFailure: (e) => e._tag, onSuccess: () => "ok" })))
+    return yield* Effect.all(sends, { concurrency: "unbounded" })
+  }))
+  assert.deepEqual(w.relayed, ["withdraw"])
+  assert.deepEqual(tags.toSorted(), ["RelayUnavailable", "RelayUnavailable", "RelayUnavailable", "RelayUnavailable", "ok"])
+})
+
 test("a call that fails onchain says why", async () => {
   const w = world({ failures: ["Not enough unlocked balance"] })
   const r = await w.tag(w.send(withdraw()))

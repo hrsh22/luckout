@@ -24,6 +24,8 @@ export interface Pending {
   readonly mode: Mode
   readonly maxPrice: number
   readonly referencePrice: number
+  /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
+  readonly luckyAmount: number
 }
 
 const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
@@ -195,7 +197,7 @@ export const makeAgent = (deps: {
         if (!(yield* deps.shopOpen)) return { error: "Purchases are paused for a few minutes; their balance is safe. Suggest trying again soon." }
         const why = blocker(a, q.maxPrice, deps.web)
         if (why) return { error: why }
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice })
+        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
         return {
           shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
         }
