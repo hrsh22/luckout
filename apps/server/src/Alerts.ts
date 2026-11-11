@@ -21,9 +21,10 @@ export class Alerts extends Context.Service<Alerts, {
       // Both networks may alert the same chat: every alert says which one it's about.
       const network = yield* Network
 
+      /** True once Telegram took the message. A failure logs its HTTP status only: the URL holds the bot token. */
       const telegram = (chatId: string | number, text: string) =>
         Option.isNone(token)
-          ? Effect.void
+          ? Effect.succeed(false)
           : Effect.tryPromise(() =>
             fetch(`https://api.telegram.org/bot${Redacted.value(token.value)}/sendMessage`, {
               method: "POST",
@@ -31,17 +32,28 @@ export class Alerts extends Context.Service<Alerts, {
               body: JSON.stringify({ chat_id: chatId, text, link_preview_options: { is_disabled: true } }),
               signal: AbortSignal.timeout(10_000)
             })
-          ).pipe(Effect.ignore)
+          ).pipe(
+            Effect.map((res) => res.status),
+            Effect.orElseSucceed(() => 0),
+            Effect.flatMap((status) =>
+              status >= 200 && status < 300
+                ? Effect.succeed(true)
+                : Effect.as(Effect.logError("alert delivery failed", status ? `HTTP ${status}` : "no response"), false)
+            )
+          )
 
       // ponytail: in-memory dedupe, resets on restart; fine for one process.
+      const DEDUPE_MS = 60 * 60_000
       const lastSent = new Map<string, number>()
       const admin = (text: string) =>
         Effect.gen(function*() {
           yield* Effect.logError(`ALERT [${network}] ${text}`)
           const now = Date.now()
-          if ((lastSent.get(text) ?? 0) > now - 60 * 60_000) return
+          for (const [t, at] of lastSent) if (at <= now - DEDUPE_MS) lastSent.delete(t)
+          if (lastSent.has(text) || Option.isNone(adminChat)) return
+          // Held while sending, so the same alert at the same moment isn't sent twice; only a delivered one counts.
           lastSent.set(text, now)
-          if (Option.isSome(adminChat)) yield* telegram(adminChat.value, `⚠️ Luckout [${network}]: ${text}`)
+          if (!(yield* telegram(adminChat.value, `⚠️ Luckout [${network}]: ${text}`))) lastSent.delete(text)
         })
 
       const customer = (accountId: string, text: string) =>

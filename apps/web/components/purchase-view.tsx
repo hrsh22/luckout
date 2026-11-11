@@ -16,7 +16,7 @@ import Link from "next/link"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-/** Follows a pending purchase until it settles, so the page never shows a stale "in progress". */
+/** Follows a pending purchase until it settles, so the page never shows a stale "in progress"; once a minute after 15 minutes (stuck). */
 export function usePolledPurchase(p: Purchase | undefined, token: string | undefined) {
   const [live, setLive] = useState(p)
   useEffect(() => setLive(p), [p])
@@ -24,7 +24,7 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
     if (!live || (live.status !== "pending" && live.status !== "waiting") || !token) return
     const t = setTimeout(() => {
       api((c) => c.purchases.get({ params: { id: live.id } }), token).then(setLive, () => {})
-    }, live.status === "waiting" ? 5000 : 3000)
+    }, Date.now() - new Date(live.createdAt).getTime() > 15 * 60_000 ? 60_000 : live.status === "waiting" ? 5000 : 3000)
     return () => clearTimeout(t)
   }, [live, token])
   return live
@@ -34,6 +34,9 @@ const redemption = (p: Purchase) => {
   const text = (k: string) => (typeof p.redemption?.[k] === "string" ? (p.redemption[k] as string) : undefined)
   return { code: text("code"), pin: text("pin"), link: safeLink(text("link")), instructions: text("instructions") }
 }
+
+/** A delivered Lucky Buy whose Draw isn't recorded yet. */
+const drawPending = (p: Purchase) => p.status === "delivered" && !p.draw && typeof p.mode === "object"
 
 /** What happened, in one line: the result first, then the price it's measured against. */
 const headline = (p: Purchase) =>
@@ -55,7 +58,8 @@ const headline = (p: Purchase) =>
 
 /** The card right after buying: the result as a voucher with a cashback stub, then the code. */
 export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => void }) {
-  const paid = p.draw ? p.draw.finalPrice : p.referencePrice
+  // Until its Draw is recorded, a Lucky Buy has cost its Maximum Price.
+  const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
   const below = p.draw && p.draw.finalPrice < p.referencePrice
   const pal = modePalette(p.mode)
   const r = redemption(p)
@@ -75,6 +79,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
         {p.status === "delivered" && (
           <p className="mt-2 text-[17px] opacity-85">
             You paid <b>{usdUp(paid)}</b> for a {usd(p.referencePrice)} card{below ? `, ${usd(p.referencePrice - paid)} less than the price` : ""}.
+            {drawPending(p) && " Draw result pending."}
           </p>
         )}
         {p.status === "pending" && <Progress />}
@@ -86,7 +91,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
             <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
               <div><dt className="opacity-70">Paid up front</dt><dd className="text-base font-semibold">{usdUp(p.maxPrice ?? paid)}</dd></div>
               <div><dt className="opacity-70">Cashback</dt><dd className="text-base font-semibold">{usd(p.draw.cashback)}</dd></div>
-              <div><dt className="opacity-70">{modeName(p.mode)} roll</dt><dd className="text-base font-semibold">{p.draw.roll}</dd></div>
+              <div><dt className="opacity-70">{modeName(p.mode)} roll</dt><dd className="text-base font-semibold">{p.draw.seed ? p.draw.roll : "—"}</dd></div>
             </dl>
           </>
         )}
@@ -294,7 +299,7 @@ const STATUS: Record<Purchase["status"], string> = {
 
 /** One line of history; open it for the code and the proof. */
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
-  const paid = p.draw ? p.draw.finalPrice : p.referencePrice
+  const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
   const pal = modePalette(p.mode)
   const tile = keyPalette(p.voucherName)
   return (
@@ -337,7 +342,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                 <div><dt className="text-muted">Price</dt><dd className="font-semibold">{usd(p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usdUp(p.maxPrice ?? p.referencePrice)}</dd></div>
-                <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : "None"}</dd></div>
+                <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : drawPending(p) ? "Draw result pending" : "None"}</dd></div>
                 <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{p.status === "delivered" ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}

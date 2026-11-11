@@ -30,7 +30,10 @@ run() {
   if [ "${GO:-}" = 1 ]; then near "$@"; fi
 }
 
-cargo near build non-reproducible-wasm
+# The reproducible build (needs Docker), or WASM=<path> to the one CI built for this commit
+# (gh run download <run id> -n luckout-wasm-<commit>): anyone can rebuild it and compare the code hash.
+if [ -z "${WASM:-}" ]; then cargo near build reproducible-wasm; WASM=target/near/luckout.wasm; fi
+python3 code-hash.py "$WASM"
 
 # 1. The accounts under luckout.near. Balances leave room above each account's alert line (Monitor):
 #    the contract's storage holds its ~250 KB of code (~2.5 NEAR) plus a NEAR free for records.
@@ -39,7 +42,7 @@ for sub in "$APP:3.6" "$SERVER:0.7" "$RELAYER:0.7" "$TREASURY:0.3"; do
 done
 
 # 2. The contract, owned by OWNER, with the server as operator.
-run contract deploy "$APP" use-file target/near/luckout.wasm with-init-call new \
+run contract deploy "$APP" use-file "$WASM" with-init-call new \
   json-args "{\"owner\":\"$OWNER\",\"operator\":\"$SERVER\",\"usdc\":\"$USDC\"}" prepaid-gas '100 Tgas' attached-deposit '0 NEAR' "${NET[@]}" "${SIGN[@]}"
 
 # 3. USDC accounts for the contract (deposits) and the treasury (pulls and refunds).

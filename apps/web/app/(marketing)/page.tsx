@@ -35,7 +35,11 @@ const FAQ = [
 ]
 
 export default async function Home() {
-  const stats = await view<Stats>(contractId, "get_stats").catch(() => undefined)
+  // Read again at most every 60 s (revalidate above). Without the reserve, lucky modes show no amounts.
+  const [stats, free] = await Promise.all([
+    view<Stats>(contractId, "get_stats").catch(() => undefined),
+    view<{ free: string }>(contractId, "get_reserve").then((r) => r.free, () => undefined)
+  ])
   const avg = stats && liveAverage(stats)
 
   return (
@@ -85,25 +89,29 @@ export default async function Home() {
         <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {MODES.map((m) => {
             const p = modePalette(m.mode)
-            const outcomes = pricedOutcomes(m, simpleQuote(m, EXAMPLE))
-            const slabs = outcomes.filter((o) => o.cashback > 0)
-            const free = slabs.find((o) => o.price === 0)
+            const q = m.premiumBps === 0 || free !== undefined ? simpleQuote(m, EXAMPLE, free ?? 0) : undefined
+            const slabs = q ? pricedOutcomes(m, q).filter((o) => o.cashback > 0) : []
+            const best = slabs.at(-1)
+            const freeSlab = slabs.find((o) => o.price === 0)
             return (
               <article key={m.name} className="flex min-h-[300px] flex-col rounded-[2.1rem] p-7" style={{ background: p.tile, color: p.ink }}>
                 <div className="flex items-center gap-2">
                   <h3 className="font-display text-[30px] font-extrabold">{m.name}</h3>
                   {m.name === RECOMMENDED && <span className="pill">Recommended</span>}
                 </div>
-                <p className="font-display mt-4 text-5xl font-extrabold">{usdUp(outcomes[0]!.price)}</p>
-                <p className="opacity-75">{m.premiumBps ? `up front, +${m.premiumBps / 100}%` : "exactly the price"}</p>
+                <p className="font-display mt-4 text-5xl font-extrabold">{q ? usdUp(q.maxPrice) : `+${m.premiumBps / 100}%`}</p>
+                <p className="opacity-75">{m.premiumBps ? (q ? `up front, +${m.premiumBps / 100}%` : "up front") : "exactly the price"}</p>
                 <div className="mt-auto pt-6 text-[15px]">
                   {m.premiumBps === 0
                     ? <p className="opacity-80">No Draw, no cashback. The card at its price.</p>
                     : (
                       <>
                         <p><b>{cashbackChanceBps(m) / 100}%</b> get cashback</p>
-                        <p className="opacity-80">{slabs.filter((o) => o !== free).map((o) => `${o.pct}%`).join(", ")} back, or free</p>
-                        {free && <span className="pill mt-3 !bg-white/70">Free {free.chanceBps / 100}% of the time</span>}
+                        {q && !best && <p className="opacity-80">None right now: the Cashback Reserve is empty.</p>}
+                        {best && (q!.luckyAmount === q!.referencePrice
+                          ? <p className="opacity-80">{slabs.filter((o) => o !== freeSlab).map((o) => `${o.pct}%`).join(", ")} back, or free</p>
+                          : <p className="opacity-80">Up to {usd(best.cashback)} back for now, more as the Cashback Reserve grows</p>)}
+                        {freeSlab && <span className="pill mt-3 !bg-white/70">Free {freeSlab.chanceBps / 100}% of the time</span>}
                       </>
                     )}
                 </div>
@@ -111,9 +119,11 @@ export default async function Home() {
             )
           })}
         </div>
-        <div className="mt-4">
-          <OddsGrid />
-        </div>
+        {free !== undefined && (
+          <div className="mt-4">
+            <OddsGrid free={free} />
+          </div>
+        )}
       </section>
 
       <section className="relative mx-auto max-w-[1240px] px-6 pt-24 sm:px-10">
@@ -155,16 +165,16 @@ export default async function Home() {
           <Link href="/wallet" className={`${buttonVariants({ variant: "light", size: "lg" })} mt-7`}>Connect Telegram</Link>
         </div>
         <div className="flex flex-col gap-3 rounded-[2.25rem] bg-sky-soft p-6 text-[15px] sm:p-8" aria-label="Example chat with the Luckout bot">
-          <p className="self-end rounded-3xl rounded-br-md bg-ink px-4 py-2.5 text-white">A $25 Steam card, Classic</p>
+          <p className="self-end rounded-3xl rounded-br-md bg-ink px-4 py-2.5 text-white">A $10 Steam card, Classic</p>
           <div className="flex max-w-[88%] flex-col gap-3 rounded-3xl rounded-bl-md bg-white px-4 py-3 shadow-card">
-            <p>Steam $25: price $25.00. On Classic you pay $30.00 now, and 40% of the time you get cashback, from 20% to all of it.</p>
+            <p>Steam $10: price $10.00. On Classic you pay $12.00 now, and 40% of the time you get cashback, from 20% to all of it.</p>
             <div className="grid grid-cols-2 gap-2 text-sm font-semibold">
-              <span className="rounded-full bg-soft px-3 py-2 text-center">Buy for $30.00</span>
+              <span className="rounded-full bg-soft px-3 py-2 text-center">Buy for $12.00</span>
               <span className="rounded-full bg-soft px-3 py-2 text-center">Cancel</span>
             </div>
           </div>
           <div className="flex max-w-[88%] items-center gap-3 rounded-3xl rounded-bl-md bg-gold px-4 py-3 font-semibold text-gold-ink">
-            $6.00 cashback! You paid $24.00, $1.00 less than the price.
+            $2.40 cashback! You paid $9.60, $0.40 less than the price.
           </div>
         </div>
       </section>

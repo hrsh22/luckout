@@ -161,6 +161,26 @@ const migrations = Migrator.fromRecord({
     yield* sql`ALTER TABLE refills ADD COLUMN paid_at TIMESTAMPTZ`
     yield* sql`DROP INDEX refills_one_open`
     yield* sql`CREATE UNIQUE INDEX refills_one_open ON refills ((true)) WHERE step IN ('fund', 'quote', 'send', 'swapping', 'invoice', 'pay', 'crediting')`
+  }),
+  // Audit fixes: a stuck refill remembers the step it stopped at, so only a stuck swap carries on by
+  // itself; a Lucky Buy is admitted at the Lucky Amount it was accepted under, or not at all.
+  "0010_refill_stuck_at_and_quoted_lucky_amount": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE refills ADD COLUMN stuck_at TEXT`
+    // Refills already stuck: one that paid 1Click but never had a successful swap stopped while swapping.
+    yield* sql`UPDATE refills SET stuck_at = 'swapping'
+               WHERE step = 'stuck' AND send_tx IS NOT NULL AND pay_tx IS NULL AND swap_status IS DISTINCT FROM 'SUCCESS'`
+    yield* sql`ALTER TABLE purchases ADD COLUMN quoted_lucky_amount BIGINT`
+  }),
+  // Every account that ever signed in, bought, relayed or linked Telegram: the solvency check sums their
+  // balances. "Sign out everywhere" ends every session issued before its time.
+  "0011_known_accounts_and_session_resets": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TABLE known_accounts (account_id TEXT PRIMARY KEY, first_seen TIMESTAMPTZ NOT NULL DEFAULT now())`
+    yield* sql`INSERT INTO known_accounts (account_id)
+               SELECT account_id FROM purchases UNION SELECT account_id FROM relays UNION SELECT account_id FROM telegram_links
+               ON CONFLICT DO NOTHING`
+    yield* sql`CREATE TABLE session_resets (account_id TEXT PRIMARY KEY, after TIMESTAMPTZ NOT NULL)`
   })
 })
 

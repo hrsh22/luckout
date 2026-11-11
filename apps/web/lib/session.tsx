@@ -1,8 +1,9 @@
 "use client"
 
 import { type Mode, SignedChallenge } from "@luckout/api"
+import { useQueryClient } from "@tanstack/react-query"
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
-import { api, cancelled, errorMessage, UNAUTHORIZED } from "./api"
+import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
 import { type Call, canSignForRelay, contractId, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -32,8 +33,10 @@ interface Session {
   token: string | undefined
   /** False until the saved session has been checked against the wallet. */
   ready: boolean
-  /** undefined while loading, null before the first deposit */
+  /** undefined while loading (or if reading it failed: see accountError), null before the first deposit */
   account: ContractAccount | null | undefined
+  /** Why the account couldn't be read from the chain; refresh() tries again. */
+  accountError: string | undefined
   /** USDC held in the wallet, not yet deposited */
   walletUsdc: string | undefined
   /** NEAR in the wallet, in yoctoNEAR: it pays the network fee unless our relayer does */
@@ -83,30 +86,42 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<{ accountId: string; token: string }>()
   const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<ContractAccount | null>()
+  const [accountError, setAccountError] = useState<string>()
   const [walletUsdc, setWalletUsdc] = useState<string>()
   const [walletNear, setWalletNear] = useState<string>()
   const [gasFree, setGasFree] = useState<boolean>()
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
+  const qc = useQueryClient()
 
+  // Signed out, switched or expired: nothing read for the last account (purchases and their codes
+  // included) may outlive it.
   const clear = useCallback(() => {
     forget()
     setSession(undefined)
     setAccount(undefined)
+    setAccountError(undefined)
     setWalletUsdc(undefined)
     setWalletNear(undefined)
     setGasFree(undefined)
-  }, [])
+    qc.clear()
+  }, [qc])
 
   const token = session?.token
   const refresh = useCallback(async () => {
     if (!accountId || !token) return
-    const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token)])
-    setAccount(a)
-    setWalletUsdc(w)
-    setWalletNear(n)
-    setGasFree(free)
+    try {
+      const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token)])
+      setAccount(a)
+      setWalletUsdc(w)
+      setWalletNear(n)
+      setGasFree(free)
+      setAccountError(undefined)
+    } catch (e) {
+      setAccountError(errorMessage(e))
+      throw e
+    }
   }, [accountId, token])
 
   // Restore the saved session only if the wallet is still on the same account.
@@ -163,13 +178,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       } catch {}
       // Read the account before switching to signed in, so the page settles once: a new customer
       // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
-      const [[a, w, n], free] = await Promise.all([
-        readAccount(s.accountId).catch(() => [undefined, undefined, undefined] as const),
-        relayable(s.token)
-      ])
-      setAccount(a)
-      setWalletUsdc(w)
-      setWalletNear(n)
+      const [read, free] = await Promise.all([readAccount(s.accountId).catch((e: unknown) => new Error(errorMessage(e))), relayable(s.token)])
+      if (read instanceof Error) setAccountError(read.message)
+      else {
+        setAccount(read[0])
+        setWalletUsdc(read[1])
+        setWalletNear(read[2])
+        setAccountError(undefined)
+      }
       setGasFree(free)
       setSession({ accountId: s.accountId, token: s.token })
       return undefined
@@ -200,6 +216,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           try {
             await api((c) => c.relay.send({ payload: { signedDelegate } }), session.token, "90 seconds")
           } catch (e) {
+            if (e instanceof TimedOut) throw new Error(`${e.message} It may still go through, so check your balance before trying again.`)
             // Nothing was sent: the relayer is off or today's free relays are used, so the wallet sends the rest.
             if ((e as { _tag?: string })?._tag !== "RelayUnavailable") throw e
             setGasFree(false)
@@ -220,7 +237,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <SessionContext
-      value={{ accountId, token, ready, account, walletUsdc, walletNear, gasFree, signing, signInError, signIn, signOut, refresh, send }}
+      value={{ accountId, token, ready, account, accountError, walletUsdc, walletNear, gasFree, signing, signInError, signIn, signOut, refresh, send }}
     >
       {children}
     </SessionContext>

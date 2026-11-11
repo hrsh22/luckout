@@ -5,15 +5,13 @@ import { TopUp } from "@/components/top-up"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
-import { toMicro, usd, usdUp } from "@/lib/format"
+import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
 import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
 import { toast } from "sonner"
 import { useEffect, useState } from "react"
-
-const dollars = (micro: number) => (micro / 1e6).toFixed(micro % 1e6 ? 2 : 0)
 
 /** An amount field with quick picks. Everything stays in micro-USDC except what's typed. */
 export function AmountField({ value, onChange, picks, label }: {

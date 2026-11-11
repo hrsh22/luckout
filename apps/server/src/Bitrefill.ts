@@ -101,8 +101,12 @@ const REFUSED_STATUS = new Set([400, 401, 403, 404, 429])
 const httpStatus = (e: unknown) => (HttpClientError.isHttpClientError(e) ? e.response?.status ?? 0 : 0)
 
 // MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most
-// 20 of them, so anonymous browsing can never starve a customer's purchase.
+// 20 of them, and browsing (catalog pages, quotes) at most 12, so junk lookups can never starve a
+// customer's purchase or its price check.
 const LOOKUPS_PER_MINUTE = 20
+const BROWSE_LOOKUPS_PER_MINUTE = 12
+/** What a Bitrefill product id looks like; anything else is refused before spending a lookup. */
+const PRODUCT_ID = /^[a-z0-9][a-z0-9-]{0,99}$/
 
 /** "5.53" → 5_530_000, with no floating point (ADR-0004). */
 export const usdToMicro = (usd: string): number => {
@@ -119,8 +123,11 @@ export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: Readonl
 
 export class Bitrefill extends Context.Service<Bitrefill, {
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
-  /** Packages with their current USD price, the Reference Price. */
-  voucher(id: string): Effect.Effect<Voucher, BitrefillUnavailable>
+  /**
+   * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
+   * the lookup may use the whole budget, not just browsing's share.
+   */
+  voucher(id: string, options?: { readonly purchase?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
   /** Places a paid order from the USD balance. Save the invoice id before awaiting delivery. */
   order(id: string, value: string): Effect.Effect<Order, BitrefillUnavailable>
   /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). */
@@ -208,26 +215,37 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       })
 
       // ponytail: fixed one-minute window in memory, one process.
-      let budget = { left: LOOKUPS_PER_MINUTE, resetAt: 0 }
-      const spendLookup = Effect.suspend(() => {
-        const now = Date.now()
-        if (budget.resetAt < now) budget = { left: LOOKUPS_PER_MINUTE, resetAt: now + 60_000 }
-        return budget.left-- > 0
-          ? Effect.void
-          : Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
-      })
+      let budget = { used: 0, resetAt: 0 }
+      const spendLookup = (limit: number) =>
+        Effect.suspend(() => {
+          const now = Date.now()
+          if (budget.resetAt < now) budget = { used: 0, resetAt: now + 60_000 }
+          if (budget.used >= limit) return Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
+          budget.used++
+          return Effect.void
+        })
+      const lookup = (id: string, limit: number) =>
+        spendLookup(limit).pipe(
+          Effect.andThen(mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct)),
+          Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e))
+        )
 
       // Prices are cached for a minute; failures only briefly, so a busy minute doesn't stick.
-      const mcpPrices = yield* Cache.makeWith(
-        (id: string) =>
-          spendLookup.pipe(
-            Effect.andThen(mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct)),
-            Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e))
-          ),
-        { capacity: 1_000, timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds") }
-      )
+      const mcpPrices = yield* Cache.makeWith((id: string) => lookup(id, BROWSE_LOOKUPS_PER_MINUTE), {
+        capacity: 1_000,
+        timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds")
+      })
+      // A purchase takes a cached price if there is one, and otherwise looks it up on the whole budget:
+      // a browsing failure cached for this id never blocks it.
+      const purchasePrice = (id: string) =>
+        Effect.flatMap(Cache.getSuccess(mcpPrices, id), (cached) =>
+          Option.isSome(cached)
+            ? Effect.succeed(cached.value)
+            : Effect.tap(lookup(id, LOOKUPS_PER_MINUTE), (p) => Cache.set(mcpPrices, id, p)))
 
-      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string) {
+      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string, options?: { readonly purchase?: boolean }) {
+        // Refused before anything is spent, so junk ids can't use up the lookups.
+        if (!PRODUCT_ID.test(id)) return yield* new BitrefillUnavailable({ message: "No such voucher" })
         if (testnet && !isTest(id)) {
           return yield* new BitrefillUnavailable({ message: "This is the testnet demo: only Bitrefill's test cards can be bought here." })
         }
@@ -245,7 +263,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             ))
           })
         }
-        const p = yield* Cache.get(mcpPrices, id)
+        const p = yield* (options?.purchase ? purchasePrice(id) : Cache.get(mcpPrices, id))
         const all = p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
         return new Voucher({
           id: p.id,

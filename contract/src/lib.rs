@@ -215,6 +215,11 @@ pub struct Contract {
 impl Contract {
     #[init]
     pub fn new(owner: AccountId, operator: AccountId, usdc: AccountId) -> Self {
+        // As in set_operator: the server's key never owns the contract, and the contract never operates itself.
+        require!(
+            operator != owner && operator != env::current_account_id(),
+            "That account can't be the operator"
+        );
         let mut c = Self {
             owner,
             operator,
@@ -340,7 +345,9 @@ impl Contract {
     /// `mode: None` uses the customer's Default Mode. `order_id` makes admission idempotent:
     /// the same order is admitted once, whatever the retries, and only for the same customer
     /// and price. `max_debit` is the most the customer confirmed; a higher Maximum Price (the
-    /// price or the reserve moved) is refused.
+    /// price or the reserve moved) is refused. `lucky_amount` is the Lucky Amount the customer
+    /// confirmed: the purchase plays exactly that, or is refused if the reserve no longer covers
+    /// it. Without it, the Lucky Amount is the most the reserve allows at admission.
     pub fn purchase(
         &mut self,
         customer: AccountId,
@@ -348,6 +355,7 @@ impl Contract {
         mode: Option<Mode>,
         order_id: String,
         max_debit: U128,
+        lucky_amount: Option<U128>,
     ) -> u64 {
         self.assert_operator();
         require!(
@@ -366,7 +374,7 @@ impl Contract {
         let r = reference_price.0;
         let mut a = self.existing_account(&customer);
         let mode = mode.unwrap_or(a.default_mode);
-        let q = self.quote_internal(r, mode);
+        let q = self.quote_internal(r, mode, lucky_amount.map(|l| l.0));
         let debit = q.max_price.0;
         require!(
             debit <= max_debit.0,
@@ -464,6 +472,13 @@ impl Contract {
     /// from a block that didn't exist when delivery was confirmed.
     #[private]
     pub fn on_draw(&mut self, purchase_id: u64) -> Purchase {
+        // `#[private]` alone also admits a transaction signed by the contract account's own key,
+        // which could bundle this with an action that panics on a bad outcome and so re-roll the
+        // Draw. Real callbacks are signed by the operator, the customer or the relayer.
+        require!(
+            env::signer_account_id() != env::current_account_id(),
+            "The contract's own key can't run a Draw"
+        );
         let mut p = self.load(purchase_id);
         require!(p.status == Status::Drawing, "Draw already done");
         let Mode::Lucky(v) = p.mode else {
@@ -537,9 +552,18 @@ impl Contract {
         id
     }
 
+    /// The server holds the operator's key: it can't be the owner, the proposed owner, the
+    /// treasury, or the contract itself (whose signature the Draw refuses).
     #[payable]
     pub fn set_operator(&mut self, operator: AccountId) {
         self.assert_owner();
+        require!(
+            operator != env::current_account_id()
+                && operator != self.owner
+                && Some(&operator) != self.pending_owner.as_ref()
+                && Some(&operator) != self.treasury.as_ref(),
+            "That account can't be the operator"
+        );
         emit("set_operator", json!({ "operator": operator }));
         self.operator = operator;
     }
@@ -631,9 +655,9 @@ impl Contract {
             self.pending_owner.as_ref() == Some(&caller),
             "Not the proposed owner"
         );
-        // The treasury may have been set after the proposal: still never the owner.
+        // The treasury or the operator may have been set after the proposal: still never the owner.
         require!(
-            Some(&caller) != self.treasury.as_ref(),
+            Some(&caller) != self.treasury.as_ref() && caller != self.operator,
             "That account can't own the contract"
         );
         let previous = std::mem::replace(&mut self.owner, caller.clone());
@@ -714,7 +738,7 @@ impl Contract {
     // ---------- views ----------
 
     pub fn quote(&self, reference_price: U128, mode: Mode) -> Quote {
-        self.quote_internal(reference_price.0, mode)
+        self.quote_internal(reference_price.0, mode, None)
     }
 
     pub fn get_account(&self, account_id: AccountId) -> Option<Account> {
@@ -762,16 +786,35 @@ impl Contract {
 }
 
 impl Contract {
-    fn quote_internal(&self, r: u128, mode: Mode) -> Quote {
+    /// `confirmed` is the Lucky Amount the customer saw: it is played as is, or refused if the
+    /// reserve no longer covers it. Without it, the Lucky Amount is the most the reserve allows now.
+    fn quote_internal(&self, r: u128, mode: Mode, confirmed: Option<u128>) -> Quote {
         require!(r >= MIN_REFERENCE_PRICE, "Purchases start at 0.5 USDC");
         let (lucky, premium) = match mode {
-            Mode::Normal => (0, 0),
+            Mode::Normal => {
+                require!(
+                    confirmed.unwrap_or(0) == 0,
+                    "A Normal purchase has no Lucky Amount"
+                );
+                (0, 0)
+            }
             Mode::Lucky(v) => {
                 let version = self.version(v);
                 let cap = self.free_reserve * DISCOUNT_CAP_BPS / BPS;
-                let lucky = r
+                let allowed = r
                     .min(cap * BPS / version.max_discount_bps())
                     .min(MAX_CASHBACK * BPS / version.max_cashback_bps());
+                let lucky = match confirmed {
+                    None => allowed,
+                    Some(x) => {
+                        require!(x > 0 && x <= r, "Invalid Lucky Amount");
+                        require!(
+                            x <= allowed,
+                            "The Cashback Reserve moved since you confirmed; please confirm again"
+                        );
+                        x
+                    }
+                };
                 require!(lucky > 0, "Reserve too small for a Lucky Buy; use Normal");
                 // Rounded up, so even tiny Lucky Amounts average at least 105.6% (ADR-0004).
                 (lucky, (lucky * version.premium_bps as u128).div_ceil(BPS))

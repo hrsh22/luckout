@@ -1,5 +1,6 @@
 use super::*;
-use near_sdk::test_utils::{get_logs, VMContextBuilder};
+use near_sdk::mock::MockAction;
+use near_sdk::test_utils::{get_created_receipts, get_logs, VMContextBuilder};
 use near_sdk::testing_env;
 
 const USDC: u128 = 1_000_000;
@@ -224,6 +225,13 @@ fn lucky_buy_needs_a_reserve() {
     c.quote(U128(6 * USDC), Mode::Lucky(0));
 }
 
+/// Runs a scheduled Draw the way NEAR would, and checks the Cashback stays within its lock.
+fn draw(c: &mut Contract, pid: u64, seed: [u8; 32]) {
+    call(contract(), DAY, seed, 0);
+    let p = c.on_draw(pid);
+    assert!(p.cashback.0 <= p.max_price.0 - p.reference_price.0 + p.locked.0);
+}
+
 #[test]
 fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
     let reserve = 500 * USDC;
@@ -231,6 +239,11 @@ fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
     let deposit = 100_000 * USDC;
     let mut c = setup(reserve, deposit);
     raise_limits(&mut c);
+    set_treasury(&mut c, u128::MAX / 4);
+    // The USDC the contract holds: what came in, less every transfer out that went through.
+    let mut held = reserve + deposit;
+    // A Lucky Buy whose Draw is scheduled but hasn't run yet.
+    let mut drawing: Option<(u64, [u8; 32])> = None;
 
     for i in 0..400u64 {
         let seed = env::sha256_array(&i.to_le_bytes());
@@ -246,27 +259,103 @@ fn money_is_conserved_and_the_reserve_always_covers_every_payout() {
             Some(mode),
             format!("loop{}", i),
             U128(u128::MAX),
+            None,
         );
         let p = c.get_purchase(pid).unwrap();
         // The lock covers the largest possible discount and never exceeds the cap it was admitted under.
         assert!(c.locked_reserve >= p.locked.0);
-
-        if i % 9 == 0 {
-            call(operator(), DAY, seed, 0);
-            c.fail_purchase(pid);
-            assert_eq!(c.get_purchase(pid).unwrap().cashback.0, 0);
-        } else {
-            let p = deliver(&mut c, pid, seed);
-            assert_eq!(p.status, Status::Delivered);
-            assert!(p.cashback.0 <= p.max_price.0 - p.reference_price.0 + p.locked.0);
+        // Last round's Draw runs only now, so this purchase was admitted while its lock was held.
+        if let Some((d, s)) = drawing.take() {
+            draw(&mut c, d, s);
         }
-        assert_eq!(c.locked_reserve, 0);
+
+        match i % 9 {
+            0 => {
+                call(operator(), DAY, seed, 0);
+                c.fail_purchase(pid);
+            }
+            1 => {
+                call(alice(), DAY + RECLAIM_AFTER_NS, seed, 0);
+                c.reclaim(pid);
+            }
+            _ => {
+                call(operator(), DAY, seed, 0);
+                let _ = c.confirm_delivery(pid);
+                if c.get_purchase(pid).unwrap().status == Status::Drawing {
+                    if i % 5 == 2 {
+                        drawing = Some((pid, seed));
+                    } else {
+                        draw(&mut c, pid, seed);
+                    }
+                }
+            }
+        }
+        if i % 9 < 2 {
+            assert_eq!(c.get_purchase(pid).unwrap().cashback.0, 0);
+        }
+
+        // Every kind of transfer out; in alternate stretches of 24 rounds they fail and are put back.
+        if i % 6 == 3 {
+            let (amount, payout) = match (i / 6) % 4 {
+                0 => {
+                    let amount = balance(&c) / 100;
+                    call(alice(), DAY, seed, 1);
+                    let _ = c.withdraw(U128(amount));
+                    (amount, Payout::Customer(alice()))
+                }
+                1 => {
+                    let amount = c.free_reserve / 20;
+                    call(owner(), DAY, seed, 1);
+                    let _ = c.withdraw_reserve(U128(amount));
+                    (amount, Payout::Reserve)
+                }
+                2 => {
+                    let amount = c.proceeds / 2;
+                    call(owner(), DAY, seed, 1);
+                    let _ = c.withdraw_proceeds(U128(amount), None);
+                    (amount, Payout::Proceeds)
+                }
+                _ => {
+                    let amount = c.proceeds / 2;
+                    call(treasury(), DAY, seed, 1);
+                    let _ = c.sweep_proceeds(U128(amount));
+                    (amount, Payout::Sweep { day: 1 })
+                }
+            };
+            held -= amount;
+            let failed = (i / 24) % 2 == 1;
+            call(contract(), DAY, seed, 0);
+            c.on_send(
+                payout,
+                U128(amount),
+                if failed {
+                    Err(PromiseError::Failed)
+                } else {
+                    Ok(())
+                },
+            );
+            if failed {
+                held += amount;
+            }
+        }
+
+        // A scheduled Draw still holds its lock, and its Risk Premium until it runs.
+        let (premium, lock) = drawing.map_or((0, 0), |(d, _)| {
+            let p = c.get_purchase(d).unwrap();
+            (p.max_price.0 - p.reference_price.0, p.locked.0)
+        });
+        assert_eq!(c.locked_reserve, lock);
         assert_eq!(
-            balance(&c) + c.free_reserve + c.locked_reserve + c.proceeds,
-            reserve + deposit
+            balance(&c) + c.free_reserve + c.locked_reserve + c.proceeds + premium,
+            held
         );
     }
-    assert!(c.lucky_settled > 250);
+    if let Some((d, s)) = drawing {
+        draw(&mut c, d, s);
+    }
+    assert_eq!(c.locked_reserve, 0);
+    assert_eq!(balance(&c) + c.free_reserve + c.proceeds, held);
+    assert_eq!(c.lucky_settled, 233);
 }
 
 #[test]
@@ -280,6 +369,7 @@ fn draw_is_recomputable_from_the_event() {
         Some(Mode::Lucky(2)),
         format!("o{}", 2),
         U128(u128::MAX),
+        None,
     );
     let p = deliver(&mut c, pid, seed);
 
@@ -311,6 +401,7 @@ fn default_mode_is_used_when_no_mode_is_given() {
         None,
         format!("o{}", 3),
         U128(u128::MAX),
+        None,
     );
     assert_eq!(c.get_purchase(pid).unwrap().mode, Mode::Lucky(1));
     assert_eq!(balance(&c), 95_200_000);
@@ -326,6 +417,7 @@ fn failed_purchase_returns_everything() {
         Some(Mode::Lucky(2)),
         format!("o{}", 4),
         U128(u128::MAX),
+        None,
     );
     assert_eq!(balance(&c), 85 * USDC);
     c.fail_purchase(pid);
@@ -343,6 +435,7 @@ fn reclaim_opens_after_24_hours() {
         Some(Mode::Lucky(0)),
         format!("o{}", 5),
         U128(u128::MAX),
+        None,
     );
     call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
     c.reclaim(pid);
@@ -361,6 +454,7 @@ fn reclaim_too_early_fails() {
         Some(Mode::Lucky(0)),
         format!("o{}", 6),
         U128(u128::MAX),
+        None,
     );
     as_(alice());
     c.reclaim(pid);
@@ -377,6 +471,7 @@ fn cannot_fail_after_the_draw() {
         Some(Mode::Lucky(2)),
         format!("o{}", 7),
         U128(u128::MAX),
+        None,
     );
     let _ = c.confirm_delivery(pid);
     c.fail_purchase(pid);
@@ -394,6 +489,7 @@ fn per_purchase_limit_counts_the_maximum_price() {
         Some(Mode::Lucky(2)),
         format!("o{}", 8),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -408,6 +504,7 @@ fn daily_limit_is_enforced() {
         Some(Mode::Normal),
         format!("o{}", 9),
         U128(u128::MAX),
+        None,
     );
     c.purchase(
         alice(),
@@ -415,6 +512,7 @@ fn daily_limit_is_enforced() {
         Some(Mode::Normal),
         format!("o{}", 10),
         U128(u128::MAX),
+        None,
     );
     c.purchase(
         alice(),
@@ -422,6 +520,7 @@ fn daily_limit_is_enforced() {
         Some(Mode::Normal),
         format!("o{}", 11),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -435,6 +534,7 @@ fn daily_limit_resets_the_next_day() {
         Some(Mode::Normal),
         format!("o{}", 12),
         U128(u128::MAX),
+        None,
     );
     c.purchase(
         alice(),
@@ -442,6 +542,7 @@ fn daily_limit_resets_the_next_day() {
         Some(Mode::Normal),
         format!("o{}", 13),
         U128(u128::MAX),
+        None,
     );
     call(operator(), 2 * DAY, [0; 32], 0);
     c.purchase(
@@ -450,6 +551,7 @@ fn daily_limit_resets_the_next_day() {
         Some(Mode::Normal),
         format!("o{}", 14),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -464,6 +566,7 @@ fn only_the_operator_can_buy() {
         Some(Mode::Normal),
         format!("o{}", 15),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -488,6 +591,7 @@ fn pause_stops_new_purchases() {
         Some(Mode::Normal),
         format!("o{}", 16),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -509,6 +613,7 @@ fn the_same_order_is_admitted_once() {
         Some(Mode::Lucky(2)),
         "order-1".into(),
         U128(15 * USDC),
+        None,
     );
     let b = c.purchase(
         alice(),
@@ -516,6 +621,7 @@ fn the_same_order_is_admitted_once() {
         Some(Mode::Lucky(2)),
         "order-1".into(),
         U128(15 * USDC),
+        None,
     );
     assert_eq!(a, b);
     assert_eq!(balance(&c), 85 * USDC, "debited once");
@@ -537,6 +643,7 @@ fn never_debits_more_than_the_customer_confirmed() {
         None,
         "order-2".into(),
         U128(10 * USDC),
+        None,
     );
 }
 
@@ -558,6 +665,7 @@ fn the_draw_runs_in_a_later_receipt_the_confirmation_cant_revert() {
         Some(Mode::Lucky(2)),
         "o-later".into(),
         U128(u128::MAX),
+        None,
     );
     let _ = c.confirm_delivery(pid);
     // Nothing about the outcome exists yet in the confirming receipt.
@@ -582,6 +690,7 @@ fn a_draw_runs_once() {
         Some(Mode::Lucky(2)),
         "o-once".into(),
         U128(u128::MAX),
+        None,
     );
     deliver(&mut c, pid, [1; 32]);
     call(contract(), DAY, [2; 32], 0);
@@ -598,6 +707,7 @@ fn a_failed_draw_callback_can_be_retried_by_the_customer() {
         Some(Mode::Lucky(0)),
         "o-retry".into(),
         U128(u128::MAX),
+        None,
     );
     let _ = c.confirm_delivery(pid);
     as_(alice());
@@ -617,6 +727,7 @@ fn strangers_cant_retry_a_draw() {
         Some(Mode::Lucky(0)),
         "o-stranger".into(),
         U128(u128::MAX),
+        None,
     );
     let _ = c.confirm_delivery(pid);
     as_(id("mallory.near"));
@@ -633,6 +744,7 @@ fn normal_purchases_settle_in_the_confirming_call() {
         Some(Mode::Normal),
         "o-normal".into(),
         U128(u128::MAX),
+        None,
     );
     let _ = c.confirm_delivery(pid);
     assert_eq!(c.get_purchase(pid).unwrap().status, Status::Delivered);
@@ -652,6 +764,7 @@ fn an_order_id_is_bound_to_its_customer_and_price() {
         Some(Mode::Normal),
         "order-x".into(),
         U128(u128::MAX),
+        None,
     );
     c.purchase(
         id("bob.near"),
@@ -659,6 +772,7 @@ fn an_order_id_is_bound_to_its_customer_and_price() {
         Some(Mode::Normal),
         "order-x".into(),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -673,6 +787,7 @@ fn purchases_start_at_half_a_usdc() {
         Some(Mode::Normal),
         "o-tiny".into(),
         U128(u128::MAX),
+        None,
     );
 }
 
@@ -701,6 +816,7 @@ fn with_proceeds(n: u64) -> Contract {
             Some(Mode::Normal),
             format!("p{i}"),
             U128(u128::MAX),
+            None,
         );
         deliver(&mut c, p, [0; 32]);
     }
@@ -924,4 +1040,533 @@ fn the_owner_can_never_be_the_treasury() {
     let mut c = with_proceeds(0);
     call(owner(), DAY, [0; 32], 1);
     c.set_treasury(Some(owner()), U128(USDC));
+}
+
+// ---------- money out ----------
+
+/// The operator admits a purchase for Alice with no confirmed Lucky Amount.
+fn buy(c: &mut Contract, r: u128, mode: Mode, order: &str) -> u64 {
+    as_(operator());
+    c.purchase(
+        alice(),
+        U128(r),
+        Some(mode),
+        order.into(),
+        U128(u128::MAX),
+        None,
+    )
+}
+
+/// The calls this receipt scheduled, as (receiver, method, JSON args).
+fn sent() -> Vec<(AccountId, String, Value)> {
+    get_created_receipts()
+        .into_iter()
+        .flat_map(|r| {
+            r.actions.into_iter().filter_map(move |a| match a {
+                MockAction::FunctionCallWeight {
+                    method_name, args, ..
+                } => Some((
+                    r.receiver_id.clone(),
+                    String::from_utf8(method_name).unwrap(),
+                    near_sdk::serde_json::from_slice(&args).unwrap(),
+                )),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+/// An `ft_transfer` of `amount` to `to`, then `on_send` with `payout` to put it back if it fails.
+fn transfer(to: &str, amount: u128, payout: Value) -> Vec<(AccountId, String, Value)> {
+    vec![
+        (
+            usdc(),
+            "ft_transfer".into(),
+            json!({ "receiver_id": to, "amount": amount.to_string(), "memo": null }),
+        ),
+        (
+            contract(),
+            "on_send".into(),
+            json!({ "payout": payout, "amount": amount.to_string() }),
+        ),
+    ]
+}
+
+#[test]
+fn withdrawing_debits_the_balance_and_sends_the_usdc() {
+    let mut c = setup(0, 100 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(40 * USDC));
+    assert_eq!(balance(&c), 60 * USDC);
+    assert_eq!(
+        sent(),
+        transfer("alice.near", 40 * USDC, json!({ "Customer": "alice.near" }))
+    );
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance")]
+fn cannot_withdraw_more_than_the_balance() {
+    let mut c = setup(0, 100 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(100 * USDC + 1));
+}
+
+#[test]
+fn the_owner_withdraws_free_reserve() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    // 10 USDC on Jackpot locks 10 USDC of the reserve.
+    buy(&mut c, 10 * USDC, Mode::Lucky(2), "o-lock");
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(490 * USDC));
+    assert_eq!((c.free_reserve, c.locked_reserve), (0, 10 * USDC));
+    assert_eq!(sent(), transfer("owner.near", 490 * USDC, json!("Reserve")));
+}
+
+#[test]
+#[should_panic(expected = "Exceeds free reserve")]
+fn locked_reserve_cannot_be_withdrawn() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    buy(&mut c, 10 * USDC, Mode::Lucky(2), "o-lock");
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(490 * USDC + 1));
+}
+
+#[test]
+fn a_failed_payout_is_put_back() {
+    // Alice holds 80 USDC and the proceeds 20.
+    let mut c = with_proceeds(2);
+    as_(usdc());
+    let _ = c.ft_on_transfer(owner(), U128(100 * USDC), "reserve".into());
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(30 * USDC));
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(40 * USDC));
+    let _ = c.withdraw_proceeds(U128(20 * USDC), None);
+    assert_eq!(
+        (balance(&c), c.free_reserve, c.proceeds),
+        (50 * USDC, 60 * USDC, 0)
+    );
+    call(contract(), DAY, [0; 32], 0);
+    // A transfer that went through changes nothing.
+    c.on_send(Payout::Customer(alice()), U128(30 * USDC), Ok(()));
+    assert_eq!(balance(&c), 50 * USDC);
+    for (payout, amount) in [
+        (Payout::Customer(alice()), 30),
+        (Payout::Reserve, 40),
+        (Payout::Proceeds, 20),
+    ] {
+        c.on_send(payout, U128(amount * USDC), Err(PromiseError::Failed));
+    }
+    assert_eq!(
+        (balance(&c), c.free_reserve, c.proceeds),
+        (80 * USDC, 100 * USDC, 20 * USDC)
+    );
+    assert_eq!(
+        get_logs()
+            .iter()
+            .filter(|l| l.contains("payout_restored"))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn a_failed_pull_from_an_earlier_day_leaves_todays_cap_alone() {
+    let mut c = with_proceeds(5);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(30 * USDC));
+    call(treasury(), 2 * DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(10 * USDC));
+    call(contract(), 2 * DAY, [0; 32], 0);
+    c.on_send(
+        Payout::Sweep { day: 1 },
+        U128(30 * USDC),
+        Err(PromiseError::Failed),
+    );
+    assert_eq!(c.get_reserve().proceeds.0, 40 * USDC);
+    assert_eq!(c.get_config()["swept_today"], "10000000");
+}
+
+// ---------- purchases ----------
+
+#[test]
+fn confirming_a_drawing_purchase_again_only_reschedules_the_draw() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(1), "o-again");
+    let _ = c.confirm_delivery(pid);
+    as_(operator());
+    let _ = c.confirm_delivery(pid);
+    assert_eq!(c.get_reserve().proceeds.0, 10 * USDC, "proceeds added once");
+    assert_eq!(c.get_purchase(pid).unwrap().status, Status::Drawing);
+    assert_eq!(
+        sent(),
+        [(contract(), "on_draw".into(), json!({ "purchase_id": pid }))]
+    );
+    assert!(get_logs().is_empty(), "no second delivery event");
+    draw(&mut c, pid, [5; 32]);
+    assert_eq!(c.get_purchase(pid).unwrap().status, Status::Delivered);
+}
+
+#[test]
+#[should_panic(expected = "Deposit at least 1 USDC")]
+fn deposits_start_at_1_usdc() {
+    let mut c = setup(0, 100 * USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(alice(), U128(USDC - 1), "".into());
+}
+
+#[test]
+#[should_panic(expected = "Only the owner funds the reserve")]
+fn only_the_owner_funds_the_reserve() {
+    let mut c = setup(0, 100 * USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(alice(), U128(100 * USDC), "reserve".into());
+}
+
+#[test]
+#[should_panic(expected = "Unknown deposit message")]
+fn unknown_deposit_messages_are_refused() {
+    let mut c = setup(0, 100 * USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(alice(), U128(100 * USDC), "gift".into());
+}
+
+#[test]
+#[should_panic(expected = "Not your purchase")]
+fn only_the_customer_can_reclaim() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(0), "o-mine");
+    call(id("mallory.near"), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(pid);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_confirmed_purchase_cannot_be_reclaimed_even_before_its_draw() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(0), "o-drawing");
+    let _ = c.confirm_delivery(pid);
+    call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(pid);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_failed_purchase_cannot_be_confirmed() {
+    let mut c = setup(0, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Normal, "o-failed");
+    c.fail_purchase(pid);
+    let _ = c.confirm_delivery(pid);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_reclaimed_purchase_cannot_be_failed() {
+    let mut c = setup(0, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Normal, "o-reclaimed");
+    call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(pid);
+    as_(operator());
+    c.fail_purchase(pid);
+}
+
+#[test]
+fn pausing_leaves_confirm_fail_reclaim_and_withdraw_working() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let lucky = buy(&mut c, 10 * USDC, Mode::Lucky(1), "p-1");
+    let failed = buy(&mut c, 10 * USDC, Mode::Normal, "p-2");
+    let reclaimed = buy(&mut c, 10 * USDC, Mode::Normal, "p-3");
+    call(owner(), DAY, [0; 32], 1);
+    c.set_paused(true);
+    let p = deliver(&mut c, lucky, [4; 32]);
+    assert_eq!(p.status, Status::Delivered);
+    as_(operator());
+    c.fail_purchase(failed);
+    call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(reclaimed);
+    // 100 - 12 for Classic + 20 back from the failed and reclaimed ones.
+    assert_eq!(balance(&c), 88 * USDC + p.cashback.0);
+    call(alice(), DAY, [0; 32], 1);
+    let all = balance(&c);
+    let _ = c.withdraw(U128(all));
+    assert_eq!(balance(&c), 0);
+}
+
+// ---------- the confirmed Lucky Amount ----------
+
+/// Alice confirms 100 USDC on Lite against a 50 USDC reserve: a 10 USDC Lucky Amount for 101.
+fn confirmed_quote() -> (Contract, Quote) {
+    let mut c = setup(50 * USDC, 200 * USDC);
+    raise_limits(&mut c);
+    let q = c.quote(U128(100 * USDC), Mode::Lucky(0));
+    assert_eq!((q.lucky_amount.0, q.max_price.0), (10 * USDC, 101 * USDC));
+    (c, q)
+}
+
+/// The operator admits exactly what the customer confirmed in `q`.
+fn buy_confirmed(c: &mut Contract, q: &Quote, order: &str) -> u64 {
+    as_(operator());
+    c.purchase(
+        alice(),
+        q.reference_price,
+        Some(q.mode),
+        order.into(),
+        q.max_price,
+        Some(q.lucky_amount),
+    )
+}
+
+fn fund_reserve(c: &mut Contract, amount: u128) {
+    as_(usdc());
+    let _ = c.ft_on_transfer(owner(), U128(amount), "reserve".into());
+}
+
+fn shrink_reserve(c: &mut Contract, amount: u128) {
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(amount));
+}
+
+#[test]
+fn a_confirmed_lucky_amount_is_kept_when_the_reserve_grows() {
+    let (mut c, q) = confirmed_quote();
+    fund_reserve(&mut c, 50 * USDC);
+    let pid = buy_confirmed(&mut c, &q, "o-grew");
+    let p = c.get_purchase(pid).unwrap();
+    assert_eq!(
+        (p.lucky_amount.0, p.max_price.0, p.locked.0),
+        (10 * USDC, 101 * USDC, 10 * USDC)
+    );
+    assert_eq!(balance(&c), 99 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "Price changed since you confirmed")]
+fn without_it_a_grown_reserve_refuses_the_confirmed_price() {
+    let (mut c, q) = confirmed_quote();
+    fund_reserve(&mut c, 50 * USDC);
+    as_(operator());
+    c.purchase(
+        alice(),
+        q.reference_price,
+        Some(q.mode),
+        "o-grew".into(),
+        q.max_price,
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "The Cashback Reserve moved since you confirmed")]
+fn a_confirmed_lucky_amount_is_refused_when_the_reserve_shrinks() {
+    let (mut c, q) = confirmed_quote();
+    shrink_reserve(&mut c, 25 * USDC);
+    buy_confirmed(&mut c, &q, "o-shrank");
+}
+
+#[test]
+fn without_it_a_shrunk_reserve_admits_a_smaller_game() {
+    let (mut c, q) = confirmed_quote();
+    shrink_reserve(&mut c, 25 * USDC);
+    as_(operator());
+    let pid = c.purchase(
+        alice(),
+        q.reference_price,
+        Some(q.mode),
+        "o-shrank".into(),
+        q.max_price,
+        None,
+    );
+    let p = c.get_purchase(pid).unwrap();
+    assert_eq!((p.lucky_amount.0, p.max_price.0), (5 * USDC, 100_500_000));
+}
+
+#[test]
+fn a_replayed_order_returns_its_purchase_before_checking_the_reserve() {
+    let (mut c, q) = confirmed_quote();
+    let a = buy_confirmed(&mut c, &q, "o-replay");
+    shrink_reserve(&mut c, 30 * USDC);
+    assert_eq!(buy_confirmed(&mut c, &q, "o-replay"), a);
+    assert_eq!(balance(&c), 99 * USDC, "debited once");
+}
+
+#[test]
+fn a_normal_purchase_may_confirm_a_zero_lucky_amount() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    c.purchase(
+        alice(),
+        U128(10 * USDC),
+        Some(Mode::Normal),
+        "o-zero".into(),
+        U128(10 * USDC),
+        Some(U128(0)),
+    );
+    assert_eq!(balance(&c), 90 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "A Normal purchase has no Lucky Amount")]
+fn a_normal_purchase_has_no_lucky_amount() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    c.purchase(
+        alice(),
+        U128(10 * USDC),
+        Some(Mode::Normal),
+        "o-one".into(),
+        U128(10 * USDC),
+        Some(U128(1)),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Invalid Lucky Amount")]
+fn the_lucky_amount_cannot_exceed_the_price() {
+    let (mut c, mut q) = confirmed_quote();
+    fund_reserve(&mut c, 10_000 * USDC);
+    q.lucky_amount = U128(q.reference_price.0 + 1);
+    buy_confirmed(&mut c, &q, "o-over");
+}
+
+/// The wasm entry point parses its JSON arguments into a struct like this one (near-sdk-macros 5,
+/// `AttrSigInfo::input_struct_deser`), so callers that leave out `lucky_amount` get `None`.
+#[test]
+fn callers_may_leave_out_the_lucky_amount() {
+    #[derive(near_sdk::serde::Deserialize)]
+    #[serde(crate = "near_sdk::serde")]
+    #[allow(dead_code)]
+    struct Input {
+        customer: AccountId,
+        reference_price: U128,
+        mode: Option<Mode>,
+        order_id: String,
+        max_debit: U128,
+        lucky_amount: Option<U128>,
+    }
+    let parse = |args: &Value| {
+        near_sdk::serde_json::from_slice::<Input>(args.to_string().as_bytes())
+            .unwrap()
+            .lucky_amount
+    };
+    let mut args = json!({
+        "customer": "alice.near",
+        "reference_price": "100000000",
+        "mode": { "lucky": 0 },
+        "order_id": "o-1",
+        "max_debit": "101000000",
+    });
+    assert_eq!(parse(&args), None);
+    args["lucky_amount"] = json!("10000000");
+    assert_eq!(parse(&args), Some(U128(10 * USDC)));
+}
+
+// ---------- roles ----------
+
+fn set_operator(c: &mut Contract, to: AccountId) {
+    call(owner(), DAY, [0; 32], 1);
+    c.set_operator(to);
+}
+
+#[test]
+fn the_owner_can_replace_the_operator() {
+    let mut c = setup(0, 100 * USDC);
+    set_operator(&mut c, id("server2.near"));
+    as_(id("server2.near"));
+    c.purchase(
+        alice(),
+        U128(USDC),
+        Some(Mode::Normal),
+        "o-new-operator".into(),
+        U128(USDC),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_owner_cannot_be_the_operator() {
+    let mut c = with_proceeds(0);
+    set_operator(&mut c, owner());
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_proposed_owner_cannot_be_the_operator() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    set_operator(&mut c, heir());
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_treasury_cannot_be_the_operator() {
+    let mut c = with_proceeds(0);
+    set_treasury(&mut c, USDC);
+    set_operator(&mut c, treasury());
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_contract_cannot_be_its_own_operator() {
+    let mut c = with_proceeds(0);
+    set_operator(&mut c, contract());
+}
+
+#[test]
+#[should_panic(expected = "That account can't own the contract")]
+fn the_operator_can_never_accept_ownership() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(heir()));
+    // What the old `set_operator` could leave on chain: the proposed owner made operator.
+    c.operator = heir();
+    call(heir(), DAY, [0; 32], 1);
+    c.accept_owner();
+}
+
+// ---------- the Draw and the contract's own key ----------
+
+/// The Draw callback as NEAR runs it: the contract is the predecessor, `signer` signed the transaction.
+fn draw_signed_by(c: &mut Contract, signer: AccountId, pid: u64) -> Purchase {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(contract())
+        .predecessor_account_id(contract())
+        .signer_account_id(signer)
+        .build());
+    c.on_draw(pid)
+}
+
+#[test]
+fn a_draw_scheduled_by_the_operator_runs() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(2), "o-signed");
+    let _ = c.confirm_delivery(pid);
+    assert_eq!(
+        draw_signed_by(&mut c, operator(), pid).status,
+        Status::Delivered
+    );
+}
+
+#[test]
+#[should_panic(expected = "The contract's own key can't run a Draw")]
+fn the_contract_key_cannot_run_a_draw() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(2), "o-self");
+    let _ = c.confirm_delivery(pid);
+    draw_signed_by(&mut c, contract(), pid);
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_owner_is_never_the_operator_from_the_start() {
+    as_(owner());
+    Contract::new(owner(), owner(), usdc());
+}
+
+#[test]
+#[should_panic(expected = "That account can't be the operator")]
+fn the_contract_never_operates_itself_from_the_start() {
+    as_(owner());
+    Contract::new(owner(), contract(), usdc());
 }

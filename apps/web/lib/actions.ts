@@ -21,7 +21,7 @@ export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {}
 
 /**
  * Everything the customer signs with their wallet. Each one says what's happening in a toast,
- * re-reads the balance, and resolves false (never throws) if the wallet refused or it failed.
+ * re-reads the balance whatever happened, and resolves false (never throws) if the wallet refused or it failed.
  */
 export function useWalletActions() {
   const { accountId, refresh, send } = useSession()
@@ -31,7 +31,6 @@ export function useWalletActions() {
     const id = toast.loading(pending, { description: "Approve it in your wallet." })
     try {
       await send(...calls)
-      await refresh().catch(() => {})
       toast.success(done, { id, description: undefined })
       return true
     } catch (e) {
@@ -39,6 +38,9 @@ export function useWalletActions() {
       if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
       else toast.error(errorMessage(e), { id, description: undefined })
       return false
+    } finally {
+      // Even a failure or a timeout may have moved money: show what the chain says now.
+      await refresh().catch(() => {})
     }
   }
 

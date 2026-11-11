@@ -1,6 +1,6 @@
-import { Effect, Option } from "effect"
+import { Effect, Option, Result } from "effect"
 import { HttpMiddleware, HttpServerRequest, HttpServerResponse } from "effect/http"
-import { IpNetwork } from "effect/net"
+import { IpNetwork, NetAddress } from "effect/net"
 
 // Only nginx on the VM and Cloudflare in front of it may set X-Forwarded-For. The client
 // is the rightmost untrusted address, so a spoofed header can't dodge the limit.
@@ -14,21 +14,42 @@ const CLOUDFLARE = [
 const trustedProxies = ["127.0.0.0/8", "::1/128", ...CLOUDFLARE].map(IpNetwork.fromStringUnsafe)
 
 const WINDOW_MS = 60_000
-/** Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer (it spends NEAR). */
-const limitFor = (path: string) => (path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") ? 20 : 120)
+/**
+ * Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer
+ * (it spends NEAR); a card or a quote asks Bitrefill and NEAR, with room for the shop's hover prefetch.
+ */
+const limitFor = (path: string) =>
+  path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay")
+    ? 20
+    : path.startsWith("/catalog/") || path === "/quote"
+    ? 60
+    : 120
+
+/** Who a request counts against: an IPv6 client by its /64 (one home or phone gets a whole /64), IPv4 as is. */
+export const clientBucket = (ip: string) => {
+  const parsed = NetAddress.ipFromString(ip)
+  if (Result.isFailure(parsed)) return ip
+  const a = NetAddress.toCanonical(parsed.success) // ::ffff:1.2.3.4 is 1.2.3.4
+  return NetAddress.isIpv6Address(a) ? IpNetwork.format(IpNetwork.fromAddressUnsafe(a, 64)) : NetAddress.formatIp(a)
+}
 
 // ponytail: fixed window in memory, one process; move to Redis or the proxy if we run several.
 const windows = new Map<string, { count: number; resetAt: number }>()
+let sweptAt = 0
 
 const limit = HttpMiddleware.make((app) =>
   Effect.gen(function*() {
     const req = yield* HttpServerRequest.HttpServerRequest
-    const ip = Option.getOrElse(req.remoteAddress, () => "unknown")
+    const ip = clientBucket(Option.getOrElse(req.remoteAddress, () => "unknown"))
     const path = req.url.split("?")[0] ?? "/"
     const max = limitFor(path)
     const key = `${ip} ${max}`
     const now = Date.now()
-    if (windows.size > 50_000) for (const [k, w] of windows) if (w.resetAt < now) windows.delete(k)
+    // Expired windows go at most once a window, not on every request.
+    if (now - sweptAt > WINDOW_MS) {
+      sweptAt = now
+      for (const [k, w] of windows) if (w.resetAt < now) windows.delete(k)
+    }
     const w = windows.get(key)
     if (!w || w.resetAt < now) windows.set(key, { count: 1, resetAt: now + WINDOW_MS })
     else if (++w.count > max) {

@@ -47,6 +47,7 @@ The alert says "was delivered but closed onchain as Reclaimed". The customer has
 
 - **Something looks wrong, stop new purchases now:** Admin → **Stop sales**. Any admin can, no wallet needed. The web shows a "paused for a few minutes" banner, the Buy button explains, and the Telegram bot stops offering Buy buttons. Purchases already in progress finish; waiting ones keep their place; withdrawals and reclaims keep working. **Restart sales** undoes it.
 - **The hard stop:** Admin → **Pause the contract**, signed by the owner's wallet. The contract itself then refuses every new purchase, whoever sends it.
+- **The server's keys may be stolen:** pause the contract and set the treasury to manual (Admin → Treasury → Change mode, a cap of 0), both owner-signed. Pausing alone doesn't stop the treasury pulling proceeds (ADR-0009).
 
 ## Bitrefill credit and refills (ADR-0009)
 

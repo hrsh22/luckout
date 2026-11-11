@@ -60,7 +60,7 @@ test("prepare_purchase returns a confirmation and buys nothing", async () => {
   model.close()
   assert.equal(bought, 0, "the model can't buy; only the customer's tap can")
   assert.deepEqual(turn.pending, {
-    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000
+    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000
   })
   assert.equal(turn.reply, "Tap Buy to confirm.")
 })
