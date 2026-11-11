@@ -28,6 +28,10 @@ _Avoid_: Wallet, account credit, house funds
 Moving value from any supported chain into a customer's Balance through a NEAR Intents swap followed by a deposit.
 _Avoid_: Payment, bridge
 
+**Intents Account**:
+A customer's own account in NEAR Intents, named after their EVM address and controlled only by their EVM key; an EVM wallet's Top-Ups pass through it and its withdrawals return to it, and Luckout moves money out of it only with the customer's signature.
+_Avoid_: Deposit address, wallet, sub-account
+
 **Agent**:
 The Telegram chat bot that searches, quotes, and buys on a customer's behalf; like the Web App, it can only buy through the server, whose NEAR key is restricted to the contract's purchase methods.
 _Avoid_: Custodian, operator, wallet
