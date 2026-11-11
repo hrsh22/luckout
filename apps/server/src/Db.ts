@@ -226,6 +226,11 @@ const migrations = Migrator.fromRecord({
         ADD COLUMN told TEXT[] NOT NULL DEFAULT '{}'`
     yield* sql`UPDATE intents_swaps SET told = '{landed,arrived,late,refunded}'`
     yield* sql`CREATE INDEX intents_swaps_account ON intents_swaps (account_id, created_at)`
+  }),
+  // A Top-Up paid short: what reached 1Click so far, so the customer can be told to send the rest.
+  "0014_transfers_deposited": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN deposited TEXT`
   })
 })
 

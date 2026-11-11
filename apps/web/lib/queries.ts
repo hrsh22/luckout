@@ -118,8 +118,8 @@ export const useTelegram = (token: string | undefined, waiting = false) =>
     refetchInterval: (q) => (waiting && !q.state.data?.linked ? 2000 : false)
   })
 
-/** Phases where the customer's money is still moving: polled often, and counted as arriving. */
-export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "swapping", "moving"])
+/** Phases where the customer's money is still moving, or waiting on them: polled often. */
+export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "incomplete", "swapping", "moving"])
 
 /**
  * The customer's Top-Ups and withdrawals through NEAR Intents (still moving, or ended in the last day),

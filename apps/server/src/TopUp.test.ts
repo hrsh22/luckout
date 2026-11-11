@@ -140,6 +140,7 @@ const row = (o: Partial<SwapRow>): SwapRow => ({
   chain: "base",
   amount_in: "2.525765",
   amount_out: null,
+  deposited: null,
   deadline: null,
   time_estimate: 60,
   status: null,
@@ -162,7 +163,7 @@ test("every swap says where the money is, in the customer's words", () => {
     [{ status: "PENDING_DEPOSIT" }, "awaiting-transfer"],
     [{ status: "KNOWN_DEPOSIT_TX" }, "swapping"],
     [{ status: "PROCESSING" }, "swapping"],
-    [{ status: "INCOMPLETE_DEPOSIT" }, "swapping"],
+    [{ status: "INCOMPLETE_DEPOSIT" }, "incomplete"],
     [{ status: "SUCCESS", move: "waiting" }, "moving"],
     [{ status: "SUCCESS", move: "moved" }, "done"],
     [{ status: "SUCCESS", move: "failed" }, "in-intents"],
@@ -186,6 +187,7 @@ test("a swap is late once 1Click has had the money well past its usual time, nev
   assert.equal(isLate(row({ status: "PROCESSING", deposit_seen_at: seen(11), time_estimate: 600 }), now), false, "3× a 10-minute estimate")
   assert.equal(isLate(row({ status: "PENDING_DEPOSIT", deposit_seen_at: null }), now), false, "we're waiting for the customer, not 1Click")
   assert.equal(isLate(row({ status: "SUCCESS", deposit_seen_at: seen(90) }), now), false, "done is never late")
+  assert.equal(isLate(row({ status: "INCOMPLETE_DEPOSIT", deposit_seen_at: seen(90) }), now), false, "a short payment waits on the customer, who is told so")
 })
 
 test("each notice says what happened and what to do, keyed so it's sent once", () => {
@@ -205,6 +207,10 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.match(late.text, /taking longer than usual\. It's safe.*explorer\.near-intents\.org\/transactions\/abc/)
   assert.equal(n({ status: "PROCESSING", deposit_seen_at: new Date(now - 60_000) }), undefined, "nothing to say yet")
   assert.equal(n({ status: "PENDING_DEPOSIT" }), undefined)
+  const short = n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now + 20.5 * 60_000) })!
+  assert.equal(short.key, "incomplete")
+  assert.match(short.text, /^1Click got 0\.15 of the 2\.525765 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your NEAR Intents account\./)
+  assert.match(n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now - 60_000) })!.text, /0\.15 of the .* needs\. What arrived goes back to your NEAR Intents account/)
 })
 
 test("tracking follows every swap, moves EVM Top-Ups in, tells each customer once, and lists what's in transit", async () => {
@@ -217,6 +223,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     out: { status: "SUCCESS", amountOut: "1.419", deliveredTx: "0xbeef" },
     refunded: { status: "REFUNDED", refunded: "2.5", refundReason: "Deposit came in after the deadline" },
     late: { status: "PROCESSING" },
+    short: { status: "INCOMPLETE_DEPOSIT", deposited: "0.15" },
     awaiting: { status: "PENDING_DEPOSIT" },
     abandoned: { status: "PENDING_DEPOSIT" },
     unsigned: { status: "PENDING_DEPOSIT" }
@@ -259,6 +266,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     yield* add("refunded", {})
     yield* add("late", { status: "PROCESSING", deposit_seen_at: new Date(Date.now() - 30 * 60_000) })
     yield* add("awaiting", { deadline: new Date(Date.now() + 20 * 60_000) })
+    yield* add("short", { account_id: NEAR, deadline: new Date(Date.now() + 20 * 60_000) })
     yield* add("abandoned", { deadline: new Date(Date.now() - 3 * 3_600_000), created_at: new Date(Date.now() - 4 * 3_600_000) })
     yield* add("unsigned", { direction: "out", deadline: new Date(Date.now() + 25 * 60_000), created_at: new Date(Date.now() - 5 * 60_000) })
     yield* t.trackNow
@@ -271,7 +279,8 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.deepEqual(sent, [EVM], "the EVM Top-Up's move-in is sent once, when its swap landed")
   assert.ok(!checked.includes("abandoned"), "a quote nobody paid into, long past its deadline, isn't checked")
   const texts = told.map(([a, t]) => `${a === NEAR ? "near" : "evm"}: ${t}`)
-  assert.equal(told.length, 5, texts.join("\n"))
+  assert.equal(told.length, 6, texts.join("\n"))
+  assert.ok(texts.some((t) => t.startsWith("near: 1Click got 0.15 of the 2.525765 USDC on Base your $2.50 Top-Up needs. Send the rest")))
   assert.ok(texts.some((t) => t.startsWith("evm: Your $2.50 Top-Up is in your Luckout balance")))
   assert.ok(texts.some((t) => t.startsWith("near: Your $2.50 Top-Up landed in your NEAR wallet")))
   assert.ok(texts.some((t) => t.startsWith("evm: Your $1.42 withdrawal arrived: 1.419 USDC on Base")))
@@ -288,5 +297,5 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.deepEqual([byAddress.out!.phase, byAddress.out!.amountOut, byAddress.out!.deliveredTx], ["done", "1.419", "0xbeef"])
   assert.deepEqual([byAddress.refunded!.phase, byAddress.refunded!.refunded, byAddress.refunded!.detail], ["refunded", "2.5", "Deposit came in after the deadline"])
   assert.match(byAddress.refunded!.explorer, /explorer\.near-intents\.org\/transactions\/refunded$/)
-  assert.deepEqual(result.near.map((x) => x.phase), ["in-wallet"])
+  assert.deepEqual(result.near.map((x) => [x.depositAddress, x.phase, x.deposited]), [["short", "incomplete", "0.15"], ["nearIn", "in-wallet", undefined]])
 })
