@@ -122,6 +122,7 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
       status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
       move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
       faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId)),
+      transfers: () => CurrentAccount.use((a) => topup.transfers(a.accountId)),
       exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc))
     })
   })

@@ -1,9 +1,20 @@
-import { ExitQuote, isEvmAccount, type SignedIntent, TopUpAsset, TopUpQuote, TopUpStatus, TopUpUnavailable } from "@luckout/api"
-import { Context, Effect, Layer, Schedule } from "effect"
+import {
+  ExitQuote,
+  isEvmAccount,
+  type SignedIntent,
+  TopUpAsset,
+  TopUpQuote,
+  TopUpStatus,
+  TopUpUnavailable,
+  Transfer,
+  type TransferPhase
+} from "@luckout/api"
+import { Config, Context, Effect, Layer, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
+import { Alerts } from "./Alerts.ts"
 import { Near, Network } from "./Near.ts"
-import { OneClick } from "./OneClick.ts"
+import { OneClick, type SwapDetails } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
 
 // Top-ups (ADR-0001): a NEAR Intents 1Click swap from any supported chain that lands native
@@ -27,6 +38,92 @@ const MOST_WAITING = 3
 const PER_PASS = 40
 /** The relayer's message when NEAR didn't answer: the intent may still have run, so it's resumed, not failed. */
 const UNANSWERED = /didn't answer in time/
+/** 1Click is done with these: the money arrived or went back. */
+const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
+/** A quote nobody paid into is still checked this long past its deadline, in case the transfer was late. */
+const LATE_DEPOSIT_GRACE_MS = 2 * 60 * 60 * 1000
+const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana", btc: "Bitcoin", near: "NEAR" }
+const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
+const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+
+/** A row of `intents_swaps`: one 1Click swap of a customer's money. */
+export interface SwapRow {
+  readonly deposit_address: string
+  readonly deposit_memo: string | null
+  readonly account_id: string
+  readonly direction: "in" | "out"
+  readonly usdc: string
+  readonly symbol: string | null
+  readonly chain: string | null
+  readonly amount_in: string | null
+  readonly amount_out: string | null
+  readonly deadline: Date | string | null
+  readonly time_estimate: number | null
+  readonly status: string | null
+  readonly deposit_seen_at: Date | string | null
+  readonly status_at: Date | string | null
+  readonly delivered_tx: string | null
+  readonly refunded: string | null
+  readonly refund_reason: string | null
+  readonly move: string | null
+  readonly move_detail: string | null
+  readonly move_in: SignedIntent | null
+  readonly told: ReadonlyArray<string>
+  readonly created_at: Date | string
+}
+
+const ms = (d: Date | string | null) => (d === null ? undefined : new Date(d).getTime())
+
+/** Where the money is, in the customer's words (see TransferPhase). */
+export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "status" | "move">): TransferPhase => {
+  if (r.status === "REFUNDED" || r.status === "FAILED") return "refunded"
+  if (r.status === "SUCCESS") {
+    if (r.direction === "out") return "done"
+    if (!isEvmAccount(r.account_id)) return "in-wallet"
+    return r.move === "moved" ? "done" : r.move === "waiting" ? "moving" : "in-intents"
+  }
+  if (!r.status || r.status === "PENDING_DEPOSIT") return r.direction === "out" ? "swapping" : "awaiting-transfer"
+  return "swapping"
+}
+
+/** 1Click has the money but it's taking well over its usual time: safe, and the customer should hear so. */
+export const isLate = (r: Pick<SwapRow, "status" | "deposit_seen_at" | "time_estimate">, now: number) => {
+  const seen = ms(r.deposit_seen_at)
+  if (seen === undefined || (r.status && FINAL.has(r.status))) return false
+  return now - seen > Math.max(10 * 60_000, 3 * (r.time_estimate ?? 0) * 1000)
+}
+
+const explorerOf = (depositAddress: string) => `https://explorer.near-intents.org/transactions/${depositAddress}`
+
+/** The Telegram notice for what just happened to this swap, keyed so each is sent once. */
+export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; text: string } | undefined => {
+  const phase = phaseOf(r)
+  const amount = usd(Number(r.usdc))
+  const from = `${r.amount_in ?? ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
+  if (r.direction === "in") {
+    if (phase === "done") return { key: "landed", text: `Your ${amount} Top-Up is in your Luckout balance.` }
+    if (phase === "in-wallet") return { key: "landed", text: `Your ${amount} Top-Up landed in your NEAR wallet. Deposit it into Luckout at ${web}/wallet` }
+    if (phase === "in-intents") {
+      return { key: "landed", text: `Your ${amount} Top-Up landed in your NEAR Intents account${r.move_detail ? ` but didn't move into Luckout (${r.move_detail})` : ""}. Move it in at ${web}/wallet` }
+    }
+    if (phase === "refunded") {
+      return {
+        key: "refunded",
+        text: `Your Top-Up (${from}) didn't go through${r.refund_reason ? `: ${r.refund_reason}` : ""}. 1Click sent ${r.refunded ? `${r.refunded} ${r.symbol ?? ""}`.trim() : "it"} back to your NEAR Intents account. See ${web}/wallet`
+      }
+    }
+  } else {
+    if (phase === "done") return { key: "arrived", text: `Your ${amount} withdrawal arrived: ${r.amount_out ?? ""} ${r.symbol ?? "USDC"} on ${chainName(r.chain)}.`.replace(/\s+/g, " ") }
+    if (phase === "refunded") return { key: "refunded", text: `Your ${amount} withdrawal to ${chainName(r.chain)} was refunded to your NEAR Intents account. Move it back into Luckout at ${web}/wallet` }
+  }
+  if (isLate(r, now)) {
+    return {
+      key: "late",
+      text: `Your ${amount} ${r.direction === "in" ? "Top-Up" : "withdrawal"} is taking longer than usual. It's safe: it either arrives or 1Click refunds it. Track it: ${explorerOf(r.deposit_address)}`
+    }
+  }
+  return undefined
+}
 
 export class TopUp extends Context.Service<TopUp, {
   readonly assets: Effect.Effect<ReadonlyArray<TopUpAsset>, TopUpUnavailable>
@@ -36,6 +133,10 @@ export class TopUp extends Context.Service<TopUp, {
   move(accountId: string, depositAddress: string, signed: SignedIntent): Effect.Effect<void, TopUpUnavailable>
   /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
   faucet(accountId: string): Effect.Effect<void, TopUpUnavailable>
+  /** The customer's swaps still on their way, and those that ended in the last day. */
+  transfers(accountId: string): Effect.Effect<ReadonlyArray<Transfer>>
+  /** One tracking pass now, as the background loop runs every 15 seconds (tests). */
+  readonly trackNow: Effect.Effect<void>
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to their own address on another chain. */
   exit(accountId: string, destinationAsset: string, usdc: number): Effect.Effect<ExitQuote, TopUpUnavailable>
 }>()("luckout/TopUp") {
@@ -46,7 +147,9 @@ export class TopUp extends Context.Service<TopUp, {
       const sql = yield* SqlClient.SqlClient
       const near = yield* Near
       const relay = yield* Relay
+      const alerts = yield* Alerts
       const mainnet = (yield* Network) === "mainnet"
+      const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
       const fail = (message: string) => new TopUpUnavailable({ message })
       const unavailable = (e: { message: string }) => fail(e.message)
 
@@ -92,9 +195,11 @@ export class TopUp extends Context.Service<TopUp, {
         if (evm && echo && (echo.recipient !== accountId || echo.recipientType !== "INTENTS")) {
           return yield* fail("1Click quoted a different recipient. Try again.")
         }
-        if (evm && !dry) {
-          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc)
-                     VALUES (${q.depositAddress!}, ${accountId}, 'in', ${Number(q.amountOut)})`.pipe(Effect.orDie)
+        // Every Top-Up is recorded, so the customer can always see where their money is, even after leaving.
+        if (!dry) {
+          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
+                     VALUES (${q.depositAddress!}, ${accountId}, 'in', ${Number(q.amountOut)}, ${asset.symbol}, ${asset.chain}, ${q.amountInFormatted},
+                             ${q.depositMemo ?? null}, ${q.deadline ? new Date(q.deadline) : null}, ${q.timeEstimate})`.pipe(Effect.orDie)
         }
         return new TopUpQuote({
           depositAddress: q.depositAddress ?? "",
@@ -167,8 +272,9 @@ export class TopUp extends Context.Service<TopUp, {
         if (echo && (echo.recipient.toLowerCase() !== accountId || echo.depositType !== "INTENTS")) {
           return yield* fail("1Click quoted a different recipient. Try again.")
         }
-        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc)
-                   VALUES (${q.depositAddress}, ${accountId}, 'out', ${usdc})`.pipe(Effect.orDie)
+        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_out, deadline, time_estimate)
+                   VALUES (${q.depositAddress}, ${accountId}, 'out', ${usdc}, ${asset.symbol}, ${asset.chain}, ${q.amountOutFormatted ?? null},
+                           ${q.deadline ? new Date(q.deadline) : null}, ${q.timeEstimate})`.pipe(Effect.orDie)
         return new ExitQuote({
           depositAddress: q.depositAddress,
           usdcIn: usdc,
@@ -209,41 +315,114 @@ export class TopUp extends Context.Service<TopUp, {
         )
       })
 
-      // Sends each waiting move-in once its swap has landed. A refunded swap, or one that never lands,
-      // leaves the money in the customer's own NEAR Intents account, where the web app offers to move it.
-      const settle = (r: { deposit_address: string; account_id: string; move_in: SignedIntent }) =>
+      // Sends a Top-Up's signed move-in once its swap has landed (EVM wallets). A refunded swap, or one that
+      // never lands, leaves the money in the customer's own NEAR Intents account, where the web app offers to move it.
+      const moveIn = (r: SwapRow, d: SwapDetails) =>
         Effect.gen(function*() {
           const done = (move: "moved" | "failed", detail: string | null) =>
-            sql`UPDATE intents_swaps SET move = ${move}, move_detail = ${detail} WHERE deposit_address = ${r.deposit_address}`.pipe(Effect.orDie)
+            sql`UPDATE intents_swaps SET move = ${move}, move_detail = ${detail} WHERE deposit_address = ${r.deposit_address}`.pipe(
+              Effect.orDie,
+              Effect.as({ ...r, move, move_detail: detail })
+            )
           // Its signature is good until its own deadline (a day at most); past that it can never run.
-          const expired = !(Date.parse(parsePayload(r.move_in.payload)?.deadline ?? "") > Date.now())
-          const s = yield* oneClick.status(r.deposit_address).pipe(Effect.orElseSucceed(() => "UNKNOWN"))
-          if (s === "SUCCESS" && !expired) {
-            return yield* relay.sendIntent(r.account_id, r.move_in, { counted: false }).pipe(
+          const expired = !(Date.parse(parsePayload(r.move_in!.payload)?.deadline ?? "") > Date.now())
+          if (d.status === "SUCCESS" && !expired) {
+            return yield* relay.sendIntent(r.account_id, r.move_in!, { counted: false }).pipe(
               Effect.flatMap(() => done("moved", null)),
               // NEAR didn't answer: it may have run. Next pass resumes the same saved transaction.
-              Effect.catchTag("RelayFailed", (e) => (UNANSWERED.test(e.message) ? Effect.void : done("failed", e.message))),
+              Effect.catchTag("RelayFailed", (e) => (UNANSWERED.test(e.message) ? Effect.succeed(r) : done("failed", e.message))),
               // Not sent (the relayer is off): stays waiting and is tried again.
-              Effect.catchTag("RelayUnavailable", (e) => Effect.logWarning("move-in waits for the relayer", e.message))
+              Effect.catchTag("RelayUnavailable", (e) => Effect.as(Effect.logWarning("move-in waits for the relayer", e.message), r))
             )
           }
-          if (s === "REFUNDED" || s === "FAILED") return yield* done("failed", `The swap was ${s.toLowerCase()}`)
+          if (d.status === "REFUNDED" || d.status === "FAILED") return yield* done("failed", `The swap was ${d.status.toLowerCase()}`)
           if (expired) return yield* done("failed", "The swap didn't land before your approval expired")
+          return r
         })
 
-      // Least recently checked first, so a pile of quotes nobody pays into can't hold up everyone else's.
-      const settleWaiting = sql<{ deposit_address: string; account_id: string; move_in: SignedIntent }>`
+      // Follows one swap: 1Click's latest, the move-in when it lands, and the customer's Telegram notice, once each.
+      const track = (row: SwapRow) =>
+        Effect.gen(function*() {
+          const d = yield* oneClick.details(row.deposit_address).pipe(Effect.option)
+          if (d._tag === "None") return
+          const changed = d.value.status !== row.status
+          const seen = row.deposit_seen_at ?? (d.value.status !== "PENDING_DEPOSIT" ? new Date() : null)
+          const [fresh] = yield* sql<SwapRow>`
+            UPDATE intents_swaps SET
+              status = ${d.value.status},
+              status_at = CASE WHEN ${changed} THEN now() ELSE status_at END,
+              deposit_seen_at = ${seen},
+              amount_out = CASE WHEN direction = 'out' THEN coalesce(${d.value.amountOut ?? null}, amount_out) ELSE amount_out END,
+              delivered_tx = coalesce(${d.value.deliveredTx ?? null}, delivered_tx),
+              refunded = coalesce(${d.value.refunded ?? null}, refunded),
+              refund_reason = coalesce(${d.value.refundReason ?? null}, refund_reason)
+            WHERE deposit_address = ${row.deposit_address}
+            RETURNING *`.pipe(Effect.orDie)
+          let r = fresh ?? row
+          if (r.direction === "in" && r.move === "waiting" && r.move_in) r = yield* moveIn(r, d.value)
+          const notice = noticeFor(r, Date.now(), web)
+          if (notice && !r.told.includes(notice.key)) {
+            // Saved first: a notice is never sent twice, even if Telegram is slow or the server restarts.
+            const [claimed] = yield* sql`UPDATE intents_swaps SET told = array_append(told, ${notice.key})
+                                         WHERE deposit_address = ${r.deposit_address} AND NOT (${notice.key} = ANY(told)) RETURNING 1`.pipe(Effect.orDie)
+            if (claimed) yield* alerts.customer(r.account_id, notice.text)
+          }
+        })
+
+      // Swaps still in motion, least recently checked first, so a pile of quotes nobody pays into can't hold up
+      // everyone else's. A quote nobody paid into stops being checked two hours past its deadline.
+      const trackPass = sql<SwapRow>`
         UPDATE intents_swaps SET checked_at = now()
         WHERE deposit_address IN (
-          SELECT deposit_address FROM intents_swaps WHERE move = 'waiting' ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
-        RETURNING deposit_address, account_id, move_in`.pipe(
+          SELECT deposit_address FROM intents_swaps
+          WHERE move = 'waiting'
+             OR (created_at > now() - interval '3 days'
+                 AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
+                 AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
+                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval))
+          ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
+        RETURNING *`.pipe(
         Effect.orDie,
-        Effect.flatMap((rows) => Effect.forEach(rows, settle, { discard: true, concurrency: 8 })),
-        Effect.catchCause((cause) => Effect.logError("move-in pass failed", cause))
+        Effect.flatMap((rows) => Effect.forEach(rows, track, { discard: true, concurrency: 8 })),
+        Effect.catchCause((cause) => Effect.logError("swap tracking pass failed", cause))
       )
-      yield* settleWaiting.pipe(Effect.repeat(Schedule.spaced("15 seconds")), Effect.forkScoped)
+      yield* trackPass.pipe(Effect.repeat(Schedule.spaced("15 seconds")), Effect.forkScoped)
 
-      return TopUp.of({ assets, quote, status, move, faucet, exit })
+      const transfers = (accountId: string) =>
+        sql<SwapRow>`
+          SELECT * FROM intents_swaps
+          WHERE account_id = ${accountId} AND created_at > now() - interval '7 days'
+            AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND direction = 'in'
+                     AND coalesce(deadline, created_at + interval '30 minutes') < now())
+            AND NOT (coalesce(status, '') IN ('SUCCESS', 'REFUNDED', 'FAILED') AND coalesce(status_at, created_at) < now() - interval '1 day')
+          ORDER BY created_at DESC LIMIT 20`.pipe(
+          Effect.orDie,
+          Effect.map((rows) =>
+            rows.map((r) =>
+              new Transfer({
+                depositAddress: r.deposit_address,
+                ...(r.deposit_memo ? { depositMemo: r.deposit_memo } : {}),
+                direction: r.direction,
+                usdc: Number(r.usdc),
+                symbol: r.symbol ?? "USDC",
+                chain: r.chain ?? "",
+                ...(r.amount_in ? { amountIn: r.amount_in } : {}),
+                ...(r.amount_out ? { amountOut: r.amount_out } : {}),
+                phase: phaseOf(r),
+                late: isLate(r, Date.now()),
+                createdAt: new Date(r.created_at).toISOString(),
+                ...(r.deadline ? { deadline: new Date(r.deadline).toISOString() } : {}),
+                ...(r.time_estimate !== null ? { timeEstimateSeconds: r.time_estimate } : {}),
+                ...(r.delivered_tx ? { deliveredTx: r.delivered_tx } : {}),
+                ...(r.refunded ? { refunded: r.refunded } : {}),
+                ...(r.refund_reason || r.move_detail ? { detail: (r.refund_reason ?? r.move_detail)! } : {}),
+                explorer: explorerOf(r.deposit_address)
+              })
+            )
+          )
+        )
+
+      return TopUp.of({ assets, quote, status, move, faucet, transfers, trackNow: trackPass, exit })
     })
   )
 }

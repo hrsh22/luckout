@@ -202,6 +202,30 @@ const migrations = Migrator.fromRecord({
     yield* sql`CREATE INDEX intents_swaps_waiting ON intents_swaps (checked_at NULLS FIRST) WHERE move = 'waiting'`
     // A Top-Up's own move-in is paid for but not counted against the daily caps.
     yield* sql`ALTER TABLE relays ADD COLUMN counted BOOLEAN NOT NULL DEFAULT true`
+  }),
+  // Money in transit is never out of sight: every 1Click swap of a customer's money (NEAR wallets' Top-Ups
+  // too) keeps what was sent, where, its latest status, any delivery or refund, and which Telegram notices
+  // went out. Swaps from before this are marked as already told, so nobody gets a stale message.
+  "0013_transfers_in_sight": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      ALTER TABLE intents_swaps
+        ADD COLUMN symbol TEXT,
+        ADD COLUMN chain TEXT,
+        ADD COLUMN amount_in TEXT,
+        ADD COLUMN amount_out TEXT,
+        ADD COLUMN deposit_memo TEXT,
+        ADD COLUMN deadline TIMESTAMPTZ,
+        ADD COLUMN time_estimate INT,
+        ADD COLUMN status TEXT,
+        ADD COLUMN status_at TIMESTAMPTZ,
+        ADD COLUMN deposit_seen_at TIMESTAMPTZ,
+        ADD COLUMN delivered_tx TEXT,
+        ADD COLUMN refunded TEXT,
+        ADD COLUMN refund_reason TEXT,
+        ADD COLUMN told TEXT[] NOT NULL DEFAULT '{}'`
+    yield* sql`UPDATE intents_swaps SET told = '{landed,arrived,late,refunded}'`
+    yield* sql`CREATE INDEX intents_swaps_account ON intents_swaps (account_id, created_at)`
   })
 })
 

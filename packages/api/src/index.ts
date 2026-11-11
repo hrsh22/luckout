@@ -324,6 +324,46 @@ export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({
   move: Schema.optional(Schema.Literals(["waiting", "moved", "failed"]))
 }) {}
 
+/**
+ * Where a Top-Up or a withdrawal is, in the customer's words: their money is never out of sight.
+ * awaiting-transfer: we're waiting for them to send. swapping: 1Click has it and is converting it.
+ * moving: it landed in their NEAR Intents account and is moving into Luckout. in-wallet: it landed in
+ * their NEAR wallet, ready to deposit. in-intents: it's in their NEAR Intents account. done: in their
+ * Luckout balance (Top-Up) or on the chain they picked (withdrawal). refunded: 1Click sent it back.
+ */
+export const TransferPhase = Schema.Literals(["awaiting-transfer", "swapping", "moving", "in-wallet", "in-intents", "done", "refunded"])
+export type TransferPhase = typeof TransferPhase.Type
+
+/** One of the customer's 1Click swaps: a Top-Up on its way in, or a withdrawal on its way out. */
+export class Transfer extends Schema.Class<Transfer>("Transfer")({
+  depositAddress: Schema.String,
+  depositMemo: Schema.optional(Schema.String),
+  direction: Schema.Literals(["in", "out"]),
+  /** USDC (micro): what lands for a Top-Up, what leaves Luckout for a withdrawal. */
+  usdc: MicroUsdc,
+  /** The other side: the token and chain it comes from (Top-Up) or goes to (withdrawal). */
+  symbol: Schema.String,
+  chain: Schema.String,
+  /** What the customer sends, formatted (a Top-Up). */
+  amountIn: Schema.optional(Schema.String),
+  /** What arrives on the other chain, formatted (a withdrawal). */
+  amountOut: Schema.optional(Schema.String),
+  phase: TransferPhase,
+  /** Taking longer than usual: safe, but say so. */
+  late: Schema.Boolean,
+  createdAt: Schema.String,
+  /** Until when 1Click takes the deposit (a Top-Up awaiting the customer's transfer). */
+  deadline: Schema.optional(Schema.String),
+  timeEstimateSeconds: Schema.optional(Schema.Number),
+  /** The delivery on the other chain (a withdrawal). */
+  deliveredTx: Schema.optional(Schema.String),
+  /** What 1Click sent back, formatted, and why. */
+  refunded: Schema.optional(Schema.String),
+  detail: Schema.optional(Schema.String),
+  /** NEAR Intents explorer page for this swap. */
+  explorer: Schema.String
+}) {}
+
 export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
   "TopUpUnavailable",
   { message: Schema.String },
@@ -348,6 +388,8 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
+  /** The customer's Top-Ups and withdrawals still on their way, and those that ended in the last day. */
+  HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable }),
   /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
   HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
