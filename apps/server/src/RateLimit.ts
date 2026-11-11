@@ -21,7 +21,7 @@ const WINDOW_MS = 60_000
 const limitFor = (path: string) =>
   path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay")
     ? 20
-    : path.startsWith("/catalog/") || path === "/quote"
+    : path.startsWith("/catalog/") || path === "/quote" || path === "/browse"
     ? 60
     : 120
 

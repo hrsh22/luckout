@@ -1,7 +1,8 @@
 import { ConfigProvider, Effect } from "effect"
+import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, regionsFor, usdToMicro } from "./Bitrefill.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
   assert.equal(usdToMicro("5.53"), 5_530_000)
@@ -15,6 +16,8 @@ const live = { skip: !process.env.BITREFILL_API_KEY && "BITREFILL_API_KEY not se
 const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>, env: Record<string, string> = {}) =>
   Effect.runPromise(Bitrefill.use(f).pipe(
     Effect.provide(Bitrefill.layer),
+    // The client otherwise keeps the first fetch it saw; tests swap in their own fakes.
+    Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...(process.env as Record<string, string>), ...env } })))
   ))
 
@@ -88,6 +91,49 @@ test("junk ids spend no lookups, and browsing can never use up the ones a purcha
     assert.equal(r.bought.packages[0]?.priceMicroUsdc, 10_000_000)
     assert.equal(r.browsed.id, "amazon-us")
     assert.equal(looked.length, 13, "twelve for browsing, one for the purchase, none for the junk id or the cached price")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("the catalog lists only cards we can deliver, filtered just by what the customer chose, and pages are cached", async () => {
+  const asked: Array<URL> = []
+  const realFetch = globalThis.fetch
+  // Bitrefill's REST catalog, faked: a full page of 50, then a last short one.
+  const product = (i: number, extra: Record<string, unknown> = {}) =>
+    ({ id: `card-${i}`, name: `Card ${i}`, country_code: "IN", country_name: "India", currency: "INR", categories: ["games"], recipient_type: "none", in_stock: true, ...extra })
+  globalThis.fetch = (async (input: unknown) => {
+    const url = new URL(String(input instanceof Request ? input.url : input))
+    asked.push(url)
+    const start = Number(url.searchParams.get("start"))
+    const data = start === 0
+      ? Array.from({ length: 50 }, (_, i) =>
+        i < 30 ? product(i, { recipient_type: "phone_number" }) : i < 32 ? product(i, { in_stock: false }) : product(i, i === 40 ? { country_code: "XI", country_name: "International" } : {}))
+      : [product(100)]
+    return Response.json({ meta: {}, data })
+  }) as typeof fetch
+  try {
+    const r = await run((b) =>
+      Effect.gen(function*() {
+        const first = yield* b.browse({ country: "IN", category: "games" })
+        const again = yield* b.browse({ country: "IN", category: "games" })
+        const second = yield* b.browse({ country: "IN", category: "games", start: first.next })
+        return { first, again, second }
+      }), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    // 50 listed: 30 top-ups needing a phone number and 2 out of stock are left out.
+    assert.equal(r.first.items.length, 18)
+    assert.ok(r.first.items.every((v) => v.countryCode === "IN" || v.countryCode === "XI"))
+    assert.equal(r.first.items.find((v) => v.id === "card-40")?.countryCode, "XI", "worldwide cards show with a country's own")
+    assert.equal(r.first.next, 50)
+    assert.deepEqual(r.second.items.map((v) => v.id), ["card-100"])
+    assert.equal(r.second.next, undefined, "a short page is the last")
+    const listed = asked[0]!
+    assert.equal(listed.pathname, "/v2/products")
+    assert.equal(listed.searchParams.get("country"), "IN,XI")
+    assert.deepEqual(regionsFor("DE"), ["DE", "EU", "XI"], "an EU member also gets Europe-wide cards")
+    assert.equal(listed.searchParams.get("category"), "games,game-stores")
+    assert.ok(!asked.some((u) => /\b(pin|refill|data)\b/.test(u.searchParams.get("category") ?? "")), "never phone credit")
+    assert.equal(asked.length, 2, "the repeated first page came from the cache")
   } finally {
     globalThis.fetch = realFetch
   }

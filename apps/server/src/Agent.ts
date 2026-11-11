@@ -20,6 +20,8 @@ export interface Pending {
   readonly value: string
   /** The card's own currency, so "500" reads as "500 INR". */
   readonly currency: string
+  /** Where the card works: a country code, or "XI" for worldwide. */
+  readonly country: string
   /** Always resolved (the Default Mode when the customer named none), so the button shows the real maximum. */
   readonly mode: Mode
   readonly maxPrice: number
@@ -27,6 +29,10 @@ export interface Pending {
   /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
   readonly luckyAmount: number
 }
+
+const regions = new Intl.DisplayNames(["en"], { type: "region" })
+/** Where a card can be used, in words: "India only", or "anywhere" for a worldwide ("XI") card. */
+export const worksIn = (code: string, name?: string) => (code === "XI" ? "anywhere" : `${name ?? regions.of(code) ?? code} only`)
 
 const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
 export const modeName = (m: Mode) => (m === "normal" ? "Normal" : ["Lite", "Classic", "Jackpot"][m.lucky] ?? "Lucky")
@@ -43,7 +49,7 @@ const tool = (name: string, description: string, properties: Record<string, obje
 const mode = { type: "string", enum: ["normal", "lite", "classic", "jackpot"], description: "Omit to use the customer's Default Mode" }
 
 const TOOLS = [
-  tool("search_vouchers", "Find gift cards, top-ups and eSIMs by brand.", { query: { type: "string" } }, ["query"]),
+  tool("search_vouchers", "Find gift cards by brand. Each result says where it works.", { query: { type: "string" } }, ["query"]),
   tool("get_voucher", "The amounts on sale for one voucher, with today's USD price for each.", { voucher_id: { type: "string" } }, ["voucher_id"]),
   tool("get_balance", "The customer's balance, Spending Limits, Default Mode and Running Total."),
   tool("quote", "The exact quote for one amount in one mode, and whether their balance covers it.", {
@@ -59,7 +65,7 @@ const TOOLS = [
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included).")
 ]
 
-const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards, phone top-ups and eSIMs (from Bitrefill) with the USDC balance they keep in Luckout.
+const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards (from Bitrefill) with the USDC balance they keep in Luckout.
 
 What you know:
 - Normal pays exactly the price.
@@ -78,6 +84,7 @@ How you talk:
 
 Rules:
 - Every price, balance and quote comes from a tool. Never guess a number.
+- A card only works in its own country (its works_in). Before preparing one, make sure it's for the country they'll use it in; if they haven't said, ask. Never offer another country's card as a substitute.
 - Only offer a purchase they can pay for. If a tool says they're short or over a limit, say by how much and give the link.
 - To buy, call prepare_purchase; they confirm with a button. Never say it's bought before they confirm.
 - No cashback means they paid the up-front amount; never call that a win.
@@ -148,7 +155,7 @@ export const makeAgent = (deps: {
   const tools = (accountId: string, prepare: (p: Pending) => void) => ({
     search_vouchers: ({ query }: { query: string }) =>
       run(deps.bitrefill.search(query).pipe(Effect.map((vs) => {
-        const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, country: v.countryCode }))
+        const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, works_in: worksIn(v.countryCode, v.countryName) }))
         return deps.testnet && results.length === 0
           ? { results, note: "Testnet demo: only Bitrefill's test cards are sold. Try search_vouchers('test')." }
           : { results }
@@ -156,6 +163,7 @@ export const makeAgent = (deps: {
     get_voucher: ({ voucher_id }: { voucher_id: string }) =>
       run(deps.bitrefill.voucher(voucher_id).pipe(Effect.map((v) => ({
         name: v.name,
+        works_in: worksIn(v.countryCode, v.countryName),
         currency: v.currency,
         amounts: v.packages.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })),
         ...(v.tooSmall?.length
@@ -197,7 +205,7 @@ export const makeAgent = (deps: {
         if (!(yield* deps.shopOpen)) return { error: "Purchases are paused for a few minutes; their balance is safe. Suggest trying again soon." }
         const why = blocker(a, q.maxPrice, deps.web)
         if (why) return { error: why }
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
+        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
         return {
           shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
         }

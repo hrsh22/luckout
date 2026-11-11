@@ -1,4 +1,4 @@
-import { BitrefillUnavailable, Voucher, VoucherSummary } from "@luckout/api"
+import { BitrefillUnavailable, CatalogPage, type Category, Voucher, VoucherSummary } from "@luckout/api"
 import { decode as decodeToon } from "@toon-format/toon"
 import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
@@ -13,7 +13,12 @@ const Product = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   country_code: Schema.String,
+  country_name: Schema.optional(Schema.String),
   currency: Schema.String,
+  categories: Schema.optional(Schema.Array(Schema.String)),
+  /** "none" for a code; "phone_number" or "account" for top-ups that need one, which we can't send. */
+  recipient_type: Schema.optional(Schema.String),
+  in_stock: Schema.optional(Schema.Boolean),
   image: Schema.optional(Schema.String),
   logo_background: Schema.optional(Schema.String),
   packages: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String, amount: Schema.optional(Schema.Number) })))
@@ -105,6 +110,40 @@ const httpStatus = (e: unknown) => (HttpClientError.isHttpClientError(e) ? e.res
 // customer's purchase or its price check.
 const LOOKUPS_PER_MINUTE = 20
 const BROWSE_LOOKUPS_PER_MINUTE = 12
+/** What a customer chose to filter the catalog by; nothing chosen lists everything. */
+export interface BrowseOptions {
+  readonly q?: string | undefined
+  readonly country?: string | undefined
+  readonly category?: Category | undefined
+  readonly start?: number | undefined
+}
+
+/**
+ * Bitrefill's categories behind each of the shop's. Bitrefill refuses a whole request naming one it
+ * doesn't know (music, pizza, voucher and other aren't), so only names checked against its API go here.
+ */
+const CATEGORY_MAP: Record<Category, ReadonlyArray<string>> = {
+  shopping: ["online-marketplaces", "department-stores", "ecommerce", "retail", "apparel", "electronics", "home", "health-beauty", "cosmetics", "sports-n-outdoors", "gifts", "multi-brand"],
+  food: ["food", "restaurants", "groceries", "food-delivery"],
+  games: ["games", "game-stores"],
+  entertainment: ["entertainment", "streaming", "experiences"],
+  travel: ["travel", "accommodation", "flights", "online-travel-agencies", "cruises"]
+}
+/** EU members: Bitrefill's Europe-wide cards ("EU") work in each of them too. */
+const EU_MEMBERS = new Set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE".split(" "))
+/** Whose cards work in a country: its own, Europe-wide ones in an EU member, and worldwide ones ("XI"). */
+export const regionsFor = (country: string) => [country, ...(EU_MEMBERS.has(country) ? ["EU"] : []), "XI"]
+
+/** "All" is every gift card: these plus the rest, but not phone credit (pin, refill, data), which would fill the first pages. */
+const ALL_GIFT_CARDS = [...Object.values(CATEGORY_MAP).flat(), "pets", "pharmacy", "payment-cards"]
+/** Bitrefill's page size, and the fewest cards a catalog page tries to return after filtering. */
+const PAGE = 50
+const MIN_PAGE_ITEMS = 12
+
+/** Only cards delivered as a code can be bought here: top-ups need a phone number or account we can't send. */
+const sellable = (p: { recipient_type?: string | undefined; in_stock?: boolean | undefined }) =>
+  (p.recipient_type ?? "none") === "none" && p.in_stock !== false
+
 /** What a Bitrefill product id looks like; anything else is refused before spending a lookup. */
 const PRODUCT_ID = /^[a-z0-9][a-z0-9-]{0,99}$/
 
@@ -123,6 +162,8 @@ export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: Readonl
 
 export class Bitrefill extends Context.Service<Bitrefill, {
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
+  /** The catalog a page at a time, filtered only by what the customer chose. */
+  browse(opts: BrowseOptions): Effect.Effect<CatalogPage, BitrefillUnavailable>
   /**
    * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
    * the lookup may use the whole budget, not just browsing's share.
@@ -208,11 +249,60 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         ...(p.logo_background ? { background: p.logo_background } : {})
       })
 
+      const summary = (p: typeof Product.Type) =>
+        new VoucherSummary({
+          id: p.id,
+          name: p.name,
+          countryCode: p.country_code,
+          ...(p.country_name ? { countryName: p.country_name } : {}),
+          currency: p.currency,
+          ...images(p)
+        })
+      // On testnet only test products can be bought, so nothing else is offered (web or bot).
+      const offered = (p: typeof Product.Type) => (testnet ? p.id.startsWith("test-") : sellable(p))
+
       const search = Effect.fn("Bitrefill.search")(function*(q: string) {
         const products = yield* get("/products/search", Schema.Array(Product), { q, include_test_products: String(testnet) })
-        // On testnet only test products can be bought, so nothing else is offered (web or bot).
-        return products.filter((p) => !testnet || p.id.startsWith("test-")).map((p) => new VoucherSummary({ id: p.id, name: p.name, countryCode: p.country_code, currency: p.currency, ...images(p) }))
+        return products.filter(offered).map(summary)
       })
+
+      const browsePage = Effect.fn("Bitrefill.browse")(function*(opts: BrowseOptions) {
+        const q = opts.q?.trim()
+        // A country shows the cards that work there (regionsFor); nothing else is assumed.
+        const regions = opts.country ? regionsFor(opts.country) : undefined
+        const inCountry = (p: typeof Product.Type) => !regions || regions.includes(p.country_code)
+        const cats = opts.category ? CATEGORY_MAP[opts.category] : undefined
+        const inCategory = (p: typeof Product.Type) => !cats || (p.categories ?? []).some((c) => cats.includes(c))
+        // Testnet sells only a handful of test cards: one search finds them all.
+        if (testnet) return new CatalogPage({ items: (yield* search(q || "test")) })
+        const items: Array<VoucherSummary> = []
+        let start = opts.start ?? 0
+        let next: number | undefined
+        // Filtering drops top-ups, so a thin page is topped up from the next one or two.
+        for (let i = 0; i < 3 && items.length < MIN_PAGE_ITEMS; i++) {
+          const params: Record<string, string> = { start: String(start), limit: String(PAGE) }
+          const products = yield* (q
+            ? get("/products/search", Schema.Array(Product), { ...params, q })
+            : get("/products", Schema.Array(Product), {
+              ...params,
+              ...(regions ? { country: regions.join(",") } : {}),
+              category: (cats ?? ALL_GIFT_CARDS).join(",")
+            }))
+          // Search can't filter by country or category itself, so those are applied here.
+          items.push(...products.filter((p) => offered(p) && inCountry(p) && inCategory(p)).map(summary))
+          next = products.length === PAGE ? start + PAGE : undefined
+          if (next === undefined) break
+          start = next
+        }
+        return new CatalogPage({ items, ...(next !== undefined ? { next } : {}) })
+      })
+      // Pages are cached for 10 minutes: browsing must not use up Bitrefill's product quota.
+      const browseCache = yield* Cache.makeWith((key: string) => browsePage(JSON.parse(key) as BrowseOptions), {
+        capacity: 500,
+        timeToLive: (exit) => (Exit.isSuccess(exit) ? "10 minutes" : "10 seconds")
+      })
+      const browse = (opts: BrowseOptions) =>
+        Cache.get(browseCache, JSON.stringify({ q: opts.q?.trim().toLowerCase() || undefined, country: opts.country, category: opts.category, start: opts.start ?? 0 }))
 
       // ponytail: fixed one-minute window in memory, one process.
       let budget = { used: 0, resetAt: 0 }
@@ -378,7 +468,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           }))
         )
 
-      return Bitrefill.of({ search, voucher, order, delivery, credit, deposit, depositState })
+      return Bitrefill.of({ search, browse, voucher, order, delivery, credit, deposit, depositState })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

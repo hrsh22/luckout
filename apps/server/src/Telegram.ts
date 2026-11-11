@@ -4,7 +4,7 @@ import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
-import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp } from "./Agent.ts"
+import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Sales } from "./Sales.ts"
@@ -251,9 +251,11 @@ export class Telegram extends Context.Service<Telegram, {
         const id = randomUUID()
         pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
         const p = turn.pending
-        const summary = p.maxPrice === p.referencePrice
+        const summary = (p.maxPrice === p.referencePrice
           ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
-          : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`
+          : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
+          // A card only works in its own country: said on the button's line, every time.
+          ` Works in ${worksIn(p.country)}.`
         await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
           reply_markup: new InlineKeyboard().text(`Buy for ${usdUp(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })
