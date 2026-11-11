@@ -1,5 +1,6 @@
 import { PgClient } from "@effect/sql-pg"
 import { PgliteClient } from "@effect/sql-pglite"
+import { PGlite } from "@electric-sql/pglite"
 import { Config, Effect, Layer, Option } from "effect"
 import { Migrator, SqlClient } from "effect/sql"
 import { mkdirSync } from "node:fs"
@@ -205,5 +206,21 @@ const NetworkLock = Layer.effectDiscard(
 
 export const DbLive = NetworkLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
 
+// Tests migrate one database per process and start each fresh one from its dump: ~70ms instead of
+// ~1s to boot and migrate. (The template is closed once dumped; left open, the process lingers 10s.)
+let migrated: Promise<File | Blob> | undefined
+const migratedDump = () =>
+  migrated ??= PGlite.create().then(async (pg) => {
+    await Effect.runPromise(Effect.provide(Migrator.make({})({ loader: migrations }), PgliteClient.layer({ liveClient: pg })))
+    const dump = await pg.dumpDataDir("none")
+    await pg.close()
+    return dump
+  })
+
 /** A fresh in-memory database, for tests. */
-export const DbMemory = Migrations.pipe(Layer.provideMerge(PgliteClient.layer({})))
+export const DbMemory = PgliteClient.layerFrom(
+  Effect.acquireRelease(
+    Effect.promise(async () => PGlite.create({ loadDataDir: await migratedDump() })),
+    (pg) => Effect.promise(() => pg.close())
+  ).pipe(Effect.flatMap((liveClient) => PgliteClient.make({ liveClient })))
+)
