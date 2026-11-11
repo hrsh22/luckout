@@ -2,18 +2,18 @@ import { BrowserCheck } from "@/components/browser-check"
 import { contractId, explorer } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackPct, MAX_CASHBACK } from "@/lib/modes"
-import { loadDraw } from "@/lib/proof"
+import { loadDraw, TX_HASH } from "@/lib/proof"
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
+import { cache } from "react"
 
 type Props = { params: Promise<{ tx: string }> }
 
-const TX = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/
-
-const load = async (tx: string) => {
-  if (!TX.test(tx)) notFound()
+// Once per request: generateMetadata and the page share it (RPC POSTs aren't memoized like GET fetches).
+const load = cache(async (tx: string) => {
+  if (!TX_HASH.test(tx)) notFound()
   return loadDraw(tx).catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }))
-}
+})
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const d = await load((await params).tx)

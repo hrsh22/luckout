@@ -8,7 +8,7 @@ import { Dialog } from "@base-ui/react/dialog"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MotionConfig } from "motion/react"
 import { usePathname } from "next/navigation"
-import { Suspense, useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Toaster } from "sonner"
 
 export function AppProviders({ children }: { children: React.ReactNode }) {
@@ -18,9 +18,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       <MotionConfig reducedMotion="user">
         <SessionProvider>
           {children}
-          <Suspense>
-            <WelcomeGate />
-          </Suspense>
+          <WelcomeGate />
         </SessionProvider>
       </MotionConfig>
       <Toaster

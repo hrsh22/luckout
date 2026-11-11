@@ -2,22 +2,46 @@
 export const network = process.env.NEXT_PUBLIC_NEAR_NETWORK === "mainnet" ? "mainnet" : "testnet"
 export const contractId = process.env.NEXT_PUBLIC_LUCKOUT_CONTRACT_ID || "app.luckout.testnet"
 export const usdcId = process.env.NEXT_PUBLIC_USDC_CONTRACT_ID || "usdc.luckout.testnet"
-const rpcUrl = network === "mainnet" ? "https://free.rpc.fastnear.com" : "https://test.rpc.fastnear.com"
+// Tried in order when one is down, slow or rate-limited: the same providers as the server's defaults (apps/server/src/Near.ts).
+const rpcUrls = network === "mainnet"
+  ? ["https://free.rpc.fastnear.com", "https://near.drpc.org"]
+  : ["https://test.rpc.fastnear.com", "https://near-testnet.drpc.org"]
+// Transactions and blocks older than a few days live only on archival nodes.
+const historyUrls = [...rpcUrls, network === "mainnet" ? "https://archival-rpc.mainnet.fastnear.com" : "https://archival-rpc.testnet.fastnear.com"]
 export const explorer = (tx: string) => `https://${network === "testnet" ? "testnet." : ""}nearblocks.io/txns/${tx}`
 
-async function rpc<T>(method: string, params: object): Promise<T> {
-  const res = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
-  }).then((r) => r.json())
-  if (res.error || res.result?.error) throw new Error(JSON.stringify(res.error?.cause ?? res.error ?? res.result.error))
-  return res.result
+async function rpc<T>(method: string, params: object, urls = rpcUrls): Promise<T> {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
+  let res: { result?: T & { error?: unknown }; error?: { code?: number; cause?: { name?: string } } } | undefined
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(10_000) })
+      res = r.ok ? await r.json() : res
+      // Rate limited (FastNEAR's -429) or pruned history is this endpoint's answer, not the chain's: try the next.
+      if (res && res.error?.code !== -429 && !/^UNKNOWN_(TRANSACTION|BLOCK)$/.test(res.error?.cause?.name ?? "")) break
+    } catch {}
+  }
+  if (!res) throw new Error("Can't reach NEAR right now. Check your connection and try again.")
+  const error = res.error ?? res.result?.error
+  if (error) {
+    // The raw reply stays on `cause` for debugging; people see plain words.
+    throw new Error(
+      res.error?.cause?.name === "UNKNOWN_TRANSACTION"
+        ? "NEAR has no record of this transaction. Check the link, or try again in a minute."
+        : "NEAR couldn't answer that just now. Try again in a moment.",
+      { cause: error }
+    )
+  }
+  return res.result as T
 }
 
 /** Liquid NEAR on an account, in yoctoNEAR: what pays network fees. */
 export const nearBalance = (accountId: string) =>
   rpc<{ amount: string }>("query", { request_type: "view_account", finality: "optimistic", account_id: accountId }).then((r) => r.amount)
+
+/** The code deployed on an account (base58 of the wasm's sha256): it changes only with an upgrade. */
+export const codeHash = (accountId: string) =>
+  rpc<{ code_hash: string }>("query", { request_type: "view_account", finality: "final", account_id: accountId }).then((r) => r.code_hash)
 
 /** Below this a wallet can't pay for our transactions (a deposit costs about 0.03 NEAR). */
 export const MIN_GAS_NEAR = 50_000_000_000_000_000_000_000n // 0.05 NEAR
@@ -42,8 +66,8 @@ export async function txEvents(txHash: string, signer: string) {
   const tx = await rpc<{
     receipts_outcome: Array<{ outcome: { logs: Array<string>; executor_id: string; status: Record<string, unknown> } }>
     transaction_outcome: { block_hash: string }
-  }>("tx", { tx_hash: txHash, sender_account_id: signer, wait_until: "NONE" })
-  const block = await rpc<{ header: { timestamp_nanosec: string } }>("block", { block_id: tx.transaction_outcome.block_hash })
+  }>("tx", { tx_hash: txHash, sender_account_id: signer, wait_until: "NONE" }, historyUrls)
+  const block = await rpc<{ header: { timestamp_nanosec: string } }>("block", { block_id: tx.transaction_outcome.block_hash }, historyUrls)
   const events = tx.receipts_outcome
     .filter((r) => r.outcome.executor_id === contractId && !("Failure" in r.outcome.status))
     .flatMap((r) => r.outcome.logs)

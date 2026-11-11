@@ -1,5 +1,5 @@
 import { usd, usdUp } from "@/lib/format"
-import { loadDraw } from "@/lib/proof"
+import { loadDraw, TX_HASH } from "@/lib/proof"
 import { ImageResponse } from "next/og"
 
 export const size = { width: 1200, height: 630 }
@@ -11,17 +11,20 @@ const PAPER = "#F5F2EA"
 const GOLD = "#E9B949"
 const MUTED = "#B9BDC7"
 
-/** Space Grotesk Bold as TTF (next/og can't read woff2); falls back to the default font. */
-const grotesk = () =>
-  fetch("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700")
-    .then((r) => r.text())
-    .then((css) => fetch(/src: url\((.+?)\) format\('(?:truetype|opentype)'\)/.exec(css)![1]!))
-    .then((r) => r.arrayBuffer())
-    .catch(() => undefined)
+/**
+ * Space Grotesk Bold as TTF (next/og can't read woff2), fetched once per server instance; falls back
+ * to the default font. ponytail: a failed fetch keeps the fallback until the instance restarts.
+ */
+const grotesk = fetch("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@700")
+  .then((r) => r.text())
+  .then((css) => fetch(/src: url\((.+?)\) format\('(?:truetype|opentype)'\)/.exec(css)![1]!))
+  .then((r) => r.arrayBuffer())
+  .catch(() => undefined)
 
 // Win Card (ADR-0005): shared link previews show the price paid, never Redemption Data.
 export default async function Image({ params }: { params: Promise<{ tx: string }> }) {
-  const [draw, font] = await Promise.all([loadDraw((await params).tx).then((d) => d.draw, () => undefined), grotesk()])
+  const tx = (await params).tx
+  const [draw, font] = await Promise.all([TX_HASH.test(tx) ? loadDraw(tx).then((d) => d.draw, () => undefined) : undefined, grotesk])
   const ref = draw ? Number(draw.reference_price) : 0
   const paid = draw ? Number(draw.final_price) : 0
   const win = draw !== undefined && paid < ref

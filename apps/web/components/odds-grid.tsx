@@ -1,7 +1,7 @@
 "use client"
 
 import { slabColor, Spacers } from "@/components/odds"
-import { usdUp } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { motion } from "motion/react"
@@ -10,15 +10,20 @@ import { useState } from "react"
 const PRICE = 20_000_000
 const LUCKY = MODES.filter((m) => m.premiumBps > 0)
 
-const label = (o: PricedOutcome) =>
-  o.price === 0 ? "got it all back, free" : o.cashback > 0 ? `got ${o.pct}% back, paid ${usdUp(o.price)}` : `no cashback, paid ${usdUp(o.price)}`
+const label = (o: PricedOutcome, whole: boolean) =>
+  o.price === 0
+    ? "got it all back, free"
+    : o.cashback > 0
+    ? `got ${whole ? `${o.pct}%` : usd(o.cashback)} back, paid ${usdUp(o.price)}`
+    : `no cashback, paid ${usdUp(o.price)}`
 
-/** The honest odds, drawn: 100 buyers of a $20 card, each dot what one of them paid. */
-export function OddsGrid() {
+/** The honest odds, drawn: 100 buyers of a $20 card at today's Free Reserve, each dot what one of them paid. */
+export function OddsGrid({ free }: { free: string }) {
   const [index, setIndex] = useState(1)
   const m = LUCKY[index]!
   const pal = modePalette(m.mode)
-  const outcomes = pricedOutcomes(m, simpleQuote(m, PRICE))
+  const q = simpleQuote(m, PRICE, free)
+  const outcomes = pricedOutcomes(m, q)
   const cells = outcomes.flatMap((o) => Array.from({ length: o.chanceBps / 100 }, () => o))
 
   return (
@@ -58,7 +63,7 @@ export function OddsGrid() {
           {outcomes.map((o) => (
             <li key={`${o.pct}-${o.cashback === 0}`} className="flex items-center gap-2">
               <span className="size-3 shrink-0 rounded-full" style={{ background: slabColor(o) }} aria-hidden="true" />
-              <span><b>{o.chanceBps / 100}</b> {label(o)}</span>
+              <span><b>{o.chanceBps / 100}</b> {label(o, q.luckyAmount === PRICE)}</span>
             </li>
           ))}
           <Spacers used={outcomes.length} />

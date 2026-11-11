@@ -12,11 +12,13 @@ if (process.env.VERCEL_ENV === "production" && !process.env.NEXT_PUBLIC_API_URL)
 // A build for one network must never point at the other's accounts or API (testnet and mainnet
 // are separate deployments: docs in deploy/README.md).
 const network = process.env.NEXT_PUBLIC_NEAR_NETWORK === "mainnet" ? "mainnet" : "testnet"
+// Mainnet USDC is the 64-hex bridged token, and the mainnet API lives at luckout-api.gamified.trade.
 const mixed = ["NEXT_PUBLIC_LUCKOUT_CONTRACT_ID", "NEXT_PUBLIC_USDC_CONTRACT_ID"].filter((k) => {
   const v = process.env[k] ?? ""
-  return network === "mainnet" ? v.endsWith(".testnet") || v === "" : v.endsWith(".near")
+  return network === "mainnet" ? v.endsWith(".testnet") || v === "" : v.endsWith(".near") || /^[0-9a-f]{64}$/.test(v)
 })
-if (network === "mainnet" && process.env.NEXT_PUBLIC_API_URL?.includes("testnet")) mixed.push("NEXT_PUBLIC_API_URL")
+const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? ""
+if (network === "mainnet" ? apiUrl.includes("testnet") : URL.parse(apiUrl)?.hostname === "luckout-api.gamified.trade") mixed.push("NEXT_PUBLIC_API_URL")
 if (mixed.length > 0) throw new Error(`NEXT_PUBLIC_NEAR_NETWORK=${network}, but these point elsewhere: ${mixed.join(", ")}`)
 
 // ponytail: no script-src. NEAR Connect runs each wallet's code, fetched from that wallet's own
@@ -25,7 +27,6 @@ const csp = ["frame-ancestors 'none'", "base-uri 'self'", "object-src 'none'", "
 
 export default {
   transpilePackages: ["@luckout/api"],
-  images: { remotePatterns: [{ protocol: "https", hostname: "www.bitrefill.com" }] },
   async headers() {
     return [{
       source: "/:path*",

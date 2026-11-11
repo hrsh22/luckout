@@ -7,7 +7,7 @@ import { SignInCard } from "@/components/sign-in-card"
 import { TelegramLink } from "@/components/telegram-link"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
@@ -126,8 +126,8 @@ function Limits({ per, daily }: { per: number; daily: number }) {
   const [b, setB] = useState("")
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    setA(String(per / 1e6))
-    setB(String(daily / 1e6))
+    setA(dollars(per))
+    setB(dollars(daily))
   }, [per, daily])
   const nextPer = toMicro(a)
   const nextDaily = toMicro(b)

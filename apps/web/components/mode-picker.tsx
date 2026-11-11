@@ -4,13 +4,15 @@ import { OddsBar } from "@/components/odds"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
+import { useFreeReserve } from "@/lib/queries"
 import type { Mode } from "@luckout/api"
 import { Check, LoaderCircle } from "lucide-react"
 import { motion } from "motion/react"
 
 /**
  * The four ways to pay, as tiles in their own colours. With a price, each tile says what you'd pay
- * now and the most you could get back; without one, it shows the odds for any purchase.
+ * now and the most you could get back; without one, it shows the odds for a $20 card. Until the
+ * Free Reserve is read, lucky tiles show no amounts: the Discount Cap could change them.
  */
 export function ModePicker({ value, onChange, price, savedDefault, saving, label = "How do you want to pay?" }: {
   value: Mode
@@ -23,14 +25,15 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
   saving?: Mode | undefined
   label?: string
 }) {
+  const free = useFreeReserve()
   return (
     <div role="radiogroup" aria-label={label} className="grid gap-3 sm:grid-cols-2">
       {MODES.map((m) => {
         const selected = sameMode(value, m.mode)
         const p = modePalette(m.mode)
         const example = price ?? 20_000_000
-        const outcomes = pricedOutcomes(m, simpleQuote(m, example))
-        const best = outcomes[outcomes.length - 1]!
+        const outcomes = m.premiumBps === 0 || free !== undefined ? pricedOutcomes(m, simpleQuote(m, example, free ?? 0)) : undefined
+        const best = outcomes?.at(-1)
         const chance = cashbackChanceBps(m) / 100
         return (
           <motion.button
@@ -64,17 +67,25 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
             <span className={`mt-1 text-[15px] ${selected ? "opacity-80" : "text-ink-soft"}`}>
               {m.premiumBps === 0
                 ? price ? `Pay ${usdUp(example)}, exactly the price` : "Exactly the price, no Draw"
-                : price ? `Pay ${usdUp(outcomes[0]!.price)} now, +${m.premiumBps / 100}%` : `+${m.premiumBps / 100}% up front`}
+                : price && outcomes ? `Pay ${usdUp(outcomes[0]!.price)} now, +${m.premiumBps / 100}%` : `+${m.premiumBps / 100}% up front`}
             </span>
             <span className="mt-auto pt-4">
               {m.premiumBps === 0
                 ? <span className={`text-sm ${selected ? "opacity-80" : "text-muted"}`}>No cashback, no surprises.</span>
                 : (
                   <>
-                    <OddsBar outcomes={outcomes} className="h-2" />
+                    {outcomes ? <OddsBar outcomes={outcomes} className="h-2" /> : <span className="skeleton block h-2 rounded-full" />}
                     <span className={`mt-2 block text-sm ${selected ? "opacity-85" : "text-muted"}`}>
-                      <b className="font-semibold">{chance}%</b> get cashback, up to {best.price === 0 ? `all ${usd(best.cashback)}` : usd(best.cashback)}
-                      {price ? "" : " on a $20 card"}
+                      {!best
+                        ? <><b className="font-semibold">{chance}%</b> get cashback</>
+                        : best.cashback === 0
+                        ? "No cashback right now: the Cashback Reserve is empty."
+                        : (
+                          <>
+                            <b className="font-semibold">{chance}%</b> get cashback, up to {best.price === 0 ? `all ${usd(best.cashback)}` : usd(best.cashback)}
+                            {price ? "" : " on a $20 card"}
+                          </>
+                        )}
                     </span>
                   </>
                 )}
