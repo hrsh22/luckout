@@ -62,6 +62,7 @@ export interface SwapRow {
   readonly chain: string | null
   readonly amount_in: string | null
   readonly amount_out: string | null
+  readonly deposited: string | null
   readonly deadline: Date | string | null
   readonly time_estimate: number | null
   readonly status: string | null
@@ -82,6 +83,7 @@ const ms = (d: Date | string | null) => (d === null ? undefined : new Date(d).ge
 /** Where the money is, in the customer's words (see TransferPhase). */
 export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "status" | "move">): TransferPhase => {
   if (r.status === "REFUNDED" || r.status === "FAILED") return "refunded"
+  if (r.status === "INCOMPLETE_DEPOSIT" && r.direction === "in") return "incomplete"
   if (r.status === "SUCCESS") {
     if (r.direction === "out") return "done"
     if (!isEvmAccount(r.account_id)) return "in-wallet"
@@ -91,10 +93,13 @@ export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "status" |
   return "swapping"
 }
 
-/** 1Click has the money but it's taking well over its usual time: safe, and the customer should hear so. */
+/**
+ * 1Click has the money but it's taking well over its usual time: safe, and the customer should hear so.
+ * Never a short payment: that waits on the customer, who is told so instead.
+ */
 export const isLate = (r: Pick<SwapRow, "status" | "deposit_seen_at" | "time_estimate">, now: number) => {
   const seen = ms(r.deposit_seen_at)
-  if (seen === undefined || (r.status && FINAL.has(r.status))) return false
+  if (seen === undefined || (r.status && (FINAL.has(r.status) || r.status === "INCOMPLETE_DEPOSIT"))) return false
   return now - seen > Math.max(10 * 60_000, 3 * (r.time_estimate ?? 0) * 1000)
 }
 
@@ -106,6 +111,17 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
   const amount = usd(Number(r.usdc))
   const from = `${r.amount_in ?? ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
   if (r.direction === "in") {
+    if (phase === "incomplete") {
+      const left = (ms(r.deadline) ?? now) - now
+      return {
+        key: "incomplete",
+        text: `1Click got ${r.deposited ?? "part"} of the ${from} your ${amount} Top-Up needs. ${
+          left > 60_000
+            ? `Send the rest to the same address within ${Math.floor(left / 60_000)} min, or what arrived goes back to your NEAR Intents account.`
+            : "What arrived goes back to your NEAR Intents account."
+        } See ${web}/wallet`
+      }
+    }
     if (phase === "done") return { key: "landed", text: `Your ${amount} Top-Up is in your Luckout balance.` }
     if (phase === "in-wallet") return { key: "landed", text: `Your ${amount} Top-Up landed in your NEAR wallet. Deposit it into Luckout at ${web}/wallet` }
     if (phase === "in-intents") {
@@ -360,6 +376,7 @@ export class TopUp extends Context.Service<TopUp, {
               status_at = CASE WHEN ${changed} THEN now() ELSE status_at END,
               deposit_seen_at = ${seen},
               amount_out = CASE WHEN direction = 'out' THEN coalesce(${d.value.amountOut ?? null}, amount_out) ELSE amount_out END,
+              deposited = coalesce(${d.value.deposited ?? null}, deposited),
               delivered_tx = coalesce(${d.value.deliveredTx ?? null}, delivered_tx),
               refunded = coalesce(${d.value.refunded ?? null}, refunded),
               refund_reason = coalesce(${d.value.refundReason ?? null}, refund_reason)
@@ -419,6 +436,7 @@ export class TopUp extends Context.Service<TopUp, {
                 chain: r.chain ?? "",
                 ...(r.amount_in ? { amountIn: r.amount_in } : {}),
                 ...(r.amount_out ? { amountOut: r.amount_out } : {}),
+                ...(r.deposited ? { deposited: r.deposited } : {}),
                 phase: phaseOf(r),
                 late: isLate(r, Date.now()),
                 createdAt: new Date(r.created_at).toISOString(),

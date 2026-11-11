@@ -331,7 +331,8 @@ export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({
  * their NEAR wallet, ready to deposit. in-intents: it's in their NEAR Intents account. done: in their
  * Luckout balance (Top-Up) or on the chain they picked (withdrawal). refunded: 1Click sent it back.
  */
-export const TransferPhase = Schema.Literals(["awaiting-transfer", "swapping", "moving", "in-wallet", "in-intents", "done", "refunded"])
+/** incomplete: 1Click got less than the quote asked for and waits for the rest until the deadline, then sends it back. */
+export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete", "swapping", "moving", "in-wallet", "in-intents", "done", "refunded"])
 export type TransferPhase = typeof TransferPhase.Type
 
 /** One of the customer's 1Click swaps: a Top-Up on its way in, or a withdrawal on its way out. */
@@ -348,6 +349,8 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   amountIn: Schema.optional(Schema.String),
   /** What arrives on the other chain, formatted (a withdrawal). */
   amountOut: Schema.optional(Schema.String),
+  /** What 1Click has received so far, formatted (a Top-Up short of its amount). */
+  deposited: Schema.optional(Schema.String),
   phase: TransferPhase,
   /** Taking longer than usual: safe, but say so. */
   late: Schema.Boolean,
