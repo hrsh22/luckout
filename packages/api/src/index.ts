@@ -36,6 +36,12 @@ export class CatalogPage extends Schema.Class<CatalogPage>("CatalogPage")({
   next: Schema.optional(Schema.Number)
 }) {}
 
+/** Popular cards, most wanted first. `country` is the one they were picked for: the one asked for, or the visitor's own. */
+export class PopularCards extends Schema.Class<PopularCards>("PopularCards")({
+  country: Schema.optional(Schema.String),
+  items: Schema.Array(VoucherSummary)
+}) {}
+
 /** The shop's categories, each a set of Bitrefill's own. */
 export const CATEGORIES = ["shopping", "food", "games", "entertainment", "travel"] as const
 export type Category = typeof CATEGORIES[number]
@@ -187,6 +193,14 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
     },
     success: CatalogPage,
     error: BitrefillUnavailable
+  }),
+  /** Popular cards for a country; with none given, for the visitor's own country when Cloudflare knows it. */
+  HttpApiEndpoint.get("popular", "/popular", {
+    query: {
+      country: Schema.optional(Schema.String.check(Schema.isPattern(/^[A-Z]{2}$/))),
+      category: Schema.optional(Schema.Literals(CATEGORIES))
+    },
+    success: PopularCards
   }),
   HttpApiEndpoint.get("voucher", "/catalog/:id", {
     params: { id: Schema.String },

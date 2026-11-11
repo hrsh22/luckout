@@ -1,6 +1,6 @@
 "use client"
 
-import type { Category, Mode, Purchase, VoucherSummary } from "@luckout/api"
+import { type Category, type Mode, type Purchase, VoucherSummary } from "@luckout/api"
 import { keepPreviousData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
@@ -36,6 +36,33 @@ export const useBrowse = (f: ShopFilters) =>
     staleTime: 5 * 60_000,
     placeholderData: keepPreviousData
   })
+
+/** Popular cards for the chosen country, or for the visitor's own when none is chosen (the server knows it). */
+export const usePopular = (f: Pick<ShopFilters, "country" | "category">, enabled: boolean) =>
+  useQuery({
+    queryKey: ["popular", f.country, f.category],
+    queryFn: () =>
+      api((c) => c.catalog.popular({ query: { ...(f.country ? { country: f.country } : {}), ...(f.category ? { category: f.category } : {}) } })),
+    enabled,
+    staleTime: 10 * 60_000,
+    placeholderData: keepPreviousData
+  })
+
+const VIEWED = "luckout.viewed"
+/** Cards opened lately in this browser, newest first; kept on this device only. */
+export const viewedCards = (): Array<VoucherSummary> => {
+  try {
+    return (JSON.parse(localStorage.getItem(VIEWED) ?? "[]") as Array<VoucherSummary>).map((v) => new VoucherSummary(v))
+  } catch {
+    return []
+  }
+}
+export const rememberViewed = ({ id, name, countryCode, countryName, currency, image, background }: VoucherSummary) => {
+  try {
+    const card = { id, name, countryCode, countryName, currency, image, background }
+    localStorage.setItem(VIEWED, JSON.stringify([card, ...viewedCards().filter((v) => v.id !== id)].slice(0, 6)))
+  } catch {}
+}
 
 export const voucherQuery = (id: string) => ({
   queryKey: ["voucher", id],

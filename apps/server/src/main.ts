@@ -1,11 +1,11 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, Authorization, BitrefillUnavailable, CurrentAccount, NotFound, type PurchaseInvalid } from "@luckout/api"
+import { type AdminInvalid, Api, Authorization, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
 import { Refill } from "./Refill.ts"
 import { Config, Effect, Layer, Redacted } from "effect"
-import { HttpRouter } from "effect/http"
+import { HttpRouter, HttpServerRequest } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
@@ -50,6 +50,14 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
     return handlers.handleAll({
       search: ({ query }) => quiet(bitrefill.search(query.q)),
       browse: ({ query }) => quiet(bitrefill.browse(query)),
+      popular: ({ query }) =>
+        Effect.gen(function*() {
+          // Cloudflare says where the visitor is ("XX" unknown, "T1" Tor). It only picks which cards to suggest.
+          const seen = (yield* HttpServerRequest.HttpServerRequest).headers["cf-ipcountry"]?.toUpperCase()
+          const country = query.country ?? (seen && /^[A-Z]{2}$/.test(seen) && seen !== "XX" && seen !== "T1" ? seen : undefined)
+          const items = yield* bitrefill.popular(country, query.category)
+          return new PopularCards({ ...(country ? { country } : {}), items })
+        }),
       voucher: ({ params }) => quiet(bitrefill.voucher(params.id)),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game))
     })
