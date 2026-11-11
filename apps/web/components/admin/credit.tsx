@@ -157,27 +157,42 @@ function CreditCard({ c, ordersToday, cap }: { c: Credit; ordersToday: number; c
 
 function CreditSettingsSheet({ open, onClose, s }: { open: boolean; onClose: () => void; s: CreditSettings }) {
   const save = useSaveCredit()
-  const [f, setF] = useState({ floor: "", ceiling: "", dailyRefill: "", waitMinutes: "" })
+  const [f, setF] = useState({ floor: "", ceiling: "", dailyRefill: "", waitMinutes: "", baseFloat: "" })
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    if (open) setF({ floor: dollars(s.floor), ceiling: dollars(s.ceiling), dailyRefill: dollars(s.dailyRefill), waitMinutes: String(s.waitMinutes) })
+    if (open) {
+      setF({
+        floor: dollars(s.floor),
+        ceiling: dollars(s.ceiling),
+        dailyRefill: dollars(s.dailyRefill),
+        waitMinutes: String(s.waitMinutes),
+        baseFloat: dollars(s.baseFloat ?? 0)
+      })
+    }
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const next = {
     floor: toMicro(f.floor),
     ceiling: toMicro(f.ceiling),
     dailyRefill: toMicro(f.dailyRefill),
-    waitMinutes: Number(f.waitMinutes)
+    waitMinutes: Number(f.waitMinutes),
+    baseFloat: toMicro(f.baseFloat)
   }
-  const valid = [next.floor, next.ceiling, next.dailyRefill].every((v) => v >= 0 && v <= 2_000_000_000) &&
+  const valid = [next.floor, next.ceiling, next.dailyRefill, next.baseFloat].every((v) => v >= 0 && v <= 2_000_000_000) &&
     Number.isInteger(next.waitMinutes) && next.waitMinutes >= 5 && next.waitMinutes <= 1440
   const fields: Array<{ key: keyof typeof f; label: string; hint: string; dollars: boolean }> = [
     { key: "floor", label: "Keep at least", hint: "Whatever sales did.", dollars: true },
     { key: "ceiling", label: "Never hold more than", hint: "The most that can sit unused at Bitrefill. A refill for orders already waiting may go past it: that credit is spent within minutes.", dollars: true },
     { key: "dailyRefill", label: "Refill at most, per day", hint: "Across all refills in 24 hours. Big orders wait for room here.", dollars: true },
-    { key: "waitMinutes", label: "Minutes an order may wait", hint: "Up to 1440 (a day). Then it's cancelled, and the customer pays nothing.", dollars: false }
+    { key: "waitMinutes", label: "Minutes an order may wait", hint: "Up to 1440 (a day). Then it's cancelled, and the customer pays nothing.", dollars: false },
+    {
+      key: "baseFloat",
+      label: "Keep ready on Base",
+      hint: "USDC in our Base wallet, so a refill pays Bitrefill in a minute instead of waiting on a swap. Topped back up by itself; 0 turns it off. It's ours, unlike Bitrefill credit.",
+      dollars: true
+    }
   ]
   return (
-    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Credit settings" description="The target is two days of recent sales, between the first two numbers.">
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Credit settings" description="The target is a day of recent sales with a Base float (two without), between the first two numbers.">
       <div className="flex flex-col gap-4">
         {fields.map((x) => (
           <label key={x.key} className="flex flex-col gap-1.5">

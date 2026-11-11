@@ -40,7 +40,7 @@ export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: As
           <a href={explorerAccount(t.accountId)} target="_blank" rel="noreferrer" className="text-sm text-muted underline-offset-2 hover:underline">{t.accountId}</a>
         )}
       </div>
-      {t.wallet && <BaseWallet w={t.wallet} />}
+      {t.wallet && <BaseWallet w={t.wallet} float={o.credit.settings.baseFloat ?? 0} />}
       <p className="text-[15px] text-ink-soft">
         {mode === "none"
           ? "The server has no treasury key yet, so refills can't be paid."
@@ -73,7 +73,7 @@ export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: As
  * Our wallet on Base: refills swap into it, then pay Bitrefill from it. It has no key of its own; the
  * treasury signs for it through NEAR Chain Signatures, so whoever controls the treasury controls it.
  */
-function BaseWallet({ w }: { w: NonNullable<AdminOverview["treasury"]["wallet"]> }) {
+function BaseWallet({ w, float }: { w: NonNullable<AdminOverview["treasury"]["wallet"]>; float: number }) {
   const low = BigInt(w.eth) < BigInt(w.alertBelow)
   return (
     <div className="rounded-[1.25rem] bg-soft p-4 text-sm">
@@ -83,7 +83,12 @@ function BaseWallet({ w }: { w: NonNullable<AdminOverview["treasury"]["wallet"]>
           {w.address.slice(0, 6)}…{w.address.slice(-4)}
         </a>
       </div>
-      <p className="mt-1 text-ink-soft"><Money micro={w.usdc} /> USDC waiting · {eth(w.eth)} ETH for gas</p>
+      <p className="mt-1 text-ink-soft">
+        <Money micro={w.usdc} /> USDC {float > 0 ? <>ready, of a <Money micro={float} /> float</> : "waiting"} · {eth(w.eth)} ETH for gas
+      </p>
+      {float > 0 && (
+        <p className="mt-1 text-xs text-muted">Refills pay Bitrefill from this in about a minute; it's topped back up by itself once under half.</p>
+      )}
       {low && (
         <p className="mt-2 flex items-start gap-2 text-warn">
           <CircleAlert size={16} className="mt-0.5 shrink-0" aria-hidden="true" />Low on gas: send about $1 of ETH on Base to {w.address}, or refills stop.

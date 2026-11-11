@@ -37,7 +37,7 @@ The browser storefront where a customer connects their NEAR wallet, tops up, set
 _Avoid_: Dashboard, admin console
 
 **Bitrefill Credit**:
-Our USD store credit at Bitrefill, which pays for every real card and can't be refunded; kept between a floor and a ceiling at about two days of sales.
+Our USD store credit at Bitrefill, which pays for every real card and can't be refunded; kept between a floor and a ceiling at about a day of sales with a Base Float (two without).
 _Avoid_: Float, balance (that's the customer's), wallet
 
 **Refill**:
@@ -51,6 +51,10 @@ _Avoid_: Hot wallet, float account
 **Base Wallet**:
 Our address on Base, derived from the Treasury through NEAR Chain Signatures, with no key of its own. Refills land here and pay Bitrefill from here, so a late swap can never pay an expired invoice.
 _Avoid_: EVM wallet, hot wallet
+
+**Base Float**:
+USDC kept ready in the Base Wallet, so a Refill pays Bitrefill in about a minute instead of waiting on a swap; topped back up from the Treasury once it's under half. Unlike Bitrefill Credit, it's still ours.
+_Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
 **Relayer**:
 The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.
