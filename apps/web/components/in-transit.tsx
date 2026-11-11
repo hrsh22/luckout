@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { CHAIN_NAMES } from "@/lib/evm"
 import { usd } from "@/lib/format"
-import { ACTIVE_PHASES, useTransfers } from "@/lib/queries"
+import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { Transfer } from "@luckout/api"
 import { ArrowDownLeft, ArrowUpRight, CircleCheck, Clock, Copy, ExternalLink, RotateCcw } from "lucide-react"
@@ -48,6 +48,30 @@ export function InTransit() {
       <ul className="flex flex-col divide-y divide-line">
         {list.map((t) => <Row key={t.depositAddress} t={t} />)}
       </ul>
+    </section>
+  )
+}
+
+/**
+ * What else is in the customer's own NEAR Intents account: 1Click returns the extra sent with a Top-Up, and
+ * refunds, in the token paid with. Luckout can't spend it, but it's the customer's, so it's never out of sight.
+ */
+export function HeldInIntents() {
+  const { token } = useSession()
+  const held = useHeld(token).data ?? []
+  if (held.length === 0) return null
+  return (
+    <section className="card flex flex-col gap-2 p-7">
+      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">Also yours, in NEAR Intents</h2>
+      <ul className="flex flex-col gap-1 font-semibold">
+        {held.map((h) => <li key={h.assetId}>{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></li>)}
+      </ul>
+      <p className="text-sm text-ink-soft">
+        1Click returns what you sent beyond a top-up's amount, and any refund, in the token you paid with, to your own NEAR Intents
+        account. Your wallet controls it, not Luckout: sign in on{" "}
+        <a href={INTENTS_APP} target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-2">near-intents.org</a>{" "}
+        with this same wallet to swap it or send it anywhere.
+      </p>
     </section>
   )
 }

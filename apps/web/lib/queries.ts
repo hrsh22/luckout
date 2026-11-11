@@ -134,6 +134,15 @@ export const useTransfers = (token: string | undefined) =>
     refetchInterval: (q) => (q.state.data?.some((t) => ACTIVE_PHASES.has(t.phase)) ? 8000 : 60_000)
   })
 
+/** What else is in the customer's NEAR Intents account: 1Click's change and refunds, in the token paid with. */
+export const useHeld = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["held", token],
+    queryFn: () => api((c) => c.topup.held(), token),
+    enabled: !!token,
+    refetchOnWindowFocus: true
+  })
+
 /** Whether the signed-in account may open the admin panel; decides the menu link. */
 export const useIsAdmin = (token: string | undefined) =>
   useQuery({
