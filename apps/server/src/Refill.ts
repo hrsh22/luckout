@@ -39,7 +39,8 @@ import { NEAR_USDC_ASSET } from "./TopUp.ts"
 // - A float of USDC kept in the Base wallet (CreditSettings.baseFloat) lets a refill skip the swap and pay
 //   Bitrefill in about a minute. When no refill is due and the wallet holds under half the float, a
 //   "float" refill swaps exactly the missing amount in, through the same steps, and ends once it lands:
-//   fund → quote → send → swapping → done. It never touches Bitrefill, and a real refill always goes first.
+//   fund → quote → send → swapping → done. It never touches Bitrefill. It waits for money quietly, and while
+//   it's still waiting at fund with nothing signed, a real refill that comes due cancels it and goes first.
 
 export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
 /** The most a refill may cost above the credit it buys, slippage buffer included. */
@@ -350,9 +351,12 @@ export class Refill extends Context.Service<Refill, {
                 return "wait"
               }
               const shortfall = cents(need - t.usdc)
+              // A float top-up is never urgent: it waits for money quietly (the panel says why), and steps
+              // aside if a real refill comes due meanwhile (giveWay).
+              const tell = (text: string) => (isFloat(row) ? Effect.void : alerts.admin(text))
               if (t.dailyCap === 0) {
                 yield* save(row.id, { error: `Waiting for ${usd(shortfall)} of proceeds in the treasury (manual mode).` })
-                yield* alerts.admin(`A Bitrefill refill is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
+                yield* tell(`A Bitrefill refill is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
                 return "wait"
               }
               const capLeft = t.dailyCap - t.sweptToday
@@ -362,7 +366,7 @@ export class Refill extends Context.Service<Refill, {
                   ? `Today's cap allows ${usd(Math.max(0, capLeft))} more (${usd(t.sweptToday)} of ${usd(t.dailyCap)} used): raise it in Admin → Treasury → Change mode, say to ${usd(suggestedCap(t.dailyCap, t.sweptToday + shortfall))}, or it carries on when the cap resets.`
                   : `The proceeds hold only ${usd(t.proceeds)}: it carries on as sales come in, or send USDC to ${near.treasuryId} to cover it now.`
                 yield* save(row.id, { error: `The treasury needs ${usd(shortfall)} more. ${fix}` })
-                yield* alerts.admin(`A ${usd(amount)} Bitrefill refill needs ${usd(shortfall)} more in the treasury. ${fix}`)
+                yield* tell(`A ${usd(amount)} Bitrefill refill needs ${usd(shortfall)} more in the treasury. ${fix}`)
                 return "wait"
               }
               // Pull exactly the shortfall: the treasury never holds more than refills need.
@@ -667,7 +671,23 @@ export class Refill extends Context.Service<Refill, {
           Effect.orDie
         )
 
+      /**
+       * A float top-up still waiting for money, with nothing signed for it yet, gives way: to a real refill
+       * that's due (`always` false) or to an admin's (`always` true). Only one refill runs at a time, and a
+       * float is never worth holding up Bitrefill credit for. One already pulling or swapping carries on.
+       */
+      const giveWay = (always: boolean) =>
+        Effect.gen(function*() {
+          const [f] = yield* sql<Row>`SELECT * FROM refills WHERE reason = 'float' AND step = 'fund' AND sweep_tx IS NULL LIMIT 1`.pipe(Effect.orDie)
+          if (!f || running.has(f.id)) return
+          if (!always && (yield* size(undefined)).amount === 0) return
+          if (yield* move(f, { step: "cancelled", error: `${f.error ? `${f.error} | ` : ""}Gave way to a Bitrefill refill.` })) {
+            yield* Effect.log(`float top-up ${f.id} gave way to a refill`)
+          }
+        })
+
       const plan = planLock.withPermits(1)(Effect.gen(function*() {
+        yield* giveWay(false)
         const why = yield* blocked(true)
         if (why === AUTO_OFF) {
           // Off by choice: still say when a refill is due, so nobody has to watch the number.
@@ -700,6 +720,7 @@ export class Refill extends Context.Service<Refill, {
 
       const request = (amount: number | undefined, by: string) =>
         planLock.withPermits(1)(Effect.gen(function*() {
+          yield* giveWay(true)
           const why = yield* blocked(false)
           if (why) return yield* new AdminInvalid({ message: why })
           const s = yield* size(amount)
