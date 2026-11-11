@@ -25,21 +25,21 @@ export class Alerts extends Context.Service<Alerts, {
       const telegram = (chatId: string | number, text: string) =>
         Option.isNone(token)
           ? Effect.succeed(false)
-          : Effect.tryPromise(() =>
-            fetch(`https://api.telegram.org/bot${Redacted.value(token.value)}/sendMessage`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ chat_id: chatId, text, link_preview_options: { is_disabled: true } }),
-              signal: AbortSignal.timeout(10_000)
-            })
-          ).pipe(
-            Effect.map((res) => res.status),
-            Effect.orElseSucceed(() => 0),
-            Effect.flatMap((status) =>
-              status >= 200 && status < 300
-                ? Effect.succeed(true)
-                : Effect.as(Effect.logError("alert delivery failed", status ? `HTTP ${status}` : "no response"), false)
-            )
+          : Effect.tryPromise({
+            try: () =>
+              fetch(`https://api.telegram.org/bot${Redacted.value(token.value)}/sendMessage`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ chat_id: chatId, text, link_preview_options: { is_disabled: true } }),
+                signal: AbortSignal.timeout(10_000)
+              }),
+            // Only the error's kind: its message can carry the URL, and the URL holds the token.
+            catch: (e) => `no response (${e instanceof Error ? e.name : typeof e})`
+          }).pipe(
+            Effect.flatMap((res) =>
+              res.status >= 200 && res.status < 300 ? Effect.succeed(true) : Effect.as(Effect.logError("alert delivery failed", `HTTP ${res.status}`), false)
+            ),
+            Effect.catch((why: string) => Effect.as(Effect.logError("alert delivery failed", why), false))
           )
 
       // ponytail: in-memory dedupe, resets on restart; fine for one process.
@@ -57,7 +57,8 @@ export class Alerts extends Context.Service<Alerts, {
         })
 
       const customer = (accountId: string, text: string) =>
-        sql<{ chat_id: string }>`SELECT chat_id FROM telegram_links WHERE account_id = ${accountId}`.pipe(
+        // As text: Postgres hands a BIGINT back as a BigInt, which JSON (and so the Telegram call) can't carry.
+        sql<{ chat_id: string }>`SELECT chat_id::text AS chat_id FROM telegram_links WHERE account_id = ${accountId}`.pipe(
           Effect.flatMap((rows) => (rows[0] ? telegram(rows[0].chat_id, text) : Effect.void)),
           Effect.ignore
         )
