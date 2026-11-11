@@ -1,3 +1,6 @@
 packages:
   - apps/*
   - packages/*
+allowBuilds:
+  # Its postinstall only checks AppKit versions.
+  '@reown/appkit': false

@@ -3,14 +3,14 @@
 import { Avatar, shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
 import { NavShell } from "@/components/nav-shell"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
 import { useIsAdmin } from "@/lib/queries"
-import { ChevronDown, Copy, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
+import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useState } from "react"
@@ -61,8 +61,9 @@ export function AppNav() {
 }
 
 /**
- * The one sign-in button: it says which step the wallet is on. Where there's no room to show why
- * sign-in stopped (the nav, the receipt), it says so in a toast.
+ * The one sign-in button: it asks which kind of wallet (NEAR, or EVM through NEAR Intents, ADR-0011),
+ * then says which step the wallet is on. Where there's no room to show why sign-in stopped (the nav,
+ * the receipt), it says so in a toast.
  */
 export function SignInButton({ size = "md", label = "Sign in", onDone, inline = false }: {
   size?: "sm" | "md" | "lg"
@@ -72,19 +73,33 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
   inline?: boolean
 }) {
   const { signIn, signing, ready } = useSession()
+  const go = (kind: "near" | "evm") =>
+    signIn(kind).then((problem) => {
+      if (!problem) return onDone?.()
+      if (!inline) problem.cancelled ? toast(problem.message) : toast.error(problem.message)
+    })
+  const item = "flex min-h-14 cursor-pointer flex-col justify-center rounded-2xl px-4 py-2 outline-none select-none data-[highlighted]:bg-soft"
   return (
-    <Button
-      size={size}
-      loading={!!signing}
-      disabled={!ready}
-      onClick={() =>
-        signIn().then((problem) => {
-          if (!problem) return onDone?.()
-          if (!inline) problem.cancelled ? toast(problem.message) : toast.error(problem.message)
-        })}
-    >
-      {signing === "wallet" ? "Choose a wallet" : signing === "message" ? "Sign the message in your wallet" : label}
-    </Button>
+    <Menu.Root>
+      <Menu.Trigger className={buttonVariants({ size })} disabled={!ready || !!signing} aria-busy={!!signing || undefined}>
+        {signing && <LoaderCircle className="animate-spin" />}
+        {signing === "wallet" ? "Choose a wallet" : signing === "message" ? "Sign the message in your wallet" : label}
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner sideOffset={8} align="start" className="z-40">
+          <Menu.Popup className="w-72 origin-[var(--transform-origin)] rounded-[1.75rem] bg-white p-2 shadow-pop outline-none transition-[scale,opacity] duration-150 data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0">
+            <Menu.Item className={item} onClick={() => void go("near")}>
+              <span className="font-semibold">NEAR wallet</span>
+              <span className="text-sm text-muted">HOT, Meteor, Intear and more</span>
+            </Menu.Item>
+            <Menu.Item className={item} onClick={() => void go("evm")}>
+              <span className="font-semibold">EVM wallet</span>
+              <span className="text-sm text-muted">MetaMask, Rabby, Coinbase and more. No NEAR needed.</span>
+            </Menu.Item>
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
   )
 }
 
@@ -113,7 +128,7 @@ function AccountMenu({ id }: { id: string }) {
                 <Avatar id={id} size={40} />
                 <div className="min-w-0">
                   <p className="truncate font-semibold" title={id}>{shortAccount(id)}</p>
-                  <p className="text-sm text-muted">NEAR {network}</p>
+                  <p className="text-sm text-muted">{/^0x/.test(id) ? `EVM wallet · NEAR ${network}` : `NEAR ${network}`}</p>
                 </div>
               </div>
               <Menu.Item className={item} onClick={() => navigator.clipboard.writeText(id).then(() => toast.success("Account copied"))}>

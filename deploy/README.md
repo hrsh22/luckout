@@ -83,6 +83,12 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 2. `gh run download <run id> -n luckout-wasm-<commit>`.
 3. `./contract/upgrade.sh mainnet luckout.wasm` shows the current and new code hashes and the reserve; `GO=1` deploys, then checks the chain reports the new hash and still reads the state. Keep the previous wasm to roll back with the same script. Testnet first: `./contract/upgrade.sh testnet <wasm>`.
 
+## EVM wallets (ADR-0011)
+
+- **Nothing to configure on the server:** the NEAR Intents account is fixed per network (`intents.near`, `intents.luckout.testnet`), as in the contract, and EVM customers' intents go through the existing relayer, so it needs gas money on both networks. One relayed intent burns about 17 Tgas (about 0.002 NEAR).
+- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `luckout.gamified.trade`, `testnet.luckout.gamified.trade` and `localhost`, or WalletConnect refuses to connect there.
+- **Testnet NEAR Intents** at `intents.luckout.testnet` is the exact wasm `intents.near` runs, deployed with `new({config:{wnear_id:"wrap.testnet",fees:{fee:0,fee_collector:"luckout.testnet"},roles:{super_admins:["luckout.testnet"]}}})` and registered on test USDC. To redeploy it after `intents.near` upgrades: fetch the code with the RPC's `view_code`, check its hash, and deploy it without an init call.
+
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
 Logs: `pm2 logs luckout-api`.

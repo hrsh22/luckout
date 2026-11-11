@@ -28,6 +28,8 @@ pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 50_000_000; // 50 USDC
 pub const DEFAULT_DAILY_LIMIT: u128 = 100_000_000; // 100 USDC
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_ON_SEND: Gas = Gas::from_tgas(10);
+/// USDC's `ft_transfer_call` into NEAR Intents: the transfer, Intents' deposit and USDC's resolve.
+const GAS_FT_TRANSFER_CALL: Gas = Gas::from_tgas(50);
 /// The Draw callback's gas is set here, not by the caller (it uses ~3 Tgas).
 const GAS_DRAW: Gas = Gas::from_tgas(20);
 
@@ -35,6 +37,54 @@ const GAS_DRAW: Gas = Gas::from_tgas(20);
 #[allow(dead_code)]
 trait FungibleToken {
     fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+    fn ft_transfer_call(
+        &mut self,
+        receiver_id: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128>;
+}
+
+/// NEAR Intents (ADR-0011): the only caller of `on_auth`, and the only sender that may name the
+/// account a deposit credits. Fixed in the code for each network, so only an upgrade can change it.
+pub fn intents_account() -> AccountId {
+    let id = if env::current_account_id().as_str().ends_with(".testnet") {
+        "intents.luckout.testnet"
+    } else {
+        "intents.near"
+    };
+    id.parse().unwrap()
+}
+
+/// An EVM customer: their address in lowercase, which is also their NEAR Intents account.
+pub fn is_evm_account(id: &AccountId) -> bool {
+    let s = id.as_str();
+    s.len() == 42
+        && s.starts_with("0x")
+        && s[2..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A deposit from NEAR Intents names the EVM account it credits: `{"for":"0x…"}`.
+#[near(serializers = [json])]
+#[serde(deny_unknown_fields)]
+struct DepositFor {
+    #[serde(rename = "for")]
+    account: AccountId,
+}
+
+/// What an EVM customer signs through NEAR Intents' `AuthCall` (ADR-0011): the same calls a NEAR
+/// wallet makes itself, e.g. `{"withdraw":{"amount":"5000000"}}`.
+#[near(serializers = [json])]
+#[serde(rename_all = "snake_case")]
+pub enum AuthAction {
+    Withdraw { amount: U128 },
+    SetLimits { per_purchase: U128, daily: U128 },
+    SetDefaultMode { mode: Mode },
+    Reclaim { purchase_id: u64 },
+    RetryDraw { purchase_id: u64 },
 }
 
 #[near]
@@ -250,8 +300,8 @@ impl Contract {
 
     // ---------- deposits ----------
 
-    /// USDC `ft_transfer_call` hook. msg "" credits the sender's Balance;
-    /// msg "reserve" (owner only) funds the Cashback Reserve.
+    /// USDC `ft_transfer_call` hook. msg "" credits the sender's Balance; msg "reserve" (owner only)
+    /// funds the Cashback Reserve; msg `{"for":"0x…"}` from NEAR Intents credits that EVM customer.
     pub fn ft_on_transfer(
         &mut self,
         sender_id: AccountId,
@@ -262,16 +312,21 @@ impl Contract {
             env::predecessor_account_id() == self.usdc,
             "Only USDC is accepted"
         );
+        let intents = intents_account();
         match msg.as_str() {
             "" => {
-                require!(amount.0 >= MIN_DEPOSIT, "Deposit at least 1 USDC");
-                let mut a = self.accounts.get(&sender_id).cloned().unwrap_or_default();
-                a.balance.0 += amount.0;
-                self.accounts.insert(sender_id.clone(), a);
-                emit(
-                    "deposit",
-                    json!({ "account_id": sender_id, "amount": amount }),
+                // NEAR Intents always names the customer: crediting `intents.near` itself would strand the money.
+                require!(sender_id != intents, "Name the account to credit");
+                self.credit(sender_id, amount);
+            }
+            _ if sender_id == intents && msg.starts_with('{') => {
+                let d: DepositFor = near_sdk::serde_json::from_str(&msg)
+                    .unwrap_or_else(|_| env::panic_str("Unknown deposit message"));
+                require!(
+                    is_evm_account(&d.account),
+                    "Only EVM accounts are credited this way"
                 );
+                self.credit(d.account, amount);
             }
             "reserve" => {
                 require!(sender_id == self.owner, "Only the owner funds the reserve");
@@ -289,54 +344,69 @@ impl Contract {
     #[payable]
     pub fn set_limits(&mut self, per_purchase: U128, daily: U128) {
         assert_one_yocto();
-        let id = env::predecessor_account_id();
-        let mut a = self.existing_account(&id);
-        a.per_purchase_limit = per_purchase;
-        a.daily_limit = daily;
-        self.accounts.insert(id.clone(), a);
-        emit(
-            "limits",
-            json!({ "account_id": id, "per_purchase": per_purchase, "daily": daily }),
-        );
+        self.limits(env::predecessor_account_id(), per_purchase, daily);
     }
 
     /// Like every setting, needs a full-access signature (1 yoctoNEAR).
     #[payable]
     pub fn set_default_mode(&mut self, mode: Mode) {
         assert_one_yocto();
-        self.assert_mode(mode);
-        let id = env::predecessor_account_id();
-        let mut a = self.existing_account(&id);
-        a.default_mode = mode;
-        self.accounts.insert(id.clone(), a);
-        emit("default_mode", json!({ "account_id": id, "mode": mode }));
+        self.default_mode(env::predecessor_account_id(), mode);
     }
 
     #[payable]
     pub fn withdraw(&mut self, amount: U128) -> Promise {
         assert_one_yocto();
         let id = env::predecessor_account_id();
-        let mut a = self.existing_account(&id);
-        require!(a.balance.0 >= amount.0, "Insufficient balance");
-        a.balance.0 -= amount.0;
-        self.accounts.insert(id.clone(), a);
-        emit("withdraw", json!({ "account_id": id, "amount": amount }));
+        self.debit_withdrawal(&id, amount, "wallet");
         self.send(id.clone(), amount.0, Payout::Customer(id))
     }
 
     /// The customer recovers the full amount debited if the operator neither
     /// confirmed nor failed the purchase within 24 hours.
     pub fn reclaim(&mut self, purchase_id: u64) {
-        let p = self.pending(purchase_id);
+        self.reclaim_as(env::predecessor_account_id(), purchase_id);
+    }
+
+    /// An EVM customer's own call, vouched for by NEAR Intents (ADR-0011): `intents.near` checked that
+    /// `signer_id` signed `msg` before calling. Only EVM accounts sign this way, so a customer who
+    /// signs in with a NEAR wallet depends on NEAR Intents for nothing. A withdrawal goes only to the
+    /// signer's own NEAR Intents account, never to an address anyone else picks.
+    pub fn on_auth(&mut self, signer_id: AccountId, msg: String) -> PromiseOrValue<()> {
         require!(
-            p.customer == env::predecessor_account_id(),
-            "Not your purchase"
+            env::predecessor_account_id() == intents_account(),
+            "Only NEAR Intents vouches for a signer"
         );
         require!(
-            env::block_timestamp() >= p.created_at + RECLAIM_AFTER_NS,
-            "Reclaim opens 24 hours after purchase"
+            is_evm_account(&signer_id),
+            "Only EVM accounts sign through NEAR Intents"
         );
-        self.unwind(purchase_id, p, Status::Reclaimed);
+        let action: AuthAction = near_sdk::serde_json::from_str(&msg)
+            .unwrap_or_else(|_| env::panic_str("Unknown action"));
+        match action {
+            AuthAction::Withdraw { amount } => {
+                self.debit_withdrawal(&signer_id, amount, "intents");
+                PromiseOrValue::Promise(self.send_to_intents(signer_id, amount.0))
+            }
+            AuthAction::SetLimits {
+                per_purchase,
+                daily,
+            } => {
+                self.limits(signer_id, per_purchase, daily);
+                PromiseOrValue::Value(())
+            }
+            AuthAction::SetDefaultMode { mode } => {
+                self.default_mode(signer_id, mode);
+                PromiseOrValue::Value(())
+            }
+            AuthAction::Reclaim { purchase_id } => {
+                self.reclaim_as(signer_id, purchase_id);
+                PromiseOrValue::Value(())
+            }
+            AuthAction::RetryDraw { purchase_id } => {
+                PromiseOrValue::Promise(self.retry_draw_as(signer_id, purchase_id))
+            }
+        }
     }
 
     // ---------- operator (server, function-call key) ----------
@@ -458,14 +528,7 @@ impl Contract {
 
     /// The customer (or operator) re-runs a Draw whose callback failed, e.g. out of gas.
     pub fn retry_draw(&mut self, purchase_id: u64) -> Promise {
-        let p = self.load(purchase_id);
-        require!(p.status == Status::Drawing, "No Draw to retry");
-        let caller = env::predecessor_account_id();
-        require!(
-            caller == p.customer || caller == self.operator,
-            "Not your purchase"
-        );
-        self.schedule_draw(purchase_id)
+        self.retry_draw_as(env::predecessor_account_id(), purchase_id)
     }
 
     /// Runs the Draw and credits the Cashback. Only the contract can call it, with randomness
@@ -735,6 +798,28 @@ impl Contract {
         }
     }
 
+    /// Puts back whatever NEAR Intents didn't take from a withdrawal: all of it if the transfer failed,
+    /// and whatever USDC's `ft_transfer_call` returned if Intents refused part or all of it.
+    #[private]
+    pub fn on_send_to_intents(
+        &mut self,
+        account_id: AccountId,
+        amount: U128,
+        #[callback_result] used: Result<U128, PromiseError>,
+    ) {
+        let back = amount.0 - used.map_or(0, |u| u.0.min(amount.0));
+        if back == 0 {
+            return;
+        }
+        emit(
+            "payout_restored",
+            json!({ "payout": Payout::Customer(account_id.clone()), "amount": U128(back) }),
+        );
+        let mut a = self.accounts.get(&account_id).cloned().unwrap_or_default();
+        a.balance.0 += back;
+        self.accounts.insert(account_id, a);
+    }
+
     // ---------- views ----------
 
     pub fn quote(&self, reference_price: U128, mode: Mode) -> Quote {
@@ -776,6 +861,7 @@ impl Contract {
             "pending_owner": self.pending_owner,
             "operator": self.operator,
             "usdc": self.usdc,
+            "intents": intents_account(),
             "paused": self.paused,
             "max_cashback": U128(MAX_CASHBACK),
             "treasury": self.treasury,
@@ -874,6 +960,78 @@ impl Contract {
         if let Mode::Lucky(v) = mode {
             self.version(v);
         }
+    }
+
+    fn credit(&mut self, id: AccountId, amount: U128) {
+        require!(amount.0 >= MIN_DEPOSIT, "Deposit at least 1 USDC");
+        let mut a = self.accounts.get(&id).cloned().unwrap_or_default();
+        a.balance.0 += amount.0;
+        self.accounts.insert(id.clone(), a);
+        emit("deposit", json!({ "account_id": id, "amount": amount }));
+    }
+
+    fn limits(&mut self, id: AccountId, per_purchase: U128, daily: U128) {
+        let mut a = self.existing_account(&id);
+        a.per_purchase_limit = per_purchase;
+        a.daily_limit = daily;
+        self.accounts.insert(id.clone(), a);
+        emit(
+            "limits",
+            json!({ "account_id": id, "per_purchase": per_purchase, "daily": daily }),
+        );
+    }
+
+    fn default_mode(&mut self, id: AccountId, mode: Mode) {
+        self.assert_mode(mode);
+        let mut a = self.existing_account(&id);
+        a.default_mode = mode;
+        self.accounts.insert(id.clone(), a);
+        emit("default_mode", json!({ "account_id": id, "mode": mode }));
+    }
+
+    /// `to`: "wallet" (the customer's NEAR account) or "intents" (their NEAR Intents account).
+    fn debit_withdrawal(&mut self, id: &AccountId, amount: U128, to: &str) {
+        let mut a = self.existing_account(id);
+        require!(a.balance.0 >= amount.0, "Insufficient balance");
+        a.balance.0 -= amount.0;
+        self.accounts.insert(id.clone(), a);
+        emit(
+            "withdraw",
+            json!({ "account_id": id, "amount": amount, "to": to }),
+        );
+    }
+
+    fn reclaim_as(&mut self, caller: AccountId, purchase_id: u64) {
+        let p = self.pending(purchase_id);
+        require!(p.customer == caller, "Not your purchase");
+        require!(
+            env::block_timestamp() >= p.created_at + RECLAIM_AFTER_NS,
+            "Reclaim opens 24 hours after purchase"
+        );
+        self.unwind(purchase_id, p, Status::Reclaimed);
+    }
+
+    fn retry_draw_as(&mut self, caller: AccountId, purchase_id: u64) -> Promise {
+        let p = self.load(purchase_id);
+        require!(p.status == Status::Drawing, "No Draw to retry");
+        require!(
+            caller == p.customer || caller == self.operator,
+            "Not your purchase"
+        );
+        self.schedule_draw(purchase_id)
+    }
+
+    /// Into the customer's own NEAR Intents account: Intents reads the message as the account to credit.
+    fn send_to_intents(&self, to: AccountId, amount: u128) -> Promise {
+        ext_ft::ext(self.usdc.clone())
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .with_static_gas(GAS_FT_TRANSFER_CALL)
+            .ft_transfer_call(intents_account(), U128(amount), None, to.to_string())
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(GAS_ON_SEND)
+                    .on_send_to_intents(to, U128(amount)),
+            )
     }
 
     fn existing_account(&self, id: &AccountId) -> Account {

@@ -1,7 +1,8 @@
-import { Challenge, Session, type SignedChallenge, Unauthorized } from "@luckout/api"
+import { Challenge, evmSignInMessage, Session, type SignedChallenge, type SignedEvmChallenge, Unauthorized } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
+import { verifyMessage } from "viem"
 import { Near, Network } from "./Near.ts"
 
 const RECIPIENT = "luckout"
@@ -11,6 +12,8 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export class Auth extends Context.Service<Auth, {
   readonly challenge: Effect.Effect<Challenge>
   verify(signed: SignedChallenge): Effect.Effect<Session, Unauthorized>
+  /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage` by a regular EVM account (EOA). */
+  verifyEvm(signed: SignedEvmChallenge): Effect.Effect<Session, Unauthorized>
   /** The account a session token belongs to. */
   authenticate(token: string): Effect.Effect<string, Unauthorized>
   /** Ends every session the account has now, on every device. */
@@ -38,11 +41,15 @@ export class Auth extends Context.Service<Auth, {
         return new Challenge({ message, recipient: RECIPIENT, nonce })
       }).pipe(Effect.orDie)
 
+      // Single use: the nonce is deleted whether or not the signature checks out.
+      const useNonce = (nonce: string) =>
+        sql`DELETE FROM auth_nonces WHERE nonce = ${nonce} AND expires_at > now() RETURNING nonce`.pipe(
+          Effect.orDie,
+          Effect.flatMap((used) => (used.length === 0 ? Effect.fail(denied("Sign-in request expired; try again")) : Effect.void))
+        )
+
       const verify = Effect.fn("Auth.verify")(function*(signed: SignedChallenge) {
-        // Single use: the nonce is deleted whether or not the signature checks out.
-        const used = yield* sql`DELETE FROM auth_nonces WHERE nonce = ${signed.nonce} AND expires_at > now() RETURNING nonce`
-          .pipe(Effect.orDie)
-        if (used.length === 0) return yield* denied("Sign-in request expired; try again")
+        yield* useNonce(signed.nonce)
         const ok = yield* near.verifySignIn({
           accountId: signed.accountId,
           publicKey: signed.publicKey,
@@ -52,13 +59,35 @@ export class Auth extends Context.Service<Auth, {
           nonce: Buffer.from(signed.nonce, "base64")
         })
         if (!ok) return yield* denied("Signature is not from a full-access key of this account")
-        // Remembered so the solvency check can count this customer's balance (Monitor).
-        yield* sql`INSERT INTO known_accounts (account_id) VALUES (${signed.accountId}) ON CONFLICT DO NOTHING`.pipe(Effect.orDie)
-        const issuedAt = Date.now()
-        const expiresAt = issuedAt + SESSION_TTL_MS
-        const payload = Buffer.from(JSON.stringify({ a: signed.accountId, e: expiresAt, n: network, i: issuedAt })).toString("base64url")
-        return new Session({ accountId: signed.accountId, token: `${payload}.${mac(payload)}`, expiresAt })
+        return yield* issue(signed.accountId)
       })
+
+      const verifyEvm = Effect.fn("Auth.verifyEvm")(function*(signed: SignedEvmChallenge) {
+        yield* useNonce(signed.nonce)
+        const address = signed.address.toLowerCase()
+        if (!/^0x[0-9a-f]{40}$/.test(address) || !/^0x[0-9a-fA-F]{130}$/.test(signed.signature)) return yield* denied("That isn't an EVM signature")
+        // Key recovery only: the same check NEAR Intents makes, so a smart-contract wallet can't sign in here
+        // and then find it can't sign intents either.
+        const ok = yield* Effect.promise(() =>
+          verifyMessage({
+            address: address as `0x${string}`,
+            message: evmSignInMessage({ message, nonce: signed.nonce }),
+            signature: signed.signature as `0x${string}`
+          }).catch(() => false)
+        )
+        if (!ok) return yield* denied("That signature isn't from this address. Luckout works with regular EVM accounts, not smart-contract wallets.")
+        return yield* issue(address)
+      })
+
+      const issue = (accountId: string) =>
+        Effect.gen(function*() {
+          // Remembered so the solvency check can count this customer's balance (Monitor).
+          yield* sql`INSERT INTO known_accounts (account_id) VALUES (${accountId}) ON CONFLICT DO NOTHING`.pipe(Effect.orDie)
+          const issuedAt = Date.now()
+          const expiresAt = issuedAt + SESSION_TTL_MS
+          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, i: issuedAt })).toString("base64url")
+          return new Session({ accountId, token: `${payload}.${mac(payload)}`, expiresAt })
+        })
 
       const authenticate = (token: string) =>
         Effect.gen(function*() {
@@ -83,7 +112,7 @@ export class Auth extends Context.Service<Auth, {
         sql`INSERT INTO session_resets (account_id, after) VALUES (${accountId}, now())
             ON CONFLICT (account_id) DO UPDATE SET after = now()`.pipe(Effect.asVoid, Effect.orDie)
 
-      return Auth.of({ challenge, verify, authenticate, signOutEverywhere })
+      return Auth.of({ challenge, verify, verifyEvm, authenticate, signOutEverywhere })
     })
   )
 }

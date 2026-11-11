@@ -1570,3 +1570,295 @@ fn the_contract_never_operates_itself_from_the_start() {
     as_(owner());
     Contract::new(owner(), contract(), usdc());
 }
+
+// ---------- EVM customers through NEAR Intents (ADR-0011) ----------
+
+fn intents() -> AccountId {
+    id("intents.near")
+}
+fn evm() -> AccountId {
+    id("0x53a19a03679e8d5e9253a998dcde6c71dbb002a2")
+}
+fn for_evm() -> String {
+    format!(r#"{{"for":"{}"}}"#, evm())
+}
+
+/// Fresh contract with a reserve, where the EVM customer moved `deposit` in from NEAR Intents.
+fn setup_evm(deposit: u128) -> Contract {
+    let mut c = setup(500 * USDC, USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(intents(), U128(deposit), for_evm());
+    c
+}
+
+fn auth(c: &mut Contract, signer: AccountId, msg: Value) -> PromiseOrValue<()> {
+    as_(intents());
+    c.on_auth(signer, msg.to_string())
+}
+
+fn evm_balance(c: &Contract) -> u128 {
+    c.get_account(evm()).unwrap().balance.0
+}
+
+#[test]
+fn nears_intents_is_fixed_per_network() {
+    as_(owner());
+    assert_eq!(intents_account(), intents());
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(id("app.luckout.testnet"))
+        .build());
+    assert_eq!(intents_account(), id("intents.luckout.testnet"));
+}
+
+#[test]
+fn only_lowercase_evm_addresses_are_evm_accounts() {
+    assert!(is_evm_account(&evm()));
+    for s in [
+        "alice.near",
+        "0x53a19a03679e8d5e9253a998dcde6c71dbb002a",
+        "0x53a19a03679e8d5e9253a998dcde6c71dbb002a2a",
+        "0x53a19a03679e8d5e9253a998dcde6c71dbb002g2",
+        "1x53a19a03679e8d5e9253a998dcde6c71dbb002a2",
+    ] {
+        if let Ok(a) = s.parse::<AccountId>() {
+            assert!(!is_evm_account(&a), "{s}");
+        }
+    }
+}
+
+#[test]
+fn a_deposit_from_intents_credits_the_evm_account_it_names() {
+    let c = setup_evm(5 * USDC);
+    assert_eq!(evm_balance(&c), 5 * USDC);
+    assert!(c.get_account(intents()).is_none());
+}
+
+#[test]
+#[should_panic(expected = "Unknown deposit message")]
+fn only_intents_names_the_account_a_deposit_credits() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(alice(), U128(5 * USDC), for_evm());
+}
+
+#[test]
+#[should_panic(expected = "Only EVM accounts are credited this way")]
+fn intents_cannot_credit_a_near_account() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), r#"{"for":"alice.near"}"#.into());
+}
+
+#[test]
+#[should_panic(expected = "Name the account to credit")]
+fn intents_itself_is_never_credited() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), "".into());
+}
+
+#[test]
+#[should_panic(expected = "Unknown deposit message")]
+fn a_deposit_message_with_extra_fields_is_refused() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let msg = format!(r#"{{"for":"{}","also":"alice.near"}}"#, evm());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), msg);
+}
+
+#[test]
+#[should_panic(expected = "Deposit at least 1 USDC")]
+fn deposits_from_intents_have_the_same_minimum() {
+    setup_evm(USDC / 2);
+}
+
+#[test]
+#[should_panic(expected = "Only NEAR Intents vouches for a signer")]
+fn the_operator_cannot_act_for_an_evm_customer() {
+    let mut c = setup_evm(5 * USDC);
+    as_(operator());
+    let _ = c.on_auth(
+        evm(),
+        json!({ "withdraw": { "amount": "1000000" } }).to_string(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Only NEAR Intents vouches for a signer")]
+fn the_evm_customer_cannot_call_on_auth_directly() {
+    let mut c = setup_evm(5 * USDC);
+    as_(evm());
+    let _ = c.on_auth(
+        evm(),
+        json!({ "withdraw": { "amount": "1000000" } }).to_string(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Only EVM accounts sign through NEAR Intents")]
+fn near_accounts_never_sign_through_intents() {
+    let mut c = setup(500 * USDC, 50 * USDC);
+    let _ = auth(
+        &mut c,
+        alice(),
+        json!({ "withdraw": { "amount": "1000000" } }),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Unknown action")]
+fn unknown_actions_are_refused() {
+    let mut c = setup_evm(5 * USDC);
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "purchase": { "amount": "1000000" } }),
+    );
+}
+
+#[test]
+fn an_evm_customer_sets_limits_and_default_mode_through_intents() {
+    let mut c = setup_evm(5 * USDC);
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "set_limits": { "per_purchase": "7000000", "daily": "9000000" } }),
+    );
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "set_default_mode": { "mode": { "lucky": 1 } } }),
+    );
+    let a = c.get_account(evm()).unwrap();
+    assert_eq!(
+        (a.per_purchase_limit.0, a.daily_limit.0, a.default_mode),
+        (7 * USDC, 9 * USDC, Mode::Lucky(1))
+    );
+}
+
+#[test]
+fn an_evm_withdrawal_goes_only_to_their_own_intents_account() {
+    let mut c = setup_evm(5 * USDC);
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "withdraw": { "amount": "2000000" } }),
+    );
+    assert_eq!(evm_balance(&c), 3 * USDC);
+    assert_eq!(
+        sent(),
+        vec![
+            (
+                usdc(),
+                "ft_transfer_call".into(),
+                json!({ "receiver_id": "intents.near", "amount": "2000000", "memo": null, "msg": evm() }),
+            ),
+            (
+                contract(),
+                "on_send_to_intents".into(),
+                json!({ "account_id": evm(), "amount": "2000000" }),
+            ),
+        ]
+    );
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance")]
+fn an_evm_customer_cannot_withdraw_more_than_their_balance() {
+    let mut c = setup_evm(5 * USDC);
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "withdraw": { "amount": "5000001" } }),
+    );
+}
+
+#[test]
+fn whatever_intents_returns_from_a_withdrawal_goes_back_to_the_balance() {
+    for (used, back) in [
+        (Ok(U128(2 * USDC)), 0),
+        (Ok(U128(0)), 2 * USDC),
+        (Ok(U128(USDC / 2)), 3 * USDC / 2),
+        (Err(PromiseError::Failed), 2 * USDC),
+    ] {
+        // Mocked storage outlives each contract value, so compare with the balance after this withdrawal.
+        let mut c = setup_evm(5 * USDC);
+        let _ = auth(
+            &mut c,
+            evm(),
+            json!({ "withdraw": { "amount": "2000000" } }),
+        );
+        let after = evm_balance(&c);
+        as_(contract());
+        c.on_send_to_intents(evm(), U128(2 * USDC), used);
+        assert_eq!(evm_balance(&c), after + back);
+    }
+}
+
+#[test]
+fn an_evm_customer_reclaims_through_intents() {
+    let mut c = setup_evm(50 * USDC);
+    as_(operator());
+    let pid = c.purchase(
+        evm(),
+        U128(10 * USDC),
+        Some(Mode::Normal),
+        "o-evm".into(),
+        U128(u128::MAX),
+        None,
+    );
+    assert_eq!(evm_balance(&c), 40 * USDC);
+    call(intents(), 2 * DAY, [0; 32], 0);
+    let _ = c.on_auth(
+        evm(),
+        json!({ "reclaim": { "purchase_id": pid } }).to_string(),
+    );
+    assert_eq!(evm_balance(&c), 50 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "Not your purchase")]
+fn an_evm_customer_cannot_reclaim_someone_elses_purchase() {
+    let mut c = setup(500 * USDC, 50 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Normal, "o-alice");
+    as_(usdc());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), for_evm());
+    call(intents(), 2 * DAY, [0; 32], 0);
+    let _ = c.on_auth(
+        evm(),
+        json!({ "reclaim": { "purchase_id": pid } }).to_string(),
+    );
+}
+
+#[test]
+fn an_evm_customer_reruns_their_draw_through_intents() {
+    let mut c = setup_evm(50 * USDC);
+    as_(operator());
+    let pid = c.purchase(
+        evm(),
+        U128(10 * USDC),
+        Some(Mode::Lucky(2)),
+        "o-evm-draw".into(),
+        U128(u128::MAX),
+        None,
+    );
+    let _ = c.confirm_delivery(pid);
+    let _ = auth(
+        &mut c,
+        evm(),
+        json!({ "retry_draw": { "purchase_id": pid } }),
+    );
+    assert_eq!(
+        sent(),
+        vec![(contract(), "on_draw".into(), json!({ "purchase_id": pid }))]
+    );
+}
+
+#[test]
+fn a_near_wallet_withdrawal_is_unchanged() {
+    let mut c = setup(0, 5 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(2 * USDC));
+    assert_eq!(sent()[0].1, "ft_transfer");
+    assert_eq!(sent()[0].2["receiver_id"], "alice.near");
+}

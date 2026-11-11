@@ -7,7 +7,13 @@ import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } fr
 
 export class OneClickUnavailable extends Data.TaggedError("OneClickUnavailable")<{ readonly message: string }> {}
 
-const Token = Schema.Struct({ assetId: Schema.String, blockchain: Schema.String, symbol: Schema.String })
+const Token = Schema.Struct({
+  assetId: Schema.String,
+  blockchain: Schema.String,
+  symbol: Schema.String,
+  contractAddress: Schema.optional(Schema.NullOr(Schema.String)),
+  decimals: Schema.optional(Schema.Number)
+})
 export type Token = typeof Token.Type
 
 const Quote = Schema.Struct({
@@ -17,6 +23,7 @@ const Quote = Schema.Struct({
   amountInFormatted: Schema.String,
   minAmountIn: Schema.optional(Schema.String),
   amountOut: Schema.String,
+  amountOutFormatted: Schema.optional(Schema.String),
   minAmountOut: Schema.optional(Schema.String),
   timeEstimate: Schema.Number,
   deadline: Schema.optional(Schema.String)
@@ -53,6 +60,10 @@ export interface QuoteRequest {
   readonly refundTo: string
   readonly refundType: "ORIGIN_CHAIN" | "INTENTS"
   readonly deadline: string
+  /** Default ORIGIN_CHAIN: a deposit on the origin chain. INTENTS: a transfer inside NEAR Intents. */
+  readonly depositType?: "ORIGIN_CHAIN" | "INTENTS"
+  /** Default DESTINATION_CHAIN. INTENTS: delivered to `recipient`'s NEAR Intents account. */
+  readonly recipientType?: "DESTINATION_CHAIN" | "INTENTS"
 }
 
 /** Where a swap is: PENDING_DEPOSIT, KNOWN_DEPOSIT_TX, INCOMPLETE_DEPOSIT, PROCESSING, SUCCESS, REFUNDED or FAILED. */
@@ -106,7 +117,7 @@ export class OneClick extends Context.Service<OneClick, {
 
       const quote = (request: QuoteRequest) =>
         wrap(HttpClientRequest.post("/quote").pipe(
-          HttpClientRequest.bodyJsonUnsafe({ ...request, depositType: "ORIGIN_CHAIN", recipientType: "DESTINATION_CHAIN" }),
+          HttpClientRequest.bodyJsonUnsafe({ depositType: "ORIGIN_CHAIN", recipientType: "DESTINATION_CHAIN", ...request }),
           http.execute,
           Effect.flatMap(read(QuoteResponse))
         ))

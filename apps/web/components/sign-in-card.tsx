@@ -16,9 +16,9 @@ export function SignInCard({ title, body }: { title: string; body: string }) {
         <span className="mb-5 grid size-14 place-items-center rounded-2xl bg-ink text-white"><Wallet /></span>
         <h2 className="font-display text-4xl leading-none font-extrabold">{title}</h2>
         <p className="mt-3 max-w-md text-ink-soft">{body}</p>
-        <div className="mt-6"><SignInButton size="lg" label="Sign in with NEAR" inline /></div>
+        <div className="mt-6"><SignInButton size="lg" label="Sign in" inline /></div>
         {signInError && <p role="alert" className={`mt-3 text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
-        <p className="mt-4 text-sm text-muted">Free: you sign one message, no transaction. HOT, Meteor, MyNearWallet and other NEAR wallets work.</p>
+        <p className="mt-4 text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, MyNearWallet) and EVM wallets (MetaMask, Rabby) both work.</p>
       </div>
     </motion.section>
   )

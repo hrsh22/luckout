@@ -5,8 +5,12 @@ export * from "./chain"
 
 let connector: NearConnector | undefined
 
-/** Browser-only NEAR Connect singleton (HOT Wallet works inside Telegram too). */
-export const near = () => (connector ??= new NearConnector({ network }))
+/**
+ * Browser-only NEAR Connect singleton (HOT Wallet works inside Telegram too). Only wallets that can
+ * sign the sign-in message are offered: NEAR Connect's Ethereum option can't, so EVM wallets sign in
+ * through lib/evm.ts instead (ADR-0011).
+ */
+export const near = () => (connector ??= new NearConnector({ network, features: { signMessage: true } }))
 
 export interface Call {
   receiverId: string
