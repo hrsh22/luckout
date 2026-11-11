@@ -14,7 +14,7 @@ import { usd, usdUp } from "@/lib/format"
 import { cashbackCapAmount, modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { useFreeReserve, useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
+import { rememberViewed, useFreeReserve, useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -22,7 +22,7 @@ import { ArrowLeft } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 
 /** Back to the results this card came from, not just the empty shop. */
 const lastSearch = () => {
@@ -49,6 +49,8 @@ function Voucher() {
   const voucher = useQuery(voucherQuery(id))
   const look = summary ?? voucher.data
   const packages = voucher.data?.packages ?? []
+  // For the shop's "Recently viewed" row.
+  useEffect(() => void (look && rememberViewed(look)), [look])
 
   // The choice lives in the URL, so a refresh or a shared link opens the same card, amount and mode.
   const value = params.get("value") ?? packages[Math.floor((packages.length - 1) / 2)]?.value
