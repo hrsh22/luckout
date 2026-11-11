@@ -9,6 +9,7 @@ import { OddsBar, OddsList } from "@/components/odds"
 import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purchase-view"
 import { Button } from "@/components/ui/button"
 import { api, errorMessage, TimedOut } from "@/lib/api"
+import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackCapAmount, modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
@@ -26,8 +27,7 @@ import { useMemo, useState } from "react"
 /** Back to the results this card came from, not just the empty shop. */
 const lastSearch = () => {
   try {
-    const q = sessionStorage.getItem("luckout.q")
-    return q ? `/shop?q=${encodeURIComponent(q)}` : "/shop"
+    return sessionStorage.getItem("luckout.shop") ?? "/shop"
   } catch {
     return "/shop"
   }
@@ -125,7 +125,14 @@ function Voucher() {
               {look
                 ? <h1 className="font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-5xl">{look.name}</h1>
                 : <span className="skeleton h-10 w-56 rounded-full" />}
-              {look && <p className="text-ink-soft">{look.countryCode}, paid out in {look.currency}. Delivered as a code in seconds.</p>}
+              {look && (
+                <>
+                  <p className="self-start rounded-full bg-ink px-3 py-1 text-sm font-semibold text-white">
+                    {flag(look.countryCode)} {look.countryCode === WORLDWIDE ? "Works worldwide" : `Works in ${countryName(look.countryCode, look.countryName)} only`}
+                  </p>
+                  <p className="text-ink-soft">Paid out in {look.currency}. Delivered as a code in seconds.</p>
+                </>
+              )}
             </div>
           </div>
 
@@ -185,6 +192,11 @@ function Voucher() {
               : (
                 <motion.div key="receipt" exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.15 }}>
                   <Receipt shown={shown} exact={!!quote.data} info={info} error={buy.error ? errorMessage(buy.error) : quote.error ? errorMessage(quote.error) : undefined}>
+                    {shown && look && look.countryCode !== WORLDWIDE && (
+                      <p className="text-sm text-ink-soft">
+                        {flag(look.countryCode)} For {countryName(look.countryCode, look.countryName)} only: it can't be used in another country's store.
+                      </p>
+                    )}
                     {shown && <BuyButton quote={quote.data} need={shown.maxPrice} onBuy={(q) => buy.mutate(q)} />}
                   </Receipt>
                 </motion.div>
