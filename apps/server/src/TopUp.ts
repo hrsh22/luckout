@@ -392,8 +392,12 @@ export class TopUp extends Context.Service<TopUp, {
         sql<SwapRow>`
           SELECT * FROM intents_swaps
           WHERE account_id = ${accountId} AND created_at > now() - interval '7 days'
-            AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND direction = 'in'
-                     AND coalesce(deadline, created_at + interval '30 minutes') < now())
+            AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
+                     AND CASE direction
+                           WHEN 'in' THEN coalesce(deadline, created_at + interval '30 minutes') < now()
+                           -- A withdrawal is sent the moment it's quoted and 1Click sees it within seconds: one
+                           -- still unseen after 3 minutes was never signed, and the money never left.
+                           ELSE created_at < now() - interval '3 minutes' END)
             AND NOT (coalesce(status, '') IN ('SUCCESS', 'REFUNDED', 'FAILED') AND coalesce(status_at, created_at) < now() - interval '1 day')
           ORDER BY created_at DESC LIMIT 20`.pipe(
           Effect.orDie,

@@ -189,7 +189,8 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     refunded: { status: "REFUNDED", refunded: "2.5", refundReason: "Deposit came in after the deadline" },
     late: { status: "PROCESSING" },
     awaiting: { status: "PENDING_DEPOSIT" },
-    abandoned: { status: "PENDING_DEPOSIT" }
+    abandoned: { status: "PENDING_DEPOSIT" },
+    unsigned: { status: "PENDING_DEPOSIT" }
   }
   const oneClick = Layer.succeed(OneClick, OneClick.of({
     tokens: Effect.succeed([]),
@@ -230,6 +231,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     yield* add("late", { status: "PROCESSING", deposit_seen_at: new Date(Date.now() - 30 * 60_000) })
     yield* add("awaiting", { deadline: new Date(Date.now() + 20 * 60_000) })
     yield* add("abandoned", { deadline: new Date(Date.now() - 3 * 3_600_000), created_at: new Date(Date.now() - 4 * 3_600_000) })
+    yield* add("unsigned", { direction: "out", deadline: new Date(Date.now() + 25 * 60_000), created_at: new Date(Date.now() - 5 * 60_000) })
     yield* t.trackNow
     yield* t.trackNow
     const mine = yield* t.transfers(EVM)
@@ -248,7 +250,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.ok(texts.some((t) => /evm: Your \$2\.50 Top-Up is taking longer than usual/.test(t)))
 
   const byAddress = Object.fromEntries(result.mine.map((x) => [x.depositAddress, x]))
-  assert.deepEqual(Object.keys(byAddress).sort(), ["awaiting", "evmIn", "late", "out", "refunded"], "the abandoned quote isn't listed")
+  assert.deepEqual(Object.keys(byAddress).sort(), ["awaiting", "evmIn", "late", "out", "refunded"], "neither the abandoned quote nor the withdrawal never sent is listed")
   assert.equal(byAddress.evmIn!.phase, "done")
   assert.equal(byAddress.awaiting!.phase, "awaiting-transfer")
   assert.equal(byAddress.late!.phase, "swapping")
