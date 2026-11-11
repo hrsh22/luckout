@@ -196,9 +196,12 @@ const migrations = Migrator.fromRecord({
         move_in JSONB,
         move TEXT CHECK (move IN ('waiting', 'moved', 'failed')),
         move_detail TEXT,
+        checked_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`
-    yield* sql`CREATE INDEX intents_swaps_waiting ON intents_swaps (created_at) WHERE move = 'waiting'`
+    yield* sql`CREATE INDEX intents_swaps_waiting ON intents_swaps (checked_at NULLS FIRST) WHERE move = 'waiting'`
+    // A Top-Up's own move-in is paid for but not counted against the daily caps.
+    yield* sql`ALTER TABLE relays ADD COLUMN counted BOOLEAN NOT NULL DEFAULT true`
   })
 })
 

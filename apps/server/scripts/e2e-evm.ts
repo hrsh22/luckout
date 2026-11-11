@@ -134,6 +134,6 @@ const refused: Array<[string, SignedIntent]> = [
 ]
 for (const [name, s] of refused) assert.equal((await relay(s)).status, 400, name)
 const tooMuch = await relay(await sign([auth({ withdraw: { amount: "999000000" } })]))
-assert.equal(tooMuch.status, 400, "the contract refuses more than the balance")
-assert.match(tooMuch.json.message, /Insufficient balance/)
+assert.equal(tooMuch.status, 400, "more than the balance is refused, by the relayer's free check before the contract")
+assert.match(tooMuch.json.message, /balance is lower|Insufficient balance/)
 console.log("✔ someone else's credit, a forged or foreign signature, swaps, unquoted transfers and overdrafts are refused")

@@ -21,8 +21,12 @@ const SYMBOLS = new Set(["USDC", "USDT", "ETH", "BTC", "SOL", "wNEAR"])
 const CHAINS = new Set(["eth", "arb", "base", "sol", "btc", "pol", "bsc", "near"])
 /** Chains an EVM wallet can withdraw to: its own address works on each. */
 const EVM_CHAINS = new Set(["eth", "arb", "base", "pol", "bsc"])
-/** A Top-Up's move-in waits this long for its swap; past it, the customer moves the money themselves. */
-const MOVE_WAITS = "2 days"
+/** Top-Ups whose move-in may wait at once, per account, so nobody can crowd out everyone else's. */
+const MOST_WAITING = 3
+/** Waiting move-ins checked per pass, least recently checked first. */
+const PER_PASS = 40
+/** The relayer's message when NEAR didn't answer: the intent may still have run, so it's resumed, not failed. */
+const UNANSWERED = /didn't answer in time/
 
 export class TopUp extends Context.Service<TopUp, {
   readonly assets: Effect.Effect<ReadonlyArray<TopUpAsset>, TopUpUnavailable>
@@ -120,7 +124,12 @@ export class TopUp extends Context.Service<TopUp, {
       const move = Effect.fn("TopUp.move")(function*(accountId: string, depositAddress: string, signed: SignedIntent) {
         const row = yield* swap(accountId, depositAddress)
         if (!row || row.direction !== "in") return yield* fail("No Top-Up of yours has that deposit address")
-        if (row.move === "moved") return
+        // Each Top-Up's move-in is armed once: a second one, uncounted, would let anyone make us pay for refusals.
+        if (row.move === "waiting" && row.move_in?.payload === signed.payload) return
+        if (row.move !== null) return yield* fail("This Top-Up's USDC was already handled. Move what's in your NEAR Intents account from the wallet page.")
+        const [{ waiting = 0 } = {}] = yield* sql<{ waiting: number }>`
+          SELECT count(*)::int AS waiting FROM intents_swaps WHERE account_id = ${accountId} AND move = 'waiting'`.pipe(Effect.orDie)
+        if (waiting >= MOST_WAITING) return yield* fail("Finish your other Top-Ups first.")
         const p = parsePayload(signed.payload)
         const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId: near.usdcId, now: new Date() })
         if (why) return yield* fail(why)
@@ -130,7 +139,7 @@ export class TopUp extends Context.Service<TopUp, {
         }
         if (!(yield* Effect.promise(() => signedBy(signed, accountId)))) return yield* fail("The signature doesn't match your account.")
         yield* sql`UPDATE intents_swaps SET move_in = ${JSON.stringify(signed)}::jsonb, move = 'waiting', move_detail = NULL
-                   WHERE deposit_address = ${depositAddress}`.pipe(Effect.orDie)
+                   WHERE deposit_address = ${depositAddress} AND move IS NULL`.pipe(Effect.orDie)
       })
 
       const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number) {
@@ -177,13 +186,16 @@ export class TopUp extends Context.Service<TopUp, {
         if (!isEvmAccount(accountId)) return yield* fail("NEAR wallets call the faucet themselves")
         const day = new Date().toISOString().slice(0, 10)
         const persist = (key: string) => (tx: { hash: string; bytes: string }) =>
-          sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${key}, ${accountId}, ${JSON.stringify(tx)}::jsonb)`.pipe(
+          sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${key}, ${accountId}, ${JSON.stringify(tx)}::jsonb)
+              ON CONFLICT DO NOTHING`.pipe(
             Effect.asVoid,
             Effect.orDie
           )
         const [used] = yield* sql`SELECT 1 FROM relays WHERE delegate_hash = ${`faucet:${accountId}:${day}`}`.pipe(Effect.orDie)
         if (used) return yield* fail("You've had today's test USDC. Come back tomorrow.")
-        yield* near.relayerCall(near.usdcId, "faucet", {}, persist(`faucet-mint:${accountId}:${day}`)).pipe(
+        // The relayer's switch and caps bound the faucet too; its deposit counts as one relay.
+        if (!(yield* relay.available(accountId))) return yield* fail("The faucet is resting. Try again later.")
+        yield* near.relayerCall(near.usdcId, "faucet", {}, () => Effect.void).pipe(
           Effect.flatMap(() =>
             near.relayerCall(
               near.usdcId,
@@ -199,28 +211,34 @@ export class TopUp extends Context.Service<TopUp, {
 
       // Sends each waiting move-in once its swap has landed. A refunded swap, or one that never lands,
       // leaves the money in the customer's own NEAR Intents account, where the web app offers to move it.
-      const settle = (r: { deposit_address: string; account_id: string; move_in: SignedIntent; old: boolean }) =>
+      const settle = (r: { deposit_address: string; account_id: string; move_in: SignedIntent }) =>
         Effect.gen(function*() {
           const done = (move: "moved" | "failed", detail: string | null) =>
             sql`UPDATE intents_swaps SET move = ${move}, move_detail = ${detail} WHERE deposit_address = ${r.deposit_address}`.pipe(Effect.orDie)
+          // Its signature is good until its own deadline (a day at most); past that it can never run.
+          const expired = !(Date.parse(parsePayload(r.move_in.payload)?.deadline ?? "") > Date.now())
           const s = yield* oneClick.status(r.deposit_address).pipe(Effect.orElseSucceed(() => "UNKNOWN"))
-          if (s === "SUCCESS") {
+          if (s === "SUCCESS" && !expired) {
             return yield* relay.sendIntent(r.account_id, r.move_in, { counted: false }).pipe(
               Effect.flatMap(() => done("moved", null)),
-              Effect.catchTag("RelayFailed", (e) => done("failed", e.message)),
-              // Not sent (no relayer right now): stays waiting and is tried again.
+              // NEAR didn't answer: it may have run. Next pass resumes the same saved transaction.
+              Effect.catchTag("RelayFailed", (e) => (UNANSWERED.test(e.message) ? Effect.void : done("failed", e.message))),
+              // Not sent (the relayer is off): stays waiting and is tried again.
               Effect.catchTag("RelayUnavailable", (e) => Effect.logWarning("move-in waits for the relayer", e.message))
             )
           }
           if (s === "REFUNDED" || s === "FAILED") return yield* done("failed", `The swap was ${s.toLowerCase()}`)
-          if (r.old) return yield* done("failed", "The swap didn't land in time")
+          if (expired) return yield* done("failed", "The swap didn't land before your approval expired")
         })
 
-      const settleWaiting = sql<{ deposit_address: string; account_id: string; move_in: SignedIntent; old: boolean }>`
-        SELECT deposit_address, account_id, move_in, created_at < now() - ${MOVE_WAITS}::interval AS old
-        FROM intents_swaps WHERE move = 'waiting' ORDER BY created_at LIMIT 20`.pipe(
+      // Least recently checked first, so a pile of quotes nobody pays into can't hold up everyone else's.
+      const settleWaiting = sql<{ deposit_address: string; account_id: string; move_in: SignedIntent }>`
+        UPDATE intents_swaps SET checked_at = now()
+        WHERE deposit_address IN (
+          SELECT deposit_address FROM intents_swaps WHERE move = 'waiting' ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
+        RETURNING deposit_address, account_id, move_in`.pipe(
         Effect.orDie,
-        Effect.flatMap((rows) => Effect.forEach(rows, settle, { discard: true, concurrency: 4 })),
+        Effect.flatMap((rows) => Effect.forEach(rows, settle, { discard: true, concurrency: 8 })),
         Effect.catchCause((cause) => Effect.logError("move-in pass failed", cause))
       )
       yield* settleWaiting.pipe(Effect.repeat(Schedule.spaced("15 seconds")), Effect.forkScoped)

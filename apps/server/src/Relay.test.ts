@@ -7,7 +7,7 @@ import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
 import { Near, type Outcome } from "./Near.ts"
-import { intentPayload, intentSignature, moveInIntent, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
+import { authCallIntent, intentPayload, intentSignature, moveInIntent, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { refusal, Relay, RELAY_DEFAULTS, USDC_REGISTRATION } from "./Relay.ts"
@@ -202,14 +202,23 @@ const signIntent = async (intent: object, nonce = randomBytes(32).toString("base
   return { standard: "erc191", payload, signature: intentSignature(await evmKey.signMessage({ message: payload })) }
 }
 
-const intentWorld = (o: { nonceUsed?: boolean } = {}) => {
+const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string } = {}) => {
   const sent: Array<{ receiver: string; method: string; args: unknown }> = []
   const near = fakeNear({
     contractId: APP,
     usdcId: USDC,
     intentsId: INTENTS,
     relayerId: "relayer.test",
-    view: <A>(method: string) => Effect.succeed((method === "is_nonce_used" ? (o.nonceUsed ?? false) : null) as A),
+    view: <A>(method: string) =>
+      Effect.succeed((
+        method === "is_nonce_used"
+          ? (o.nonceUsed ?? false)
+          : method === "mt_balance_of"
+          ? (o.intentsUsdc ?? "1000000000")
+          : method === "get_account"
+          ? { balance: o.balance ?? "1000000000" }
+          : null
+      ) as A),
     relayerCall: (receiver, method, args, persist) =>
       Effect.gen(function*() {
         const hash = `tx-${sent.length + 1}`
@@ -271,17 +280,33 @@ test("a transfer pays only a withdrawal quoted for this account, for exactly its
   assert.deepEqual(results, { more: "RelayFailed", exact: "tx-1" })
 })
 
-test("daily caps count intents too, except a Top-Up's own move-in", async () => {
+test("daily caps count intents too; a Top-Up's own move-in neither counts nor uses them up", async () => {
   const w = intentWorld()
   const tags = await w.run(Effect.gen(function*() {
     yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet"))
-    const one = yield* Effect.promise(() => signIntent(moveIn("1000000")))
-    const two = yield* Effect.promise(() => signIntent(moveIn("2000000")))
-    const three = yield* Effect.promise(() => signIntent(moveIn("3000000")))
-    yield* w.send(one)
-    const capped = yield* Effect.flip(w.send(two))
-    const own = yield* w.send(three, false)
-    return [capped._tag, own.hash]
+    const own = yield* w.send(yield* Effect.promise(() => signIntent(moveIn("3000000"))), false)
+    const one = yield* w.send(yield* Effect.promise(() => signIntent(moveIn("1000000"))))
+    const capped = yield* Effect.flip(w.send(yield* Effect.promise(() => signIntent(moveIn("2000000")))))
+    return [own.hash, one.hash, capped._tag]
   }))
-  assert.deepEqual(tags, ["RelayUnavailable", "tx-2"])
+  assert.deepEqual(tags, ["tx-1", "tx-2", "RelayUnavailable"])
+})
+
+test("switching the relayer off stops a Top-Up's own move-in too", async () => {
+  const w = intentWorld()
+  const tag = await w.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: false, perAccountDaily: 5, allDaily: 50 }), "admin.testnet"))
+    return (yield* Effect.flip(w.send(yield* Effect.promise(() => signIntent(moveIn())), false)))._tag
+  }))
+  assert.equal(tag, "RelayUnavailable")
+  assert.equal(w.sent.length, 0)
+})
+
+test("an intent that would fail for want of money is refused before we pay", async () => {
+  const poor = intentWorld({ intentsUsdc: "4999999" })
+  assert.equal((await poor.tag(poor.send(await signIntent(moveIn("5000000")))))._tag, "RelayFailed")
+  const broke = intentWorld({ balance: "999999" })
+  const withdraw = authCallIntent(APP, { withdraw: { amount: "1000000" } })
+  assert.equal((await broke.tag(broke.send(await signIntent(withdraw))))._tag, "RelayFailed")
+  assert.equal(poor.sent.length + broke.sent.length, 0)
 })

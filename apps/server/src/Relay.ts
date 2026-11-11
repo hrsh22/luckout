@@ -89,7 +89,8 @@ export class Relay extends Context.Service<Relay, {
   send(accountId: string, signedDelegate: string): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
   /**
    * EVM wallets (ADR-0011): checks one signed NEAR Intents payload, sends it to `intents.near` from the
-   * relayer, and waits until it has run. `counted: false` skips the daily caps, for a Top-Up's own move-in.
+   * relayer, and waits until it has run. `counted: false` leaves it out of the daily caps (not the admin's
+   * switch), for a Top-Up's own move-in, sent once per real swap.
    */
   sendIntent(accountId: string, signed: SignedIntent, o?: { counted?: boolean }): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
   readonly settings: Effect.Effect<RelaySettings>
@@ -113,7 +114,7 @@ export class Relay extends Context.Service<Relay, {
       const usedToday = (accountId: string) =>
         sql<{ mine: number; everyone: number }>`
           SELECT count(*) FILTER (WHERE account_id = ${accountId})::int AS mine, count(*)::int AS everyone
-          FROM relays WHERE created_at > now() - interval '1 day'`.pipe(Effect.map((r) => r[0] ?? { mine: 0, everyone: 0 }))
+          FROM relays WHERE counted AND created_at > now() - interval '1 day'`.pipe(Effect.map((r) => r[0] ?? { mine: 0, everyone: 0 }))
 
       /** Whether the relayer is on and this account (and everyone) has free relays left today. */
       const quotaLeft = (accountId: string) =>
@@ -184,6 +185,26 @@ export class Relay extends Context.Service<Relay, {
           })
         )
 
+      /** Why this intent would fail for want of money: USDC in the signer's Intents account, or their Luckout Balance. */
+      const fundsShort = (accountId: string, intent: Record<string, unknown>) =>
+        Effect.gen(function*() {
+          const need = intent.intent === "ft_withdraw"
+            ? BigInt(String(intent.amount))
+            : intent.intent === "transfer"
+            ? BigInt(Object.values(intent.tokens as Record<string, string>)[0] ?? "0")
+            : undefined
+          if (need !== undefined) {
+            const has = BigInt(yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: `nep141:${usdcId}` }, near.intentsId))
+            return has < need ? "That USDC isn't in your NEAR Intents account yet." : undefined
+          }
+          const action = intent.intent === "auth_call" ? JSON.parse(String(intent.msg)) : undefined
+          if (action?.withdraw) {
+            const a = yield* near.view<{ balance: string } | null>("get_account", { account_id: accountId })
+            return BigInt(a?.balance ?? "0") < BigInt(action.withdraw.amount) ? "Your Luckout balance is lower than that." : undefined
+          }
+          return undefined
+        })
+
       const sendIntent = (accountId: string, signed: SignedIntent, o: { counted?: boolean } = {}) =>
         Effect.gen(function*() {
           if (!near.relayerId) return yield* new RelayUnavailable({ message: "Luckout can't send this right now. Try again later." })
@@ -204,13 +225,17 @@ export class Relay extends Context.Service<Relay, {
           const outcome = yield* lock.withPermits(1)(Effect.gen(function*() {
             const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
             if (seen) return yield* near.resume(seen.signed_tx)
-            if (o.counted !== false && !(yield* quotaLeft(accountId))) {
+            const counted = o.counted !== false
+            if (counted ? !(yield* quotaLeft(accountId)) : !(yield* settings).enabled) {
               return yield* new RelayUnavailable({ message: "You've used today's free actions. Try again tomorrow." })
             }
             const used = yield* near.view<boolean>("is_nonce_used", { account_id: accountId, nonce: p!.nonce }, near.intentsId)
             if (used) return yield* failed("That approval was already used. Try again.")
+            // Money the intent would move must be there, checked for free, so nobody makes us pay for a refusal.
+            const why = yield* fundsShort(accountId, first!)
+            if (why) return yield* failed(why)
             return yield* near.relayerCall(near.intentsId, "execute_intents", { signed: [signed] }, (tx) =>
-              sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(tx)}::jsonb)
+              sql`INSERT INTO relays (delegate_hash, account_id, signed_tx, counted) VALUES (${hash}, ${accountId}, ${JSON.stringify(tx)}::jsonb, ${counted})
                   ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
           }))
           if (outcome.failures[0]) return yield* failed(readable(outcome.failures[0]))
