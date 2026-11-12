@@ -306,7 +306,10 @@ export class TopUp extends Context.Service<TopUp, {
         if (row.move === "waiting" && row.move_in?.payload === signed.payload) return
         if (row.move !== null) return yield* fail("This Top-Up's USDC was already handled. Move what's in your NEAR Intents account from the wallet page.")
         const [{ waiting = 0 } = {}] = yield* sql<{ waiting: number }>`
-          SELECT count(*)::int AS waiting FROM intents_swaps WHERE account_id = ${accountId} AND move = 'waiting'`.pipe(Effect.orDie)
+          SELECT count(*)::int AS waiting FROM intents_swaps WHERE account_id = ${accountId} AND move = 'waiting'
+            -- A quote left unpaid past its deadline can't land, so it doesn't hold up new ones (its approval lasts a day).
+            AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
+                     AND coalesce(deadline, created_at + interval '30 minutes') < now())`.pipe(Effect.orDie)
         if (waiting >= MOST_WAITING) return yield* fail("Finish your other Top-Ups first.")
         const p = parsePayload(signed.payload)
         const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId: near.usdcId, now: new Date() })

@@ -32,6 +32,13 @@ const walletOn = (c: string) => (c === "near" ? "your NEAR wallet" : `your walle
 const refundPlace = (t: Transfer) => (t.refundsToWallet ? walletOn(t.chain) : "your NEAR Intents account")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+const when = (iso: string) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+const titleOf = (t: Transfer) =>
+  t.direction === "in"
+    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""}${on(t.chain)}`
+    : t.direction === "back"
+    ? `${tokenAmount(t.amountOut ?? t.amountIn ?? "", t.symbol, "down")} ${t.symbol} to ${walletOn(t.chain)}`
+    : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
 /** Still before the deadline, so the rest of a short payment can be sent. */
 const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
 
@@ -42,19 +49,49 @@ const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline)
  */
 export function InTransit() {
   const { token } = useSession()
-  const transfers = useTransfers(token)
-  const list = transfers.data ?? []
+  // Finished ones go to RecentTransfers, at the bottom: only what's moving or needs a look stays up here.
+  const list = (useTransfers(token).data ?? []).filter((t) => t.phase !== "done")
   if (list.length === 0) return null
-  const active = list.filter((t) => ACTIVE_PHASES.has(t.phase))
+  const active = list.some((t) => ACTIVE_PHASES.has(t.phase))
   return (
     <section className="card flex flex-col gap-1 p-7" aria-live="polite">
-      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">{active.length > 0 ? "Money on its way" : "Recent transfers"}</h2>
+      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">{active ? "Money on its way" : "Transfers"}</h2>
       <p className="mb-3 text-sm text-muted">
         Top-ups and withdrawals through NEAR Intents. Each one either arrives or is sent back; nothing gets lost in between.
       </p>
       <ul className="flex flex-col divide-y divide-line">
         {list.map((t) => <Row key={t.depositAddress} t={t} />)}
       </ul>
+    </section>
+  )
+}
+
+/** Finished transfers, one line each, at the bottom of the wallet: they never push the rest of the page down. */
+export function RecentTransfers() {
+  const { token } = useSession()
+  const done = (useTransfers(token).data ?? []).filter((t) => t.phase === "done")
+  const [all, setAll] = useState(false)
+  if (done.length === 0) return null
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="font-display text-3xl font-extrabold">Recent transfers</h2>
+      <ul className="card flex flex-col divide-y divide-line px-6 py-1">
+        {(all ? done : done.slice(0, 3)).map((t) => (
+          <li key={t.depositAddress} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
+            <CircleCheck size={18} className="shrink-0 text-good" aria-hidden="true" />
+            <span className="font-semibold">{titleOf(t)}</span>
+            <span className="text-muted">{when(t.createdAt)}</span>
+            <a href={t.explorer} target="_blank" rel="noreferrer" className="ml-auto inline-flex items-center gap-1 text-muted underline-offset-2 hover:underline">
+              Track<ExternalLink size={14} aria-hidden="true" />
+            </a>
+          </li>
+        ))}
+      </ul>
+      {done.length > 3 && (
+        <button type="button" className="self-start text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline" onClick={() => setAll(!all)}>
+          {all ? "Show fewer" : `Show all ${done.length}`}
+        </button>
+      )}
     </section>
   )
 }
@@ -103,11 +140,9 @@ function Row({ t }: { t: Transfer }) {
   const { evm, walletUsdc } = useSession()
   const actions = useWalletActions()
   const incoming = t.direction === "in"
-  const title = incoming
-    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""}${on(t.chain)}`
-    : t.direction === "back"
-    ? `${tokenAmount(t.amountOut ?? t.amountIn ?? "", t.symbol, "down")} ${t.symbol} to ${walletOn(t.chain)}`
-    : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
+  // A quote nobody has paid into yet keeps its address behind a tap: it's often one the customer started and left.
+  const unpaid = t.phase === "awaiting-transfer" && !t.depositTx
+  const [shown, setShown] = useState(false)
   const Icon = t.phase === "done" || t.phase === "in-wallet"
     ? CircleCheck
     : t.phase === "refunded"
@@ -123,10 +158,10 @@ function Row({ t }: { t: Transfer }) {
     <li className="flex gap-4 py-4">
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="font-semibold">{title}</p>
+        <p className="font-semibold">{titleOf(t)}</p>
         <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
 
-        {((t.phase === "awaiting-transfer" && !t.depositTx) || (t.phase === "incomplete" && open(t))) && (
+        {((unpaid && shown) || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm sm:flex-row">
             <Qr value={t.depositAddress} size={112} label="QR code of the deposit address" />
             <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -148,6 +183,7 @@ function Row({ t }: { t: Transfer }) {
         )}
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+          {unpaid && !shown && <Button size="sm" variant="light" onClick={() => setShown(true)}>Show address</Button>}
           {t.phase === "in-wallet" && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
           )}
@@ -167,7 +203,7 @@ function Row({ t }: { t: Transfer }) {
           <a href={t.explorer} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-muted underline-offset-2 hover:underline">
             Track on NEAR Intents<ExternalLink size={14} aria-hidden="true" />
           </a>
-          <span className="text-muted">{new Date(t.createdAt).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+          <span className="text-muted">{when(t.createdAt)}</span>
         </div>
       </div>
     </li>
@@ -219,7 +255,7 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
       }
-      return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below (a little more is fine: the extra comes back).`
+      return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} (a little more is fine: the extra comes back).`
     case "incomplete":
       return open(t)
         ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
