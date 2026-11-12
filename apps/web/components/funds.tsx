@@ -105,6 +105,9 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
 
       {tab === "chain" && network === "mainnet"
         ? evm ? <TopUpEvm need={need} onDone={done} /> : <TopUp need={need} onDone={done} />
+        // Testnet with nothing to deposit: the faucet above is the whole story.
+        : network === "testnet" && inWallet < 1_000_000
+        ? null
         : (
           <div className="flex flex-col gap-4">
             {network === "testnet" && <p className="font-semibold">{evm ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}

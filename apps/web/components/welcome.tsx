@@ -14,7 +14,7 @@ import { markWelcomed, pendingMode, setPendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
 import { useSession } from "@/lib/session"
 import type { Mode } from "@luckout/api"
-import { Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
+import { ArrowLeft, Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import { useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
@@ -77,7 +77,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
   }
 
   return (
-    <div ref={top} className="mx-auto flex w-full max-w-[760px] scroll-mt-28 flex-col gap-8">
+    <div ref={top} className="mx-auto flex w-full max-w-[760px] scroll-mt-28 flex-col gap-6">
       <ol className="grid grid-cols-4 gap-2" aria-label="Welcome steps">
         {STEPS.map((label, i) => (
           <li key={label} className="flex flex-col gap-2" aria-current={i === step ? "step" : undefined}>
@@ -102,7 +102,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
           animate="center"
           exit="exit"
           transition={{ type: "spring", stiffness: 320, damping: 32 }}
-          className="flex flex-col gap-6"
+          className="flex flex-col gap-5"
         >
           {step === 0 && (
             <>
@@ -126,7 +126,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
                 title="How do you like to pay?"
                 body="This becomes your default in the shop and in Telegram. You can pick another mode for any purchase, or change it later in Wallet."
               />
-              <ModePicker value={mode} onChange={setMode} label="Default mode" />
+              <ModePicker value={mode} onChange={setMode} label="Default mode" compact />
               <p className="text-sm text-muted">
                 Every lucky mode averages 5.6% above the price over many purchases, and any cashback leaves you below it. Odds shown for a $20 card.
               </p>
@@ -138,14 +138,17 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
 
           {step === 2 && (
             <>
+              <button type="button" onClick={() => go(1)} className="-mb-2 inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
+                <ArrowLeft size={16} aria-hidden="true" />Back to modes
+              </button>
               <Heading title="Add funds" body="Your balance pays for cards, and you can withdraw what you don't spend at any time." />
-              <div className="card p-6 sm:p-8">
+              <div className="card p-5 sm:p-6">
                 <AddFundsPanel onDone={(ok) => ok && go(3)} />
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="ghost" onClick={() => go(1)}>Back</Button>
-                <Button variant="ghost" onClick={() => go(3)}>Skip for now</Button>
-              </div>
+              {/* Over a page, "Skip for now" is in the header already. */}
+              {!onDone && (
+                <Button variant="ghost" className="self-start" onClick={() => go(3)}>Skip for now</Button>
+              )}
             </>
           )}
 
@@ -184,8 +187,9 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
 function Heading({ title, body }: { title: string; body: string }) {
   return (
     <div>
-      <h1 className="font-display text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">{title}</h1>
-      <p className="mt-4 max-w-[56ch] text-lg text-ink-soft">{body}</p>
+      <h1 className="font-display text-4xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-5xl">{title}</h1>
+      {/* On short screens the title says enough, so the step fits without scrolling. */}
+      <p className="mt-3 max-w-[56ch] text-ink-soft sm:text-lg [@media(max-height:780px)]:hidden">{body}</p>
     </div>
   )
 }
