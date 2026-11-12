@@ -13,6 +13,8 @@
 
 Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK`, or one that has moved past the commit CI tested. By hand: `pnpm deploy:testnet` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
 
+SSH (22) and CloudPanel (8443) are open only to our Tailscale tailnet; only 80 and 443 are public. The VM is `milesvm` (100.85.5.47, `tag:server`). The tailnet policy lets our own devices reach it, lets CI reach only its port 22, and lets the VM itself open no connections into the tailnet. CI joins as `tag:ci` with the `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET` OAuth client. The CloudPanel firewall page shows these rules; keep 22 and 8443 limited to `100.64.0.0/10` and `fd7a:115c:a1e0::/48` there. SSH takes keys only, and root logs in by key only.
+
 The steps below set up one site; repeat them per environment with its own user, port, database and `.env`.
 
 ## Mainnet launch
