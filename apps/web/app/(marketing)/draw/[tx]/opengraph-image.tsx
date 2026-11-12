@@ -36,7 +36,7 @@ export default async function Image({ params }: { params: Promise<{ tx: string }
         {win
           ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={{ fontSize: 120, fontWeight: 800, color: GOLD, lineHeight: 1 }}>{paid === 0 ? "Free." : `Paid ${usdUp(paid)}`}</div>
+              <div style={{ fontSize: 120, fontWeight: 800, color: GOLD, lineHeight: 1 }}>{paid === 0 ? "100% off." : `Paid ${usdUp(paid)}`}</div>
               <div style={{ fontSize: 48, color: PAPER }}>{`for a ${usd(ref)} gift card.`}</div>
             </div>
           )

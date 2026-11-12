@@ -1,3 +1,4 @@
+import { DailyReset } from "@/components/local-time"
 import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
 import { MAX_CASHBACK } from "@/lib/modes"
@@ -73,9 +74,9 @@ export default async function Fair() {
           {[
             "Every Game Version is immutable, and the contract refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.",
             "The Draw runs a block after delivery is confirmed, so nobody, including us, can retry it or cancel a purchase after seeing the result.",
-            "Your per-purchase and daily limits apply to every purchase, whoever submits it. The daily limit resets at 00:00 UTC.",
+            <>Your per-purchase and daily limits apply to every purchase, whoever submits it. The daily limit resets every day at <DailyReset />.</>,
             "A purchase we neither deliver nor cancel can be reclaimed in full after 24 hours."
-          ].map((t) => <li key={t} className="card p-6 text-ink-soft">{t}</li>)}
+          ].map((t, i) => <li key={i} className="card p-6 text-ink-soft">{t}</li>)}
         </ul>
         <p className="max-w-[64ch] text-ink-soft">
           What it can't prove: that a code was delivered (Bitrefill isn't on chain), and that we buy in the mode you chose. Both are bounded

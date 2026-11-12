@@ -55,7 +55,7 @@ const headline = (p: Purchase) =>
     : !p.draw
     ? "Delivered"
     : p.draw.finalPrice === 0
-    ? "Free!"
+    ? "100% off!"
     : p.draw.cashback > 0
     ? `${usd(p.draw.cashback)} back`
     : "No cashback this time"
@@ -325,7 +325,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
             : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
-              {p.draw.finalPrice === 0 ? "Free" : `${usd(p.draw.cashback)} back`}
+              {p.draw.finalPrice === 0 ? "100% off" : `${usd(p.draw.cashback)} back`}
             </span>
           )}
           {p.draw && p.draw.cashback === 0 && <span className="text-xs text-muted">No cashback</span>}

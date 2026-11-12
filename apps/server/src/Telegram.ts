@@ -275,7 +275,7 @@ export class Telegram extends Context.Service<Telegram, {
             ? `You paid ${usdUp(paid)}.`
             : p.draw.cashback === 0
             ? `No cashback this time: you paid ${usdUp(paid)}.`
-            : `${paid === 0 ? "Free!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
+            : `${paid === 0 ? "100% off!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
           typeof r.code === "string" ? `Code: ${r.code}` : "",
           typeof r.pin === "string" ? `PIN: ${r.pin}` : "",
           typeof r.link === "string" ? `Link: ${r.link}` : "",
