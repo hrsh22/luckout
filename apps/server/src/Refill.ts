@@ -132,6 +132,21 @@ const isFloat = (row: { readonly reason: string }) => row.reason === "float"
 export const floatTopUp = (float: number, walletUsdc: number) =>
   float > 0 && walletUsdc < float / 2 ? Math.max(cents(float - walletUsdc), MIN_SWAP) : 0
 
+/**
+ * An automatic refill the treasury can't fund in full is cut to what it can: customers waiting for credit come
+ * first, and topping the credit back up to its target can wait for the next one. Never below what the waiting
+ * purchases need or the smallest refill. `available`: what the treasury holds plus what it may still pull today.
+ * The new amount, or undefined to keep it.
+ */
+export const fundable = (o: { amount: number; walletUsdc: number; available: number; waitingNeed: number }) => {
+  // The biggest swap `available` pays for at its most (maxCost); under MIN_SWAP there's no swap at all.
+  let swap = Math.floor(o.available * 10_000 / (10_000 + Number(MAX_COST_BPS)) / 10_000) * 10_000
+  while (swap > 0 && maxCost(swap) > o.available) swap -= 10_000
+  const can = Math.floor((Math.max(0, o.walletUsdc) + (swap >= MIN_SWAP ? swap : 0)) / 10_000) * 10_000
+  const cut = Math.max(MIN_REFILL, cents(Math.max(0, o.waitingNeed)), can)
+  return cut < o.amount ? cut : undefined
+}
+
 /** What a swap must bring to the Base wallet for a refill: 0 when the wallet already holds it. */
 export const swapFor = (amount: number, walletUsdc: number) => (walletUsdc >= amount ? 0 : Math.max(cents(amount - walletUsdc), MIN_SWAP))
 
@@ -349,6 +364,20 @@ export class Refill extends Context.Service<Refill, {
                 yield* save(row.id, { error: `The contract's treasury is ${t.contractTreasury ?? "not set"}, not ${near.treasuryId}. Fix it in Admin → Treasury.` })
                 yield* alerts.admin(`Refills can't be funded: the contract's treasury is ${t.contractTreasury ?? "not set"}, but the server signs as ${near.treasuryId}.`)
                 return "wait"
+              }
+              // Short of money for all of it: an automatic refill shrinks to what can be funded now, so a
+              // customer's card doesn't wait on topping the credit back up. Only here, before anything is signed.
+              if (row.reason === "waiting" || row.reason === "target") {
+                const pullable = t.dailyCap > 0 ? Math.max(0, Math.min(t.dailyCap - t.sweptToday, t.proceeds)) : 0
+                const c = yield* credit.view
+                const cut = fundable({ amount, walletUsdc: w.usdc, available: t.usdc + pullable, waitingNeed: c.waiting.total - Math.max(0, c.free) })
+                if (cut !== undefined) {
+                  yield* save(row.id, { amount: cut })
+                  yield* alerts.admin(
+                    `Refill ${row.id.slice(0, 8)} cut from ${usd(amount)} to ${usd(cut)}: the treasury can't fund all of it now, and purchases waiting for credit come first.`
+                  )
+                  return "next"
+                }
               }
               const shortfall = cents(need - t.usdc)
               // A float top-up is never urgent: it waits for money quietly (the panel says why), and steps
