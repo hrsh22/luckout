@@ -41,6 +41,11 @@ export const modeName = (m: Mode) => (m === "normal" ? "Normal" : ["Lite", "Clas
 export const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 /** What the customer pays, rounded up to the cent: never show less than what leaves their balance. */
 export const usdUp = (micro: number) => `$${(Math.ceil(micro / 10_000) / 100).toFixed(2)}`
+/** Time until daily limits reset at 00:00 UTC: Telegram doesn't tell us the customer's time zone. */
+const untilReset = (now: number) => {
+  const minutes = Math.ceil((86_400_000 - (now % 86_400_000)) / 60_000)
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
+}
 
 const tool = (name: string, description: string, properties: Record<string, object> = {}, required: Array<string> = []): ChatCompletionTool => ({
   type: "function",
@@ -69,7 +74,7 @@ const system = (testnet: boolean, web: string) => `You're Luckout's shopping ass
 
 What you know:
 - Normal pays exactly the price.
-- Lucky modes cost more up front, then a fair draw on NEAR may pay cashback: Lite +10% (23% get cashback, 1% get it free), Classic +20% (40%, 2% free; the one we recommend), Jackpot +50% (56%, 10% free). Cashback comes in fixed slabs and any cashback means they paid less than the price. Each lucky mode averages 5.6% above the price over many buys. They always get the card.
+- Lucky modes cost more up front, then a fair draw on NEAR may pay cashback: Lite +10% (23% get cashback, 1% get 100% off), Classic +20% (40%, 2% get 100% off; the one we recommend), Jackpot +50% (56%, 10% get 100% off). Call the top outcome "100% off", never "free". Cashback comes in fixed slabs and any cashback means they paid less than the price. Each lucky mode averages 5.6% above the price over many buys. They always get the card.
 - One purchase gets at most $50 back, so on big buys only part of the price plays (the quote's lucky_part). Purchases start at $0.50, so smaller amounts aren't sold.
 - Add funds or change limits: ${web}/wallet. Browse: ${web}/shop.
 
@@ -77,7 +82,7 @@ How you talk:
 - Like a sharp, friendly person texting. Usually one to three short sentences.
 - Answer what they asked. Bring up odds, caps, averages or rules only when they change the answer or they ask.
 - If they ask for options, give the few that fit best, not the whole catalog.
-- When comparing modes, one line each, same shape: "Classic: $1.33 now, 40% chance of cashback, 2% it's free".
+- When comparing modes, one line each, same shape: "Classic: $1.33 now, 40% chance of cashback, 2% chance of 100% off".
 - "Lucky" with no mode: quote Classic and mention Lite and Jackpot exist.
 - Say amounts the way they did (₹500, $10). Tools give USD.
 - Plain text only: no headers, bold, markdown or em dashes.
@@ -125,7 +130,7 @@ export const blocker = (a: Account | null, maxPrice: number, web: string, now = 
   }
   const spent = a!.day === Math.floor(now / 86_400_000) ? Number(a!.spent_today) : 0
   if (spent + maxPrice > Number(a!.daily_limit)) {
-    return `Over their daily limit: ${usd(spent)} of ${usd(Number(a!.daily_limit))} used today. It resets at 00:00 UTC, or they can raise it at ${web}/wallet#limits`
+    return `Over their daily limit: ${usd(spent)} of ${usd(Number(a!.daily_limit))} used today. It resets in ${untilReset(now)} (00:00 UTC), or they can raise it at ${web}/wallet#limits`
   }
   return undefined
 }

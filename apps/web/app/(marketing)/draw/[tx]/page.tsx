@@ -1,4 +1,5 @@
 import { BrowserCheck } from "@/components/browser-check"
+import { LocalTime } from "@/components/local-time"
 import { contractId, explorer } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackPct, MAX_CASHBACK } from "@/lib/modes"
@@ -22,7 +23,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if ("error" in d) return { title: "Draw Proof" }
   const paid = Number(d.draw.final_price)
   return {
-    title: `Draw Proof: paid ${paid === 0 ? "nothing" : usdUp(paid)} for a ${usd(d.draw.reference_price)} card`,
+    title: `Draw Proof: ${paid === 0 ? "100% off" : `paid ${usdUp(paid)} for`} a ${usd(d.draw.reference_price)} card`,
     description: "Recompute this Draw yourself, straight from the NEAR chain."
   }
 }
@@ -52,11 +53,11 @@ export default async function DrawProof({ params }: Props) {
       </Link>
       <div className="relative flex flex-col gap-4">
         <h1 className="font-display text-[48px] leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[72px]">
-          {paid === 0 ? "Paid nothing" : `Paid ${usdUp(paid)}`} for a {usd(ref)} card
+          {paid === 0 ? "100% off" : `Paid ${usdUp(paid)} for`} a {usd(ref)} card
         </h1>
         <p className="text-lg text-ink-soft">
           Purchase #{draw.purchase_id} by {draw.customer} on {version.name} (up to +{version.premium_bps / 100}%),{" "}
-          {time.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC.
+          <LocalTime iso={time.toISOString()} options={{ dateStyle: "medium", timeStyle: "short" }} />.
         </p>
       </div>
 

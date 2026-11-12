@@ -104,8 +104,8 @@ export default async function Home() {
                     : (
                       <>
                         <p><b>{cashbackChanceBps(m) / 100}%</b> get cashback</p>
-                        <p className="opacity-80">{slabs.filter((o) => o !== freeSlab).map((o) => `${o.pct}%`).join(", ")} back, or free</p>
-                        {freeSlab && <span className="pill mt-3 !bg-white/70">Free {freeSlab.chanceBps / 100}% of the time</span>}
+                        <p className="opacity-80">{slabs.filter((o) => o !== freeSlab).map((o) => `${o.pct}%`).join(", ")} back, or 100% off</p>
+                        {freeSlab && <span className="pill mt-3 !bg-white/70">100% off {freeSlab.chanceBps / 100}% of the time</span>}
                       </>
                     )}
                 </div>
@@ -190,7 +190,7 @@ export default async function Home() {
         <div className="relative overflow-hidden rounded-[2.75rem] px-8 py-14 sm:px-14" style={{ background: "linear-gradient(160deg,#FFE7A3,#FFC53D 60%,#FFB21F)" }}>
           <div className="blob -top-24 -right-10 size-80 bg-white opacity-50" aria-hidden="true" />
           <div className="relative text-gold-ink">
-            <h2 className="max-w-[14em] font-display text-5xl leading-none font-extrabold tracking-[-0.03em] sm:text-[60px]">Your next card could be free.</h2>
+            <h2 className="max-w-[14em] font-display text-5xl leading-none font-extrabold tracking-[-0.03em] sm:text-[60px]">Your next card could be 100% off.</h2>
             <p className="mt-4 text-lg opacity-80">Sign in with a NEAR or EVM wallet and choose how you like to pay. It takes a minute.</p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href="/welcome" className={buttonVariants({ size: "lg" })}>Create your account</Link>

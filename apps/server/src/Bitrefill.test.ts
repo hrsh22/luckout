@@ -3,6 +3,7 @@ import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Bitrefill, isTestMerchant, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
   assert.equal(usdToMicro("5.53"), 5_530_000)
@@ -16,6 +17,7 @@ const live = { skip: !process.env.BITREFILL_API_KEY && "BITREFILL_API_KEY not se
 const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>, env: Record<string, string> = {}) =>
   Effect.runPromise(Bitrefill.use(f).pipe(
     Effect.provide(Bitrefill.layer),
+    Effect.provide(DbMemory),
     // The client otherwise keeps the first fetch it saw; tests swap in their own fakes.
     Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...(process.env as Record<string, string>), ...env } })))
