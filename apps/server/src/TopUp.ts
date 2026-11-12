@@ -320,7 +320,10 @@ export class TopUp extends Context.Service<TopUp, {
       })
 
       const sent = Effect.fn("TopUp.sent")(function*(accountId: string, depositAddress: string, txHash: string) {
-        if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return yield* fail("That isn't a transaction hash")
+        // An EVM or Bitcoin hash (hex), or a Solana or NEAR one (base58). 1Click checks it against the chain.
+        // ponytail: a customer can name any hash for their own quote; at worst that keeps the row in sight and
+        // sends one admin alert. Check it on chain ourselves if that's ever abused.
+        if (!/^(0x)?[0-9a-fA-F]{64}$|^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(txHash)) return yield* fail("That isn't a transaction hash")
         const [row] = yield* sql`UPDATE intents_swaps SET deposit_tx = ${txHash}
                                  WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction = 'in' AND deposit_tx IS NULL
                                  RETURNING 1`.pipe(Effect.orDie)
@@ -445,9 +448,13 @@ export class TopUp extends Context.Service<TopUp, {
           const notice = noticeFor(r, Date.now(), web)
           if (notice && !r.told.includes(notice.key)) {
             // Saved first: a notice is never sent twice, even if Telegram is slow or the server restarts.
-            const [claimed] = yield* sql`UPDATE intents_swaps SET told = array_append(told, ${notice.key})
+            const [claimed] = yield* sql`UPDATE intents_swaps SET told = array_append(told, ${notice.key}), retell = false
                                          WHERE deposit_address = ${r.deposit_address} AND NOT (${notice.key} = ANY(told)) RETURNING 1`.pipe(Effect.orDie)
-            if (claimed) yield* alerts.customer(r.account_id, notice.text)
+            if (claimed && !(yield* alerts.customer(r.account_id, notice.text))) {
+              // Telegram didn't take it: unclaimed, and the swap stays tracked, so a later pass sends it again.
+              yield* sql`UPDATE intents_swaps SET told = array_remove(told, ${notice.key}), retell = true
+                         WHERE deposit_address = ${r.deposit_address}`.pipe(Effect.orDie)
+            }
             if (claimed && notice.key === "unseen") {
               yield* alerts.admin(`1Click hasn't seen a paid Top-Up: deposit ${r.deposit_address}, tx ${r.deposit_tx} on ${chainName(r.chain)}, ${r.amount_in ?? "?"} ${r.symbol ?? ""}, for ${r.account_id}. Ask 1Click support.`)
             }
@@ -461,6 +468,8 @@ export class TopUp extends Context.Service<TopUp, {
         WHERE deposit_address IN (
           SELECT deposit_address FROM intents_swaps
           WHERE move = 'waiting'
+             -- A notice Telegram didn't take is tried again, for a day.
+             OR (retell AND coalesce(status_at, created_at) > now() - interval '1 day')
              OR (created_at > now() - interval '3 days'
                  AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
                  AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL

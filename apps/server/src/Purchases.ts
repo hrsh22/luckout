@@ -280,7 +280,7 @@ export class Purchases extends Context.Service<Purchases, {
           : row.step === "rejected"
           ? `Your ${what} wasn't bought. ${row.error ?? ""}`.trim()
           : undefined
-        return text ? alerts.customer(row.account_id, text) : Effect.void
+        return text ? Effect.asVoid(alerts.customer(row.account_id, text)) : Effect.void
       }
 
       const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>

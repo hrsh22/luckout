@@ -104,7 +104,7 @@ const world = (opts: {
       Layer.succeed(Bitrefill, bitrefill),
       Layer.succeed(Refill, refill),
       Layer.succeed(Sales, Sales.of({ status: Effect.sync(() => shop), setOpen: () => Effect.die("not used") })),
-      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.void }))
+      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
     )),
     Layer.provideMerge(DbMemory),
     // Real cards are only sold on mainnet.
