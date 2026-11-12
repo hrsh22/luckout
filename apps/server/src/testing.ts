@@ -33,6 +33,7 @@ export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
     search: unused("bitrefill.search"),
     browse: unused("bitrefill.browse"),
     popular: unused("bitrefill.popular"),
+    logo: () => ({}),
     voucher: unused("bitrefill.voucher"),
     order: unused("bitrefill.order"),
     delivery: unused("bitrefill.delivery"),

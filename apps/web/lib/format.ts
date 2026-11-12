@@ -3,6 +3,8 @@ const fmt = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" 
 export const usd = (micro: number | string) => fmt.format(Number(micro) / 1e6)
 /** What the customer pays, rounded up to the cent: never show less than what leaves their balance. */
 export const usdUp = (micro: number | string) => fmt.format(Math.ceil(Number(micro) / 10_000) / 100)
+/** A balance, rounded down to the cent: never show more than is there (prices round up, so the two add up). */
+export const usdDown = (micro: number | string) => fmt.format(Math.floor(Number(micro) / 10_000) / 100)
 /** "12.5" USDC → micro-USDC, without floating point. NaN if it isn't an amount or is too big to be exact. */
 export const toMicro = (usdc: string) => {
   const m = /^(\d+)(?:\.(\d{0,6}))?$/.exec(usdc.trim())

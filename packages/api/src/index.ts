@@ -148,6 +148,9 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   id: Schema.String,
   voucherId: Schema.String,
   voucherName: Schema.String,
+  /** The card's logo and brand colour, when we know them. */
+  image: Schema.optional(Schema.String),
+  background: Schema.optional(Schema.String),
   value: Schema.String,
   status: PurchaseStatus,
   /** Why it was rejected or failed, in plain words. */

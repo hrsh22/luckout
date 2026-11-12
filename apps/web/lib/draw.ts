@@ -59,7 +59,15 @@ export interface Check {
   expected: string
   recomputed: string
   ok: boolean
+  /** What the raw numbers are in (basis points of the price, or micro-USDC), so they can also be read plainly. */
+  unit?: "bps" | "usdc"
 }
+
+/** "11000" bps → "110% of the price"; "605000" micro-USDC → "$0.605". */
+export const plainly = (value: string, unit: NonNullable<Check["unit"]>) =>
+  unit === "bps"
+    ? `${Number(value) / 100}% of the price`
+    : `$${(Number(value) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`
 
 /** Every step of the Draw recomputed and compared with what the contract logged. */
 export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<Check>> {
@@ -68,17 +76,18 @@ export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<
   const bps = finalBpsFor(version.outcomes, roll)
   const price = finalPrice(BigInt(e.reference_price), BigInt(e.lucky_amount), BigInt(e.max_price), bps)
   const cashback = BigInt(e.max_price) - price
-  const row = (label: string, expected: string | number | bigint, recomputed: string | number | bigint) => ({
+  const row = (label: string, expected: string | number | bigint, recomputed: string | number | bigint, unit?: Check["unit"]) => ({
     label,
     expected: String(expected),
     recomputed: String(recomputed),
-    ok: String(expected) === String(recomputed)
+    ok: String(expected) === String(recomputed),
+    ...(unit ? { unit } : {})
   })
   return [
     row("Random value", e.random, random),
     row("Roll", e.roll, roll),
-    row("Final Price share", e.final_bps, bps),
-    row("Final Price", e.final_price, price),
-    row("Cashback", e.cashback, cashback)
+    row("Final Price share", e.final_bps, bps, "bps"),
+    row("Final Price", e.final_price, price, "usdc"),
+    row("Cashback", e.cashback, cashback, "usdc")
   ]
 }

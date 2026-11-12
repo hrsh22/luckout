@@ -22,7 +22,7 @@ import { ArrowLeft } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
-import { useEffect, useMemo, useState } from "react"
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react"
 
 /** Back to the results this card came from, not just the empty shop. */
 const lastSearch = () => {
@@ -100,6 +100,7 @@ function Voucher() {
     }
   })
   const live = usePolledPurchase(buy.data, token)
+  const panel = useRef<HTMLElement>(null)
 
   if (voucher.error && !look) {
     return (
@@ -185,7 +186,7 @@ function Voucher() {
           </section>
         </div>
 
-        <aside className="flex flex-col gap-4 lg:sticky lg:top-28" aria-live="polite">
+        <aside ref={panel} className="flex flex-col gap-4 lg:sticky lg:top-28" aria-live="polite">
           <AnimatePresence mode="wait" initial={false}>
             {live
               ? <PurchaseResult key="result" p={live} onAgain={() => (buy.reset(), setRound((r) => r + 1))} />
@@ -205,6 +206,34 @@ function Voucher() {
               )}
           </AnimatePresence>
         </aside>
+      </div>
+      {shown && !live && !buy.isPending && <JumpToBuy panel={panel} name={info.name} amount={shown.maxPrice} />}
+    </div>
+  )
+}
+
+/**
+ * Phones: the price and the buy panel sit below the amounts and modes, so a bar keeps the price in sight and
+ * takes you to the panel (which handles signing in, adding funds and limits). Gone once the panel is on screen.
+ */
+function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | null>; name: string; amount: number }) {
+  const [inView, setInView] = useState(true)
+  useEffect(() => {
+    const el = panel.current
+    if (!el) return
+    const o = new IntersectionObserver(([e]) => setInView(e!.isIntersecting), { threshold: 0.25 })
+    o.observe(el)
+    return () => o.disconnect()
+  }, [panel])
+  if (inView) return null
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-white/90 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur lg:hidden">
+      <div className="mx-auto flex max-w-[640px] items-center justify-between gap-3">
+        <div className="leading-tight">
+          <p className="text-sm text-muted">{name}</p>
+          <p className="font-display text-2xl font-extrabold">{usdUp(amount)}</p>
+        </div>
+        <Button size="lg" onClick={() => panel.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>Review and buy</Button>
       </div>
     </div>
   )

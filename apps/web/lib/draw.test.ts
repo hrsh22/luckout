@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { verify } from "./draw.ts"
+import { plainly, verify } from "./draw.ts"
 
 // The first testnet Draw: tx 77EAmNVpwoqL62byNaPmES54vJmRMChfzL5LrMb8NxFQ on app.luckout.testnet.
 const jackpot = {
@@ -26,6 +26,13 @@ const event = {
 test("a real testnet Draw recomputes exactly", async () => {
   const checks = await verify(event, jackpot)
   assert.ok(checks.every((c) => c.ok), JSON.stringify(checks))
+})
+
+test("the raw numbers also read plainly", () => {
+  assert.equal(plainly("11000", "bps"), "110% of the price")
+  assert.equal(plainly("605000", "usdc"), "$0.605")
+  assert.equal(plainly("0", "usdc"), "$0.00")
+  assert.equal(plainly("9000000", "usdc"), "$9.00")
 })
 
 test("a tampered Draw is caught", async () => {

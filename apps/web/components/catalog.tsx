@@ -22,21 +22,28 @@ const CATEGORY_NAMES: Record<Category, string> = {
 }
 const isCategory = (c: string | null): c is Category => !!c && (CATEGORIES as ReadonlyArray<string>).includes(c)
 
-/** The shop's address for a set of filters, so Back and shared links keep them. */
-const shopUrl = (f: ShopFilters) => {
+/** The shop's address for a set of filters, so Back and shared links keep them ("all": every country, chosen). */
+const shopUrl = (f: ShopFilters, everyCountry: boolean) => {
   const p = new URLSearchParams()
   if (f.q.trim()) p.set("q", f.q.trim())
   if (f.country) p.set("country", f.country)
+  else if (everyCountry) p.set("country", "all")
   if (f.category) p.set("category", f.category)
   return p.size ? `/shop?${p}` : "/shop"
 }
 
-/** Every card, until the customer narrows it down: nothing is filtered on their behalf. */
+/**
+ * The catalog. A card only works in its own country, so until the customer picks one, the shop shows the
+ * visitor's own (with cards for their region or worldwide), saying so; "All countries" is one choice away.
+ */
 export function Catalog() {
   const params = useSearchParams()
+  const urlCountry = params.get("country")
+  // Whether the customer has chosen a country (or every country): then it's never chosen for them.
+  const picked = useRef(urlCountry !== null)
   const [filters, setFilters] = useState<ShopFilters>(() => ({
     q: params.get("q") ?? "",
-    country: /^[A-Z]{2}$/.test(params.get("country") ?? "") ? params.get("country")! : "",
+    country: /^[A-Z]{2}$/.test(urlCountry ?? "") ? urlCountry! : "",
     category: isCategory(params.get("category")) ? params.get("category") as Category : ""
   }))
   const [text, setText] = useState(filters.q)
@@ -46,10 +53,10 @@ export function Catalog() {
   const update = (next: Partial<ShopFilters>) =>
     setFilters((f) => {
       const merged = { ...f, ...next }
-      window.history.replaceState(null, "", shopUrl(merged))
+      window.history.replaceState(null, "", shopUrl(merged, picked.current))
       try {
         // A card's Back link returns to the same view.
-        sessionStorage.setItem("luckout.shop", shopUrl(merged))
+        sessionStorage.setItem("luckout.shop", shopUrl(merged, picked.current))
       } catch {}
       return merged
     })
@@ -88,6 +95,14 @@ export function Catalog() {
   const popularPending = popularOn && popular.isPending
   const popularItems = popular.data?.items ?? []
   const near = popular.data?.country
+  // The visitor's own country, once known, unless they chose one (or every country) themselves.
+  useEffect(() => {
+    if (near && !picked.current && !filters.country) {
+      picked.current = true
+      update({ country: near })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [near])
   // Read after mount: the server render has no browser storage.
   const [viewed, setViewed] = useState<Array<VoucherSummary>>([])
   useEffect(() => setViewed(viewedCards()), [])
@@ -131,7 +146,7 @@ export function Catalog() {
             <select
               className="field !h-16 w-full cursor-pointer appearance-none !rounded-full !pr-10 !pl-5 !text-base shadow-card"
               value={filters.country}
-              onChange={(e) => update({ country: e.target.value })}
+              onChange={(e) => ((picked.current = true), update({ country: e.target.value }))}
             >
               <option value="">🌐 All countries</option>
               {/* Node and browsers name a few places differently ("Falkland Islands (Islas Malvinas)"); either is fine. */}
@@ -206,7 +221,7 @@ export function Catalog() {
             Try another search, country or category.
           </p>
           {filtered && (
-            <button type="button" onClick={() => (setText(""), update({ q: "", country: "", category: "" }))} className="font-semibold underline underline-offset-4">
+            <button type="button" onClick={() => (setText(""), (picked.current = true), update({ q: "", country: "", category: "" }))} className="font-semibold underline underline-offset-4">
               Show every card
             </button>
           )}

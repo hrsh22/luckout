@@ -1,5 +1,8 @@
 "use client"
 
+import { AmountField } from "@/components/amount-field"
+import { sortAssets, TokenPicker } from "@/components/token-picker"
+import { topUpAmount, topUpPicks } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, cancelled, errorMessage } from "@/lib/api"
@@ -19,13 +22,13 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
  * Intents account, and the intent they sign before sending moves it into Luckout once it lands. The
  * transfer on their own chain is the only fee they pay.
  */
-export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
+export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; need?: number | undefined } = {}) {
   const { accountId, token, refresh, signIntent } = useSession()
   const actions = useWalletActions()
   const qc = useQueryClient()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [assetId, setAssetId] = useState("")
-  const [amount, setAmount] = useState("20")
+  const [amount, setAmount] = useState(() => topUpAmount(need))
   const [quote, setQuote] = useState<TopUpQuote>()
   const [signed, setSigned] = useState(false)
   const [status, setStatus] = useState<TopUpStatus>()
@@ -36,9 +39,9 @@ export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   useEffect(() => {
     if (!token) return
     api((c) => c.topup.assets(), token).then((all) => {
-      const mine = all.filter((a) => EVM_CHAIN_IDS[a.chain])
+      const mine = sortAssets(all.filter((a) => EVM_CHAIN_IDS[a.chain]))
       setAssets(mine)
-      setAssetId(mine.find((a) => a.symbol === "USDC" && a.chain === "base")?.assetId ?? mine[0]?.assetId ?? "")
+      setAssetId(mine[0]?.assetId ?? "")
     }, (e) => setError(errorMessage(e)))
   }, [token])
 
@@ -90,13 +93,14 @@ export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
 
   if (!quote) {
     return (
-      <div className="flex flex-col gap-3">
-        <input className="field !w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
-        <span className="text-sm text-muted">USDC, paid with</span>
-        <select className="field !w-auto" value={assetId} onChange={(e) => setAssetId(e.target.value)} aria-label="Pay with">
-          {assets?.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {CHAIN_NAMES[a.chain] ?? a.chain}</option>)}
-        </select>
+      <div className="flex flex-col gap-4">
+        <AmountField label="USDC to receive" value={amount} onChange={setAmount} picks={topUpPicks(need)} />
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-semibold text-muted">Pay with</span>
+          {assets ? <TokenPicker assets={assets} value={assetId} onChange={setAssetId} /> : <span className="skeleton h-16 rounded-[1.25rem]" />}
+        </div>
         <Button
+          size="lg"
           loading={busy === "quote"}
           disabled={!!busy || !assetId || !(toMicro(amount) >= 1_000_000)}
           onClick={() =>

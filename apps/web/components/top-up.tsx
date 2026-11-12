@@ -1,9 +1,11 @@
 "use client"
 
+import { AmountField } from "@/components/amount-field"
+import { sortAssets, TokenPicker } from "@/components/token-picker"
 import { Button } from "@/components/ui/button"
 import { depositCall } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { usdcId, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
@@ -14,17 +16,27 @@ import { toast } from "sonner"
 const STORAGE_DEPOSIT = "1250000000000000000000" // 0.00125 NEAR, USDC's registration fee
 const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 
+/** What a card still needs (at least the $1 top-up minimum), or $20. */
+const needed = (need: number | undefined) => (need ? Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 : undefined)
+export const topUpAmount = (need?: number) => dollars(needed(need) ?? 20_000_000)
+export const topUpPicks = (need?: number) => [
+  ...(needed(need) ? [{ label: `Exactly ${usdUp(needed(need)!)}`, micro: needed(need)! }] : []),
+  { label: "$10", micro: 10_000_000 },
+  { label: "$25", micro: 25_000_000 },
+  { label: "$50", micro: 50_000_000 }
+]
+
 /**
  * Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit.
  * `onDone` runs once it's in the balance, like a wallet deposit (a mode chosen before it is saved then).
  */
-export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
+export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?: number | undefined } = {}) {
   const { accountId, token, refresh, send, gasFree } = useSession()
   const qc = useQueryClient()
   const [registered, setRegistered] = useState<boolean>()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [asset, setAsset] = useState("")
-  const [amount, setAmount] = useState("20")
+  const [amount, setAmount] = useState(() => topUpAmount(need))
   const [quote, setQuote] = useState<TopUpQuote>()
   const [status, setStatus] = useState<string>()
   const [busy, setBusy] = useState(false)
@@ -34,7 +46,11 @@ export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   useEffect(() => {
     if (!accountId || !token) return
     view<unknown>(usdcId, "storage_balance_of", { account_id: accountId }).then((b) => setRegistered(b !== null), fail)
-    api((c) => c.topup.assets(), token).then((a) => (setAssets(a), setAsset(a.find((x) => x.symbol === "USDC" && x.chain === "base")?.assetId ?? a[0]?.assetId ?? "")), fail)
+    api((c) => c.topup.assets(), token).then((a) => {
+      const sorted = sortAssets(a)
+      setAssets(sorted)
+      setAsset(sorted[0]?.assetId ?? "")
+    }, fail)
   }, [accountId, token])
 
   // Poll 1Click until the swap settles.
@@ -68,13 +84,13 @@ export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
   return (
     <div className="flex flex-col gap-3">
       {!quote && (
-        <div className="flex flex-col gap-3">
-          <input className="field !w-28" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="USDC to receive" />
-          <span className="text-sm text-muted">USDC, paid with</span>
-          <select className="field !w-auto" value={asset} onChange={(e) => setAsset(e.target.value)} aria-label="Pay with">
-            {assets?.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {a.chain}</option>)}
-          </select>
-          <Button disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
+        <div className="flex flex-col gap-4">
+          <AmountField label="USDC to receive" value={amount} onChange={setAmount} picks={topUpPicks(need)} />
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-semibold text-muted">Pay with</span>
+            {assets ? <TokenPicker assets={assets} value={asset} onChange={setAsset} /> : <span className="skeleton h-16 rounded-[1.25rem]" />}
+          </div>
+          <Button size="lg" disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
             setQuote(await api((c) => c.topup.quote({ payload: { originAsset: asset, usdc: toMicro(amount) } }), token))
             setStatus("PENDING_DEPOSIT")
             // Recorded on the server now: it shows under "Money on its way" even if this page closes.
