@@ -1904,11 +1904,25 @@ fn a_share_only_cap_grows_with_the_reserve() {
 }
 
 #[test]
-fn a_fixed_only_cap_still_locks_no_more_than_free_reserve() {
+#[should_panic(expected = "at most 50%")]
+fn the_reserve_share_cant_be_turned_off() {
+    // Without it, a high fixed amount would let one Draw lock the whole Free Reserve.
     let mut c = setup(30 * USDC, USDC);
     set_cap(&mut c, Some(100 * USDC), None);
-    let q = c.quote(U128(1_000 * USDC), Mode::Lucky(0));
-    assert_eq!(q.lucky_amount.0, 30 * USDC);
+}
+
+#[test]
+fn even_the_largest_share_locks_under_half_the_free_reserve() {
+    let mut c = setup(300 * USDC, 4_000 * USDC);
+    raise_limits(&mut c);
+    set_cap(&mut c, None, Some(5_000));
+    for v in 0..3 {
+        let free = c.get_reserve().free.0;
+        let pid = buy(&mut c, 1_000 * USDC, Mode::Lucky(v), &format!("o-half-{v}"));
+        let locked = c.get_purchase(pid).unwrap().locked.0;
+        assert!(locked < free / 2, "mode {v} locked {locked} of {free}");
+        let _ = deliver(&mut c, pid, [9; 32]);
+    }
 }
 
 #[test]
@@ -1917,7 +1931,7 @@ fn a_new_cap_leaves_accepted_purchases_alone() {
     raise_limits(&mut c);
     let pid = buy(&mut c, 500 * USDC, Mode::Lucky(1), "o-before");
     let before = c.get_purchase(pid).unwrap();
-    set_cap(&mut c, Some(USDC), None);
+    set_cap(&mut c, Some(USDC), Some(2_000));
     let after = deliver(&mut c, pid, [7; 32]);
     assert_eq!(
         (after.lucky_amount, after.locked),
@@ -1939,13 +1953,6 @@ fn setting_the_cashback_cap_needs_a_full_access_key() {
     let mut c = setup(0, USDC);
     as_(owner());
     c.set_cashback_cap(Some(U128(100 * USDC)), None);
-}
-
-#[test]
-#[should_panic(expected = "Keep at least one limit")]
-fn the_cashback_cap_keeps_at_least_one_limit() {
-    let mut c = setup(0, USDC);
-    set_cap(&mut c, None, None);
 }
 
 #[test]

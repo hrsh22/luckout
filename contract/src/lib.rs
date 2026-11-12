@@ -103,7 +103,7 @@ enum Key {
 }
 
 /// The most Cashback one Lucky Buy can pay: the lower of a fixed amount and a share of Free
-/// Reserve. `None` turns that limit off; at least one stays on.
+/// Reserve. A `None` fixed amount is off; the share is always set (it's an Option only in storage).
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CashbackCap {
@@ -656,17 +656,14 @@ impl Contract {
     }
 
     /// Sets the Cashback Cap: one Lucky Buy pays at most the lower of `fixed` and `reserve_bps` of
-    /// Free Reserve. `None` turns a limit off, but one must stay on. Accepted purchases keep their lock.
+    /// Free Reserve. A `None` fixed amount turns it off; the share is required, so one Draw never takes
+    /// most of the reserve. Accepted purchases keep their lock.
     #[payable]
     pub fn set_cashback_cap(&mut self, fixed: Option<U128>, reserve_bps: Option<u32>) {
         self.assert_owner();
-        require!(
-            fixed.is_some() || reserve_bps.is_some(),
-            "Keep at least one limit"
-        );
         require!(fixed != Some(U128(0)), "The fixed limit must be above 0");
         require!(
-            reserve_bps.is_none_or(|b| b > 0 && b <= MAX_CAP_RESERVE_BPS),
+            reserve_bps.is_some_and(|b| b > 0 && b <= MAX_CAP_RESERVE_BPS),
             "The reserve share must be above 0% and at most 50%"
         );
         let cap = CashbackCap { fixed, reserve_bps };
