@@ -49,7 +49,7 @@ export const useTopUpPreview = (token: string | undefined, assetId: string, micr
 }
 
 /** What the customer will send, when it arrives, and the fee their wallet pays. */
-export function TopUpPreview({ q, stale, error }: { q: TopUpQuote | undefined; stale: boolean; error: unknown }) {
+export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | undefined; stale: boolean; error: unknown; warning?: string | undefined }) {
   if (error) return <p role="alert" className="text-sm font-medium text-bad">{errorMessage(error)}</p>
   if (!q) return <span className="skeleton h-[66px] rounded-2xl" />
   const chain = chainLabel(q.chain)
@@ -62,6 +62,7 @@ export function TopUpPreview({ q, stale, error }: { q: TopUpQuote | undefined; s
       <p className="text-sm text-muted">
         Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee: {FEES[q.chain] ?? "set by your wallet"}
       </p>
+      {warning && <p className="text-sm font-medium text-warn">{warning}</p>}
     </div>
   )
 }
