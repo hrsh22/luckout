@@ -106,7 +106,9 @@ export function Catalog() {
   // Read after mount: the server render has no browser storage.
   const [viewed, setViewed] = useState<Array<VoucherSummary>>([])
   useEffect(() => setViewed(viewedCards()), [])
-  const showViewed = !filtered && viewed.length > 0
+  // Not while the visitor's own country is on its way: it filters the shop, which would hide this row a moment later.
+  const countryComing = popularOn && !picked.current && (popularPending || !!near)
+  const showViewed = !filtered && !countryComing && viewed.length > 0
   const shelves = !filters.q && (showViewed || popularPending || popularItems.length > 0)
 
   return (
