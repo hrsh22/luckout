@@ -1,5 +1,5 @@
 import { NearConnector } from "@hot-labs/near-connect"
-import { network } from "./chain"
+import { network, txFailure } from "./chain"
 
 export * from "./chain"
 
@@ -45,16 +45,25 @@ async function walletOn(expected: string) {
   return wallet
 }
 
+/** A wallet resolves with the outcomes even when the chain refused a call: that's an error, never a success. */
+function sent<T>(outcomes: T) {
+  for (const o of Array.isArray(outcomes) ? outcomes : [outcomes]) {
+    const why = txFailure(o)
+    if (why) throw new Error(why)
+  }
+  return outcomes
+}
+
 /** Signs and sends calls with the connected wallet, in one approval. The wallet pays the network fee. */
 export async function send(expected: string, ...calls: Array<Call>) {
-  return (await walletOn(expected)).signAndSendTransactions({ transactions: calls.map(toTransaction) })
+  return sent(await (await walletOn(expected)).signAndSendTransactions({ transactions: calls.map(toTransaction) }))
 }
 
 /** Sends NEAR (yoctoNEAR) from the connected wallet, which pays the fee. */
 export async function sendNear(expected: string, receiverId: string, yocto: string) {
-  return (await walletOn(expected)).signAndSendTransactions({
+  return sent(await (await walletOn(expected)).signAndSendTransactions({
     transactions: [{ receiverId, actions: [{ type: "Transfer" as const, params: { deposit: yocto } }] }]
-  })
+  }))
 }
 
 /** Whether the connected wallet can sign without sending (NEP-366), so our relayer can send and pay. */
