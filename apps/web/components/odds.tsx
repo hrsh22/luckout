@@ -4,7 +4,7 @@ import { usd, usdUp } from "@/lib/format"
 import { MOST_OUTCOMES, mostLikely, type PricedOutcome } from "@/lib/modes"
 import { motion } from "motion/react"
 
-/** Gold deepens with the cashback: pale for 10% back, full gold for free. No cashback stays ink. */
+/** Gold deepens with the cashback: pale for 10% back, full gold for 100% off. No cashback stays ink. */
 export const slabColor = (o: PricedOutcome) =>
   o.cashback === 0 ? "rgb(22 18 43 / 0.12)" : o.price === 0 ? "#FF9F1C" : ["#FFEBB0", "#FFE08A", "#FFD466", "#FFC53D", "#FFB21F"][Math.min(4, Math.round(o.pct / 10) - 1)]!
 
@@ -43,7 +43,7 @@ export function OddsList({ outcomes, whole }: { outcomes: ReadonlyArray<PricedOu
             {o.cashback === 0
               ? <>No cashback, you pay <b>{usdUp(o.price)}</b></>
               : o.price === 0
-              ? <><b>Free</b>, all {usd(o.cashback)} back</>
+              ? <><b>100% off</b>, all {usd(o.cashback)} back</>
               : <>{whole ? `${o.pct}% back, ` : `${usd(o.cashback)} back, `}you pay <b>{usdUp(o.price)}</b></>}
             {o === likely && <span className="ml-2 text-sm text-muted">most likely</span>}
           </span>

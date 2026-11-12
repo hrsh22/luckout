@@ -2,6 +2,7 @@
 
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
 import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
+import { DailyReset } from "@/components/local-time"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
@@ -93,7 +94,7 @@ export default function WalletPage() {
             <div className="h-2 overflow-hidden rounded-full bg-soft">
               <div className="h-full rounded-full bg-ink transition-[width] duration-500" style={{ width: `${Math.min(100, (today / daily) * 100)}%` }} />
             </div>
-            <p className="mt-2 text-sm text-muted">of your {usd(daily)} daily limit. Resets at 00:00 UTC.</p>
+            <p className="mt-2 text-sm text-muted">of your {usd(daily)} daily limit. Resets at <DailyReset />.</p>
           </div>
         </div>
       </section>

@@ -29,7 +29,7 @@ export default function Purchases() {
           <div className="flex flex-wrap gap-2">
             <span className="pill !bg-white !px-4 !py-2 !text-sm">{delivered.length} delivered</span>
             {cashback > 0 && <span className="pill !bg-gold !px-4 !py-2 !text-sm !text-gold-ink">{usd(cashback)} cashback</span>}
-            {free > 0 && <span className="pill !bg-gold-soft !px-4 !py-2 !text-sm !text-gold-ink">{free} free</span>}
+            {free > 0 && <span className="pill !bg-gold-soft !px-4 !py-2 !text-sm !text-gold-ink">{free} at 100% off</span>}
           </div>
         )}
       </div>

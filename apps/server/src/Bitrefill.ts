@@ -3,6 +3,7 @@ import { decode as decodeToon } from "@toon-format/toon"
 import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Network } from "./Near.ts"
+import { readSetting, writeSetting } from "./Settings.ts"
 
 // Our float is the USD store-credit sub-account (docs/research/bitrefill-funding.md).
 // REST v2 only sees the primary sub-account (BTC), so real products are priced and
@@ -377,8 +378,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // Popular cards come from our own copy of the gift-card catalog (about 100 pages), refreshed twice a
       // day instead of read on every visit. Testnet sells only test cards, so it has none.
       let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = []
-      /** Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. */
-      let logos = new Map<string, ReturnType<typeof images>>()
+      /**
+       * Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. Saved with the settings too,
+       * so a restart (every deploy) starts with them instead of letters until the next copy is done.
+       */
+      const Logos = Schema.Record(Schema.String, Schema.Struct({ image: Schema.optionalKey(Schema.String), background: Schema.optionalKey(Schema.String) }))
+      let logos = new Map<string, ReturnType<typeof images>>(Object.entries(yield* readSetting("card_logos", Logos, {})))
       const copyCatalog = Effect.gen(function*() {
         const cards: Array<typeof Product.Type> = []
         for (let start = 0;; start += PAGE) {
@@ -388,6 +393,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         }
         brands = popularBrands(cards)
         logos = new Map(cards.map((c) => [c.id, images(c)]))
+        yield* writeSetting("card_logos", Logos, Object.fromEntries(logos), "server")
       })
       if (!testnet && Option.isSome(apiKey)) {
         yield* copyCatalog.pipe(

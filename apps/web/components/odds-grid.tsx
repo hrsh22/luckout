@@ -12,7 +12,7 @@ const LUCKY = MODES.filter((m) => m.premiumBps > 0)
 
 const label = (o: PricedOutcome, whole: boolean) =>
   o.price === 0
-    ? "got it all back, free"
+    ? "got it all back: 100% off"
     : o.cashback > 0
     ? `got ${whole ? `${o.pct}%` : usd(o.cashback)} back, paid ${usdUp(o.price)}`
     : `no cashback, paid ${usdUp(o.price)}`

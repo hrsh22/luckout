@@ -97,7 +97,7 @@ export function HeroArt() {
           <Zap size={16} strokeWidth={2.4} />Code in seconds
         </motion.span>
         <motion.span variants={rise} custom={{ delay: 0.75, rotate: 4 }} className="sticker absolute top-[380px] right-[-16px] z-20 bg-gold text-gold-ink">
-          Free 2% of the time
+          100% off 2% of the time
         </motion.span>
       </motion.div>
     </MotionConfig>
