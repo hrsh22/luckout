@@ -35,11 +35,8 @@ const FAQ = [
 ]
 
 export default async function Home() {
-  // Read again at most every 60 s (revalidate above). Without the reserve, lucky modes show no amounts.
-  const [stats, free] = await Promise.all([
-    view<Stats>(contractId, "get_stats").catch(() => undefined),
-    view<{ free: string }>(contractId, "get_reserve").then((r) => r.free, () => undefined)
-  ])
+  // Read again at most every 60 s (revalidate above).
+  const stats = await view<Stats>(contractId, "get_stats").catch(() => undefined)
   const avg = stats && liveAverage(stats)
 
   return (
@@ -89,9 +86,9 @@ export default async function Home() {
         <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {MODES.map((m) => {
             const p = modePalette(m.mode)
-            const q = m.premiumBps === 0 || free !== undefined ? simpleQuote(m, EXAMPLE, free ?? 0) : undefined
-            const slabs = q ? pricedOutcomes(m, q).filter((o) => o.cashback > 0) : []
-            const best = slabs.at(-1)
+            // The model at its best, whatever today's reserve: the whole card in the Draw. The shop prices from the live reserve.
+            const q = simpleQuote(m, EXAMPLE, Number.MAX_SAFE_INTEGER)
+            const slabs = pricedOutcomes(m, q).filter((o) => o.cashback > 0)
             const freeSlab = slabs.find((o) => o.price === 0)
             return (
               <article key={m.name} className="flex min-h-[300px] flex-col rounded-[2.1rem] p-7" style={{ background: p.tile, color: p.ink }}>
@@ -99,18 +96,15 @@ export default async function Home() {
                   <h3 className="font-display text-[30px] font-extrabold">{m.name}</h3>
                   {m.name === RECOMMENDED && <span className="pill">Recommended</span>}
                 </div>
-                <p className="font-display mt-4 text-5xl font-extrabold">{q ? usdUp(q.maxPrice) : `+${m.premiumBps / 100}%`}</p>
-                <p className="opacity-75">{m.premiumBps ? (q ? `up front, +${m.premiumBps / 100}%` : "up front") : "exactly the price"}</p>
+                <p className="font-display mt-4 text-5xl font-extrabold">{usdUp(q.maxPrice)}</p>
+                <p className="opacity-75">{m.premiumBps ? `up front, +${m.premiumBps / 100}%` : "exactly the price"}</p>
                 <div className="mt-auto pt-6 text-[15px]">
                   {m.premiumBps === 0
                     ? <p className="opacity-80">No Draw, no cashback. The card at its price.</p>
                     : (
                       <>
                         <p><b>{cashbackChanceBps(m) / 100}%</b> get cashback</p>
-                        {q && !best && <p className="opacity-80">None right now: the Cashback Reserve is empty.</p>}
-                        {best && (q!.luckyAmount === q!.referencePrice
-                          ? <p className="opacity-80">{slabs.filter((o) => o !== freeSlab).map((o) => `${o.pct}%`).join(", ")} back, or free</p>
-                          : <p className="opacity-80">Up to {usd(best.cashback)} back for now, more as the Cashback Reserve grows</p>)}
+                        <p className="opacity-80">{slabs.filter((o) => o !== freeSlab).map((o) => `${o.pct}%`).join(", ")} back, or free</p>
                         {freeSlab && <span className="pill mt-3 !bg-white/70">Free {freeSlab.chanceBps / 100}% of the time</span>}
                       </>
                     )}
@@ -119,11 +113,9 @@ export default async function Home() {
             )
           })}
         </div>
-        {free !== undefined && (
-          <div className="mt-4">
-            <OddsGrid free={free} />
-          </div>
-        )}
+        <div className="mt-4">
+          <OddsGrid />
+        </div>
       </section>
 
       <section className="relative mx-auto max-w-[1240px] px-6 pt-24 sm:px-10">
