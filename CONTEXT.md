@@ -65,7 +65,7 @@ The server's NEAR account that sends a customer's own wallet-signed calls (depos
 _Avoid_: Paymaster, gas station, sponsor
 
 **Spending Limit**:
-A per-purchase or per-day cap the customer sets on their own Balance, enforced by the contract against every Agent action.
+A per-purchase or per-day cap the customer sets on their own Balance, enforced by the contract on every purchase, whoever submits it. New accounts start at $200 a purchase and $1,000 a day. Either can be set to No limit, which leaves only the Balance.
 _Avoid_: Admission Policy, allowance
 
 **Standard Purchase**:
@@ -140,16 +140,12 @@ _Avoid_: Free Reserve, operator funds
 Cashback Reserve not locked against an accepted Lucky Buy; the operator may withdraw it, which reduces capacity for new Lucky Buys.
 _Avoid_: Protocol revenue, customer funds
 
-**Discount Cap**:
-The largest Reference Discount one Lucky Buy can produce: 20% of Free Reserve at admission. It never limits purchase size, grows as the reserve grows, and never changes an accepted purchase.
-_Avoid_: Purchase cap, mode restriction
-
 **Cashback Cap**:
-The most Cashback one Lucky Buy can pay: 50 USDC, sized for a 1,000 USDC Cashback Reserve. Like the Discount Cap, it never limits purchase size, only the Lucky Amount.
-_Avoid_: Prize limit, purchase cap
+The most Cashback one Lucky Buy can pay: the lower of a fixed amount and a share of Free Reserve at admission, both set by the owner. The fixed amount may be off; the share is required and at most 50%, so one Lucky Buy never takes most of the reserve. It never limits purchase size, only the Lucky Amount, and never changes an accepted purchase.
+_Avoid_: Discount Cap (its share once limited the Reference Discount instead), prize limit, purchase cap
 
 **Lucky Amount**:
-The part of a Lucky Buy's Reference Price that its Game Version applies to: the whole price, or less when the full price's largest Cashback would exceed the Cashback Cap or its largest discount would exceed the Discount Cap. The Risk Premium is charged only on this part, and the rest is bought at Reference Price.
+The part of a Lucky Buy's Reference Price that its Game Version applies to: the whole price, or less when the full price's largest Cashback would exceed the Cashback Cap or its Reserve Lock would exceed Free Reserve. The Risk Premium is charged only on this part, and the rest is bought at Reference Price.
 _Avoid_: Stake, bet size
 
 **Draw Proof**:

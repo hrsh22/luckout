@@ -24,8 +24,8 @@ const near = fakeNear({
   relayerId: "relayer.test",
   view: <A>(method: string) =>
     Effect.succeed(({
-      get_config: { owner: "luckout.testnet", operator: "server.test", usdc: "usdc.test", paused: false, max_cashback: "50000000" },
-      get_reserve: { free: "1000000000", locked: "5000000", discount_cap: "200000000", proceeds: "236000000" },
+      get_config: { owner: "luckout.testnet", operator: "server.test", usdc: "usdc.test", paused: false, cashback_cap: { fixed: "50000000", reserve_bps: 2_000 } },
+      get_reserve: { free: "1000000000", locked: "5000000", max_cashback: "50000000", proceeds: "236000000" },
       get_stats: { lucky_settled: 4, lucky_amount_total: "40000000", lucky_paid_total: "37200000" },
       // The contract's USDC: customers' $120 plus the reserve and proceeds above.
       ft_balance_of: "1361000000"

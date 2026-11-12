@@ -4,7 +4,7 @@ import { OddsBar } from "@/components/odds"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
-import { useFreeReserve } from "@/lib/queries"
+import { useReserve } from "@/lib/queries"
 import type { Mode } from "@luckout/api"
 import { Check, LoaderCircle } from "lucide-react"
 import { motion } from "motion/react"
@@ -12,7 +12,7 @@ import { motion } from "motion/react"
 /**
  * The four ways to pay, as tiles in their own colours. With a price, each tile says what you'd pay
  * now and the most you could get back; without one, it shows the odds for a $20 card. Until the
- * Free Reserve is read, lucky tiles show no amounts: the Discount Cap could change them.
+ * Free Reserve is read, lucky tiles show no amounts: the reserve could change them.
  */
 export function ModePicker({ value, onChange, price, savedDefault, saving, compact = false, label = "How do you want to pay?" }: {
   value: Mode
@@ -27,14 +27,14 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
   compact?: boolean
   label?: string
 }) {
-  const free = useFreeReserve()
+  const reserve = useReserve()
   return (
     <div role="radiogroup" aria-label={label} className="grid gap-3 sm:grid-cols-2">
       {MODES.map((m) => {
         const selected = sameMode(value, m.mode)
         const p = modePalette(m.mode)
         const example = price ?? 20_000_000
-        const quote = m.premiumBps === 0 || free !== undefined ? simpleQuote(m, example, free ?? 0) : undefined
+        const quote = m.premiumBps === 0 || reserve !== undefined ? simpleQuote(m, example, reserve) : undefined
         const outcomes = quote && pricedOutcomes(m, quote)
         // When only part of the price plays (a small Cashback Reserve), the extra is less than the mode's
         // percentage of the price: say what it really is.

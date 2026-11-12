@@ -2,6 +2,7 @@
 
 import { shortAccount } from "@/components/avatar"
 import { ShopControls, TransferOwnerSheet } from "@/components/admin/controls"
+import { capText, CashbackCapSheet, maxCashbackAt } from "@/components/admin/cashback-cap"
 import { CreditSection } from "@/components/admin/credit"
 import { BaseGasTile, GasTile, SendNearSheet } from "@/components/admin/gas"
 import { PurchasesCard } from "@/components/admin/purchases"
@@ -27,9 +28,6 @@ import { toast } from "sonner"
 // the ordinary "No page here". Money never moves through the server: reserve, proceeds, the shop
 // switch and gas are transactions signed in the admin's own wallet, and the contract checks the
 // owner itself. The relayer's switch and caps are server settings.
-
-/** Full cashback needs the Discount Cap (20% of free reserve) to reach the Cashback Cap. */
-const capFor = (free: number) => Math.floor(free / 5)
 
 export function AdminPanel() {
   const { accountId, token, ready } = useSession()
@@ -101,7 +99,7 @@ function useAdminTx(): Tx {
   }
 }
 
-type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | { gas: AdminOverview["gas"][number] }
+type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | "cap" | { gas: AdminOverview["gas"][number] }
 
 function Dashboard({ o }: { o: AdminOverview }) {
   const { accountId, token } = useSession()
@@ -204,7 +202,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
           <p className="flex items-start gap-3 rounded-[1.5rem] bg-lilac-soft p-5 text-[15px]">
             <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
             <span>
-              The reserve, proceeds, the contract's pause and the treasury's mode need the owner's wallet, <b>{o.contract.owner}</b>. Any admin can stop
+              The reserve, its cashback cap, proceeds, the contract's pause and the treasury's mode need the owner's wallet, <b>{o.contract.owner}</b>. Any admin can stop
               sales, send gas, and change the relayer and credit settings.
             </span>
           </p>
@@ -218,12 +216,12 @@ function Dashboard({ o }: { o: AdminOverview }) {
             <p className="text-white/70">Cashback Reserve, free</p>
             <p className="font-display mt-1 text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.free} /></p>
             <p className="mt-3 text-sm text-white/65">
-              {usd(o.reserve.locked)} locked in open lucky buys. One purchase can get up to {usd(Math.min(o.reserve.maxCashback, o.reserve.discountCap))} back
-              {o.reserve.discountCap < o.reserve.maxCashback ? `: the reserve needs ${usd(o.reserve.maxCashback * 5)} free for the full ${usd(o.reserve.maxCashback)}.` : "."}
+              {usd(o.reserve.locked)} locked in open lucky buys. One purchase can get up to {usd(o.reserve.maxCashback)} back: {capText(o.reserve.cashbackCap)}.
             </p>
             <div className="mt-auto flex flex-wrap gap-2 pt-8">
               <Button variant="gold" onClick={asOwner(() => setOpen("fund"))}><Plus />Fund</Button>
               <Button variant="onColor" className="text-white!" disabled={!o.reserve.free} onClick={asOwner(() => setOpen("withdraw-reserve"))}>Withdraw</Button>
+              <Button variant="onColor" className="text-white!" onClick={asOwner(() => setOpen("cap"))}>Cashback cap</Button>
             </div>
           </div>
         </div>
@@ -260,6 +258,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
       </section>
 
       <FundReserveSheet open={open === "fund"} onClose={close} o={o} tx={tx} />
+      <CashbackCapSheet open={open === "cap"} onClose={close} o={o} tx={tx} />
       <WithdrawSheet
         open={open === "withdraw-reserve"}
         onClose={close}
@@ -268,7 +267,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         to={o.contract.owner}
         preview={(m) => {
           const after = o.reserve.free - m
-          return `Free reserve after: ${usd(after)}. Most cashback per purchase: ${usd(Math.min(o.reserve.maxCashback, capFor(after)))}.`
+          return `Free reserve after: ${usd(after)}. Most cashback per purchase: ${usd(maxCashbackAt(o.reserve.cashbackCap, after))}.`
         }}
         onWithdraw={(m) => tx(`Withdrawing ${usd(m)} from the reserve`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
           send(id, contractCall("withdraw_reserve", { amount: String(m) }, 60)))}

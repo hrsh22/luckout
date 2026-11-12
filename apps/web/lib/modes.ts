@@ -33,8 +33,13 @@ export const MODES: ReadonlyArray<ModeInfo> = [
 /** The longest outcome table: lists reserve this many rows so switching modes doesn't move the page. */
 export const MOST_OUTCOMES = Math.max(...MODES.map((m) => m.outcomes.length))
 
-/** The most Cashback one Lucky Buy can pay: MAX_CASHBACK in the contract. */
-export const MAX_CASHBACK = 50_000_000
+/** What the quote needs from the contract's get_reserve, in micro-USDC: Free Reserve and the most Cashback one Lucky Buy can pay now. */
+export interface ReserveView {
+  free: number | string
+  max_cashback: number | string
+}
+/** Room for any example price: shows a mode at its best, whatever today's reserve. */
+export const AMPLE_RESERVE: ReserveView = { free: Number.MAX_SAFE_INTEGER, max_cashback: Number.MAX_SAFE_INTEGER }
 
 export const sameMode = (a: Mode | undefined, b: Mode | undefined) => JSON.stringify(a) === JSON.stringify(b)
 export const modeInfo = (m: Mode | undefined) => MODES.find((x) => sameMode(x.mode, m))
@@ -77,19 +82,19 @@ export const mostLikely = (outcomes: ReadonlyArray<PricedOutcome>) => outcomes.r
 
 const minFinalBps = (m: ModeInfo) => BigInt(Math.min(...m.outcomes.map((o) => o.finalBps)))
 
-/** The most of a price that can play before the Cashback Cap binds: MAX_CASHBACK * BPS / max_cashback_bps() in the contract. */
-export const cashbackCapAmount = (m: ModeInfo) => Number((BigInt(MAX_CASHBACK) * 10_000n) / (10_000n + BigInt(m.premiumBps) - minFinalBps(m)))
-
 /**
- * quote_internal in contract/src/lib.rs, in exact integers: the whole price plays, up to what the
- * Discount Cap (20% of the Free Reserve, micro-USDC) and the Cashback Cap allow. A lucky mode with
- * luckyAmount 0 can't be bought right now (the contract refuses it: "Reserve too small").
+ * quote_internal in contract/src/lib.rs, in exact integers: the whole price plays, up to what keeps the
+ * best result within the Cashback Cap and its lock within Free Reserve. A lucky mode with luckyAmount 0
+ * can't be bought right now (the contract refuses it: "Reserve too small"). Normal needs no reserve.
  */
-export const simpleQuote = (m: ModeInfo, referencePrice: number, freeReserve: number | string) => {
+export const simpleQuote = (m: ModeInfo, referencePrice: number, reserve: ReserveView | undefined) => {
   if (m.premiumBps === 0) return { referencePrice, luckyAmount: 0, maxPrice: referencePrice }
-  const discountCap = (BigInt(freeReserve) * 2_000n) / 10_000n
-  const lucky = [BigInt(referencePrice), (discountCap * 10_000n) / (10_000n - minFinalBps(m)), BigInt(cashbackCapAmount(m))]
-    .reduce((a, b) => (b < a ? b : a))
+  const minFinal = minFinalBps(m)
+  const lucky = [
+    BigInt(referencePrice),
+    (BigInt(reserve?.max_cashback ?? 0) * 10_000n) / (10_000n + BigInt(m.premiumBps) - minFinal),
+    (BigInt(reserve?.free ?? 0) * 10_000n) / (10_000n - minFinal)
+  ].reduce((a, b) => (b < a ? b : a))
   const premium = (lucky * BigInt(m.premiumBps) + 9_999n) / 10_000n
   return { referencePrice, luckyAmount: Number(lucky), maxPrice: referencePrice + Number(premium) }
 }

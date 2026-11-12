@@ -82,6 +82,16 @@ export async function txEvents(txHash: string, signer: string) {
   return { events, time: new Date(Number(BigInt(block.header.timestamp_nanosec) / 1_000_000n)) }
 }
 
+/**
+ * Why a sent transaction failed on chain, or undefined if it went through. Wallets hand back the
+ * outcome even when the contract refused the call, so this must be checked before saying it worked.
+ */
+export const txFailure = (outcome: unknown) => {
+  const failure = (outcome as { status?: { Failure?: unknown } } | undefined)?.status?.Failure
+  if (failure === undefined) return undefined
+  return /"ExecutionError":"(?:Smart contract panicked: )?([^"]*)"/.exec(JSON.stringify(failure))?.[1] ?? "The transaction failed on chain."
+}
+
 export const explorerAccount = (id: string) => `https://${network === "testnet" ? "testnet." : ""}nearblocks.io/address/${id}`
 
 export interface Stats {

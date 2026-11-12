@@ -8,24 +8,28 @@ use near_sdk::json_types::U128;
 use near_sdk::serde_json::{json, Value};
 use near_sdk::store::{LookupMap, Vector};
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseError, PromiseOrValue,
+    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas,
+    IntoStorageKey, NearToken, PanicOnDefault, Promise, PromiseError, PromiseOrValue,
 };
 
 pub const BPS: u128 = 10_000;
 /// Every Game Version averages 105.6% of the Lucky Amount (ADR-0002).
 pub const TARGET_FINAL_BPS: u128 = 10_560;
-/// The Discount Cap: 20% of Free Reserve.
-pub const DISCOUNT_CAP_BPS: u128 = 2_000;
-/// The most Cashback one Lucky Buy can pay, so a 1,000 USDC reserve serves many buyers (ADR-0002).
-pub const MAX_CASHBACK: u128 = 50_000_000; // 50 USDC
+/// The Cashback Cap until the owner sets one: the lower of 50 USDC and 20% of Free Reserve (ADR-0002).
+pub const DEFAULT_CASHBACK_CAP: CashbackCap = CashbackCap {
+    fixed: Some(U128(50_000_000)),
+    reserve_bps: Some(2_000),
+};
+/// The owner can't set the reserve share above 50%, so one Draw never takes most of the reserve.
+pub const MAX_CAP_RESERVE_BPS: u32 = 5_000;
 pub const DAY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 pub const RECLAIM_AFTER_NS: u64 = DAY_NS;
 pub const MIN_DEPOSIT: u128 = 1_000_000; // 1 USDC, keeps dust accounts from bloating storage
 /// Every purchase stores a record; a floor keeps a stolen operator key from cheaply filling storage.
 pub const MIN_REFERENCE_PRICE: u128 = 500_000; // 0.5 USDC, so ₹50 cards sell (ADR-0001)
-pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 50_000_000; // 50 USDC
-pub const DEFAULT_DAILY_LIMIT: u128 = 100_000_000; // 100 USDC
+/// New accounts' Spending Limits. A customer may set any U128; u128::MAX is "No limit" in the apps.
+pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 200_000_000; // 200 USDC
+pub const DEFAULT_DAILY_LIMIT: u128 = 1_000_000_000; // 1,000 USDC
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_ON_SEND: Gas = Gas::from_tgas(10);
 /// USDC's `ft_transfer_call` into NEAR Intents: the transfer, Intents' deposit and USDC's resolve.
@@ -94,6 +98,17 @@ enum Key {
     Versions,
     Purchases,
     Orders,
+    /// Stored apart from the contract's main state, so adding it needed no migration.
+    CashbackCap,
+}
+
+/// The most Cashback one Lucky Buy can pay: the lower of a fixed amount and a share of Free
+/// Reserve. A `None` fixed amount is off; the share is always set (it's an Option only in storage).
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CashbackCap {
+    pub fixed: Option<U128>,
+    pub reserve_bps: Option<u32>,
 }
 
 /// Normal is a Standard Purchase; Lucky(n) is a Lucky Buy on Game Version n.
@@ -205,7 +220,8 @@ pub struct Quote {
 pub struct Reserve {
     pub free: U128,
     pub locked: U128,
-    pub discount_cap: U128,
+    /// The most Cashback one Lucky Buy can pay right now, from the Cashback Cap.
+    pub max_cashback: U128,
     pub proceeds: U128,
 }
 
@@ -639,6 +655,25 @@ impl Contract {
         emit("set_paused", json!({ "paused": paused }));
     }
 
+    /// Sets the Cashback Cap: one Lucky Buy pays at most the lower of `fixed` and `reserve_bps` of
+    /// Free Reserve. A `None` fixed amount turns it off; the share is required, so one Draw never takes
+    /// most of the reserve. Accepted purchases keep their lock.
+    #[payable]
+    pub fn set_cashback_cap(&mut self, fixed: Option<U128>, reserve_bps: Option<u32>) {
+        self.assert_owner();
+        require!(fixed != Some(U128(0)), "The fixed limit must be above 0");
+        require!(
+            reserve_bps.is_some_and(|b| b > 0 && b <= MAX_CAP_RESERVE_BPS),
+            "The reserve share must be above 0% and at most 50%"
+        );
+        let cap = CashbackCap { fixed, reserve_bps };
+        env::storage_write(
+            &Key::CashbackCap.into_storage_key(),
+            &near_sdk::borsh::to_vec(&cap).unwrap(),
+        );
+        emit("cashback_cap_set", json!(cap));
+    }
+
     #[payable]
     pub fn withdraw_reserve(&mut self, amount: U128) -> Promise {
         self.assert_owner();
@@ -842,7 +877,7 @@ impl Contract {
         Reserve {
             free: U128(self.free_reserve),
             locked: U128(self.locked_reserve),
-            discount_cap: U128(self.free_reserve * DISCOUNT_CAP_BPS / BPS),
+            max_cashback: U128(self.max_cashback()),
             proceeds: U128(self.proceeds),
         }
     }
@@ -863,7 +898,7 @@ impl Contract {
             "usdc": self.usdc,
             "intents": intents_account(),
             "paused": self.paused,
-            "max_cashback": U128(MAX_CASHBACK),
+            "cashback_cap": self.cashback_cap(),
             "treasury": self.treasury,
             "sweep_daily_cap": U128(self.sweep_daily_cap),
             "swept_today": U128(if self.sweep_day == env::block_timestamp() / DAY_NS { self.swept_today } else { 0 }),
@@ -886,10 +921,10 @@ impl Contract {
             }
             Mode::Lucky(v) => {
                 let version = self.version(v);
-                let cap = self.free_reserve * DISCOUNT_CAP_BPS / BPS;
+                // The best result pays at most the Cashback Cap, and its lock always fits in Free Reserve.
                 let allowed = r
-                    .min(cap * BPS / version.max_discount_bps())
-                    .min(MAX_CASHBACK * BPS / version.max_cashback_bps());
+                    .min(self.max_cashback().saturating_mul(BPS) / version.max_cashback_bps())
+                    .min(self.free_reserve * BPS / version.max_discount_bps());
                 let lucky = match confirmed {
                     None => allowed,
                     Some(x) => {
@@ -912,6 +947,21 @@ impl Contract {
             lucky_amount: U128(lucky),
             max_price: U128(r + premium),
         }
+    }
+
+    fn cashback_cap(&self) -> CashbackCap {
+        env::storage_read(&Key::CashbackCap.into_storage_key())
+            .map(|b| near_sdk::borsh::from_slice(&b).unwrap())
+            .unwrap_or(DEFAULT_CASHBACK_CAP)
+    }
+
+    /// The most Cashback one Lucky Buy can pay now: the lower of the Cashback Cap's limits.
+    fn max_cashback(&self) -> u128 {
+        let c = self.cashback_cap();
+        let share = c
+            .reserve_bps
+            .map_or(u128::MAX, |b| self.free_reserve * b as u128 / BPS);
+        c.fixed.map_or(u128::MAX, |f| f.0).min(share)
     }
 
     fn unwind(&mut self, purchase_id: u64, mut p: Purchase, status: Status) {

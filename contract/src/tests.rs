@@ -47,9 +47,25 @@ fn setup(reserve: u128, deposit: u128) -> Contract {
     c
 }
 
+/// "No limit" for both, as the apps store it.
 fn raise_limits(c: &mut Contract) {
     call(alice(), DAY, [0; 32], 1);
-    c.set_limits(U128(u128::MAX / 4), U128(u128::MAX / 4));
+    c.set_limits(U128(u128::MAX), U128(u128::MAX));
+}
+
+/// Alice buys `n` Normal purchases of `price` each.
+fn buy_normal(c: &mut Contract, n: u32, price: u128) {
+    for _ in 0..n {
+        let order = format!("n{}", c.next_purchase_id);
+        c.purchase(
+            alice(),
+            U128(price),
+            Some(Mode::Normal),
+            order,
+            U128(u128::MAX),
+            None,
+        );
+    }
 }
 
 fn balance(c: &Contract) -> u128 {
@@ -171,7 +187,8 @@ fn rejects_an_outcome_above_maximum_price() {
 
 #[test]
 fn small_purchases_get_the_full_game_version() {
-    let c = setup(30 * USDC, 100 * USDC);
+    // 20% of 45 USDC is 9 USDC of Cashback: Jackpot's free result on 6 USDC pays back exactly 9.
+    let c = setup(45 * USDC, 100 * USDC);
     let q = |v| c.quote(U128(6 * USDC), Mode::Lucky(v));
     assert_eq!(
         (q(0).lucky_amount.0, q(0).max_price.0),
@@ -191,8 +208,8 @@ fn small_purchases_get_the_full_game_version() {
 
 #[test]
 fn big_purchases_only_play_the_lucky_amount() {
-    let c = setup(150 * USDC, 100 * USDC);
-    // Discount Cap = 30 USDC, below the 50 USDC Cashback cap for Lite.
+    let c = setup(165 * USDC, 100 * USDC);
+    // 20% of 165 USDC is 33 USDC of Cashback, below the fixed 50: Lite plays 30 (30 + 10% = 33).
     let lite = c.quote(U128(1_000 * USDC), Mode::Lucky(0));
     assert_eq!(
         (lite.lucky_amount.0, lite.max_price.0),
@@ -202,7 +219,7 @@ fn big_purchases_only_play_the_lucky_amount() {
 
 #[test]
 fn no_lucky_buy_pays_back_more_than_50_usdc() {
-    // 1,000 USDC of reserve: the Discount Cap (200) is looser than the Cashback cap.
+    // 1,000 USDC of reserve: the 20% share (200) is looser than the fixed 50.
     let c = setup(1_000 * USDC, 100 * USDC);
     let r = 1_000 * USDC;
     let free = |v: u32| {
@@ -480,12 +497,12 @@ fn cannot_fail_after_the_draw() {
 #[test]
 #[should_panic(expected = "Over the per-purchase spending limit")]
 fn per_purchase_limit_counts_the_maximum_price() {
-    let mut c = setup(500 * USDC, 200 * USDC);
+    let mut c = setup(500 * USDC, 300 * USDC);
     as_(operator());
-    // 40 USDC on Jackpot can cost 56.67 (only 33.33 of it plays), above the default 50 USDC limit.
+    // 190 USDC on Jackpot can cost 206.67 (only 33.33 of it plays), above the default 200 USDC limit.
     c.purchase(
         alice(),
-        U128(40 * USDC),
+        U128(190 * USDC),
         Some(Mode::Lucky(2)),
         format!("o{}", 8),
         U128(u128::MAX),
@@ -496,63 +513,39 @@ fn per_purchase_limit_counts_the_maximum_price() {
 #[test]
 #[should_panic(expected = "Over the daily spending limit")]
 fn daily_limit_is_enforced() {
-    let mut c = setup(0, 200 * USDC);
+    let mut c = setup(0, 1_200 * USDC);
     as_(operator());
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 9),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 10),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 11),
-        U128(u128::MAX),
-        None,
-    );
+    // Five at the default 200 USDC per purchase reach the default 1,000 USDC a day; a sixth is over.
+    buy_normal(&mut c, 6, 200 * USDC);
 }
 
 #[test]
 fn daily_limit_resets_the_next_day() {
-    let mut c = setup(0, 200 * USDC);
+    let mut c = setup(0, 1_200 * USDC);
     as_(operator());
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 12),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 13),
-        U128(u128::MAX),
-        None,
-    );
+    buy_normal(&mut c, 5, 200 * USDC);
     call(operator(), 2 * DAY, [0; 32], 0);
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 14),
-        U128(u128::MAX),
-        None,
-    );
+    buy_normal(&mut c, 1, 200 * USDC);
+}
+
+#[test]
+fn no_limit_leaves_only_the_balance() {
+    let mut c = setup(0, 5_000 * USDC);
+    raise_limits(&mut c);
+    as_(operator());
+    // Far above both defaults, and the day's total adds up without overflowing u128::MAX.
+    buy_normal(&mut c, 2, 2_000 * USDC);
+    let a = c.get_account(alice()).unwrap();
+    assert_eq!((a.spent_today.0, a.balance.0), (4_000 * USDC, 1_000 * USDC));
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance")]
+fn no_limit_still_stops_at_the_balance() {
+    let mut c = setup(0, 5_000 * USDC);
+    raise_limits(&mut c);
+    as_(operator());
+    buy_normal(&mut c, 3, 2_000 * USDC);
 }
 
 #[test]
@@ -1296,9 +1289,10 @@ fn pausing_leaves_confirm_fail_reclaim_and_withdraw_working() {
 
 // ---------- the confirmed Lucky Amount ----------
 
-/// Alice confirms 100 USDC on Lite against a 50 USDC reserve: a 10 USDC Lucky Amount for 101.
+/// Alice confirms 100 USDC on Lite against a 55 USDC reserve: 20% is 11 USDC of Cashback, so a
+/// 10 USDC Lucky Amount for 101.
 fn confirmed_quote() -> (Contract, Quote) {
-    let mut c = setup(50 * USDC, 200 * USDC);
+    let mut c = setup(55 * USDC, 200 * USDC);
     raise_limits(&mut c);
     let q = c.quote(U128(100 * USDC), Mode::Lucky(0));
     assert_eq!((q.lucky_amount.0, q.max_price.0), (10 * USDC, 101 * USDC));
@@ -1368,7 +1362,8 @@ fn a_confirmed_lucky_amount_is_refused_when_the_reserve_shrinks() {
 #[test]
 fn without_it_a_shrunk_reserve_admits_a_smaller_game() {
     let (mut c, q) = confirmed_quote();
-    shrink_reserve(&mut c, 25 * USDC);
+    // 27.5 USDC left: 5.5 USDC of Cashback, a 5 USDC Lucky Amount.
+    shrink_reserve(&mut c, 27_500_000);
     as_(operator());
     let pid = c.purchase(
         alice(),
@@ -1861,4 +1856,115 @@ fn a_near_wallet_withdrawal_is_unchanged() {
     let _ = c.withdraw(U128(2 * USDC));
     assert_eq!(sent()[0].1, "ft_transfer");
     assert_eq!(sent()[0].2["receiver_id"], "alice.near");
+}
+
+// ---------- the Cashback Cap ----------
+
+fn set_cap(c: &mut Contract, fixed: Option<u128>, reserve_bps: Option<u32>) {
+    call(owner(), DAY, [0; 32], 1);
+    c.set_cashback_cap(fixed.map(U128), reserve_bps);
+}
+
+/// What the free result pays back on a 1,000 USDC purchase in mode `v`.
+fn best_cashback(c: &Contract, v: u32) -> u128 {
+    let r = 1_000 * USDC;
+    let q = c.quote(U128(r), Mode::Lucky(v));
+    q.max_price.0 - final_price(r, q.lucky_amount.0, q.max_price.0, 0)
+}
+
+#[test]
+fn the_cap_starts_at_the_lower_of_50_usdc_and_20_percent_of_free_reserve() {
+    let c = setup(200 * USDC, USDC);
+    assert_eq!(
+        c.get_config()["cashback_cap"],
+        json!({ "fixed": "50000000", "reserve_bps": 2_000 })
+    );
+    assert_eq!(c.get_reserve().max_cashback.0, 40 * USDC);
+    assert_eq!(best_cashback(&c, 1), 40 * USDC);
+}
+
+#[test]
+fn the_owner_raises_the_fixed_limit() {
+    let mut c = setup(1_000 * USDC, USDC);
+    set_cap(&mut c, Some(100 * USDC), Some(2_000));
+    assert_eq!(c.get_reserve().max_cashback.0, 100 * USDC);
+    // Rounded down to a whole base unit, never above the cap.
+    assert_eq!(
+        [0, 1, 2].map(|v| best_cashback(&c, v)),
+        [99_999_999, 100 * USDC, 99_999_999]
+    );
+}
+
+#[test]
+fn a_share_only_cap_grows_with_the_reserve() {
+    let mut c = setup(1_000 * USDC, USDC);
+    set_cap(&mut c, None, Some(3_000));
+    assert_eq!(c.get_reserve().max_cashback.0, 300 * USDC);
+    assert_eq!(best_cashback(&c, 2), 300 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "at most 50%")]
+fn the_reserve_share_cant_be_turned_off() {
+    // Without it, a high fixed amount would let one Draw lock the whole Free Reserve.
+    let mut c = setup(30 * USDC, USDC);
+    set_cap(&mut c, Some(100 * USDC), None);
+}
+
+#[test]
+fn even_the_largest_share_locks_under_half_the_free_reserve() {
+    let mut c = setup(300 * USDC, 4_000 * USDC);
+    raise_limits(&mut c);
+    set_cap(&mut c, None, Some(5_000));
+    for v in 0..3 {
+        let free = c.get_reserve().free.0;
+        let pid = buy(&mut c, 1_000 * USDC, Mode::Lucky(v), &format!("o-half-{v}"));
+        let locked = c.get_purchase(pid).unwrap().locked.0;
+        assert!(locked < free / 2, "mode {v} locked {locked} of {free}");
+        let _ = deliver(&mut c, pid, [9; 32]);
+    }
+}
+
+#[test]
+fn a_new_cap_leaves_accepted_purchases_alone() {
+    let mut c = setup(1_000 * USDC, 1_000 * USDC);
+    raise_limits(&mut c);
+    let pid = buy(&mut c, 500 * USDC, Mode::Lucky(1), "o-before");
+    let before = c.get_purchase(pid).unwrap();
+    set_cap(&mut c, Some(USDC), Some(2_000));
+    let after = deliver(&mut c, pid, [7; 32]);
+    assert_eq!(
+        (after.lucky_amount, after.locked),
+        (before.lucky_amount, before.locked)
+    );
+}
+
+#[test]
+#[should_panic(expected = "Only the owner")]
+fn only_the_owner_sets_the_cashback_cap() {
+    let mut c = setup(0, USDC);
+    call(operator(), DAY, [0; 32], 1);
+    c.set_cashback_cap(Some(U128(1_000 * USDC)), None);
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn setting_the_cashback_cap_needs_a_full_access_key() {
+    let mut c = setup(0, USDC);
+    as_(owner());
+    c.set_cashback_cap(Some(U128(100 * USDC)), None);
+}
+
+#[test]
+#[should_panic(expected = "at most 50%")]
+fn the_reserve_share_is_at_most_half() {
+    let mut c = setup(0, USDC);
+    set_cap(&mut c, None, Some(5_001));
+}
+
+#[test]
+#[should_panic(expected = "The fixed limit must be above 0")]
+fn the_fixed_limit_is_above_zero() {
+    let mut c = setup(0, USDC);
+    set_cap(&mut c, Some(0), Some(2_000));
 }
