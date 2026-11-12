@@ -7,9 +7,14 @@ import { useQuery } from "@tanstack/react-query"
 
 export { GAS_COIN, type Holding, maxTopUp } from "@/lib/holdings"
 
-/** Reown's balance lookup (the one AppKit's account view uses): every chain in one call, read-only. */
+/**
+ * Reown's balance lookup (the one AppKit's account view uses): every chain in one call, read-only. It answers an
+ * empty list unless the request says which SDK asks, as AppKit's own does (its CORS allows these headers).
+ */
 const fetchBalances = async (address: string): Promise<ReadonlyArray<ReownBalance>> => {
-  const r = await fetch(`https://rpc.walletconnect.org/v1/account/${address}/balance?projectId=${projectId}&currency=usd`)
+  const r = await fetch(`https://rpc.walletconnect.org/v1/account/${address}/balance?projectId=${projectId}&currency=usd`, {
+    headers: { "x-sdk-type": "appkit", "x-sdk-version": "html-wagmi-1.8.24" }
+  })
   if (!r.ok) throw new Error(`balances: HTTP ${r.status}`)
   return ((await r.json()) as { balances?: ReadonlyArray<ReownBalance> }).balances ?? []
 }
