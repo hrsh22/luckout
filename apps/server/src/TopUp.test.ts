@@ -352,6 +352,7 @@ const BASE = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
 const tokens = [
   { assetId: BASE, blockchain: "base", symbol: "USDC", contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", decimals: 6 },
   { assetId: "nep141:sol.omft.near", blockchain: "sol", symbol: "SOL", decimals: 9 },
+  { assetId: "nep141:eth.omft.near", blockchain: "eth", symbol: "ETH", decimals: 18 },
   { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
 ]
 /** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
@@ -390,8 +391,10 @@ const mainnetTopUp = (holdings: Record<string, string> = {}) => {
 
 test("a Top-Up's refund, and the extra it asks for, go back to an EVM wallet on its own chain; anything else to NEAR Intents", async () => {
   const w = mainnetTopUp()
-  await w.run((t) => Effect.all([t.quote(EVM, BASE, 1_000_000), t.quote(EVM, "nep141:sol.omft.near", 1_000_000), t.quote(NEAR, BASE, 1_000_000)]))
-  assert.deepEqual(w.asked.map((r) => [r.refundTo, r.refundType]), [[EVM, "ORIGIN_CHAIN"], [EVM, "INTENTS"], [NEAR, "INTENTS"]])
+  await w.run((t) =>
+    Effect.all([t.quote(EVM, BASE, 1_000_000), t.quote(EVM, "nep141:sol.omft.near", 1_000_000), t.quote(EVM, "nep141:eth.omft.near", 1_000_000), t.quote(NEAR, BASE, 1_000_000)])
+  )
+  assert.deepEqual(w.asked.map((r) => [r.refundTo, r.refundType]), [[EVM, "ORIGIN_CHAIN"], [EVM, "INTENTS"], [EVM, "INTENTS"], [NEAR, "INTENTS"]], "Ethereum's gas could eat the change")
 })
 
 test("a held token goes to the customer's own wallet: an EVM wallet's as it is on its chain, a NEAR wallet's as USDC", async () => {
