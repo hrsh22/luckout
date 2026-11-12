@@ -1,5 +1,6 @@
 "use client"
 
+import type { Holding } from "@/lib/balances"
 import { CHAIN_NAMES } from "@/lib/evm"
 import { Select } from "@base-ui/react/select"
 import type { TopUpAsset } from "@luckout/api"
@@ -40,14 +41,22 @@ export function TokenMark({ symbol, chain, size = 32 }: { symbol: string; chain:
   )
 }
 
-function Option({ a }: { a: TopUpAsset }) {
+const amountText = (n: number) => n.toLocaleString("en-US", { maximumSignificantDigits: 5 })
+
+function Option({ a, held, short }: { a: TopUpAsset; held?: Holding | undefined; short?: boolean | undefined }) {
   return (
-    <span className="flex min-w-0 items-center gap-3">
+    <span className={`flex min-w-0 flex-1 items-center gap-3 ${short ? "opacity-50" : ""}`}>
       <TokenMark symbol={a.symbol} chain={a.chain} />
       <span className="flex min-w-0 flex-col text-left leading-tight">
         <span className="font-semibold">{a.symbol}</span>
         <span className="text-sm text-muted">{chainLabel(a.chain)}</span>
       </span>
+      {held && (
+        <span className="ml-auto flex flex-col text-right leading-tight tabular-nums">
+          <span className="font-semibold">{amountText(held.amount)}</span>
+          <span className="text-sm text-muted">${held.usd.toFixed(2)}</span>
+        </span>
+      )}
     </span>
   )
 }
@@ -65,20 +74,28 @@ function NoToken({ label }: { label: string }) {
 }
 
 /** Choose a token (to pay with, or to receive): logos and chain badges instead of a long text list. */
-export function TokenPicker({ assets, value, onChange, label = "Pay with", none }: {
+export function TokenPicker({ assets, value, onChange, label = "Pay with", none, holdings, short }: {
   assets: ReadonlyArray<TopUpAsset>
   value: string
   onChange: (assetId: string) => void
   label?: string
   /** Offer a choice with no token (value ""), labelled so. */
   none?: string
+  /** What the connected wallet holds of each, shown beside it. */
+  holdings?: ReadonlyMap<string, Holding> | undefined
+  /** Tokens that can't cover the amount: dimmed, still selectable. */
+  short?: ((assetId: string) => boolean) | undefined
 }) {
   const selected = assets.find((a) => a.assetId === value)
   return (
     <Select.Root value={value} onValueChange={(v) => typeof v === "string" && onChange(v)}>
       <Select.Trigger className="field flex !h-16 items-center gap-3 !rounded-[1.25rem]" aria-label={label}>
         <Select.Value>
-          {() => (selected ? <Option a={selected} /> : none && value === "" ? <NoToken label={none} /> : <span className="text-muted">Choose a token</span>)}
+          {() => (selected
+            ? <Option a={selected} held={holdings?.get(selected.assetId)} />
+            : none && value === ""
+            ? <NoToken label={none} />
+            : <span className="text-muted">Choose a token</span>)}
         </Select.Value>
         <Select.Icon className="ml-auto text-muted"><ChevronDown size={18} /></Select.Icon>
       </Select.Trigger>
@@ -92,8 +109,8 @@ export function TokenPicker({ assets, value, onChange, label = "Pay with", none 
                 label={`${a.symbol} ${chainLabel(a.chain)}`}
                 className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 outline-none select-none data-[highlighted]:bg-soft"
               >
-                <Option a={a} />
-                <Select.ItemIndicator className="ml-auto text-ink"><Check size={16} strokeWidth={3} /></Select.ItemIndicator>
+                <Option a={a} held={holdings?.get(a.assetId)} short={short?.(a.assetId)} />
+                <Select.ItemIndicator className="text-ink"><Check size={16} strokeWidth={3} /></Select.ItemIndicator>
               </Select.Item>
             ))}
             {none && (

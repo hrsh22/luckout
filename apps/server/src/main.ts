@@ -118,7 +118,7 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
     const topup = yield* TopUp
     return handlers.handleAll({
       assets: () => topup.assets,
-      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc)),
+      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.dry ?? false)),
       status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
       move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
       faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId)),
