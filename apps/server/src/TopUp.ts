@@ -49,6 +49,8 @@ const UNANSWERED = /didn't answer in time/
 const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 /** A quote nobody paid into is still checked this long past its deadline, in case the transfer was late. */
 const LATE_DEPOSIT_GRACE_MS = 2 * 60 * 60 * 1000
+/** A paid Top-Up 1Click hasn't seen this long past its deadline is chased: the customer and an admin are told. */
+const UNSEEN_MS = 5 * 60_000
 /**
  * When 1Click starts refunding a swap that hasn't completed: what the customer is told to beat. (1Click's own
  * `deadline` in a quote is days later: how long the deposit address stays open, not when refunds begin.)
@@ -96,6 +98,8 @@ export interface SwapRow {
   /** A send-back: the held token and all of it (base units) it takes from their NEAR Intents account. */
   readonly origin_asset: string | null
   readonly origin_amount: string | null
+  /** The customer's transfer to the deposit address, when the app sent it. */
+  readonly deposit_tx: string | null
   readonly told: ReadonlyArray<string>
   readonly created_at: Date | string
 }
@@ -169,6 +173,13 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
     if (phase === "done") return { key: "arrived", text: `Your ${amount} withdrawal arrived: ${r.amount_out ?? ""} ${r.symbol ?? "USDC"} on ${chainName(r.chain)}.`.replace(/\s+/g, " ") }
     if (phase === "refunded") return { key: "refunded", text: `Your ${amount} withdrawal to ${chainName(r.chain)} was refunded to your NEAR Intents account. Move it back into Luckout at ${web}/wallet` }
   }
+  // Paid (we have the transaction), but 1Click still hasn't seen it after the deadline: say so, and we're told too.
+  if (r.direction === "in" && r.deposit_tx && (!r.status || r.status === "PENDING_DEPOSIT") && now > (ms(r.deadline) ?? now) + UNSEEN_MS) {
+    return {
+      key: "unseen",
+      text: `1Click hasn't confirmed your ${amount} Top-Up transfer (${from}) yet. It's at 1Click's deposit address: it either goes through or comes back to ${refundPlace}. Luckout is looking into it. Track it: ${explorerOf(r.deposit_address)}`
+    }
+  }
   if (isLate(r, now)) {
     return {
       key: "late",
@@ -182,6 +193,8 @@ export class TopUp extends Context.Service<TopUp, {
   readonly assets: Effect.Effect<ReadonlyArray<TopUpAsset>, TopUpUnavailable>
   quote(accountId: string, originAsset: string, usdc: number, dry?: boolean): Effect.Effect<TopUpQuote, TopUpUnavailable>
   status(accountId: string, depositAddress: string): Effect.Effect<TopUpStatus, TopUpUnavailable>
+  /** The app paid this Top-Up from the customer's wallet: keeps the transaction and passes it to 1Click. */
+  sent(accountId: string, depositAddress: string, txHash: string): Effect.Effect<void, TopUpUnavailable>
   /** EVM wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
   move(accountId: string, depositAddress: string, signed: SignedIntent): Effect.Effect<void, TopUpUnavailable>
   /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
@@ -306,6 +319,14 @@ export class TopUp extends Context.Service<TopUp, {
                    WHERE deposit_address = ${depositAddress} AND move IS NULL`.pipe(Effect.orDie)
       })
 
+      const sent = Effect.fn("TopUp.sent")(function*(accountId: string, depositAddress: string, txHash: string) {
+        if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return yield* fail("That isn't a transaction hash")
+        const [row] = yield* sql`UPDATE intents_swaps SET deposit_tx = ${txHash}
+                                 WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction = 'in' AND deposit_tx IS NULL
+                                 RETURNING 1`.pipe(Effect.orDie)
+        if (row) yield* oneClick.submitDeposit({ txHash, depositAddress })
+      })
+
       const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number) {
         if (!isEvmAccount(accountId)) return yield* fail("Withdrawals to other chains are for EVM wallets")
         if (!mainnet) return yield* fail("Withdrawals to other chains run on mainnet.")
@@ -427,6 +448,9 @@ export class TopUp extends Context.Service<TopUp, {
             const [claimed] = yield* sql`UPDATE intents_swaps SET told = array_append(told, ${notice.key})
                                          WHERE deposit_address = ${r.deposit_address} AND NOT (${notice.key} = ANY(told)) RETURNING 1`.pipe(Effect.orDie)
             if (claimed) yield* alerts.customer(r.account_id, notice.text)
+            if (claimed && notice.key === "unseen") {
+              yield* alerts.admin(`1Click hasn't seen a paid Top-Up: deposit ${r.deposit_address}, tx ${r.deposit_tx} on ${chainName(r.chain)}, ${r.amount_in ?? "?"} ${r.symbol ?? ""}, for ${r.account_id}. Ask 1Click support.`)
+            }
           }
         })
 
@@ -439,7 +463,7 @@ export class TopUp extends Context.Service<TopUp, {
           WHERE move = 'waiting'
              OR (created_at > now() - interval '3 days'
                  AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
-                 AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
+                 AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
                           AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval))
           ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
         RETURNING *`.pipe(
@@ -455,7 +479,8 @@ export class TopUp extends Context.Service<TopUp, {
           WHERE account_id = ${accountId} AND created_at > now() - interval '7 days'
             AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
                      AND CASE direction
-                           WHEN 'in' THEN coalesce(deadline, created_at + interval '30 minutes') < now()
+                           -- A Top-Up we know was paid stays in sight until 1Click settles it.
+                           WHEN 'in' THEN deposit_tx IS NULL AND coalesce(deadline, created_at + interval '30 minutes') < now()
                            -- A withdrawal is sent the moment it's quoted and 1Click sees it within seconds: one
                            -- still unseen after 3 minutes was never signed, and the money never left.
                            ELSE created_at < now() - interval '3 minutes' END)
@@ -474,6 +499,7 @@ export class TopUp extends Context.Service<TopUp, {
                 ...(r.amount_in ? { amountIn: r.amount_in } : {}),
                 ...(r.amount_out ? { amountOut: r.amount_out } : {}),
                 ...(r.deposited ? { deposited: r.deposited } : {}),
+                ...(r.deposit_tx ? { depositTx: r.deposit_tx } : {}),
                 phase: phaseOf(r),
                 late: isLate(r, Date.now()),
                 createdAt: new Date(r.created_at).toISOString(),
@@ -557,7 +583,7 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
-      return TopUp.of({ assets, quote, status, move, faucet, transfers, held, sendBack, trackNow: trackPass, exit })
+      return TopUp.of({ assets, quote, status, sent, move, faucet, transfers, held, sendBack, trackNow: trackPass, exit })
     })
   )
 }

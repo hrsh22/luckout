@@ -377,6 +377,8 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   amountOut: Schema.optional(Schema.String),
   /** What 1Click has received so far, formatted (a Top-Up short of its amount). */
   deposited: Schema.optional(Schema.String),
+  /** The customer's own transfer to the deposit address, when the app sent it (a Top-Up from an EVM wallet). */
+  depositTx: Schema.optional(Schema.String),
   phase: TransferPhase,
   /** Taking longer than usual: safe, but say so. */
   late: Schema.Boolean,
@@ -416,6 +418,12 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   /** EVM wallets: the signed intent that moves this Top-Up into Luckout once it lands; the server sends it then. */
   HttpApiEndpoint.post("move", "/topup/move", {
     payload: Schema.Struct({ depositAddress: Schema.String, signed: SignedIntent }),
+    success: HttpApiSchema.NoContent,
+    error: TopUpUnavailable
+  }),
+  /** The app paid this Top-Up from the customer's wallet: its transaction, kept and passed on to 1Click. */
+  HttpApiEndpoint.post("sent", "/topup/sent", {
+    payload: Schema.Struct({ depositAddress: Schema.String, txHash: Schema.String }),
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
