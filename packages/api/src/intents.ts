@@ -33,11 +33,18 @@ export const authCallIntent = (contractId: string, action: AuthAction) => ({
   min_gas: AUTH_CALL_GAS
 })
 
-/** Sends `amount` USDC from the customer's NEAR Intents account to `receiverId` (a 1Click deposit address). */
-export const transferIntent = (o: { receiverId: string; usdcId: string; amount: string }) => ({
+/** Sends `amount` of `token` (an Intents asset id, `nep141:…`) from the customer's NEAR Intents account to `receiverId` (a 1Click deposit address). */
+export const transferIntent = (o: { receiverId: string; token: string; amount: string }) => ({
   intent: "transfer",
   receiver_id: o.receiverId,
-  tokens: { [`nep141:${o.usdcId}`]: o.amount }
+  tokens: { [o.token]: o.amount }
+})
+
+/** The same transfer as a NEAR wallet's own call: `intents.near`'s `mt_transfer` arguments (with 1 yoctoNEAR). */
+export const mtTransferArgs = (o: { receiverId: string; token: string; amount: string }) => ({
+  receiver_id: o.receiverId,
+  token_id: o.token,
+  amount: o.amount
 })
 
 /** The text the wallet signs; `intents.near` reads it as JSON. `nonce`: 32 random bytes, base64. */

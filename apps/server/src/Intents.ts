@@ -4,15 +4,15 @@ import { recoverMessageAddress } from "viem"
 // The NEAR Intents payloads EVM customers sign (ADR-0011), checked before our relayer pays for one.
 // Each must be signed by the signed-in account and hold exactly one intent, rebuilt here with the
 // same helpers the web app uses: moving USDC into the customer's own Balance, one of our contract
-// calls, or sending USDC to a 1Click withdrawal this server quoted for them.
+// calls, or sending money to a 1Click swap this server quoted for them (a withdrawal, or a send-back).
 
 export interface IntentRules {
   readonly accountId: string
   readonly intentsId: string
   readonly contractId: string
   readonly usdcId: string
-  /** USDC (micro, as a string) a 1Click withdrawal we quoted for this account takes, if `transfer` names one. */
-  readonly exitAmount?: string | undefined
+  /** What a 1Click swap we quoted for this account takes (token and base units), if `transfer` pays one. */
+  readonly quoted?: { readonly token: string; readonly amount: string } | undefined
   readonly now: Date
 }
 
@@ -67,9 +67,9 @@ export const intentRefusal = (intent: Record<string, unknown>, r: IntentRules): 
         : "Luckout only pays for its own calls."
     }
     case "transfer":
-      return r.exitAmount && same(intent, transferIntent({ receiverId: String(intent.receiver_id), usdcId: r.usdcId, amount: r.exitAmount }))
+      return r.quoted && same(intent, transferIntent({ receiverId: String(intent.receiver_id), ...r.quoted }))
         ? undefined
-        : "Luckout only pays to send your USDC to a withdrawal it quoted for you."
+        : "Luckout only pays to send your money to a 1Click swap it quoted for you."
     default:
       return "Luckout only pays for its own calls: moving USDC in and out, settings and reclaims."
   }
