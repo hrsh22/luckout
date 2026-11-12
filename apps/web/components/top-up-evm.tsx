@@ -69,6 +69,15 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   const short = !!holdings && !!p && Number(p.amountInFormatted) > (held?.amount ?? 0)
   const noGas = !!asset?.contract && !!gas && !gas.has(asset.chain)
   const nothingCovers = !!holdings && !!assets && micro >= 1_000_000 && !assets.some((a) => covers(a.assetId))
+  const where = asset ? chainLabel(asset.chain) : ""
+  /** Why this wallet can't pay this from here, in one line; undefined when it can. */
+  const blocked = nothingCovers
+    ? `This wallet doesn't hold ${usd(micro)} on any chain we take.`
+    : short
+    ? `This wallet has ${held ? `only ${held.amount.toLocaleString("en-US", { maximumSignificantDigits: 5 })}` : "no"} ${asset?.symbol} on ${where}.`
+    : noGas
+    ? `This wallet needs a little ${GAS_COIN[asset!.chain] ?? "gas"} on ${where} for the network fee.`
+    : undefined
   const max = asset && held ? maxTopUp(asset, held) : 0
 
   // The caller's onDone changes every render: read it through a ref, so the poll isn't restarted, and run it once.
@@ -130,9 +139,10 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
       // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
       void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
     })
+  /** Paid from an exchange or another wallet: the address (and its QR) is the next screen. */
+  const sendElsewhere = () => step("quote", async () => (setManual(true), setQuote(await realQuote())))
 
   if (!quote) {
-    const chain = asset ? chainLabel(asset.chain) : ""
     return (
       <div className="flex flex-col gap-4">
         <AmountField
@@ -147,34 +157,47 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
             ? <TokenPicker assets={ordered} value={assetId} onChange={(id) => ((picked.current = true), setAssetId(id))} holdings={holdings} short={holdings && ((id) => !covers(id))} />
             : <span className="skeleton h-14 rounded-[1.25rem]" />}
         </div>
-        {micro >= 1_000_000 && assetId && <TopUpPreview q={p} stale={preview.isPlaceholderData || preview.isFetching} error={preview.error} />}
-        {nothingCovers
-          ? <p className="rounded-2xl bg-warn-soft p-3 text-sm text-warn">This wallet doesn't hold {usd(micro)} on any chain we take. Try a smaller amount, or send it from an exchange or another wallet.</p>
-          : short
-          ? <p className="rounded-2xl bg-warn-soft p-3 text-sm text-warn">This wallet has {held ? `${held.amount.toLocaleString("en-US", { maximumSignificantDigits: 5 })} ${asset?.symbol}` : `no ${asset?.symbol}`} on {chain}: not enough for this. Pick another token, a smaller amount, or send it from elsewhere.</p>
-          : noGas && <p className="rounded-2xl bg-warn-soft p-3 text-sm text-warn">You'll need a little {GAS_COIN[asset!.chain] ?? "gas"} on {chain} to pay the network fee.</p>}
-        <Button
-          size="lg"
-          loading={busy === "send" || busy === "quote"}
-          disabled={!!busy || !p || short || noGas}
-          onClick={() =>
-            step("quote", async () => {
-              const q = await realQuote()
-              setQuote(q)
-              // Priced as shown: send at once. If it moved, the next screen shows the new price to confirm.
-              if (Number(q.amountInFormatted) <= Number(p!.amountInFormatted) * 1.005) await sendNow(q)
-            })}
-        >
-          {p ? `Send ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
-        </Button>
-        <button
-          type="button"
-          disabled={!!busy || !assetId || !(micro >= 1_000_000)}
-          className="self-center text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline disabled:opacity-45"
-          onClick={() => step("quote", async () => (setManual(true), setQuote(await realQuote())))}
-        >
-          Send it from an exchange or another wallet instead
-        </button>
+        {micro >= 1_000_000 && assetId && (
+          <TopUpPreview
+            q={p}
+            stale={preview.isPlaceholderData || preview.isFetching}
+            error={preview.error}
+            warning={blocked}
+          />
+        )}
+        {/* When this wallet can't pay, the way that can is the main button, not a disabled Send. */}
+        {blocked
+          ? (
+            <Button size="lg" loading={busy === "quote"} disabled={!!busy || !assetId || !(micro >= 1_000_000)} onClick={sendElsewhere}>
+              Send it from an exchange or another wallet
+            </Button>
+          )
+          : (
+            <>
+              <Button
+                size="lg"
+                loading={busy === "send" || busy === "quote"}
+                disabled={!!busy || !p}
+                onClick={() =>
+                  step("quote", async () => {
+                    const q = await realQuote()
+                    setQuote(q)
+                    // Priced as shown: send at once. If it moved, the next screen shows the new price to confirm.
+                    if (Number(q.amountInFormatted) <= Number(p!.amountInFormatted) * 1.005) await sendNow(q)
+                  })}
+              >
+                {p ? `Send ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
+              </Button>
+              <button
+                type="button"
+                disabled={!!busy || !assetId || !(micro >= 1_000_000)}
+                className="self-center text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline disabled:opacity-45"
+                onClick={sendElsewhere}
+              >
+                Send it from an exchange or another wallet instead
+              </button>
+            </>
+          )}
         {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
       </div>
     )
