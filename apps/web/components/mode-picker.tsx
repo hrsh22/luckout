@@ -14,7 +14,7 @@ import { motion } from "motion/react"
  * now and the most you could get back; without one, it shows the odds for a $20 card. Until the
  * Free Reserve is read, lucky tiles show no amounts: the Discount Cap could change them.
  */
-export function ModePicker({ value, onChange, price, savedDefault, saving, label = "How do you want to pay?" }: {
+export function ModePicker({ value, onChange, price, savedDefault, saving, compact = false, label = "How do you want to pay?" }: {
   value: Mode
   onChange: (m: Mode) => void
   /** Reference Price in micro-USDC, when a card and amount are chosen. */
@@ -23,6 +23,8 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
   savedDefault?: Mode | undefined
   /** A mode being saved right now shows a spinner. */
   saving?: Mode | undefined
+  /** Shorter tiles, for Welcome, where the whole step should fit a laptop screen. */
+  compact?: boolean
   label?: string
 }) {
   const free = useFreeReserve()
@@ -47,7 +49,7 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
             aria-checked={selected}
             onClick={() => onChange(m.mode)}
             whileTap={{ scale: 0.98 }}
-            className="relative flex min-h-[148px] flex-col overflow-hidden rounded-[1.75rem] p-5 text-left transition-shadow outline-none focus-visible:ring-4 focus-visible:ring-lilac/40"
+            className={`relative flex flex-col overflow-hidden rounded-[1.75rem] text-left transition-shadow outline-none focus-visible:ring-4 focus-visible:ring-lilac/40 ${compact ? "min-h-[112px] p-4" : "min-h-[148px] p-5"}`}
             style={{
               background: selected ? p.tile : "#fff",
               color: selected ? p.ink : undefined,
@@ -73,7 +75,7 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
                 ? price ? `Pay ${usdUp(example)}, exactly the price` : "Exactly the price, no Draw"
                 : price && quote ? `Pay ${usdUp(quote.maxPrice)} now, ${extra}` : `+${m.premiumBps / 100}% up front`}
             </span>
-            <span className="mt-auto pt-4">
+            <span className={`mt-auto ${compact ? "pt-2" : "pt-4"}`}>
               {m.premiumBps === 0
                 ? <span className={`text-sm ${selected ? "opacity-80" : "text-muted"}`}>No cashback, no surprises.</span>
                 : (
