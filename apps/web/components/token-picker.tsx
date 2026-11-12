@@ -90,7 +90,7 @@ export function TokenPicker({ assets, value, onChange, label = "Pay with", none,
   return (
     <Select.Root value={value} onValueChange={(v) => typeof v === "string" && onChange(v)}>
       <Select.Trigger className="field flex !h-16 items-center gap-3 !rounded-[1.25rem]" aria-label={label}>
-        <Select.Value>
+        <Select.Value className="flex min-w-0 flex-1">
           {() => (selected
             ? <Option a={selected} held={holdings?.get(selected.assetId)} />
             : none && value === ""
