@@ -77,6 +77,8 @@ test("a NEAR wallet's send-back is paid for only as quoted: that address, token 
   const quoted = { ...allow, sendBack: SEND_BACK }
   const mt = (args: object, deposit = 1n) => delegate("intents.test", "mt_transfer", args, deposit).d
   assert.equal(refusal(mt(mtTransferArgs(SEND_BACK)), quoted), undefined)
+  const { amount, receiver_id, token_id } = mtTransferArgs(SEND_BACK)
+  assert.equal(refusal(mt({ amount, receiver_id, token_id }), quoted), undefined, "keys in another order (the NEAR CLI sorts them)")
   const no: Array<[string, ReturnType<typeof mt>, typeof allow]> = [
     ["never quoted", mt(mtTransferArgs(SEND_BACK)), allow],
     ["more than quoted", mt(mtTransferArgs({ ...SEND_BACK, amount: "120133" })), quoted],

@@ -33,6 +33,10 @@ export interface Allowlist {
   readonly sendBack?: { readonly receiverId: string; readonly token: string; readonly amount: string } | undefined
 }
 
+/** Exactly these arguments, in any order: a wallet may re-encode a call's JSON (the NEAR CLI sorts its keys). */
+const sameArgs = (args: Record<string, unknown>, want: Record<string, string>) =>
+  Object.keys(args).length === Object.keys(want).length && Object.entries(want).every(([k, v]) => args[k] === v)
+
 /** The deposit a call must carry for us to pay its fee, or undefined if we don't pay for it at all. */
 const expectedDeposit = (receiver: string, method: string, args: Record<string, unknown>, a: Allowlist) => {
   if (receiver === a.contractId && ["withdraw", "set_default_mode", "set_limits"].includes(method)) return 1n
@@ -44,7 +48,7 @@ const expectedDeposit = (receiver: string, method: string, args: Record<string, 
     if (method === "faucet" && a.testnet) return 0n
   }
   // A NEAR wallet sending what's held in its NEAR Intents account to its own wallet, through a swap we quoted, exactly.
-  if (receiver === a.intentsId && method === "mt_transfer" && a.sendBack && JSON.stringify(args) === JSON.stringify(mtTransferArgs(a.sendBack))) {
+  if (receiver === a.intentsId && method === "mt_transfer" && a.sendBack && sameArgs(args, mtTransferArgs(a.sendBack))) {
     return 1n
   }
   return undefined
