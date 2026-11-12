@@ -1,4 +1,4 @@
-import type { Mode } from "@luckout/api"
+import { type Mode, noLimit } from "@luckout/api"
 import { Effect } from "effect"
 import OpenAI from "openai"
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
@@ -119,6 +119,9 @@ interface Account {
   cashback_received: string
 }
 
+/** A Spending Limit for the model: dollars, or "No limit" when they turned it off (u128::MAX). */
+const limit = (micro: string) => (noLimit(micro) ? "No limit" : usd(Number(micro)))
+
 /** Why the customer can't buy this right now, in words the model can pass on; undefined if they can. */
 export const blocker = (a: Account | null, maxPrice: number, web: string, now = Date.now()) => {
   const balance = Number(a?.balance ?? 0)
@@ -126,11 +129,11 @@ export const blocker = (a: Account | null, maxPrice: number, web: string, now = 
     return `Not enough balance: they have ${usd(balance)} and this needs ${usdUp(maxPrice)}, so they're ${usdUp(maxPrice - balance)} short. Add funds at ${web}/wallet`
   }
   if (maxPrice > Number(a!.per_purchase_limit)) {
-    return `Over their per-purchase limit of ${usd(Number(a!.per_purchase_limit))}. They can raise it at ${web}/wallet#limits`
+    return `Over their per-purchase limit of ${usd(Number(a!.per_purchase_limit))}. They can raise it in one tap when they buy on the web, or at ${web}/wallet#limits`
   }
   const spent = a!.day === Math.floor(now / 86_400_000) ? Number(a!.spent_today) : 0
   if (spent + maxPrice > Number(a!.daily_limit)) {
-    return `Over their daily limit: ${usd(spent)} of ${usd(Number(a!.daily_limit))} used today. It resets in ${untilReset(now)} (00:00 UTC), or they can raise it at ${web}/wallet#limits`
+    return `Over their daily limit: ${usd(spent)} of ${usd(Number(a!.daily_limit))} used today. It resets in ${untilReset(now)} (00:00 UTC), or they can raise it in one tap when they buy on the web, or at ${web}/wallet#limits`
   }
   return undefined
 }
@@ -180,8 +183,8 @@ export const makeAgent = (deps: {
         a
           ? {
             balance: usd(Number(a.balance)),
-            per_purchase_limit: usd(Number(a.per_purchase_limit)),
-            daily_limit: usd(Number(a.daily_limit)),
+            per_purchase_limit: limit(a.per_purchase_limit),
+            daily_limit: limit(a.daily_limit),
             default_mode: modeName(a.default_mode),
             running_total: usd(Number(a.cashback_received) - Number(a.premiums_paid))
           }

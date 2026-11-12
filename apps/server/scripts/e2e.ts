@@ -20,11 +20,14 @@ const req = async (method: string, path: string, body?: unknown, token?: string)
   return { status: r.status, json: await r.json().catch(() => null) }
 }
 
+const APP = "app.luckout.testnet"
+const keyOf = (accountId: string) => JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${accountId}.json`, "utf8")).private_key as KeyPairString
+
 const signed = async (accountId: string) => {
-  const key = JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${accountId}.json`, "utf8")).private_key
+  const key = keyOf(accountId)
   const { json: c } = await req("POST", "/auth/challenge", {})
   const s = await signMessage({
-    signerAccount: new Account(accountId, rpc, key as KeyPairString),
+    signerAccount: new Account(accountId, rpc, key),
     payload: { message: c.message, recipient: c.recipient, nonce: Buffer.from(c.nonce, "base64") }
   })
   return { accountId, publicKey: s.publicKey.toString(), signature: Buffer.from(s.signature).toString("base64"), nonce: c.nonce }
@@ -68,8 +71,17 @@ const d = lucky.json.draw
 assert.ok(d && d.finalPrice <= q.maxPrice && d.finalPrice + d.cashback === q.maxPrice, JSON.stringify(lucky.json))
 console.log(`✔ Jackpot delivered: price ${q.referencePrice / 1e6}, paid ${d.finalPrice / 1e6} (Draw Proof: /draw/${lucky.json.settleTx})`)
 
-// 100 USDC is above the default 50 USDC per-purchase limit. The server refuses it before
-// signing anything (the contract would too: scripts/attack.ts tries it with the operator key).
+// The customer sets their own limits with their full-access key, as their wallet would: $50 a purchase,
+// so the 100 USDC card is over it whatever they had before, and $1,000 a day so reruns stay under that.
+// The server refuses the card before signing anything (the contract would too: scripts/attack.ts tries
+// it with the operator key).
+await new Account(customer, rpc, keyOf(customer)).callFunction({
+  contractId: APP,
+  methodName: "set_limits",
+  args: { per_purchase: "50000000", daily: "1000000000" },
+  deposit: 1n,
+  gas: 30_000_000_000_000n
+})
 const over = await buy({ voucherId: "test-gift-card-code", value: "100", mode: { lucky: 2 }, maxPrice: 150_000_000, idempotencyKey: crypto.randomUUID() })
 assert.equal(over.status, 400, JSON.stringify(over.json))
 assert.match(over.json.message, /spending limit/)

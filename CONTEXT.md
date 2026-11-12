@@ -65,7 +65,7 @@ The server's NEAR account that sends a customer's own wallet-signed calls (depos
 _Avoid_: Paymaster, gas station, sponsor
 
 **Spending Limit**:
-A per-purchase or per-day cap the customer sets on their own Balance, enforced by the contract against every Agent action.
+A per-purchase or per-day cap the customer sets on their own Balance, enforced by the contract on every purchase, whoever submits it. New accounts start at $200 a purchase and $1,000 a day. Either can be set to No limit, which leaves only the Balance.
 _Avoid_: Admission Policy, allowance
 
 **Standard Purchase**:

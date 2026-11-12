@@ -47,9 +47,25 @@ fn setup(reserve: u128, deposit: u128) -> Contract {
     c
 }
 
+/// "No limit" for both, as the apps store it.
 fn raise_limits(c: &mut Contract) {
     call(alice(), DAY, [0; 32], 1);
-    c.set_limits(U128(u128::MAX / 4), U128(u128::MAX / 4));
+    c.set_limits(U128(u128::MAX), U128(u128::MAX));
+}
+
+/// Alice buys `n` Normal purchases of `price` each.
+fn buy_normal(c: &mut Contract, n: u32, price: u128) {
+    for _ in 0..n {
+        let order = format!("n{}", c.next_purchase_id);
+        c.purchase(
+            alice(),
+            U128(price),
+            Some(Mode::Normal),
+            order,
+            U128(u128::MAX),
+            None,
+        );
+    }
 }
 
 fn balance(c: &Contract) -> u128 {
@@ -481,12 +497,12 @@ fn cannot_fail_after_the_draw() {
 #[test]
 #[should_panic(expected = "Over the per-purchase spending limit")]
 fn per_purchase_limit_counts_the_maximum_price() {
-    let mut c = setup(500 * USDC, 200 * USDC);
+    let mut c = setup(500 * USDC, 300 * USDC);
     as_(operator());
-    // 40 USDC on Jackpot can cost 56.67 (only 33.33 of it plays), above the default 50 USDC limit.
+    // 190 USDC on Jackpot can cost 206.67 (only 33.33 of it plays), above the default 200 USDC limit.
     c.purchase(
         alice(),
-        U128(40 * USDC),
+        U128(190 * USDC),
         Some(Mode::Lucky(2)),
         format!("o{}", 8),
         U128(u128::MAX),
@@ -497,63 +513,39 @@ fn per_purchase_limit_counts_the_maximum_price() {
 #[test]
 #[should_panic(expected = "Over the daily spending limit")]
 fn daily_limit_is_enforced() {
-    let mut c = setup(0, 200 * USDC);
+    let mut c = setup(0, 1_200 * USDC);
     as_(operator());
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 9),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 10),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(40 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 11),
-        U128(u128::MAX),
-        None,
-    );
+    // Five at the default 200 USDC per purchase reach the default 1,000 USDC a day; a sixth is over.
+    buy_normal(&mut c, 6, 200 * USDC);
 }
 
 #[test]
 fn daily_limit_resets_the_next_day() {
-    let mut c = setup(0, 200 * USDC);
+    let mut c = setup(0, 1_200 * USDC);
     as_(operator());
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 12),
-        U128(u128::MAX),
-        None,
-    );
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 13),
-        U128(u128::MAX),
-        None,
-    );
+    buy_normal(&mut c, 5, 200 * USDC);
     call(operator(), 2 * DAY, [0; 32], 0);
-    c.purchase(
-        alice(),
-        U128(50 * USDC),
-        Some(Mode::Normal),
-        format!("o{}", 14),
-        U128(u128::MAX),
-        None,
-    );
+    buy_normal(&mut c, 1, 200 * USDC);
+}
+
+#[test]
+fn no_limit_leaves_only_the_balance() {
+    let mut c = setup(0, 5_000 * USDC);
+    raise_limits(&mut c);
+    as_(operator());
+    // Far above both defaults, and the day's total adds up without overflowing u128::MAX.
+    buy_normal(&mut c, 2, 2_000 * USDC);
+    let a = c.get_account(alice()).unwrap();
+    assert_eq!((a.spent_today.0, a.balance.0), (4_000 * USDC, 1_000 * USDC));
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance")]
+fn no_limit_still_stops_at_the_balance() {
+    let mut c = setup(0, 5_000 * USDC);
+    raise_limits(&mut c);
+    as_(operator());
+    buy_normal(&mut c, 3, 2_000 * USDC);
 }
 
 #[test]

@@ -27,8 +27,9 @@ pub const RECLAIM_AFTER_NS: u64 = DAY_NS;
 pub const MIN_DEPOSIT: u128 = 1_000_000; // 1 USDC, keeps dust accounts from bloating storage
 /// Every purchase stores a record; a floor keeps a stolen operator key from cheaply filling storage.
 pub const MIN_REFERENCE_PRICE: u128 = 500_000; // 0.5 USDC, so ₹50 cards sell (ADR-0001)
-pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 50_000_000; // 50 USDC
-pub const DEFAULT_DAILY_LIMIT: u128 = 100_000_000; // 100 USDC
+/// New accounts' Spending Limits. A customer may set any U128; u128::MAX is "No limit" in the apps.
+pub const DEFAULT_PER_PURCHASE_LIMIT: u128 = 200_000_000; // 200 USDC
+pub const DEFAULT_DAILY_LIMIT: u128 = 1_000_000_000; // 1,000 USDC
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_ON_SEND: Gas = Gas::from_tgas(10);
 /// USDC's `ft_transfer_call` into NEAR Intents: the transfer, Intents' deposit and USDC's resolve.

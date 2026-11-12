@@ -8,6 +8,7 @@ import { Money } from "@/components/money"
 import { OddsBar, OddsList } from "@/components/odds"
 import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purchase-view"
 import { Button } from "@/components/ui/button"
+import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
@@ -16,7 +17,7 @@ import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
 import { rememberViewed, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
-import { type Mode, NewPurchase, type Quote } from "@luckout/api"
+import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
@@ -289,9 +290,11 @@ function Receipt({ shown, exact, info, error, children }: {
 
 /** One button that knows what's in the way: signing in, funds, or limits, and fixes it on the spot. */
 function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
-  const { accountId, account, accountError, refresh } = useSession()
+  const { accountId, account, accountError, refresh, evm, gasFree } = useSession()
+  const actions = useWalletActions()
   const shop = useShopStatus().data
   const [adding, setAdding] = useState(false)
+  const [raising, setRaising] = useState(false)
   if (shop && !shop.open) {
     return (
       <p className="rounded-2xl bg-warn-soft p-4 text-[15px] font-medium text-warn">
@@ -311,11 +314,13 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
   if (account === undefined) return <span className="skeleton h-14 rounded-full" />
   const balance = Number(account?.balance ?? 0)
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
-  const limit = account && need > Number(account.per_purchase_limit)
-    ? `Above your ${usd(account.per_purchase_limit)} per-purchase limit.`
-    : account && today + need > Number(account.daily_limit)
-    ? `This would pass your ${usd(account.daily_limit)} daily limit (${usd(today)} used today).`
-    : undefined
+  // A limit that's off is u128::MAX, so it's never "over" and never shown in dollars here.
+  const overPer = !!account && need > Number(account.per_purchase_limit)
+  const overDay = !!account && today + need > Number(account.daily_limit)
+  // Up to the new defaults, or what this purchase needs (to the whole dollar) if that's more; the other limit stays as it is.
+  const raised = (floor: number, needed: number) => String(Math.max(floor, Math.ceil(needed / 1e6) * 1e6))
+  const per = overPer ? raised(DEFAULT_LIMITS.perPurchase, need) : account?.per_purchase_limit
+  const daily = overDay ? raised(DEFAULT_LIMITS.daily, today + need) : account?.daily_limit
 
   if (balance < need) {
     return (
@@ -325,11 +330,25 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
       </>
     )
   }
-  if (limit) {
+  if ((overPer || overDay) && per && daily) {
     return (
-      <div className="flex flex-col gap-2 rounded-2xl bg-warn-soft p-4 text-[15px] text-warn">
-        <p className="font-medium">{limit}</p>
-        <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">Change your limits</Link>
+      <div className="flex flex-col gap-3 rounded-2xl bg-warn-soft p-4 text-[15px] text-warn">
+        {overPer && <p className="font-medium">Above your {usd(account!.per_purchase_limit)} per-purchase limit.</p>}
+        {overDay && <p className="font-medium">This would pass your {usd(account!.daily_limit)} daily limit ({usd(today)} used today).</p>}
+        <Button
+          size="lg"
+          loading={raising}
+          onClick={async () => {
+            setRaising(true)
+            await actions.setLimits(per, daily)
+            setRaising(false)
+          }}
+        >
+          Raise to {[overPer && `${usd(per)} a purchase`, overDay && `${usd(daily)} a day`].filter(Boolean).join(", ")}
+        </Button>
+        <p className="text-sm">
+          {evm || gasFree ? "One approval, no fee" : "One approval"}, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
+        </p>
       </div>
     )
   }

@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
+import { NO_LIMIT } from "@luckout/api"
 import { blocker, makeAgent, trimHistory, usdUp } from "./Agent.ts"
 
 // A fake OpenAI-compatible endpoint that plays back scripted model turns and records what it was sent.
@@ -115,6 +116,8 @@ test("blocker: balance first, then the per-purchase and daily limits", () => {
   assert.match(blocker({ ...rich, per_purchase_limit: "10000000" } as never, 15_000_000, "w")!, /per-purchase limit of \$10\.00/)
   assert.match(blocker({ ...rich, day: 5, spent_today: "90000000" } as never, 15_000_000, "w", now)!, /daily limit/)
   assert.equal(blocker({ ...rich, day: 4, spent_today: "90000000" } as never, 15_000_000, "w", now), undefined, "yesterday's spending doesn't count")
+  const unlimited = { ...rich, balance: "9000000000000", per_purchase_limit: NO_LIMIT, daily_limit: NO_LIMIT, day: 5, spent_today: "8000000000000" }
+  assert.equal(blocker(unlimited as never, 900_000_000_000, "w", now), undefined, "No limit: only the balance counts")
 })
 
 test("amounts the customer pays round up to the cent, never down", () => {

@@ -1,3 +1,5 @@
+import { noLimit } from "@luckout/api"
+
 const fmt = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 /** micro-USDC → "$5.53" (display only; amounts stay integers everywhere else). */
 export const usd = (micro: number | string) => fmt.format(Number(micro) / 1e6)
@@ -7,6 +9,11 @@ export const usdUp = (micro: number | string) => fmt.format(Math.ceil(Number(mic
 export const usdDown = (micro: number | string) => fmt.format(Math.floor(Number(micro) / 10_000) / 100)
 
 export { tokenAmount } from "@luckout/api"
+/** "$200.00 a purchase, $1,000.00 a day"; a limit that's off says so instead of an amount. */
+export const limitsText = (per: number | string, daily: number | string) =>
+  noLimit(per) && noLimit(daily)
+    ? "No limits"
+    : `${noLimit(per) ? "No per-purchase limit" : `${usd(per)} a purchase`}, ${noLimit(daily) ? "no daily limit" : `${usd(daily)} a day`}`
 /** "12.5" USDC → micro-USDC, without floating point. NaN if it isn't an amount or is too big to be exact. */
 export const toMicro = (usdc: string) => {
   const m = /^(\d+)(?:\.(\d{0,6}))?$/.exec(usdc.trim())

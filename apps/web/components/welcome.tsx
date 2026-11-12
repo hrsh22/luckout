@@ -8,12 +8,12 @@ import { Money } from "@/components/money"
 import { TelegramLink } from "@/components/telegram-link"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { usd } from "@/lib/format"
+import { limitsText } from "@/lib/format"
 import { MODES, modeName, RECOMMENDED, sameMode } from "@/lib/modes"
 import { markWelcomed, pendingMode, setPendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
 import { useSession } from "@/lib/session"
-import type { Mode } from "@luckout/api"
+import { DEFAULT_LIMITS, type Mode } from "@luckout/api"
 import { ArrowLeft, Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import { useRouter } from "next/navigation"
@@ -165,7 +165,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
                 <div className="card flex flex-col gap-2 p-6">
                   <span className="text-sm text-muted">Spending limits</span>
                   <span className="font-display text-xl leading-tight font-extrabold">
-                    {usd(account?.per_purchase_limit ?? 50_000_000)} a purchase, {usd(account?.daily_limit ?? 100_000_000)} a day
+                    {limitsText(account?.per_purchase_limit ?? DEFAULT_LIMITS.perPurchase, account?.daily_limit ?? DEFAULT_LIMITS.daily)}
                   </span>
                   <span className="text-sm text-muted">The contract enforces these, even for Telegram.</span>
                 </div>
