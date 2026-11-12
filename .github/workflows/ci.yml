@@ -77,6 +77,12 @@ jobs:
     runs-on: ubuntu-latest
     concurrency: deploy-${{ github.ref_name }}
     steps:
+      # The VM's SSH is reachable only over our tailnet. tag:ci may reach nothing there but port 22.
+      - uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
       - name: Deploy over SSH
         env:
           KEY: ${{ github.ref == 'refs/heads/main' && secrets.MAINNET_DEPLOY_KEY || secrets.TESTNET_DEPLOY_KEY }}
