@@ -376,12 +376,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         Cache.get(browseCache, JSON.stringify({ q: opts.q?.trim().toLowerCase() || undefined, country: opts.country, category: opts.category, start: opts.start ?? 0 }))
 
       // Popular cards come from our own copy of the gift-card catalog (about 100 pages), refreshed twice a
-      // day instead of read on every visit. Testnet sells only test cards, so it has none.
-      let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = []
-      /**
-       * Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. Saved with the settings too,
-       * so a restart (every deploy) starts with them instead of letters until the next copy is done.
-       */
+      // day instead of read on every visit. Testnet sells only test cards, so it has none. What the copy gives
+      // is saved with the settings too, so a restart (every deploy) starts with it instead of waiting for the next copy.
+      const Brands = Schema.Array(Schema.Array(Product))
+      let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = yield* readSetting("popular_brands", Brands, [])
+      /** Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. */
       const Logos = Schema.Record(Schema.String, Schema.Struct({ image: Schema.optionalKey(Schema.String), background: Schema.optionalKey(Schema.String) }))
       let logos = new Map<string, ReturnType<typeof images>>(Object.entries(yield* readSetting("card_logos", Logos, {})))
       const copyCatalog = Effect.gen(function*() {
@@ -393,6 +392,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         }
         brands = popularBrands(cards)
         logos = new Map(cards.map((c) => [c.id, images(c)]))
+        yield* writeSetting("popular_brands", Brands, brands, "server")
         yield* writeSetting("card_logos", Logos, Object.fromEntries(logos), "server")
       })
       if (!testnet && Option.isSome(apiKey)) {
