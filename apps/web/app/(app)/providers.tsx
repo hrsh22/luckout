@@ -52,7 +52,7 @@ function WelcomeGate() {
     <Dialog.Root open={open} onOpenChange={(o) => !o && close()}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-40 bg-ink/30 backdrop-blur-[6px] transition-opacity duration-300 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <Dialog.Popup initialFocus={content} className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-canvas outline-none transition-[opacity,translate] duration-300 ease-[cubic-bezier(.2,.9,.25,1)] data-[ending-style]:translate-y-6 data-[ending-style]:opacity-0 data-[starting-style]:translate-y-6 data-[starting-style]:opacity-0 sm:inset-4 sm:rounded-[2.25rem] sm:shadow-pop">
+        <Dialog.Popup initialFocus={content} className="scroll-soft fixed inset-0 z-50 overflow-y-auto bg-canvas outline-none transition-[opacity,translate] duration-300 ease-[cubic-bezier(.2,.9,.25,1)] data-[ending-style]:translate-y-6 data-[ending-style]:opacity-0 data-[starting-style]:translate-y-6 data-[starting-style]:opacity-0 sm:inset-4 sm:rounded-[2.25rem] sm:shadow-pop">
           <Dialog.Title className="sr-only">Welcome to Luckout</Dialog.Title>
           <div className="sticky top-0 z-10 flex items-center justify-between bg-canvas/85 px-6 py-3 backdrop-blur sm:px-10">
             <Mark className="size-8" />
