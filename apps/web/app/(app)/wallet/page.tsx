@@ -1,7 +1,7 @@
 "use client"
 
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
-import { HeldInIntents, InTransit } from "@/components/in-transit"
+import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
@@ -117,6 +117,8 @@ export default function WalletPage() {
         <h2 className="font-display text-3xl font-extrabold">Telegram</h2>
         <TelegramLink />
       </section>
+
+      <RecentTransfers />
 
       <AddFundsSheet open={adding} onOpenChange={setAdding} />
       <WithdrawSheet open={withdrawing} onOpenChange={setWithdrawing} />
