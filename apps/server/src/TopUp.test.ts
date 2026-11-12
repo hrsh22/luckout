@@ -206,8 +206,8 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.match(n({ status: "SUCCESS", move: "failed", move_detail: "That approval expired" })!.text, /NEAR Intents account but didn't move into Luckout \(That approval expired\)\. Move it in/)
   const refund = n({ status: "REFUNDED", refunded: "2.5", refund_reason: "Deposit came in after the deadline" })!
   assert.equal(refund.key, "refunded")
-  assert.match(refund.text, /2\.525765 USDC on Base\) didn't go through: Deposit came in after the deadline\. 1Click sent 2\.5 USDC back to your wallet on Base\./)
-  assert.match(n({ status: "REFUNDED", refunded: "2.5", account_id: NEAR })!.text, /1Click sent 2\.5 USDC back to your NEAR Intents account\./, "a NEAR wallet's address on Base is unknown")
+  assert.match(refund.text, /2\.53 USDC on Base\) didn't go through: Deposit came in after the deadline\. 1Click sent 2\.50 USDC back to your wallet on Base\./)
+  assert.match(n({ status: "REFUNDED", refunded: "2.5", account_id: NEAR })!.text, /1Click sent 2\.50 USDC back to your NEAR Intents account\./, "a NEAR wallet's address on Base is unknown")
   assert.match(n({ status: "REFUNDED", refunded: "0.1", symbol: "SOL", chain: "sol" })!.text, /1Click sent 0\.1 SOL back to your NEAR Intents account\./, "an EVM address isn't one on Solana")
   assert.match(n({ status: "REFUNDED", refunded: "0.15", refund_reason: "QUOTE_EXPIRED" })!.text, /didn't go through: the full amount didn't arrive before the deadline\. 1Click sent 0\.15 USDC back/)
   assert.deepEqual(n({ direction: "out", status: "SUCCESS", amount_out: "1.419", chain: "base" }), { key: "arrived", text: "Your $2.50 withdrawal arrived: 1.419 USDC on Base." })
@@ -219,12 +219,12 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.equal(n({ status: "PENDING_DEPOSIT" }), undefined)
   const short = n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now + 20.5 * 60_000) })!
   assert.equal(short.key, "incomplete")
-  assert.match(short.text, /^1Click got 0\.15 of the 2\.525765 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your wallet on Base\./)
+  assert.match(short.text, /^1Click got 0\.15 of the 2\.53 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your wallet on Base\./)
   assert.match(n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now - 60_000), account_id: NEAR })!.text, /0\.15 of the .* needs\. What arrived goes back to your NEAR Intents account/)
   const paid = { status: "PENDING_DEPOSIT", deposit_tx: "0x" + "ab".repeat(32), deposit_address: "dq" }
   const unseen = n({ ...paid, deadline: new Date(now - 6 * 60_000) })!
   assert.equal(unseen.key, "unseen")
-  assert.match(unseen.text, /^1Click hasn't confirmed your \$2\.50 Top-Up transfer \(2\.525765 USDC on Base\) yet\. It's at 1Click's deposit address: it either goes through or comes back to your wallet on Base\. Luckout is looking into it\./)
+  assert.match(unseen.text, /^1Click hasn't confirmed your \$2\.50 Top-Up transfer \(2\.53 USDC on Base\) yet\. It's at 1Click's deposit address: it either goes through or comes back to your wallet on Base\. Luckout is looking into it\./)
   assert.equal(n({ ...paid, deadline: new Date(now - 60_000) }), undefined, "1Click gets a few minutes past the deadline")
   assert.equal(n({ ...paid, deposit_tx: null, deadline: new Date(now - 6 * 60_000) }), undefined, "nobody said they paid")
   const back = (o: Partial<SwapRow>) => n({ direction: "back", usdc: "0", amount_in: "0.120132", amount_out: "0.117732", ...o })!
@@ -301,7 +301,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.ok(!checked.includes("abandoned"), "a quote nobody paid into, long past its deadline, isn't checked")
   const texts = told.map(([a, t]) => `${a === NEAR ? "near" : "evm"}: ${t}`)
   assert.equal(told.length, 6, texts.join("\n"))
-  assert.ok(texts.some((t) => t.startsWith("near: 1Click got 0.15 of the 2.525765 USDC on Base your $2.50 Top-Up needs. Send the rest")))
+  assert.ok(texts.some((t) => t.startsWith("near: 1Click got 0.15 of the 2.53 USDC on Base your $2.50 Top-Up needs. Send the rest")))
   assert.ok(texts.some((t) => t.startsWith("evm: Your $2.50 Top-Up is in your Luckout balance")))
   assert.ok(texts.some((t) => t.startsWith("near: Your $2.50 Top-Up landed in your NEAR wallet")))
   assert.ok(texts.some((t) => t.startsWith("evm: Your $1.42 withdrawal arrived: 1.419 USDC on Base")))
@@ -464,7 +464,7 @@ test("a Top-Up the app paid stays in sight past its deadline until 1Click settle
   assert.deepEqual(w.submitted, [{ txHash: tx, depositAddress: "dq-1" }], "passed on to 1Click once, for the customer's own quote")
   assert.deepEqual(r.listed.map((x) => [x.depositAddress, x.phase, x.depositTx]), [["dq-1", "awaiting-transfer", tx]], "the unpaid quote is gone; the paid one isn't")
   assert.equal(w.told.length, 2, "told once, not on every pass")
-  assert.ok(w.told[0]!.startsWith(`${EVM}: 1Click hasn't confirmed your $0.12 Top-Up transfer (0.120132 USDC on Base) yet.`), w.told[0])
+  assert.ok(w.told[0]!.startsWith(`${EVM}: 1Click hasn't confirmed your $0.12 Top-Up transfer (0.13 USDC on Base) yet.`), w.told[0])
   assert.match(w.told[1]!, new RegExp(`^admin: 1Click hasn't seen a paid Top-Up: deposit dq-1, tx ${tx} on Base`))
 })
 
