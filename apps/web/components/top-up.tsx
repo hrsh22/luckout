@@ -51,10 +51,10 @@ export const useTopUpPreview = (token: string | undefined, assetId: string, micr
 /** What the customer will send, when it arrives, and the fee their wallet pays. */
 export function TopUpPreview({ q, stale, error }: { q: TopUpQuote | undefined; stale: boolean; error: unknown }) {
   if (error) return <p role="alert" className="text-sm font-medium text-bad">{errorMessage(error)}</p>
-  if (!q) return <span className="skeleton h-[74px] rounded-2xl" />
+  if (!q) return <span className="skeleton h-[66px] rounded-2xl" />
   const chain = chainLabel(q.chain)
   return (
-    <div className={`flex flex-col gap-1 rounded-2xl bg-soft p-4 transition-opacity ${stale ? "opacity-60" : ""}`} aria-live="polite">
+    <div className={`flex flex-col gap-1 rounded-2xl bg-soft px-4 py-3 transition-opacity ${stale ? "opacity-60" : ""}`} aria-live="polite">
       <p className="flex items-center gap-2">
         <TokenMark symbol={q.symbol} chain={q.chain} size={22} />
         <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
@@ -112,11 +112,12 @@ function HeldFirst() {
 /** What a card still needs (at least the $1 top-up minimum), or $20. */
 const needed = (need: number | undefined) => (need ? Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 : undefined)
 export const topUpAmount = (need?: number) => dollars(needed(need) ?? 20_000_000)
+// One row of chips: "Exactly …" takes $50's place when a card needs a set amount.
 export const topUpPicks = (need?: number) => [
   ...(needed(need) ? [{ label: `Exactly ${usdUp(needed(need)!)}`, micro: needed(need)! }] : []),
   { label: "$10", micro: 10_000_000 },
   { label: "$25", micro: 25_000_000 },
-  { label: "$50", micro: 50_000_000 }
+  ...(needed(need) ? [] : [{ label: "$50", micro: 50_000_000 }])
 ]
 
 /**
@@ -183,7 +184,7 @@ export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?:
           <AmountField label="USDC to receive" value={amount} onChange={setAmount} picks={topUpPicks(need)} />
           <div className="flex flex-col gap-2">
             <span className="text-sm font-semibold text-muted">Pay with</span>
-            {assets ? <TokenPicker assets={assets} value={asset} onChange={setAsset} /> : <span className="skeleton h-16 rounded-[1.25rem]" />}
+            {assets ? <TokenPicker assets={assets} value={asset} onChange={setAsset} /> : <span className="skeleton h-14 rounded-[1.25rem]" />}
           </div>
           {toMicro(amount) >= 1_000_000 && asset && <TopUpPreview q={preview.data} stale={preview.isPlaceholderData || preview.isFetching} error={preview.error} />}
           <Button size="lg" disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {

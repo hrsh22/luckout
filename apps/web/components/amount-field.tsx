@@ -15,7 +15,7 @@ export function AmountField({ value, onChange, picks, label }: {
         <span className="sr-only">{label}</span>
         <span className="font-display pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-3xl font-extrabold text-muted">$</span>
         <input
-          className="field font-display !h-16 !rounded-[1.25rem] !pl-11 !text-3xl !font-extrabold"
+          className="field font-display !h-14 !rounded-[1.25rem] !pl-11 !text-3xl !font-extrabold"
           inputMode="decimal"
           value={value}
           onChange={(e) => onChange(e.target.value.replace(/[^\d.]/g, ""))}
