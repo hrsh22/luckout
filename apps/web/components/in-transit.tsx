@@ -219,11 +219,11 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
       }
-      return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
+      return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below (a little more is fine: the extra comes back).`
     case "incomplete":
       return open(t)
-        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
-        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
+        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
+        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
     case "swapping":
       return t.direction === "in"
         ? `1Click has your ${t.symbol} and is ${t.symbol === "USDC" ? "bringing it over to NEAR" : "converting it to USDC"}. Usually ${usual}.`
