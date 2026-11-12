@@ -11,8 +11,8 @@ export interface ReownBalance {
   readonly symbol: string
   /** CAIP-2, e.g. "eip155:8453". */
   readonly chainId: string
-  /** CAIP-10 for a token ("eip155:8453:0x8335…"), null for the chain's own coin. */
-  readonly address: string | null
+  /** CAIP-10 for a token ("eip155:8453:0x8335…"); absent (or null) for the chain's own coin. */
+  readonly address?: string | null
   readonly value?: number
   readonly quantity: { readonly numeric: string }
 }
@@ -31,13 +31,13 @@ export const matchHoldings = (assets: ReadonlyArray<TopUpAsset>, balances: Reado
   for (const a of assets) {
     const b = balances.find((x) =>
       CHAIN_IDS[x.chainId] === a.chain &&
-      (a.contract ? x.address?.toLowerCase().endsWith(`:${a.contract.toLowerCase()}`) : x.address === null && x.symbol === a.symbol)
+      (a.contract ? x.address?.toLowerCase().endsWith(`:${a.contract.toLowerCase()}`) : !x.address && x.symbol === a.symbol)
     )
     const amount = b ? Number(b.quantity.numeric) : 0
     if (amount > 0) holdings.set(a.assetId, { amount, usd: b?.value ?? 0 })
   }
   const gas = new Set(
-    balances.filter((x) => x.address === null && Number(x.quantity.numeric) > 0).map((x) => CHAIN_IDS[x.chainId]).filter((c): c is string => !!c)
+    balances.filter((x) => !x.address && Number(x.quantity.numeric) > 0).map((x) => CHAIN_IDS[x.chainId]).filter((c): c is string => !!c)
   )
   return { holdings, gas }
 }
