@@ -2,7 +2,7 @@
 
 import { slabColor, Spacers } from "@/components/odds"
 import { usd, usdUp } from "@/lib/format"
-import { MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { AMPLE_RESERVE, MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { motion } from "motion/react"
 import { useState } from "react"
@@ -22,7 +22,7 @@ export function OddsGrid() {
   const [index, setIndex] = useState(1)
   const m = LUCKY[index]!
   const pal = modePalette(m.mode)
-  const q = simpleQuote(m, PRICE, Number.MAX_SAFE_INTEGER)
+  const q = simpleQuote(m, PRICE, AMPLE_RESERVE)
   const outcomes = pricedOutcomes(m, q)
   const cells = outcomes.flatMap((o) => Array.from({ length: o.chanceBps / 100 }, () => o))
 

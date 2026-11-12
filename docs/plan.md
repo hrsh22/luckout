@@ -119,6 +119,6 @@ Each of these is a quick check against an API or the docs while building.
 | The README doesn't run for the first-pass agents | PGlite fallback with no Docker; a fresh-clone check on Day 6 |
 | USD store credit can't be refunded, and is capped at $2,000 across all balances | Keep the float small and refill often |
 | Early variance drains the reserve | Jackpot can lose money over about 100 Draws (about 12% chance); fund the reserve before launch and don't sweep profit early (ADR-0003) |
-| Block producers can bias `random_seed` | Bounded by the Discount Cap and Spending Limits; disclosed |
+| Block producers can bias `random_seed` | Bounded by the Cashback Cap and Spending Limits; disclosed |
 | India's Online Gaming Act (2025) | Pitch globally, use Swiggy as one example, geo-restrict where required. This is not legal advice. |
 | Running out of time | Stretch items are cut first; the core loop is done by Day 3 |

@@ -2,7 +2,7 @@ import { BrowserCheck } from "@/components/browser-check"
 import { LocalTime } from "@/components/local-time"
 import { contractId, explorer } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
-import { cashbackPct, MAX_CASHBACK } from "@/lib/modes"
+import { cashbackPct } from "@/lib/modes"
 import { loadDraw, TX_HASH } from "@/lib/proof"
 import { ArrowLeft } from "lucide-react"
 import type { Metadata } from "next"
@@ -106,8 +106,8 @@ export default async function DrawProof({ params }: Props) {
           </table>
         </div>
         <p className="text-sm text-ink-soft">
-          Game Versions are immutable and every table averages exactly 105.6%. A block producer can bias the seed slightly; the{" "}
-          {usd(MAX_CASHBACK)} cashback cap, the Discount Cap and Spending Limits bound what that could ever be worth.
+          Game Versions are immutable and every table averages exactly 105.6%. A block producer can bias the seed slightly; the Cashback
+          Cap and Spending Limits bound what that could ever be worth.
         </p>
       </section>
 

@@ -66,8 +66,8 @@ export class Admin extends Context.Service<Admin, {
             ? spendable(near, accountId).pipe(Effect.map((s) => [{ role, accountId, spendable: String(s), alertBelow: String(GAS_ALERT[role]) }]))
             : Effect.succeed([])
         const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop, held] = yield* Effect.all([
-          near.view<{ owner: string; pending_owner?: string | null; operator: string; usdc: string; paused: boolean; max_cashback: string }>("get_config"),
-          near.view<{ free: string; locked: string; discount_cap: string; proceeds: string }>("get_reserve"),
+          near.view<{ owner: string; pending_owner?: string | null; operator: string; usdc: string; paused: boolean; cashback_cap: { fixed: string | null; reserve_bps: number | null } }>("get_config"),
+          near.view<{ free: string; locked: string; max_cashback: string; proceeds: string }>("get_reserve"),
           near.view<{ lucky_settled: number; lucky_amount_total: string; lucky_paid_total: string }>("get_stats"),
           Effect.all([
             gasOf("operator", near.operatorId),
@@ -111,9 +111,12 @@ export class Admin extends Context.Service<Admin, {
           reserve: {
             free: Number(reserve.free),
             locked: Number(reserve.locked),
-            discountCap: Number(reserve.discount_cap),
             proceeds: Number(reserve.proceeds),
-            maxCashback: Number(config.max_cashback),
+            maxCashback: Number(reserve.max_cashback),
+            cashbackCap: {
+              fixed: config.cashback_cap.fixed === null ? null : Number(config.cashback_cap.fixed),
+              reserveBps: config.cashback_cap.reserve_bps
+            },
             held: Number(held),
             customers: Number(held) - Number(reserve.free) - Number(reserve.locked) - Number(reserve.proceeds)
           },

@@ -11,10 +11,10 @@ import { Button } from "@/components/ui/button"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
-import { cashbackCapAmount, modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { rememberViewed, useFreeReserve, useQuote, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
+import { rememberViewed, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -66,10 +66,10 @@ function Voucher() {
   const pkg = packages.find((p) => p.value === value)
   const info = modeInfo(mode)!
   const quote = useQuote(id, value, mode)
-  const free = useFreeReserve()
+  const reserve = useReserve()
   // Shown at once from the same tables and reserve the contract uses; the server's quote replaces it in a moment.
   const shown: Quote | undefined = quote.data ??
-    (pkg && (info.premiumBps === 0 || free !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, free ?? 0) } : undefined)
+    (pkg && (info.premiumBps === 0 || reserve !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) } : undefined)
 
   const [round, setRound] = useState(0)
   // A fresh key per choice: double clicks and retries return the same purchase instead of buying twice.
@@ -274,9 +274,8 @@ function Receipt({ shown, exact, info, error, children }: {
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
           {shown.luckyAmount < shown.referencePrice && (
             <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Only {usd(shown.luckyAmount)} of the price plays, because {shown.luckyAmount < cashbackCapAmount(info)
-                ? "one purchase can use at most 20% of the Cashback Reserve, and it's small right now"
-                : `one purchase gets at most ${usd(best.cashback)} back`}. The rest is at the normal price.
+              Only {usd(shown.luckyAmount)} of the price plays, because one purchase gets at most {usd(best.cashback)} back right now. The
+              rest is at the normal price.
             </p>
           )}
         </div>

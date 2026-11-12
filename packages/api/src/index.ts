@@ -577,9 +577,11 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   reserve: Schema.Struct({
     free: MicroUsdc,
     locked: MicroUsdc,
-    discountCap: MicroUsdc,
     proceeds: MicroUsdc,
+    /** The most Cashback one Lucky Buy can pay now: the lower of the Cashback Cap's limits. */
     maxCashback: MicroUsdc,
+    /** The owner's Cashback Cap: a fixed amount and a share of Free Reserve (basis points); null is off. */
+    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.NullOr(Schema.Int) }),
     /** USDC the contract holds in all. */
     held: MicroUsdc,
     /** Customers' money in the contract: what it holds minus the reserve and proceeds. Negative means it holds less than it owes. */
