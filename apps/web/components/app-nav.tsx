@@ -204,7 +204,7 @@ function Arriving() {
   const transfers = useTransfers(token)
   const list = transfers.data ?? []
   // Only money 1Click has and is delivering: not a quote still waiting for its transfer, nor one paid short.
-  const coming = list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving"))
+  const coming = list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving" || (t.phase === "awaiting-transfer" && t.depositTx)))
   // When a transfer lands or is sent back, the balances it changed are read again (this is on every page).
   const settled = list.filter((t) => !ACTIVE_PHASES.has(t.phase)).map((t) => `${t.depositAddress}:${t.phase}`).join()
   const seen = useRef<string | undefined>(undefined)

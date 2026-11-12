@@ -154,6 +154,7 @@ const row = (o: Partial<SwapRow>): SwapRow => ({
   move_in: null,
   origin_asset: null,
   origin_amount: null,
+  deposit_tx: null,
   told: [],
   created_at: new Date(),
   ...o
@@ -220,6 +221,12 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.equal(short.key, "incomplete")
   assert.match(short.text, /^1Click got 0\.15 of the 2\.525765 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your wallet on Base\./)
   assert.match(n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now - 60_000), account_id: NEAR })!.text, /0\.15 of the .* needs\. What arrived goes back to your NEAR Intents account/)
+  const paid = { status: "PENDING_DEPOSIT", deposit_tx: "0x" + "ab".repeat(32), deposit_address: "dq" }
+  const unseen = n({ ...paid, deadline: new Date(now - 6 * 60_000) })!
+  assert.equal(unseen.key, "unseen")
+  assert.match(unseen.text, /^1Click hasn't confirmed your \$2\.50 Top-Up transfer \(2\.525765 USDC on Base\) yet\. It's at 1Click's deposit address: it either goes through or comes back to your wallet on Base\. Luckout is looking into it\./)
+  assert.equal(n({ ...paid, deadline: new Date(now - 60_000) }), undefined, "1Click gets a few minutes past the deadline")
+  assert.equal(n({ ...paid, deposit_tx: null, deadline: new Date(now - 6 * 60_000) }), undefined, "nobody said they paid")
   const back = (o: Partial<SwapRow>) => n({ direction: "back", usdc: "0", amount_in: "0.120132", amount_out: "0.117732", ...o })!
   assert.deepEqual(back({ status: "SUCCESS" }), { key: "arrived", text: "0.117732 USDC is in your wallet on Base." })
   assert.deepEqual(back({ status: "SUCCESS", account_id: NEAR, chain: "near" }), { key: "arrived", text: "0.117732 USDC is in your NEAR wallet." })
@@ -358,6 +365,8 @@ const tokens = [
 /** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
 const mainnetTopUp = (holdings: Record<string, string> = {}) => {
   const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
+  const submitted: Array<{ txHash: string; depositAddress: string }> = []
+  const told: Array<string> = []
   const oneClick = Layer.succeed(OneClick, OneClick.of({
     tokens: Effect.succeed(tokens),
     quote: (r) => {
@@ -369,7 +378,11 @@ const mainnetTopUp = (holdings: Record<string, string> = {}) => {
     },
     status: () => Effect.succeed("PENDING_DEPOSIT"),
     details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
-    submitDeposit: () => Effect.void
+    submitDeposit: (i) => Effect.sync(() => void submitted.push(i))
+  }))
+  const alerts = Layer.succeed(Alerts, Alerts.of({
+    admin: (text) => Effect.sync(() => void told.push(`admin: ${text}`)),
+    customer: (account, text) => Effect.sync(() => void told.push(`${account}: ${text}`))
   }))
   const near = fakeNear({
     view: ((method: string, args: { token_ids?: Array<string> }) =>
@@ -383,10 +396,10 @@ const mainnetTopUp = (holdings: Record<string, string> = {}) => {
     Effect.runPromise(Effect.gen(function*() {
       return yield* f(yield* TopUp, yield* SqlClient.SqlClient)
     }).pipe(Effect.provide(TopUp.layer.pipe(
-      Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory)),
+      Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, alerts, DbMemory)),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
     ))))
-  return { asked, run }
+  return { asked, submitted, told, run }
 }
 
 test("a Top-Up's refund, and the extra it asks for, go back to an EVM wallet on its own chain; anything else to NEAR Intents", async () => {
@@ -427,4 +440,29 @@ test("a held token goes to the customer's own wallet: an EVM wallet's as it is o
     ["dq-2", "back", "USDC", "near", BASE, "120132"]
   ])
   assert.deepEqual(r.listed.map((x) => [x.direction, x.phase, x.amountOut]), [["back", "swapping", "0.117732"]], "on its way, in sight")
+})
+
+test("a Top-Up the app paid stays in sight past its deadline until 1Click settles it, and an unseen one is chased", async () => {
+  const w = mainnetTopUp()
+  const tx = "0x" + "cd".repeat(32)
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* t.quote(EVM, BASE, 1_000_000) // dq-1: paid
+      yield* t.quote(EVM, BASE, 1_000_000) // dq-2: never paid
+      const bad = yield* Effect.flip(t.sent(EVM, "dq-1", "0x1234"))
+      yield* t.sent(NEAR, "dq-1", tx) // not theirs: nothing happens
+      yield* t.sent(EVM, "dq-1", tx)
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '10 minutes'`
+      const listed = yield* t.transfers(EVM)
+      yield* t.trackNow
+      yield* t.trackNow
+      return { bad: bad.message, listed }
+    })
+  )
+  assert.equal(r.bad, "That isn't a transaction hash")
+  assert.deepEqual(w.submitted, [{ txHash: tx, depositAddress: "dq-1" }], "passed on to 1Click once, for the customer's own quote")
+  assert.deepEqual(r.listed.map((x) => [x.depositAddress, x.phase, x.depositTx]), [["dq-1", "awaiting-transfer", tx]], "the unpaid quote is gone; the paid one isn't")
+  assert.equal(w.told.length, 2, "told once, not on every pass")
+  assert.ok(w.told[0]!.startsWith(`${EVM}: 1Click hasn't confirmed your $0.12 Top-Up transfer (0.120132 USDC on Base) yet.`), w.told[0])
+  assert.match(w.told[1]!, new RegExp(`^admin: 1Click hasn't seen a paid Top-Up: deposit dq-1, tx ${tx} on Base`))
 })

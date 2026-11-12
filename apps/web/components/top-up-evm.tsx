@@ -132,7 +132,9 @@ export function TopUpEvm({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
                 onClick={() =>
                   step("send", async () => {
                     await signMoveIn(quote)
-                    await sendFromWallet(accountId, { chain: quote.chain, contract: asset?.contract, to: quote.depositAddress, amount: quote.amountIn })
+                    const txHash = await sendFromWallet(accountId, { chain: quote.chain, contract: asset?.contract, to: quote.depositAddress, amount: quote.amountIn })
+                    // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
+                    void api((c) => c.topup.sent({ payload: { depositAddress: quote.depositAddress, txHash } }), token).catch(() => {})
                   })}
               >
                 Send from your wallet

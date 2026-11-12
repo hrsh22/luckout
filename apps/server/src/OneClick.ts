@@ -100,7 +100,7 @@ export class OneClick extends Context.Service<OneClick, {
   status(depositAddress: string): Effect.Effect<SwapStatus, OneClickUnavailable>
   details(depositAddress: string): Effect.Effect<SwapDetails, OneClickUnavailable>
   /** Tells 1Click about our deposit so it doesn't wait to notice it; best effort. */
-  submitDeposit(input: { txHash: string; depositAddress: string; nearSenderAccount: string }): Effect.Effect<void>
+  submitDeposit(input: { txHash: string; depositAddress: string; nearSenderAccount?: string }): Effect.Effect<void>
 }>()("luckout/OneClick") {
   static readonly layer = Layer.effect(
     OneClick,
@@ -166,7 +166,7 @@ export class OneClick extends Context.Service<OneClick, {
         ))
       const status = (depositAddress: string) => details(depositAddress).pipe(Effect.map((d) => d.status))
 
-      const submitDeposit = (input: { txHash: string; depositAddress: string; nearSenderAccount: string }) =>
+      const submitDeposit = (input: { txHash: string; depositAddress: string; nearSenderAccount?: string }) =>
         HttpClientRequest.post("/deposit/submit").pipe(
           HttpClientRequest.bodyJsonUnsafe(input),
           http.execute,

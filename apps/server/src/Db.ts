@@ -239,6 +239,12 @@ const migrations = Migrator.fromRecord({
     yield* sql`ALTER TABLE intents_swaps DROP CONSTRAINT intents_swaps_direction_check`
     yield* sql`ALTER TABLE intents_swaps ADD CONSTRAINT intents_swaps_direction_check CHECK (direction IN ('in', 'out', 'back'))`
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN origin_asset TEXT, ADD COLUMN origin_amount TEXT`
+  }),
+  // A Top-Up the app paid from the customer's wallet: its transaction, so the money stays in sight (and is
+  // chased) even if 1Click never confirms it arrived.
+  "0016_transfers_deposit_tx": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN deposit_tx TEXT`
   })
 })
 
