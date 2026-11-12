@@ -9,8 +9,11 @@ import { Network } from "./Near.ts"
 export class Alerts extends Context.Service<Alerts, {
   /** Something a human must look at. The same text is sent at most once an hour. */
   admin(text: string): Effect.Effect<void>
-  /** A short notice to the customer's linked Telegram chat, if any. Never Redemption Data. */
-  customer(accountId: string, text: string): Effect.Effect<void>
+  /**
+   * A short notice to the customer's linked Telegram chat, if any. Never Redemption Data. False only when
+   * it's worth sending again: Telegram didn't answer, rate-limited us or failed itself.
+   */
+  customer(accountId: string, text: string): Effect.Effect<boolean>
 }>()("luckout/Alerts") {
   static readonly layer = Layer.effect(
     Alerts,
@@ -21,10 +24,14 @@ export class Alerts extends Context.Service<Alerts, {
       // Both networks may alert the same chat: every alert says which one it's about.
       const network = yield* Network
 
-      /** True once Telegram took the message. A failure logs its HTTP status only: the URL holds the bot token. */
-      const telegram = (chatId: string | number, text: string) =>
+      /**
+       * "sent" once Telegram took the message; "retry" when it didn't answer, rate-limited us or failed itself;
+       * "refused" for the rest (a chat that blocked the bot), or with no bot. A failure logs its HTTP status
+       * only: the URL holds the bot token.
+       */
+      const telegram = (chatId: string | number, text: string): Effect.Effect<"sent" | "retry" | "refused"> =>
         Option.isNone(token)
-          ? Effect.succeed(false)
+          ? Effect.succeed("refused")
           : Effect.tryPromise({
             try: () =>
               fetch(`https://api.telegram.org/bot${Redacted.value(token.value)}/sendMessage`, {
@@ -37,9 +44,14 @@ export class Alerts extends Context.Service<Alerts, {
             catch: (e) => `no response (${e instanceof Error ? e.name : typeof e})`
           }).pipe(
             Effect.flatMap((res) =>
-              res.status >= 200 && res.status < 300 ? Effect.succeed(true) : Effect.as(Effect.logError("alert delivery failed", `HTTP ${res.status}`), false)
+              res.status >= 200 && res.status < 300
+                ? Effect.succeed("sent" as const)
+                : Effect.as(
+                  Effect.logError("alert delivery failed", `HTTP ${res.status}`),
+                  res.status === 429 || res.status >= 500 ? ("retry" as const) : ("refused" as const)
+                )
             ),
-            Effect.catch((why: string) => Effect.as(Effect.logError("alert delivery failed", why), false))
+            Effect.catch((why: string) => Effect.as(Effect.logError("alert delivery failed", why), "retry" as const))
           )
 
       // ponytail: in-memory dedupe, resets on restart; fine for one process.
@@ -53,14 +65,16 @@ export class Alerts extends Context.Service<Alerts, {
           if (lastSent.has(text) || Option.isNone(adminChat)) return
           // Held while sending, so the same alert at the same moment isn't sent twice; only a delivered one counts.
           lastSent.set(text, now)
-          if (!(yield* telegram(adminChat.value, `⚠️ Luckout [${network}]: ${text}`))) lastSent.delete(text)
+          if ((yield* telegram(adminChat.value, `⚠️ Luckout [${network}]: ${text}`)) !== "sent") lastSent.delete(text)
         })
 
       const customer = (accountId: string, text: string) =>
         // As text: Postgres hands a BIGINT back as a BigInt, which JSON (and so the Telegram call) can't carry.
         sql<{ chat_id: string }>`SELECT chat_id::text AS chat_id FROM telegram_links WHERE account_id = ${accountId}`.pipe(
-          Effect.flatMap((rows) => (rows[0] ? telegram(rows[0].chat_id, text) : Effect.void)),
-          Effect.ignore
+          Effect.flatMap((rows) => (rows[0] ? telegram(rows[0].chat_id, text) : Effect.succeed("refused" as const))),
+          Effect.map((d) => d !== "retry"),
+          // Our own database failing isn't Telegram's: no retry loop over it.
+          Effect.orElseSucceed(() => true)
         )
 
       return Alerts.of({ admin, customer })

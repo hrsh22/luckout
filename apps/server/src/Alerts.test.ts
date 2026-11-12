@@ -66,3 +66,32 @@ test("a customer notice reaches their linked chat (Postgres hands a BIGINT chat 
   // Sent as text, the form that survives the real Postgres driver (this in-memory one returns a number).
   assert.deepEqual(bodies.map((b) => [b.chat_id, b.text]), [["900304486", "Your $2.50 Top-Up is in your Luckout balance."]])
 })
+
+test("a customer notice is worth sending again only when Telegram didn't answer, rate-limited us or failed itself", async () => {
+  const answers: Array<number | "down"> = ["down", 500, 429, 403, 200]
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async () => {
+    const a = answers.shift() ?? 200
+    if (a === "down") throw new TypeError("fetch failed")
+    return new Response("{}", { status: a })
+  }) as typeof fetch
+  try {
+    const r = await Effect.runPromise(Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id) VALUES (1, 'alice.near', 1)`
+      const alerts = yield* Alerts
+      const out: Array<boolean> = []
+      for (let i = 0; i < 5; i++) out.push(yield* alerts.customer("alice.near", "hi"))
+      out.push(yield* alerts.customer("nobody.near", "not linked"))
+      return out
+    }).pipe(Effect.provide(Alerts.layer.pipe(
+      Layer.provideMerge(DbMemory),
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, NEAR_NETWORK: "testnet" } }))),
+      Layer.provideMerge(Logger.layer([]))
+    ))))
+    // down, 500, 429: again later. 403 (blocked the bot): give up. 200: sent. Not linked: nothing to send.
+    assert.deepEqual(r, [false, false, false, true, true, true])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})

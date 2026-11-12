@@ -2,11 +2,13 @@
 
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
+import { api, errorMessage } from "@/lib/api"
 import { CHAIN_NAMES } from "@/lib/evm"
 import { usd } from "@/lib/format"
 import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { HeldToken, Transfer } from "@luckout/api"
+import { useQueryClient } from "@tanstack/react-query"
 import { useState } from "react"
 import { ArrowDownLeft, ArrowUpRight, CircleCheck, Clock, Copy, ExternalLink, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
@@ -130,6 +132,7 @@ function Row({ t }: { t: Transfer }) {
             <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(t.depositAddress).then(() => toast.success("Address copied"))}>
               <Copy />Copy address
             </Button>
+            {t.phase === "awaiting-transfer" && <PasteTx t={t} />}
           </div>
         )}
 
@@ -164,6 +167,41 @@ function Row({ t }: { t: Transfer }) {
         </div>
       </div>
     </li>
+  )
+}
+
+/**
+ * Sent from an exchange or another wallet: its transaction keeps the Top-Up in sight past its deadline, helps
+ * 1Click find the deposit, and gets us told if 1Click doesn't.
+ */
+function PasteTx({ t }: { t: Transfer }) {
+  const { token } = useSession()
+  const qc = useQueryClient()
+  const [hash, setHash] = useState("")
+  const [busy, setBusy] = useState(false)
+  const save = async () => {
+    setBusy(true)
+    try {
+      await api((c) => c.topup.sent({ payload: { depositAddress: t.depositAddress, txHash: hash.trim() } }), token)
+      toast.success("Got it. 1Click knows to look for your transfer.")
+      void qc.invalidateQueries({ queryKey: ["transfers"] })
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <form className="mt-1 flex flex-wrap gap-2" onSubmit={(e) => (e.preventDefault(), void save())}>
+      <input
+        className="field min-w-0 flex-1 !py-1.5 font-mono text-xs"
+        placeholder="Already sent it? Paste the transaction hash"
+        aria-label="Your transaction hash"
+        value={hash}
+        onChange={(e) => setHash(e.target.value)}
+      />
+      <Button size="sm" variant="light" type="submit" loading={busy} disabled={!hash.trim()}>Add</Button>
+    </form>
   )
 }
 

@@ -25,7 +25,7 @@ const noRelay = Layer.succeed(Relay, Relay.of({
   settings: Effect.die("relay.settings was not expected"),
   configure: () => Effect.die("relay.configure was not expected")
 }))
-const noAlerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.void }))
+const noAlerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
 const layer = TopUp.layer.pipe(Layer.provide([OneClick.layer, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory]))
 const live = { skip: process.env.CI ? "no network calls to 1Click in CI" : false }
 
@@ -263,7 +263,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     settings: Effect.die("relay.settings was not expected"),
     configure: () => Effect.die("relay.configure was not expected")
   }))
-  const alerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: (a, t) => Effect.sync(() => void told.push([a, t])) }))
+  const alerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: (a, t) => Effect.sync(() => (told.push([a, t]), true)) }))
   const moveIn = {
     standard: "erc191",
     payload: intentPayload({
@@ -363,7 +363,8 @@ const tokens = [
   { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
 ]
 /** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
-const mainnetTopUp = (holdings: Record<string, string> = {}) => {
+const mainnetTopUp = (holdings: Record<string, string> = {}, o: { deliver?: () => boolean; status?: string } = {}) => {
+  const deliver = o.deliver ?? (() => true)
   const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
   const submitted: Array<{ txHash: string; depositAddress: string }> = []
   const told: Array<string> = []
@@ -377,12 +378,12 @@ const mainnetTopUp = (holdings: Record<string, string> = {}) => {
       } as never)
     },
     status: () => Effect.succeed("PENDING_DEPOSIT"),
-    details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
+    details: () => Effect.succeed({ status: o.status ?? "PENDING_DEPOSIT" }),
     submitDeposit: (i) => Effect.sync(() => void submitted.push(i))
   }))
   const alerts = Layer.succeed(Alerts, Alerts.of({
     admin: (text) => Effect.sync(() => void told.push(`admin: ${text}`)),
-    customer: (account, text) => Effect.sync(() => void told.push(`${account}: ${text}`))
+    customer: (account, text) => Effect.sync(() => (told.push(`${account}: ${text}`), deliver()))
   }))
   const near = fakeNear({
     view: ((method: string, args: { token_ids?: Array<string> }) =>
@@ -465,4 +466,19 @@ test("a Top-Up the app paid stays in sight past its deadline until 1Click settle
   assert.equal(w.told.length, 2, "told once, not on every pass")
   assert.ok(w.told[0]!.startsWith(`${EVM}: 1Click hasn't confirmed your $0.12 Top-Up transfer (0.120132 USDC on Base) yet.`), w.told[0])
   assert.match(w.told[1]!, new RegExp(`^admin: 1Click hasn't seen a paid Top-Up: deposit dq-1, tx ${tx} on Base`))
+})
+
+test("a notice Telegram didn't take is sent again on a later pass, even once the swap is done, and only until it's taken", async () => {
+  const answers = [false, true]
+  const w = mainnetTopUp({}, { status: "SUCCESS", deliver: () => answers.shift() ?? true })
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* t.quote(NEAR, BASE, 1_000_000)
+      for (let i = 0; i < 3; i++) yield* t.trackNow
+      return (yield* sql<{ told: Array<string>; retell: boolean }>`SELECT told, retell FROM intents_swaps`)[0]!
+    })
+  )
+  assert.equal(w.told.length, 2, "failed once, delivered on the next pass, then left alone")
+  assert.ok(w.told.every((x) => x.includes("landed in your NEAR wallet")))
+  assert.deepEqual([[...r.told], r.retell], [["landed"], false])
 })

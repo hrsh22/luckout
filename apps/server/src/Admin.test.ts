@@ -55,7 +55,7 @@ const layer = Admin.layer.pipe(
     Layer.succeed(Near, near),
     Layer.succeed(Bitrefill, bitrefill),
     Layer.succeed(Refill, refill),
-    Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.void }))
+    Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
   )),
   Layer.provideMerge(DbMemory)
 )
