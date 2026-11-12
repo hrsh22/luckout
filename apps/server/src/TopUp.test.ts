@@ -77,7 +77,7 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
   const results = await Effect.runPromise(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const t = yield* TopUp
-    for (const d of ["d1", "d2", "d3", "d4"]) {
+    for (const d of ["d1", "d2", "d3", "d4", "d5"]) {
       yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc) VALUES (${d}, ${me}, 'in', 2000000)`
     }
     const tag = <E>(e: Effect.Effect<void, E>) => e.pipe(Effect.match({ onFailure: (err) => String((err as { message: string }).message), onSuccess: () => "ok" }))
@@ -88,13 +88,18 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
       again: yield* tag(t.move(me, "d1", a2)),
       second: yield* tag(t.move(me, "d2", yield* Effect.promise(() => sign("2000000")))),
       third: yield* tag(t.move(me, "d3", yield* Effect.promise(() => sign("2000000")))),
-      fourth: yield* tag(t.move(me, "d4", yield* Effect.promise(() => sign("2000000"))))
+      fourth: yield* tag(t.move(me, "d4", yield* Effect.promise(() => sign("2000000")))),
+      // d1 left unpaid past its deadline: it can't land, so it stops counting.
+      afterDeadline: yield* sql`UPDATE intents_swaps SET deadline = now() - interval '1 minute' WHERE deposit_address = 'd1'`.pipe(
+        Effect.andThen(tag(t.move(me, "d5", yield* Effect.promise(() => sign("2000000")))))
+      )
     }
   }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(pending, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory))))))
   assert.match(results.wrongAmount, /doesn't move this Top-Up/)
   assert.deepEqual([results.first, results.same, results.second, results.third], ["ok", "ok", "ok", "ok"])
   assert.match(results.again, /already handled/, "a second signed move-in for the same Top-Up is refused")
   assert.match(results.fourth, /other Top-Ups first/)
+  assert.equal(results.afterDeadline, "ok", "an unpaid quote past its deadline doesn't hold up a new Top-Up")
 })
 
 // ---------- money in transit stays in sight ----------
