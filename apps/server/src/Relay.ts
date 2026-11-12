@@ -1,4 +1,4 @@
-import { RelayFailed, RelaySettings, RelayUnavailable, type SignedIntent } from "@luckout/api"
+import { mtTransferArgs, RelayFailed, RelaySettings, RelayUnavailable, type SignedIntent } from "@luckout/api"
 import { deserialize, serialize } from "borsh"
 import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
@@ -27,7 +27,10 @@ export interface Allowlist {
   readonly accountId: string
   readonly contractId: string
   readonly usdcId: string
+  readonly intentsId: string
   readonly testnet: boolean
+  /** A send-back we quoted for this account (its 1Click deposit address, token and base units), if the call pays one. */
+  readonly sendBack?: { readonly receiverId: string; readonly token: string; readonly amount: string } | undefined
 }
 
 /** The deposit a call must carry for us to pay its fee, or undefined if we don't pay for it at all. */
@@ -40,22 +43,35 @@ const expectedDeposit = (receiver: string, method: string, args: Record<string, 
     if (method === "storage_deposit" && (args.account_id ?? a.accountId) === a.accountId && args.registration_only === true) return USDC_REGISTRATION
     if (method === "faucet" && a.testnet) return 0n
   }
+  // A NEAR wallet sending what's held in its NEAR Intents account to its own wallet, through a swap we quoted, exactly.
+  if (receiver === a.intentsId && method === "mt_transfer" && a.sendBack && JSON.stringify(args) === JSON.stringify(mtTransferArgs(a.sendBack))) {
+    return 1n
+  }
   return undefined
 }
 
-/** Why we won't pay for this delegate, or undefined if it's one of our own calls, exactly as the app makes it. */
-export const refusal = (d: Pick<SignedDelegate["delegateAction"], "senderId" | "receiverId" | "actions">, a: Allowlist): string | undefined => {
-  if (d.senderId !== a.accountId) return "This was signed by a different account than the one signed in."
+type Delegate = Pick<SignedDelegate["delegateAction"], "senderId" | "receiverId" | "actions">
+/** The delegate's one function call and its JSON arguments, if that's what it is. */
+const onlyCall = (d: Delegate) => {
   const call = d.actions.length === 1 ? d.actions[0]!.functionCall : undefined
-  if (!call) return "Luckout only pays the fee for one of its own calls at a time."
-  let args: Record<string, unknown>
+  if (!call) return undefined
   try {
-    args = JSON.parse(new TextDecoder().decode(Uint8Array.from(call.args)))
+    const args: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(call.args)))
+    return { call, args: (args ?? {}) as Record<string, unknown> }
   } catch {
-    return "Luckout only pays the fee for its own calls."
+    return { call, args: undefined }
   }
-  const deposit = expectedDeposit(d.receiverId, call.methodName, args ?? {}, a)
-  if (deposit === undefined) return "Luckout only pays the fee for its own calls: deposits, withdrawals, settings and reclaims."
+}
+
+/** Why we won't pay for this delegate, or undefined if it's one of our own calls, exactly as the app makes it. */
+export const refusal = (d: Delegate, a: Allowlist): string | undefined => {
+  if (d.senderId !== a.accountId) return "This was signed by a different account than the one signed in."
+  const one = onlyCall(d)
+  if (!one) return "Luckout only pays the fee for one of its own calls at a time."
+  const { call, args } = one
+  if (!args) return "Luckout only pays the fee for its own calls."
+  const deposit = expectedDeposit(d.receiverId, call.methodName, args, a)
+  if (deposit === undefined) return "Luckout only pays the fee for its own calls: deposits, withdrawals, settings, reclaims and send-backs."
   if (BigInt(call.deposit) !== deposit) return "That call carries an unexpected deposit."
   if (BigInt(call.gas) > MAX_GAS) return "That call asks for more gas than it needs."
   return undefined
@@ -126,6 +142,16 @@ export class Relay extends Context.Service<Relay, {
         near.relayerId ? quotaLeft(accountId).pipe(Effect.orElseSucceed(() => false)) : Effect.succeed(false)
 
       const failed = (message: string) => new RelayFailed({ message })
+
+      /** What a 1Click swap we quoted for this account takes from its NEAR Intents account: a withdrawal's USDC, or a send-back. */
+      const quotedSwap = (accountId: string, depositAddress: unknown) =>
+        typeof depositAddress !== "string"
+          ? Effect.succeed(undefined)
+          : sql<{ token: string; amount: string }>`
+              SELECT coalesce(origin_asset, ${`nep141:${usdcId}`}) AS token, coalesce(origin_amount, usdc::text) AS amount
+              FROM intents_swaps WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction <> 'in'`.pipe(
+              Effect.map((r) => r[0])
+            )
       // ponytail: one global lock around dedupe, caps, checks and send, so parallel requests can't all
       // pass the caps (or both register USDC) before either is saved. Fine while the relayer sends one
       // at a time from one process (ADR-0006); per-account locks if throughput matters.
@@ -145,7 +171,10 @@ export class Relay extends Context.Service<Relay, {
             catch: () => failed("That isn't a signed NEAR action.")
           })
           const d = sd.delegateAction
-          const why = refusal(d, { accountId, contractId: near.contractId, usdcId, testnet })
+          const to = d.receiverId === near.intentsId ? onlyCall(d)?.args?.receiver_id : undefined
+          const quoted = yield* quotedSwap(accountId, to)
+          const sendBack = quoted && { receiverId: String(to), ...quoted }
+          const why = refusal(d, { accountId, contractId: near.contractId, usdcId, intentsId: near.intentsId, testnet, sendBack })
           if (why) return yield* failed(why)
 
           // The same signature sent twice (a retry, a double click) gets the first result, not a second fee.
@@ -170,6 +199,11 @@ export class Relay extends Context.Service<Relay, {
               const registered = yield* near.view<unknown>("storage_balance_of", { account_id: accountId }, usdcId)
               if (registered !== null) return yield* failed("USDC is already enabled on your account.")
             }
+            // A send-back that would fail for want of the token, refused before we pay for it.
+            if (sendBack) {
+              const has = yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: sendBack.token }, near.intentsId)
+              if (BigInt(has) < BigInt(sendBack.amount)) return yield* failed("That's no longer in your NEAR Intents account.")
+            }
             return yield* near.relay(sd, (signed) =>
               sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(signed)}::jsonb)
                   ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
@@ -185,17 +219,17 @@ export class Relay extends Context.Service<Relay, {
           })
         )
 
-      /** Why this intent would fail for want of money: USDC in the signer's Intents account, or their Luckout Balance. */
+      /** Why this intent would fail for want of money: the token in the signer's Intents account, or their Luckout Balance. */
       const fundsShort = (accountId: string, intent: Record<string, unknown>) =>
         Effect.gen(function*() {
-          const need = intent.intent === "ft_withdraw"
-            ? BigInt(String(intent.amount))
+          const [token, need] = intent.intent === "ft_withdraw"
+            ? [`nep141:${usdcId}`, BigInt(String(intent.amount))]
             : intent.intent === "transfer"
-            ? BigInt(Object.values(intent.tokens as Record<string, string>)[0] ?? "0")
-            : undefined
-          if (need !== undefined) {
-            const has = BigInt(yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: `nep141:${usdcId}` }, near.intentsId))
-            return has < need ? "That USDC isn't in your NEAR Intents account yet." : undefined
+            ? Object.entries(intent.tokens as Record<string, string>).map(([t, a]) => [t, BigInt(a)] as const)[0] ?? []
+            : []
+          if (token !== undefined && need !== undefined) {
+            const has = BigInt(yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: token }, near.intentsId))
+            return has < need ? "That isn't in your NEAR Intents account yet." : undefined
           }
           const action = intent.intent === "auth_call" ? JSON.parse(String(intent.msg)) : undefined
           if (action?.withdraw) {
@@ -210,13 +244,9 @@ export class Relay extends Context.Service<Relay, {
           if (!near.relayerId) return yield* new RelayUnavailable({ message: "Luckout can't send this right now. Try again later." })
           const p = parsePayload(signed.payload)
           const first = p?.intents[0]
-          // A transfer may only pay a 1Click withdrawal we quoted for this account, and exactly its amount.
-          const exitAmount = first?.intent === "transfer"
-            ? (yield* sql<{ usdc: string }>`
-                SELECT usdc::text AS usdc FROM intents_swaps
-                WHERE deposit_address = ${String(first.receiver_id)} AND account_id = ${accountId} AND direction = 'out'`)[0]?.usdc
-            : undefined
-          const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId, exitAmount, now: new Date() })
+          // A transfer may only pay a 1Click swap we quoted for this account, with exactly its token and amount.
+          const quoted = first?.intent === "transfer" ? yield* quotedSwap(accountId, first.receiver_id) : undefined
+          const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId, quoted, now: new Date() })
           if (why) return yield* failed(why)
           if (!(yield* Effect.promise(() => signedBy(signed, accountId)))) return yield* failed("The signature doesn't match your account.")
 

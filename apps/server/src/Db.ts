@@ -231,6 +231,14 @@ const migrations = Migrator.fromRecord({
   "0014_transfers_deposited": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN deposited TEXT`
+  }),
+  // A send-back ('back'): a token held in the customer's NEAR Intents account, all of it, to their own wallet.
+  // What it takes is kept so the relayer pays for exactly that transfer.
+  "0015_transfers_send_back": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps DROP CONSTRAINT intents_swaps_direction_check`
+    yield* sql`ALTER TABLE intents_swaps ADD CONSTRAINT intents_swaps_direction_check CHECK (direction IN ('in', 'out', 'back'))`
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN origin_asset TEXT, ADD COLUMN origin_amount TEXT`
   })
 })
 

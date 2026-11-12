@@ -105,7 +105,7 @@ test("a quote tells the customer, and records, when refunds begin (30 min), not 
     tokens: Effect.succeed([{ assetId: "nep141:base-usdc", blockchain: "base", symbol: "USDC", contractAddress: "0xusdc", decimals: 6 }]),
     quote: (r) => Effect.succeed({
       quote: { depositAddress: `dq-${r.swapType}`, amountIn: "1010224", amountInFormatted: "1.010224", amountOut: "1000000", amountOutFormatted: "0.99", timeEstimate: 35, deadline: threeDays },
-      quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: r.recipient, swapType: r.swapType, recipientType: r.recipientType, depositType: r.depositType ?? "ORIGIN_CHAIN" }
+      quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: r.recipient, refundTo: r.refundTo, swapType: r.swapType, recipientType: r.recipientType, depositType: r.depositType ?? "ORIGIN_CHAIN" }
     } as never),
     status: () => Effect.succeed("PENDING_DEPOSIT"),
     details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
@@ -152,6 +152,8 @@ const row = (o: Partial<SwapRow>): SwapRow => ({
   move: null,
   move_detail: null,
   move_in: null,
+  origin_asset: null,
+  origin_amount: null,
   told: [],
   created_at: new Date(),
   ...o
@@ -174,7 +176,11 @@ test("every swap says where the money is, in the customer's words", () => {
     [{ direction: "out", status: "PENDING_DEPOSIT" }, "swapping"],
     [{ direction: "out", status: "PROCESSING" }, "swapping"],
     [{ direction: "out", status: "SUCCESS" }, "done"],
-    [{ direction: "out", status: "REFUNDED" }, "refunded"]
+    [{ direction: "out", status: "REFUNDED" }, "refunded"],
+    [{ direction: "back", status: null }, "swapping"],
+    [{ direction: "back", status: "PROCESSING" }, "swapping"],
+    [{ direction: "back", status: "SUCCESS", account_id: NEAR }, "done"],
+    [{ direction: "back", status: "REFUNDED" }, "refunded"]
   ]
   for (const [o, phase] of cases) assert.equal(phaseOf(row(o)), phase, JSON.stringify(o))
 })
@@ -199,7 +205,9 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.match(n({ status: "SUCCESS", move: "failed", move_detail: "That approval expired" })!.text, /NEAR Intents account but didn't move into Luckout \(That approval expired\)\. Move it in/)
   const refund = n({ status: "REFUNDED", refunded: "2.5", refund_reason: "Deposit came in after the deadline" })!
   assert.equal(refund.key, "refunded")
-  assert.match(refund.text, /2\.525765 USDC on Base\) didn't go through: Deposit came in after the deadline\. 1Click sent 2\.5 USDC back to your NEAR Intents account/)
+  assert.match(refund.text, /2\.525765 USDC on Base\) didn't go through: Deposit came in after the deadline\. 1Click sent 2\.5 USDC back to your wallet on Base\./)
+  assert.match(n({ status: "REFUNDED", refunded: "2.5", account_id: NEAR })!.text, /1Click sent 2\.5 USDC back to your NEAR Intents account\./, "a NEAR wallet's address on Base is unknown")
+  assert.match(n({ status: "REFUNDED", refunded: "0.1", symbol: "SOL", chain: "sol" })!.text, /1Click sent 0\.1 SOL back to your NEAR Intents account\./, "an EVM address isn't one on Solana")
   assert.match(n({ status: "REFUNDED", refunded: "0.15", refund_reason: "QUOTE_EXPIRED" })!.text, /didn't go through: the full amount didn't arrive before the deadline\. 1Click sent 0\.15 USDC back/)
   assert.deepEqual(n({ direction: "out", status: "SUCCESS", amount_out: "1.419", chain: "base" }), { key: "arrived", text: "Your $2.50 withdrawal arrived: 1.419 USDC on Base." })
   assert.match(n({ direction: "out", status: "REFUNDED" })!.text, /withdrawal to Base was refunded to your NEAR Intents account/)
@@ -210,8 +218,13 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   assert.equal(n({ status: "PENDING_DEPOSIT" }), undefined)
   const short = n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now + 20.5 * 60_000) })!
   assert.equal(short.key, "incomplete")
-  assert.match(short.text, /^1Click got 0\.15 of the 2\.525765 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your NEAR Intents account\./)
-  assert.match(n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now - 60_000) })!.text, /0\.15 of the .* needs\. What arrived goes back to your NEAR Intents account/)
+  assert.match(short.text, /^1Click got 0\.15 of the 2\.525765 USDC on Base your \$2\.50 Top-Up needs\. Send the rest to the same address within 20 min, or what arrived goes back to your wallet on Base\./)
+  assert.match(n({ status: "INCOMPLETE_DEPOSIT", deposited: "0.15", deadline: new Date(now - 60_000), account_id: NEAR })!.text, /0\.15 of the .* needs\. What arrived goes back to your NEAR Intents account/)
+  const back = (o: Partial<SwapRow>) => n({ direction: "back", usdc: "0", amount_in: "0.120132", amount_out: "0.117732", ...o })!
+  assert.deepEqual(back({ status: "SUCCESS" }), { key: "arrived", text: "0.117732 USDC is in your wallet on Base." })
+  assert.deepEqual(back({ status: "SUCCESS", account_id: NEAR, chain: "near" }), { key: "arrived", text: "0.117732 USDC is in your NEAR wallet." })
+  assert.match(back({ status: "REFUNDED" }).text, /^Sending it to your wallet on Base didn't go through\. It's still in your NEAR Intents account/)
+  assert.match(back({ status: "PROCESSING", deposit_seen_at: new Date(now - 30 * 60_000) }).text, /^Sending to your wallet on Base is taking longer than usual/)
 })
 
 test("tracking follows every swap, moves EVM Top-Ups in, tells each customer once, and lists what's in transit", async () => {
@@ -331,4 +344,84 @@ test("what 1Click sent back in the token paid with is listed, so no change or re
   const show = (xs: ReadonlyArray<{ amount: string; symbol: string; chain: string }>) => xs.map((x) => `${x.amount} ${x.symbol} on ${x.chain}`)
   assert.deepEqual(show(r.evm), ["0.120132 USDC on base"], "an EVM wallet's NEAR USDC is its Luckout wallet already; an unknown token is skipped")
   assert.deepEqual(show(r.near), ["0.120132 USDC on base", "2.5 USDC on near"], "a NEAR wallet sees its NEAR USDC there too; nothing at zero")
+})
+
+// ---------- what 1Click sends back reaches the customer's own wallet ----------
+
+const BASE = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+const tokens = [
+  { assetId: BASE, blockchain: "base", symbol: "USDC", contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", decimals: 6 },
+  { assetId: "nep141:sol.omft.near", blockchain: "sol", symbol: "SOL", decimals: 9 },
+  { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
+]
+/** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
+const mainnetTopUp = (holdings: Record<string, string> = {}) => {
+  const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
+  const oneClick = Layer.succeed(OneClick, OneClick.of({
+    tokens: Effect.succeed(tokens),
+    quote: (r) => {
+      asked.push(r)
+      return Effect.succeed({
+        quote: { depositAddress: `dq-${asked.length}`, amountIn: r.amount, amountInFormatted: "0.120132", amountOut: "117732", amountOutFormatted: "0.117732", timeEstimate: 12 },
+        quoteRequest: { ...r, depositType: r.depositType ?? "ORIGIN_CHAIN" }
+      } as never)
+    },
+    status: () => Effect.succeed("PENDING_DEPOSIT"),
+    details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
+    submitDeposit: () => Effect.void
+  }))
+  const near = fakeNear({
+    view: ((method: string, args: { token_ids?: Array<string> }) =>
+      Effect.succeed(
+        method === "mt_tokens_for_owner"
+          ? Object.keys(holdings).map((token_id) => ({ token_id }))
+          : args.token_ids!.map((id) => holdings[id])
+      )) as never
+  })
+  const run = <A, E>(f: (t: TopUp["Service"], sql: SqlClient.SqlClient) => Effect.Effect<A, E>) =>
+    Effect.runPromise(Effect.gen(function*() {
+      return yield* f(yield* TopUp, yield* SqlClient.SqlClient)
+    }).pipe(Effect.provide(TopUp.layer.pipe(
+      Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory)),
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
+    ))))
+  return { asked, run }
+}
+
+test("a Top-Up's refund, and the extra it asks for, go back to an EVM wallet on its own chain; anything else to NEAR Intents", async () => {
+  const w = mainnetTopUp()
+  await w.run((t) => Effect.all([t.quote(EVM, BASE, 1_000_000), t.quote(EVM, "nep141:sol.omft.near", 1_000_000), t.quote(NEAR, BASE, 1_000_000)]))
+  assert.deepEqual(w.asked.map((r) => [r.refundTo, r.refundType]), [[EVM, "ORIGIN_CHAIN"], [EVM, "INTENTS"], [NEAR, "INTENTS"]])
+})
+
+test("a held token goes to the customer's own wallet: an EVM wallet's as it is on its chain, a NEAR wallet's as USDC", async () => {
+  const held = { [BASE]: "120132", "nep141:wrap.near": "10", "nep141:usdc.test": "5" }
+  const w = mainnetTopUp(held)
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      const evm = yield* t.held(EVM)
+      const near = yield* t.held(NEAR)
+      const q = yield* t.sendBack(EVM, BASE)
+      const n = yield* t.sendBack(NEAR, BASE)
+      const refused = yield* Effect.all([t.sendBack(EVM, "nep141:wrap.near"), t.sendBack(NEAR, "nep141:usdc.test"), t.sendBack(EVM, "nep141:none")].map(Effect.flip))
+      const rows = yield* sql<{ deposit_address: string; direction: string; symbol: string; chain: string; origin_asset: string; origin_amount: string }>`
+        SELECT deposit_address, direction, symbol, chain, origin_asset, origin_amount FROM intents_swaps ORDER BY deposit_address`
+      const listed = yield* t.transfers(EVM)
+      return { evm, near, q, n, refused, rows, listed }
+    })
+  )
+  assert.deepEqual(r.evm.map((h) => [h.symbol, h.chain, h.sendable]), [["USDC", "base", true], ["wNEAR", "near", false]], "an EVM wallet has no address on NEAR")
+  assert.deepEqual(r.near.map((h) => [h.symbol, h.chain, h.sendable]), [["USDC", "base", true], ["wNEAR", "near", true], ["USDC", "near", false]])
+  assert.deepEqual(w.asked.map((a) => [a.originAsset, a.destinationAsset, a.amount, a.depositType, a.recipient, a.recipientType, a.refundType]), [
+    [BASE, BASE, "120132", "INTENTS", EVM, "DESTINATION_CHAIN", "INTENTS"],
+    [BASE, "nep141:usdc.test", "120132", "INTENTS", NEAR, "DESTINATION_CHAIN", "INTENTS"]
+  ])
+  assert.deepEqual([r.q.depositAddress, r.q.assetId, r.q.amount, r.q.symbol, r.q.chain], ["dq-1", BASE, "120132", "USDC", "base"])
+  assert.deepEqual([r.n.symbol, r.n.chain], ["USDC", "near"])
+  assert.equal(r.refused.length, 3)
+  assert.deepEqual(r.rows.map((x) => [x.deposit_address, x.direction, x.symbol, x.chain, x.origin_asset, x.origin_amount]), [
+    ["dq-1", "back", "USDC", "base", BASE, "120132"],
+    ["dq-2", "back", "USDC", "near", BASE, "120132"]
+  ])
+  assert.deepEqual(r.listed.map((x) => [x.direction, x.phase, x.amountOut]), [["back", "swapping", "0.117732"]], "on its way, in sight")
 })
