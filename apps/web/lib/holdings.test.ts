@@ -2,9 +2,9 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { matchHoldings, maxTopUp } from "./holdings.ts"
 
-// Shaped like Reown's balance lookup for the test wallet on Base (2026-11-12).
+// Shaped like Reown's balance lookup for the test wallet on Base (2026-11-12): the chain's own coin has no address key.
 const balances = [
-  { symbol: "ETH", chainId: "eip155:8453", address: null, value: 0.49, quantity: { numeric: "0.000245" } },
+  { symbol: "ETH", chainId: "eip155:8453", value: 0.49, quantity: { numeric: "0.000245" } },
   { symbol: "USDC", chainId: "eip155:8453", address: "eip155:8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", value: 47.1, quantity: { numeric: "47.12" } },
   { symbol: "USDC", chainId: "eip155:10", address: "eip155:10:0x0b2c639c533813f4aa9d7837caf62653d097ff85", value: 9, quantity: { numeric: "9" } }
 ]
