@@ -7,13 +7,14 @@ import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
 import { TelegramLink } from "@/components/telegram-link"
+import { Toggle } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { dollars, toMicro, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
-import type { Mode } from "@luckout/api"
+import { DEFAULT_LIMITS, type Mode, NO_LIMIT, noLimit } from "@luckout/api"
 import { Plus } from "lucide-react"
 import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
@@ -39,7 +40,7 @@ export default function WalletPage() {
   const balance = Number(account?.balance ?? 0)
   const running = account ? Number(account.cashback_received) - Number(account.premiums_paid) : 0
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
-  const daily = Number(account?.daily_limit ?? 100_000_000)
+  const daily = account?.daily_limit ?? String(DEFAULT_LIMITS.daily)
   const chosen = account?.default_mode ?? (accountId ? pendingMode(accountId) : undefined) ?? "normal"
 
   const pickMode = async (m: Mode) => {
@@ -92,9 +93,9 @@ export default function WalletPage() {
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={today} /></p>
           <div className="mt-auto pt-6">
             <div className="h-2 overflow-hidden rounded-full bg-soft">
-              <div className="h-full rounded-full bg-ink transition-[width] duration-500" style={{ width: `${Math.min(100, (today / daily) * 100)}%` }} />
+              <div className="h-full rounded-full bg-ink transition-[width] duration-500" style={{ width: `${Math.min(100, (today / Number(daily)) * 100)}%` }} />
             </div>
-            <p className="mt-2 text-sm text-muted">of your {usd(daily)} daily limit. Resets at <DailyReset />.</p>
+            <p className="mt-2 text-sm text-muted">{noLimit(daily) ? "No daily limit." : <>of your {usd(daily)} daily limit. Resets at <DailyReset />.</>}</p>
           </div>
         </div>
       </section>
@@ -112,7 +113,7 @@ export default function WalletPage() {
         <ModePicker value={saving ?? chosen} onChange={pickMode} saving={saving} savedDefault={account?.default_mode} label="Default mode" />
       </section>
 
-      {account && <Limits per={Number(account.per_purchase_limit)} daily={daily} />}
+      {account && <Limits per={account.per_purchase_limit} daily={daily} />}
 
       <section className="flex flex-col gap-4">
         <h2 className="font-display text-3xl font-extrabold">Telegram</h2>
@@ -127,54 +128,86 @@ export default function WalletPage() {
   )
 }
 
-function Limits({ per, daily }: { per: number; daily: number }) {
+/** Micro-USDC strings from the contract; "No limit" is u128::MAX, which no JS number holds exactly. */
+function Limits({ per, daily }: { per: string; daily: string }) {
   const actions = useWalletActions()
   const [a, setA] = useState("")
   const [b, setB] = useState("")
+  const [offA, setOffA] = useState(false)
+  const [offB, setOffB] = useState(false)
   const [busy, setBusy] = useState(false)
   useEffect(() => {
-    setA(dollars(per))
-    setB(dollars(daily))
+    setOffA(noLimit(per))
+    setOffB(noLimit(daily))
+    setA(noLimit(per) ? "" : dollars(Number(per)))
+    setB(noLimit(daily) ? "" : dollars(Number(daily)))
   }, [per, daily])
-  const nextPer = toMicro(a)
-  const nextDaily = toMicro(b)
-  const changed = nextPer !== per || nextDaily !== daily
-  const valid = nextPer >= 0 && nextDaily >= 0
+  /** What a field would save: NO_LIMIT, micro-USDC, or undefined if it isn't an amount. */
+  const next = (off: boolean, v: string) => (off ? NO_LIMIT : toMicro(v) >= 0 ? String(toMicro(v)) : undefined)
+  const nextPer = next(offA, a)
+  const nextDaily = next(offB, b)
+  const same = (n: string | undefined, now: string) => (noLimit(now) ? n === NO_LIMIT : n === now)
+  const changed = !same(nextPer, per) || !same(nextDaily, daily)
 
   return (
     <section id="limits" className="flex scroll-mt-28 flex-col gap-4">
       <div>
         <h2 className="font-display text-3xl font-extrabold">Spending limits</h2>
         <p className="mt-1 max-w-[60ch] text-ink-soft">
-          The contract checks these on every purchase, including ones the Telegram bot makes. Only your wallet can raise them.
+          The contract checks these on every purchase: yours here, the Telegram bot's, and any our server submits. Only your wallet can change
+          them.
         </p>
       </div>
-      <div className="card flex flex-col gap-5 p-6 sm:flex-row sm:items-end">
-        {[
-          { label: "Per purchase", value: a, set: setA },
-          { label: "Per day", value: b, set: setB }
-        ].map((f) => (
-          <label key={f.label} className="flex flex-1 flex-col gap-2">
-            <span className="font-semibold">{f.label}</span>
-            <span className="relative">
-              <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>
-              <input className="field !pl-8" inputMode="decimal" value={f.value} onChange={(e) => f.set(e.target.value.replace(/[^\d.]/g, ""))} aria-invalid={!(toMicro(f.value) >= 0)} />
-            </span>
-          </label>
-        ))}
-        <Button
-          size="md"
-          className="sm:mb-0.5"
-          loading={busy}
-          disabled={!changed || !valid}
-          onClick={async () => {
-            setBusy(true)
-            await actions.setLimits(nextPer, nextDaily)
-            setBusy(false)
-          }}
-        >
-          Save limits
-        </Button>
+      <div className="card flex flex-col gap-5 p-6">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-end">
+          {[
+            { id: "limit-per", label: "Per purchase", value: a, set: setA, off: offA, setOff: setOffA },
+            { id: "limit-day", label: "Per day", value: b, set: setB, off: offB, setOff: setOffB }
+          ].map((f) => (
+            <div key={f.id} className="flex flex-1 flex-col gap-2">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor={f.id} className="font-semibold">{f.label}</label>
+                <span className="flex items-center gap-2 text-sm text-ink-soft">
+                  No limit
+                  <Toggle on={f.off} onChange={f.setOff} label={`No ${f.label.toLowerCase()} limit`} />
+                </span>
+              </div>
+              <span className="relative">
+                {!f.off && <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>}
+                <input
+                  id={f.id}
+                  className="field !pl-8 disabled:opacity-60"
+                  inputMode="decimal"
+                  disabled={f.off}
+                  placeholder={f.off ? "No limit" : undefined}
+                  value={f.off ? "" : f.value}
+                  onChange={(e) => f.set(e.target.value.replace(/[^\d.]/g, ""))}
+                  aria-invalid={!f.off && !(toMicro(f.value) >= 0)}
+                />
+              </span>
+            </div>
+          ))}
+          <Button
+            size="md"
+            className="sm:mb-0.5"
+            loading={busy}
+            disabled={!changed || !nextPer || !nextDaily}
+            onClick={async () => {
+              if (!nextPer || !nextDaily) return
+              setBusy(true)
+              await actions.setLimits(nextPer, nextDaily)
+              setBusy(false)
+            }}
+          >
+            Save limits
+          </Button>
+        </div>
+        {(offA || offB) && (
+          <p role="note" className="rounded-2xl bg-warn-soft p-4 text-[15px] text-warn">
+            With no {offA && offB ? "limits" : offA ? "per-purchase limit" : "daily limit"}, the contract only checks your balance. Any purchase,
+            whether you make it, the Telegram bot makes it or our server submits it, can spend up to everything in your balance.
+          </p>
+        )}
       </div>
     </section>
   )

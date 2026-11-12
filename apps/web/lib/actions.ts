@@ -4,7 +4,7 @@ import { type HeldToken, type Mode, mtTransferArgs, type TopUpAsset, transferInt
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
-import { tokenAmount, usd } from "./format"
+import { limitsText, tokenAmount, usd } from "./format"
 import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
 import { type Call, contractId, intentsId, usdcId } from "./near"
@@ -126,11 +126,12 @@ export function useWalletActions() {
         args: { mode },
         deposit: ONE_YOCTO
       }),
-    setLimits: (perPurchase: number, daily: number) =>
-      run("Saving your limits", `Limits saved: ${usd(perPurchase)} a purchase, ${usd(daily)} a day`, {
+    /** Micro-USDC strings, so "No limit" (u128::MAX) reaches the contract exactly. */
+    setLimits: (perPurchase: string, daily: string) =>
+      run("Saving your limits", `Limits saved: ${limitsText(perPurchase, daily)}`, {
         receiverId: contractId,
         method: "set_limits",
-        args: { per_purchase: String(perPurchase), daily: String(daily) },
+        args: { per_purchase: perPurchase, daily },
         deposit: ONE_YOCTO
       }),
     /** A purchase neither delivered nor cancelled within 24 hours: the full amount comes back. */
