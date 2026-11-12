@@ -85,8 +85,9 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   finished.current = onDone
   const reported = useRef(false)
 
-  // Poll until the swap settles and its USDC has moved into Luckout (or couldn't).
-  const waiting = !!quote && signed && !(status && DONE.has(status.status) && status.move !== "waiting")
+  // Poll until the swap settles and its USDC has moved into Luckout (or couldn't). An exchange transfer is followed
+  // too, approved or not: unapproved, it lands in their NEAR Intents account and they're offered the one tap.
+  const waiting = !!quote && (signed || manual) && !(status && DONE.has(status.status) && status.move !== "waiting")
   useEffect(() => {
     if (!quote || !token || !waiting) return
     const t = setInterval(() => {
@@ -139,8 +140,26 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
       // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
       void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
     })
-  /** Paid from an exchange or another wallet: the address (and its QR) is the next screen. */
-  const sendElsewhere = () => step("quote", async () => (setManual(true), setQuote(await realQuote())))
+  /**
+   * Asks once for the approval that moves this Top-Up into Luckout when it lands. Declining isn't an error: the
+   * money then waits in their NEAR Intents account for one tap.
+   */
+  const approve = (q = quote) =>
+    step("sign", async () => {
+      try {
+        if (q) await signMoveIn(q)
+      } catch (e) {
+        if (!cancelled(e)) throw e
+      }
+    })
+  /** Paid from an exchange or another wallet: approve first, then the address (and its QR). */
+  const sendElsewhere = () =>
+    step("quote", async () => {
+      setManual(true)
+      const q = await realQuote()
+      setQuote(q)
+      await approve(q)
+    })
 
   if (!quote) {
     return (
@@ -210,36 +229,58 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
         ? <p className="font-semibold">Done: {usd(quote.usdcOut)} is in your balance.</p>
         : (
           <>
-            <p>
-              Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{CHAIN_NAMES[quote.chain] ?? quote.chain}</b> and get <b>{usd(quote.usdcOut)}</b> in
-              Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
-            </p>
-            {!signed && !manual && (
-              <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quote)}>
-                Send from your wallet
-              </Button>
-            )}
-            <details className="text-muted" open={signed || manual}>
-              <summary className="cursor-pointer">Or send it yourself, from an exchange or another wallet</summary>
-              <div className="mt-2 flex flex-col gap-3">
-                <p>Send exactly {quote.amountInFormatted} {quote.symbol} on {CHAIN_NAMES[quote.chain] ?? quote.chain} before {new Date(quote.deadline).toLocaleTimeString()} to:</p>
-                <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
-                {!signed && (
-                  <Button variant="light" size="sm" className="self-start" loading={busy === "sign"} disabled={!!busy} onClick={() => step("sign", () => signMoveIn(quote))}>
-                    Sign to move it in when it lands
-                  </Button>
-                )}
-              </div>
-            </details>
-            {signed && (
+            {manual
+              ? (
+                // Sent from an exchange or another wallet: the address is the point, not something to unfold.
+                <div className="flex flex-col gap-3">
+                  <p>
+                    Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> before{" "}
+                    {new Date(quote.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} to this address, and get <b>{usd(quote.usdcOut)}</b>{" "}
+                    in Luckout. A little more is fine: 1Click sends the extra back.
+                  </p>
+                  <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
+                  {signed
+                    ? <p className="font-medium text-good">Approved: it goes straight into your balance when it arrives.</p>
+                    : !(status && DONE.has(status.status)) && (
+                      <div className="flex flex-col gap-2 rounded-2xl bg-white p-3">
+                        <p>
+                          Not approved yet: when it arrives it waits in your NEAR Intents account (yours, safe) until you move it in with one tap.
+                          Approve now and it goes straight into your balance.
+                        </p>
+                        <Button variant="light" size="sm" className="self-start" loading={busy === "sign"} disabled={!!busy} onClick={() => approve()}>
+                          Approve now
+                        </Button>
+                      </div>
+                    )}
+                </div>
+              )
+              : (
+                <>
+                  <p>
+                    Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get <b>{usd(quote.usdcOut)}</b> in
+                    Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
+                  </p>
+                  {!signed && (
+                    <>
+                      <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quote)}>
+                        Send from your wallet
+                      </Button>
+                      <button type="button" disabled={!!busy} className="self-start text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline" onClick={() => (setManual(true), approve())}>
+                        Send it from an exchange or another wallet instead
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            {(signed || manual) && (
               <p>
                 Status: <b>{status?.status.replaceAll("_", " ").toLowerCase() ?? "waiting for your transfer"}</b>
                 {status?.status === "SUCCESS" && status.move === "waiting" && ", moving it into Luckout"}
               </p>
             )}
-            {status?.move === "failed" && (
+            {(status?.move === "failed" || (status?.status === "SUCCESS" && !status.move)) && (
               <div className="flex flex-col gap-2">
-                <p>It didn't move into Luckout. Whatever arrived is in your NEAR Intents account.</p>
+                <p>It landed in your NEAR Intents account. Move it into Luckout with one tap.</p>
                 <Button variant="light" size="sm" className="self-start" onClick={() => void actions.deposit(quote.usdcOut)}>Move it in now</Button>
               </div>
             )}

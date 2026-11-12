@@ -9,7 +9,8 @@ import {
   TopUpStatus,
   TopUpUnavailable,
   Transfer,
-  type TransferPhase
+  type TransferPhase,
+  tokenAmount
 } from "@luckout/api"
 import { Config, Context, Effect, Layer, Schedule } from "effect"
 import { formatUnits } from "viem"
@@ -141,14 +142,14 @@ const explorerOf = (depositAddress: string) => `https://explorer.near-intents.or
 export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; text: string } | undefined => {
   const phase = phaseOf(r)
   const amount = usd(Number(r.usdc))
-  const from = `${r.amount_in ?? ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
+  const from = `${r.amount_in ? tokenAmount(r.amount_in, r.symbol ?? "", "up") : ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
   const refundPlace = refundsToWallet(r) ? walletOn(r.chain) : "your NEAR Intents account"
   if (r.direction === "in") {
     if (phase === "incomplete") {
       const left = (ms(r.deadline) ?? now) - now
       return {
         key: "incomplete",
-        text: `1Click got ${r.deposited ?? "part"} of the ${from} your ${amount} Top-Up needs. ${
+        text: `1Click got ${r.deposited ? tokenAmount(r.deposited, r.symbol ?? "", "down") : "part"} of the ${from} your ${amount} Top-Up needs. ${
           left > 60_000
             ? `Send the rest to the same address within ${Math.floor(left / 60_000)} min, or what arrived goes back to ${refundPlace}.`
             : `What arrived goes back to ${refundPlace}.`
@@ -163,7 +164,7 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
     if (phase === "refunded") {
       return {
         key: "refunded",
-        text: `Your Top-Up (${from}) didn't go through${r.refund_reason ? `: ${reasonText(r.refund_reason)}` : ""}. 1Click sent ${r.refunded ? `${r.refunded} ${r.symbol ?? ""}`.trim() : "it"} back to ${refundPlace}. See ${web}/wallet`
+        text: `Your Top-Up (${from}) didn't go through${r.refund_reason ? `: ${reasonText(r.refund_reason)}` : ""}. 1Click sent ${r.refunded ? `${tokenAmount(r.refunded, r.symbol ?? "", "down")} ${r.symbol ?? ""}`.trim() : "it"} back to ${refundPlace}. See ${web}/wallet`
       }
     }
   } else if (r.direction === "back") {

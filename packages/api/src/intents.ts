@@ -107,3 +107,19 @@ export const personalSignature = (signature: string) => {
   bytes[64] = bytes[64]! + 27
   return `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}` as `0x${string}`
 }
+
+const STABLES = new Set(["USDC", "USDT"])
+/**
+ * A token amount people read: stablecoins to the cent, anything else to 6 significant digits. "up" for what
+ * the customer sends (never shows less than leaves the wallet), "down" for what they get (never shows more).
+ * "Send 1.07 USDC" is safe to follow: 1Click sends any extra back.
+ */
+export const tokenAmount = (formatted: string, symbol: string, dir: "up" | "down") => {
+  const n = Number(formatted)
+  if (!Number.isFinite(n) || n <= 0) return formatted
+  const round = dir === "up" ? Math.ceil : Math.floor
+  // The epsilon keeps exact values exact (1.07 stays 1.07, not 1.08) despite binary floating point.
+  const step = STABLES.has(symbol) ? 0.01 : 10 ** (Math.floor(Math.log10(n)) - 5)
+  const r = round(n / step + (dir === "up" ? -1e-9 : 1e-9)) * step
+  return STABLES.has(symbol) ? r.toFixed(2) : r.toLocaleString("en-US", { maximumSignificantDigits: 6, useGrouping: false })
+}

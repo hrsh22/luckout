@@ -202,7 +202,8 @@ export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?:
       {quote && (
         <div className="flex flex-col gap-2 rounded-[1.5rem] bg-soft p-5 text-sm">
           <p>
-            Send exactly <b>{quote.amountInFormatted} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> to:
+            Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> to this address. A little
+            more is fine: 1Click sends the extra back.
           </p>
           <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
           <p className="text-muted">
