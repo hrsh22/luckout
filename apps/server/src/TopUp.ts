@@ -58,11 +58,16 @@ const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", 
 const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
 const walletOn = (c: string | null) => (c === "near" ? "your NEAR wallet" : `your wallet on ${chainName(c)}`)
 /**
+ * EVM chains where 1Click's refund to the paying wallet costs it a fraction of a cent: it pays the gas out of the refund
+ * (on Base, 0.0024 of a 0.0101 USDC change), so on Ethereum a Top-Up's change could be eaten whole.
+ */
+const CHEAP_REFUND_CHAINS = new Set(["arb", "base", "pol", "bsc"])
+/**
  * A Top-Up's refund goes straight back to the wallet it came from: an EVM wallet signs with its own key (Intents.ts),
  * so its address is its own on every EVM chain. Anything else goes to their NEAR Intents account.
  */
 export const refundsToWallet = (r: Pick<SwapRow, "direction" | "account_id" | "chain">) =>
-  r.direction === "in" && isEvmAccount(r.account_id) && r.chain !== null && EVM_CHAINS.has(r.chain)
+  r.direction === "in" && isEvmAccount(r.account_id) && r.chain !== null && CHEAP_REFUND_CHAINS.has(r.chain)
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 
 /** A row of `intents_swaps`: one 1Click swap of a customer's money. */
