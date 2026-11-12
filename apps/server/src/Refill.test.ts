@@ -8,11 +8,11 @@ import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type PaymentStatus } from "./Base.ts"
 import { Bitrefill, type DepositState } from "./Bitrefill.ts"
-import { Credit, CREDIT_DEFAULTS, levels } from "./Credit.ts"
+import { Credit, CREDIT_DEFAULTS, levels, MIN_REFILL } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { OneClick, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
-import { BASE_USDC_ASSET, floatTopUp, quoteProblem, Refill } from "./Refill.ts"
+import { BASE_USDC_ASSET, floatTopUp, fundable, quoteProblem, Refill } from "./Refill.ts"
 import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
 import { NEAR_USDC_ASSET } from "./TopUp.ts"
 
@@ -783,4 +783,34 @@ test("the float is topped up only once the wallet holds under half of it, and wi
   assert.equal(levels({ ...s, baseFloat: 50_000_000 }, 40_000_000, 0).target, 40_000_000, "one day with one")
   assert.equal(CREDIT_DEFAULTS.mainnet.baseFloat, 50_000_000)
   assert.equal(CREDIT_DEFAULTS.testnet.baseFloat, 0, "refills, and so the float, don't run on testnet")
+})
+
+test("a refill the treasury can't fund in full is cut to what it can, never below what waiting purchases need", () => {
+  const cut = (o: Partial<Parameters<typeof fundable>[0]>) => fundable({ amount: 200_000_000, walletUsdc: 0, available: 100_000_000, waitingNeed: 70_000_000, ...o })
+  assert.equal(cut({}), 99_000_000, "all $100 can fund: a swap of $99.00 costs at most $99.99")
+  assert.equal(cut({ walletUsdc: 5_000_000 }), 104_000_000, "USDC already in the Base wallet counts too")
+  assert.equal(cut({ available: 20_000_000 }), 70_000_000, "short even of what customers need: cut to that, and it waits for less")
+  assert.equal(cut({ available: 0, waitingNeed: 0 }), MIN_REFILL, "never under the smallest refill")
+  assert.equal(cut({ available: 1_000_000_000 }), undefined, "it can all be funded: unchanged")
+  assert.equal(cut({ amount: 60_000_000, available: 0 }), undefined, "never raised")
+})
+
+test("an automatic refill waiting on money funds the purchase waiting for credit first, then carries on", async () => {
+  // $50 of credit, a $120 card waiting, and only $100 of proceeds: the full refill would wait for good.
+  const w = world({ credit: 50_000_000, treasuryUsdc: 0, proceeds: 100_000_000, cap: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Refill, (r) => r.kick)
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ id: string }>`SELECT id FROM refills WHERE reason = 'waiting'`
+    const done = yield* drive(row!.id)
+    const [after] = yield* sql<{ amount: string }>`SELECT amount::text AS amount FROM refills WHERE id = ${row!.id}`
+    return { done, amount: Number(after!.amount) }
+  }))
+  assert.equal(r.done.step, "done", r.done.error ?? "")
+  assert.equal(r.amount, 99_000_000, "what $100 of proceeds can fund, enough for the $70 the card needs")
+  assert.ok(w.alerts.some((a) => /cut from \$\d+\.\d\d to \$99\.00: the treasury can't fund all of it now, and purchases waiting for credit come first/.test(a)), w.alerts.join("\n"))
 })
