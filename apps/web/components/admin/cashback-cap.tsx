@@ -22,7 +22,7 @@ export const capText = (cap: Cap) => {
   return share ? `the lower of ${usd(cap.fixed)} and ${share}` : usd(cap.fixed)
 }
 
-/** The owner sets the Cashback Cap in their wallet. An empty field turns that limit off; the contract keeps at least one. */
+/** The owner sets the Cashback Cap in their wallet. An empty fixed field turns that limit off; the share is required. */
 export function CashbackCapSheet({ open, onClose, o, tx }: { open: boolean; onClose: () => void; o: AdminOverview; tx: Tx }) {
   const cap = o.reserve.cashbackCap
   const [fixed, setFixed] = useState("")
@@ -34,11 +34,9 @@ export function CashbackCapSheet({ open, onClose, o, tx }: { open: boolean; onCl
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   const next: Cap = { fixed: fixed.trim() === "" ? null : toMicro(fixed), reserveBps: share.trim() === "" ? null : Math.round(Number(share) * 100) }
   // The contract's own checks in set_cashback_cap, said before the wallet opens.
-  const problem = next.fixed === null && next.reserveBps === null
-    ? "Keep at least one limit."
-    : next.fixed !== null && !(next.fixed > 0)
+  const problem = next.fixed !== null && !(next.fixed > 0)
     ? "The fixed limit must be an amount above $0."
-    : next.reserveBps !== null && !(next.reserveBps > 0 && next.reserveBps <= 5_000)
+    : !(next.reserveBps !== null && next.reserveBps > 0 && next.reserveBps <= 5_000)
     ? "The share must be above 0% and at most 50%."
     : undefined
   return (
@@ -60,10 +58,10 @@ export function CashbackCapSheet({ open, onClose, o, tx }: { open: boolean; onCl
         <label className="flex flex-col gap-1.5">
           <span className="text-sm font-semibold">Share of free reserve</span>
           <span className="relative">
-            <input className="field pr-9!" inputMode="decimal" placeholder="No share limit" value={share} onChange={(e) => setShare(e.target.value.replace(/[^\d.]/g, ""))} />
+            <input className="field pr-9!" inputMode="decimal" placeholder="20" value={share} onChange={(e) => setShare(e.target.value.replace(/[^\d.]/g, ""))} />
             <span className="pointer-events-none absolute top-1/2 right-4 -translate-y-1/2 font-semibold text-muted">%</span>
           </span>
-          <span className="text-xs text-muted">Shrinks with the reserve after a run of luck, so it always lasts. At most 50%. Leave empty for none.</span>
+          <span className="text-xs text-muted">Shrinks with the reserve after a run of luck, so it always lasts. Required, at most 50%: one purchase never takes most of the reserve.</span>
         </label>
         <p className="rounded-[1.25rem] bg-soft p-4 text-sm text-ink-soft">
           {problem ?? `With ${usd(o.reserve.free)} free, one purchase could get up to ${usd(maxCashbackAt(next, o.reserve.free))} back (now ${usd(o.reserve.maxCashback)}).`}

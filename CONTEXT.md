@@ -141,7 +141,7 @@ Cashback Reserve not locked against an accepted Lucky Buy; the operator may with
 _Avoid_: Protocol revenue, customer funds
 
 **Cashback Cap**:
-The most Cashback one Lucky Buy can pay: the lower of a fixed amount and a share of Free Reserve at admission, both set by the owner. Either limit may be off, but not both. It never limits purchase size, only the Lucky Amount, and never changes an accepted purchase.
+The most Cashback one Lucky Buy can pay: the lower of a fixed amount and a share of Free Reserve at admission, both set by the owner. The fixed amount may be off; the share is required and at most 50%, so one Lucky Buy never takes most of the reserve. It never limits purchase size, only the Lucky Amount, and never changes an accepted purchase.
 _Avoid_: Discount Cap (its share once limited the Reference Discount instead), prize limit, purchase cap
 
 **Lucky Amount**:
