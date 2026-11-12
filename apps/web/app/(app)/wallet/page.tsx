@@ -204,8 +204,11 @@ function Limits({ per, daily }: { per: string; daily: string }) {
         </div>
         {(offA || offB) && (
           <p role="note" className="rounded-2xl bg-warn-soft p-4 text-[15px] text-warn">
-            With no {offA && offB ? "limits" : offA ? "per-purchase limit" : "daily limit"}, the contract only checks your balance. Any purchase,
-            whether you make it, the Telegram bot makes it or our server submits it, can spend up to everything in your balance.
+            {offA && offB
+              ? "With no limits, the contract only checks your balance. Any purchase, whether you make it, the Telegram bot makes it or our server submits it, can spend up to everything in your balance."
+              : offA
+              ? "With no per-purchase limit, one purchase, whether you make it, the Telegram bot makes it or our server submits it, can spend up to your whole daily limit."
+              : "With no daily limit, purchases within your per-purchase limit, whether you make them, the Telegram bot makes them or our server submits them, can add up to everything in your balance in a day."}
           </p>
         )}
       </div>
