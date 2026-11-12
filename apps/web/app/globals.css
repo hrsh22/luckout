@@ -52,7 +52,8 @@
 
 @layer base {
   html { background: var(--color-canvas); color: var(--color-ink); scroll-behavior: smooth; }
-  body { font-family: var(--font-sans); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+  /* Decorative blobs sit partly off-screen: clip, never scroll sideways (clip keeps the sticky header working). */
+  body { font-family: var(--font-sans); font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; overflow-x: clip; }
   ::selection { background: var(--color-lilac); color: #fff; }
   :focus-visible { outline: 3px solid var(--color-lilac); outline-offset: 3px; }
   button, [role="button"], summary { cursor: pointer; }

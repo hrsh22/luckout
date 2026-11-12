@@ -1,5 +1,6 @@
 "use client"
 
+import { GiftCard } from "@/components/gift-card"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
@@ -7,7 +8,7 @@ import { safeLink, usd, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
-import { keyPalette, modePalette } from "@/lib/palette"
+import { modePalette } from "@/lib/palette"
 import type { Purchase } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
@@ -32,7 +33,10 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
 
 const redemption = (p: Purchase) => {
   const text = (k: string) => (typeof p.redemption?.[k] === "string" ? (p.redemption[k] as string) : undefined)
-  return { code: text("code"), pin: text("pin"), link: safeLink(text("link")), instructions: text("instructions") }
+  // Bitrefill's expiry date, when the card has one.
+  const expiry = text("expiration_date")
+  const expires = expiry && !Number.isNaN(Date.parse(expiry)) ? new Date(expiry) : undefined
+  return { code: text("code"), pin: text("pin"), link: safeLink(text("link")), instructions: text("instructions"), expires }
 }
 
 /** A delivered Lucky Buy whose Draw isn't recorded yet. */
@@ -239,6 +243,7 @@ export function CodeBlock({ p }: { p: Purchase }) {
         </a>
       )}
       {r.instructions && <p className="text-sm text-muted">{r.instructions}</p>}
+      {r.expires && <p className="text-sm text-muted">Use it by {r.expires.toLocaleDateString(undefined, { dateStyle: "long" })}.</p>}
     </div>
   )
 }
@@ -301,13 +306,10 @@ const STATUS: Record<Purchase["status"], string> = {
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
   const pal = modePalette(p.mode)
-  const tile = keyPalette(p.voucherName)
   return (
     <li className="card overflow-hidden">
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
-        <span className="voucher font-display grid h-12 w-[76px] shrink-0 place-items-center rounded-xl text-xl font-extrabold" style={{ background: tile.tile, color: tile.ink, ["--notch" as string]: "6px" }} aria-hidden="true">
-          {p.voucherName.trim()[0]?.toUpperCase()}
-        </span>
+        <GiftCard v={{ name: p.voucherName, image: p.image, background: p.background }} notch={6} className="h-12 w-[76px] shrink-0 rounded-xl text-[8px]" />
         <span className="min-w-0 flex-1">
           <span className="block truncate font-semibold">{p.voucherName}, {p.value}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
@@ -326,6 +328,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               {p.draw.finalPrice === 0 ? "Free" : `${usd(p.draw.cashback)} back`}
             </span>
           )}
+          {p.draw && p.draw.cashback === 0 && <span className="text-xs text-muted">No cashback</span>}
         </span>
         <ChevronDown size={18} className={`shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
       </button>

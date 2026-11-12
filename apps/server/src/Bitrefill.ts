@@ -199,9 +199,16 @@ export const pickPopular = <P extends Branded>(brands: ReadonlyArray<ReadonlyArr
   return picks
 }
 
+/**
+ * Bitrefill's own test merchants, listed among real cards: its fictional Syldavia (filed as KN) and its testers.
+ * A real brand with "test" in its name (Test Kitchen Philippines) isn't one.
+ */
+export const isTestMerchant = (p: { readonly id: string; readonly name: string; readonly country_code: string }) =>
+  p.id.endsWith("-syldavia") || (p.country_code === "KN" && /test/i.test(`${p.id} ${p.name}`))
+
 /** Only cards delivered as a code can be bought here: top-ups need a phone number or account we can't send. */
-const sellable = (p: { recipient_type?: string | undefined; in_stock?: boolean | undefined }) =>
-  (p.recipient_type ?? "none") === "none" && p.in_stock !== false
+const sellable = (p: { id: string; name: string; country_code: string; recipient_type?: string | undefined; in_stock?: boolean | undefined }) =>
+  (p.recipient_type ?? "none") === "none" && p.in_stock !== false && !isTestMerchant(p)
 
 /** What a Bitrefill product id looks like; anything else is refused before spending a lookup. */
 const PRODUCT_ID = /^[a-z0-9][a-z0-9-]{0,99}$/
@@ -225,6 +232,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   browse(opts: BrowseOptions): Effect.Effect<CatalogPage, BitrefillUnavailable>
   /** Up to 12 popular cards that work in `country` (see pickPopular); none on testnet or before the first catalog copy. */
   popular(country?: string, category?: Category): Effect.Effect<ReadonlyArray<VoucherSummary>>
+  /** A card's logo and its brand colour, from our catalog copy: nothing if it isn't there (yet). */
+  logo(id: string): { readonly image?: string; readonly background?: string }
   /**
    * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
    * the lookup may use the whole budget, not just browsing's share.
@@ -368,6 +377,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // Popular cards come from our own copy of the gift-card catalog (about 100 pages), refreshed twice a
       // day instead of read on every visit. Testnet sells only test cards, so it has none.
       let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = []
+      /** Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. */
+      let logos = new Map<string, ReturnType<typeof images>>()
       const copyCatalog = Effect.gen(function*() {
         const cards: Array<typeof Product.Type> = []
         for (let start = 0;; start += PAGE) {
@@ -376,6 +387,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           if (page.length < PAGE) break
         }
         brands = popularBrands(cards)
+        logos = new Map(cards.map((c) => [c.id, images(c)]))
       })
       if (!testnet && Option.isSome(apiKey)) {
         yield* copyCatalog.pipe(
@@ -437,12 +449,14 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           })
         }
         const p = yield* (options?.purchase ? purchasePrice(id) : Cache.get(mcpPrices, id))
+        if (isTestMerchant(p)) return yield* new BitrefillUnavailable({ message: "No such voucher" })
         const all = p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
         return new Voucher({
           id: p.id,
           name: p.name,
           countryCode: p.country_code,
           currency: p.currency,
+          ...logos.get(p.id),
           packages: forSale(all),
           tooSmall: tooSmall(all)
         })
@@ -551,7 +565,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           }))
         )
 
-      return Bitrefill.of({ search, browse, popular, voucher, order, delivery, credit, deposit, depositState })
+      const logo = (id: string) => logos.get(id) ?? {}
+      return Bitrefill.of({ search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

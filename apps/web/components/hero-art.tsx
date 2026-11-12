@@ -76,7 +76,7 @@ export function HeroArt() {
               </svg>
               <div className="absolute inset-0 grid place-content-center">
                 <b className="font-display text-[52px] leading-none font-extrabold">$9.60</b>
-                <small className="text-muted">back, 40%</small>
+                <small className="text-muted">cashback</small>
               </div>
             </div>
             <div className="mt-4 flex justify-center gap-2 text-[13px] font-semibold">

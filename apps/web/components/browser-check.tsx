@@ -1,6 +1,6 @@
 "use client"
 
-import { type Check, verify } from "@/lib/draw"
+import { type Check, plainly, verify } from "@/lib/draw"
 import { loadDraw } from "@/lib/proof"
 import { useEffect, useState } from "react"
 
@@ -38,8 +38,14 @@ export function BrowserCheck({ tx }: { tx: string }) {
             {checks.map((c) => (
               <tr key={c.label} className="border-b border-line last:border-0">
                 <td className="p-4">{c.label}</td>
-                <td className="max-w-40 truncate p-4 tabular-nums" title={c.expected}>{c.expected}</td>
-                <td className="max-w-40 truncate p-4 tabular-nums" title={c.recomputed}>{c.recomputed}</td>
+                <td className="max-w-40 truncate p-4 tabular-nums" title={c.expected}>
+                  {c.expected}
+                  {c.unit && <span className="block text-muted">{plainly(c.expected, c.unit)}</span>}
+                </td>
+                <td className="max-w-40 truncate p-4 tabular-nums" title={c.recomputed}>
+                  {c.recomputed}
+                  {c.unit && <span className="block text-muted">{plainly(c.recomputed, c.unit)}</span>}
+                </td>
                 <td className="p-4">{c.ok ? "✓" : "✗"}</td>
               </tr>
             ))}

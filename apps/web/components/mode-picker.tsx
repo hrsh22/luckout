@@ -32,7 +32,11 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
         const selected = sameMode(value, m.mode)
         const p = modePalette(m.mode)
         const example = price ?? 20_000_000
-        const outcomes = m.premiumBps === 0 || free !== undefined ? pricedOutcomes(m, simpleQuote(m, example, free ?? 0)) : undefined
+        const quote = m.premiumBps === 0 || free !== undefined ? simpleQuote(m, example, free ?? 0) : undefined
+        const outcomes = quote && pricedOutcomes(m, quote)
+        // When only part of the price plays (a small Cashback Reserve), the extra is less than the mode's
+        // percentage of the price: say what it really is.
+        const extra = quote && quote.luckyAmount < example ? `+${usdUp(quote.maxPrice - example)}` : `+${m.premiumBps / 100}%`
         const best = outcomes?.at(-1)
         const chance = cashbackChanceBps(m) / 100
         return (
@@ -67,7 +71,7 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
             <span className={`mt-1 text-[15px] ${selected ? "opacity-80" : "text-ink-soft"}`}>
               {m.premiumBps === 0
                 ? price ? `Pay ${usdUp(example)}, exactly the price` : "Exactly the price, no Draw"
-                : price && outcomes ? `Pay ${usdUp(outcomes[0]!.price)} now, +${m.premiumBps / 100}%` : `+${m.premiumBps / 100}% up front`}
+                : price && quote ? `Pay ${usdUp(quote.maxPrice)} now, ${extra}` : `+${m.premiumBps / 100}% up front`}
             </span>
             <span className="mt-auto pt-4">
               {m.premiumBps === 0
@@ -82,7 +86,12 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, label
                         ? "No cashback right now: the Cashback Reserve is empty."
                         : (
                           <>
-                            <b className="font-semibold">{chance}%</b> get cashback, up to {best.price === 0 ? `all ${usd(best.cashback)}` : usd(best.cashback)}
+                            <b className="font-semibold">{chance}%</b> get cashback, up to{" "}
+                            {best.price === 0
+                              ? `all ${usd(best.cashback)}`
+                              : price || best.cashback < 1_000_000
+                              ? usd(best.cashback)
+                              : `$${Math.floor(best.cashback / 1_000_000)}`}
                             {price ? "" : " on a $20 card"}
                           </>
                         )}

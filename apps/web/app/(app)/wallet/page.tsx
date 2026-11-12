@@ -66,12 +66,12 @@ export default function WalletPage() {
           <div className="relative flex h-full flex-col">
             <p className="text-white/70">Balance in Luckout</p>
             <p className="font-display mt-1 text-6xl leading-none font-extrabold tracking-[-0.03em] sm:text-7xl">
-              {account === undefined ? <span className="skeleton inline-block h-14 w-48 rounded-full opacity-30" /> : <Money micro={balance} />}
+              {account === undefined ? <span className="skeleton inline-block h-14 w-48 rounded-full opacity-30" /> : <Money micro={balance} down />}
             </p>
             {Number(walletUsdc) ? <p className="mt-3 text-sm text-white/60">{usd(walletUsdc!)} more USDC sits in your {evm ? "NEAR Intents account" : "NEAR wallet"}.</p> : null}
             <div className="mt-8 flex flex-wrap gap-2">
               <Button variant="gold" onClick={() => setAdding(true)}><Plus />Add funds</Button>
-              <Button variant="onColor" className="!text-white" disabled={!balance} onClick={() => setWithdrawing(true)}>Withdraw</Button>
+              <Button variant="light" disabled={!balance} onClick={() => setWithdrawing(true)}>Withdraw</Button>
             </div>
           </div>
         </div>
