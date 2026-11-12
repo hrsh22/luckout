@@ -345,13 +345,27 @@ export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
   symbol: Schema.String,
   chain: Schema.String,
   /** Formatted, in the token's own units. */
-  amount: Schema.String
+  amount: Schema.String,
+  /** Luckout can send it to their own wallet: an EVM wallet's on its own chain, a NEAR wallet's as USDC. */
+  sendable: Schema.Boolean
+}) {}
+
+/** Sends a held token to the customer's own wallet: move all `amount` (base units) of `assetId` to `depositAddress`. */
+export class SendBackQuote extends Schema.Class<SendBackQuote>("SendBackQuote")({
+  depositAddress: Schema.String,
+  assetId: Schema.String,
+  amount: Schema.String,
+  amountOutFormatted: Schema.String,
+  symbol: Schema.String,
+  chain: Schema.String,
+  timeEstimateSeconds: Schema.Number
 }) {}
 
 export class Transfer extends Schema.Class<Transfer>("Transfer")({
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
-  direction: Schema.Literals(["in", "out"]),
+  /** in: a Top-Up. out: a withdrawal from Luckout. back: something held in their NEAR Intents account, sent to their own wallet. */
+  direction: Schema.Literals(["in", "out", "back"]),
   /** USDC (micro): what lands for a Top-Up, what leaves Luckout for a withdrawal. */
   usdc: MicroUsdc,
   /** The other side: the token and chain it comes from (Top-Up) or goes to (withdrawal). */
@@ -374,6 +388,8 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   deliveredTx: Schema.optional(Schema.String),
   /** What 1Click sent back, formatted, and why. */
   refunded: Schema.optional(Schema.String),
+  /** A Top-Up whose refund (and any extra sent) goes back to the wallet it came from, not to their NEAR Intents account. */
+  refundsToWallet: Schema.optional(Schema.Boolean),
   detail: Schema.optional(Schema.String),
   /** NEAR Intents explorer page for this swap. */
   explorer: Schema.String
@@ -409,6 +425,12 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("held", "/topup/held", { success: Schema.Array(HeldToken), error: TopUpUnavailable }),
   /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
   HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
+  /** A held token (see HeldToken.sendable), all of it, to the customer's own wallet. */
+  HttpApiEndpoint.post("sendBack", "/topup/send-back", {
+    payload: Schema.Struct({ assetId: Schema.String }),
+    success: SendBackQuote,
+    error: TopUpUnavailable
+  }),
   /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
   HttpApiEndpoint.post("exit", "/topup/exit", {
     payload: Schema.Struct({ destinationAsset: Schema.String, usdc: MicroUsdc }),

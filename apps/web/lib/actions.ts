@@ -1,13 +1,13 @@
 "use client"
 
-import { type Mode, type TopUpAsset, transferIntent } from "@luckout/api"
+import { type HeldToken, type Mode, mtTransferArgs, type TopUpAsset, transferIntent } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
 import { usd } from "./format"
 import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
-import { type Call, contractId, usdcId } from "./near"
+import { type Call, contractId, intentsId, usdcId } from "./near"
 import { useSession } from "./session"
 
 const ONE_YOCTO = "1"
@@ -87,12 +87,36 @@ export function useWalletActions() {
         try {
           const q = await api((c) => c.topup.exit({ payload: { destinationAsset: asset.assetId, usdc: micro } }), token)
           void qc.invalidateQueries({ queryKey: ["transfers"] })
-          const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, usdcId, amount: String(micro) }))
+          const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, token: `nep141:${usdcId}`, amount: String(micro) }))
           await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
           arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
         } catch (e) {
           throw new Error(`${usd(micro)} is in your NEAR Intents account, but sending it on didn't work: ${errorMessage(e)} Move it back into Luckout, or send it from near.com.`)
         }
+      })
+    },
+    /**
+     * All of a token held in their NEAR Intents account (1Click's change or a refund), to their own wallet through
+     * 1Click: an EVM wallet gets it as it is on its own chain, a NEAR wallet as USDC. One signature; Luckout pays the fee.
+     */
+    sendBack: (h: HeldToken) => {
+      let arriving = ""
+      return steps(`Sending ${h.amount} ${h.symbol} to your wallet`, () => arriving, async () => {
+        const q = await api((c) => c.topup.sendBack({ payload: { assetId: h.assetId } }), token)
+        const to = { receiverId: q.depositAddress, token: q.assetId, amount: q.amount }
+        try {
+          if (evm) {
+            const signed = await signIntent(transferIntent(to))
+            await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
+          } else {
+            await send({ receiverId: intentsId, method: "mt_transfer", args: mtTransferArgs(to), deposit: ONE_YOCTO, tgas: 30 })
+          }
+        } finally {
+          void qc.invalidateQueries({ queryKey: ["transfers"] })
+          void qc.invalidateQueries({ queryKey: ["held"] })
+        }
+        const where = q.chain === "near" ? "your NEAR wallet" : `your wallet on ${CHAIN_NAMES[q.chain] ?? q.chain}`
+        arriving = `${q.amountOutFormatted} ${q.symbol} arrives in ${where} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
       })
     },
     setDefaultMode: (mode: Mode) =>

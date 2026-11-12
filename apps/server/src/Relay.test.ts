@@ -7,7 +7,7 @@ import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
 import { Near, type Outcome } from "./Near.ts"
-import { authCallIntent, intentPayload, intentSignature, moveInIntent, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
+import { authCallIntent, intentPayload, intentSignature, moveInIntent, mtTransferArgs, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { refusal, Relay, RELAY_DEFAULTS, USDC_REGISTRATION } from "./Relay.ts"
@@ -19,7 +19,9 @@ process.env.NEAR_NETWORK = "testnet"
 const APP = "app.luckout.testnet"
 const USDC = "usdc.luckout.testnet"
 const ALICE = "alice.testnet"
-const allow = { accountId: ALICE, contractId: APP, usdcId: USDC, testnet: true }
+const allow = { accountId: ALICE, contractId: APP, usdcId: USDC, intentsId: "intents.test", testnet: true }
+const BASE_USDC = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+const SEND_BACK = { receiverId: "d".repeat(64), token: BASE_USDC, amount: "120132" }
 const key = KeyPair.fromRandom("ed25519")
 const stranger = KeyPair.fromRandom("ed25519")
 
@@ -71,7 +73,22 @@ test("only our own calls, with the exact deposit each needs, are paid for", () =
   assert.ok(refusal(delegate(USDC, "faucet", {}, 0n).d, { ...allow, testnet: false }), "no faucet on mainnet")
 })
 
-const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; failures?: Array<string> } = {}) => {
+test("a NEAR wallet's send-back is paid for only as quoted: that address, token and amount, with 1 yoctoNEAR", () => {
+  const quoted = { ...allow, sendBack: SEND_BACK }
+  const mt = (args: object, deposit = 1n) => delegate("intents.test", "mt_transfer", args, deposit).d
+  assert.equal(refusal(mt(mtTransferArgs(SEND_BACK)), quoted), undefined)
+  const no: Array<[string, ReturnType<typeof mt>, typeof allow]> = [
+    ["never quoted", mt(mtTransferArgs(SEND_BACK)), allow],
+    ["more than quoted", mt(mtTransferArgs({ ...SEND_BACK, amount: "120133" })), quoted],
+    ["another token", mt(mtTransferArgs({ ...SEND_BACK, token: `nep141:${USDC}` })), quoted],
+    ["someone else", mt(mtTransferArgs({ ...SEND_BACK, receiverId: "mallory.near" })), quoted],
+    ["with a memo", mt({ ...mtTransferArgs(SEND_BACK), memo: "x" }), quoted],
+    ["no deposit", mt(mtTransferArgs(SEND_BACK), 0n), quoted]
+  ]
+  for (const [name, d, a] of no) assert.ok(refusal(d, a), name)
+})
+
+const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; failures?: Array<string>; held?: string } = {}) => {
   const relayed: Array<string> = []
   const resumed: Array<string> = []
   const outcome = (hash: string): Outcome => ({ hash, value: null, events: [], failures: o.failures ?? [] })
@@ -79,7 +96,7 @@ const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; fai
     contractId: APP,
     usdcId: USDC,
     relayerId: o.relayer === false ? undefined : "relayer.test",
-    view: <A>() => Effect.succeed(null as A),
+    view: <A>(method: string) => Effect.succeed((method === "mt_balance_of" ? (o.held ?? "0") : null) as A),
     relay: (sd, persist) =>
       Effect.gen(function*() {
         const hash = `tx-${relayed.length + 1}`
@@ -267,7 +284,7 @@ test("a used nonce, a forged signature or someone else's account is refused befo
 test("a transfer pays only a withdrawal quoted for this account, for exactly its amount", async () => {
   const w = intentWorld()
   const address = "c".repeat(64)
-  const transfer = (amount: string) => transferIntent({ receiverId: address, usdcId: USDC, amount })
+  const transfer = (amount: string) => transferIntent({ receiverId: address, token: `nep141:${USDC}`, amount })
   const before = await w.tag(w.send(await signIntent(transfer("2000000"))))
   assert.equal(before._tag, "RelayFailed", "not quoted yet")
   const results = await w.run(Effect.gen(function*() {
@@ -278,6 +295,37 @@ test("a transfer pays only a withdrawal quoted for this account, for exactly its
     return { more: more._tag, exact: exact.hash }
   }))
   assert.deepEqual(results, { more: "RelayFailed", exact: "tx-1" })
+})
+
+test("a send-back is paid for, EVM intent or NEAR call, only when quoted for this account and the token is there", async () => {
+  // EVM: a transfer intent of the held token, exactly as quoted.
+  const w = intentWorld()
+  const address = "e".repeat(64)
+  const back = (token: string) => transferIntent({ receiverId: address, token, amount: "120132" })
+  const evm = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, origin_asset, origin_amount)
+               VALUES (${address}, ${EVM}, 'back', 0, ${BASE_USDC}, '120132')`
+    const usdc = yield* Effect.flip(w.send(yield* Effect.promise(() => signIntent(back(`nep141:${USDC}`)))))
+    const ok = yield* w.send(yield* Effect.promise(() => signIntent(back(BASE_USDC))))
+    return { usdc: usdc._tag, ok: ok.hash }
+  }))
+  assert.deepEqual(evm, { usdc: "RelayFailed", ok: "tx-1" })
+
+  // NEAR wallet: its own mt_transfer call on intents.near.
+  const quote = Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, origin_asset, origin_amount)
+               VALUES (${SEND_BACK.receiverId}, ${ALICE}, 'back', 0, ${BASE_USDC}, '120132')`
+  })
+  const call = delegate("intents.test", "mt_transfer", mtTransferArgs(SEND_BACK), 1n).b64
+  const unquoted = world({ held: "120132" })
+  assert.equal((await unquoted.tag(unquoted.send(call)))._tag, "RelayFailed", "not quoted")
+  const gone = world({ held: "120131" })
+  assert.equal((await gone.tag(Effect.andThen(quote, gone.send(call))))._tag, "RelayFailed", "no longer all there")
+  const there = world({ held: "120132" })
+  await there.run(Effect.andThen(quote, there.send(call)))
+  assert.deepEqual([unquoted.relayed, gone.relayed, there.relayed], [[], [], ["mt_transfer"]])
 })
 
 test("daily caps count intents too; a Top-Up's own move-in neither counts nor uses them up", async () => {

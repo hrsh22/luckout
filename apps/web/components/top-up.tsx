@@ -94,8 +94,8 @@ export function TopUp({ onDone }: { onDone?: (ok: boolean) => void } = {}) {
           {quote.depositMemo && <p>Memo (required): <span className="font-mono select-all">{quote.depositMemo}</span></p>}
           <p className="text-muted">
             {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your transfer
-            confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, the funds are refunded to your
-            NEAR account on NEAR Intents.
+            confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, 1Click refunds it to your
+            NEAR Intents account, and the Wallet page sends it on to your wallet.
           </p>
           <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
           {status === "SUCCESS" && (

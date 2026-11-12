@@ -6,7 +6,8 @@ import { CHAIN_NAMES } from "@/lib/evm"
 import { usd } from "@/lib/format"
 import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
-import type { Transfer } from "@luckout/api"
+import type { HeldToken, Transfer } from "@luckout/api"
+import { useState } from "react"
 import { ArrowDownLeft, ArrowUpRight, CircleCheck, Clock, Copy, ExternalLink, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 
@@ -23,6 +24,9 @@ const INTENTS_APP = "https://near-intents.org"
 const chain = (c: string) => CHAIN_NAMES[c] ?? c
 /** " on Base", or nothing for a swap recorded before its chain was kept. */
 const on = (c: string) => (c ? ` on ${chain(c)}` : "")
+const walletOn = (c: string) => (c === "near" ? "your NEAR wallet" : `your wallet${on(c)}`)
+/** Where 1Click sends a Top-Up's money if it doesn't go through. */
+const refundPlace = (t: Transfer) => (t.refundsToWallet ? walletOn(t.chain) : "your NEAR Intents account")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 /** Still before the deadline, so the rest of a short payment can be sent. */
@@ -53,24 +57,40 @@ export function InTransit() {
 }
 
 /**
- * What else is in the customer's own NEAR Intents account: 1Click returns the extra sent with a Top-Up, and
- * refunds, in the token paid with. Luckout can't spend it, but it's the customer's, so it's never out of sight.
+ * What else is in the customer's own NEAR Intents account: a refund, or the extra a Top-Up asked for, in the
+ * token paid with. Luckout can't spend it, but it's the customer's: one tap sends it to their own wallet.
  */
 export function HeldInIntents() {
-  const { token } = useSession()
+  const { token, evm } = useSession()
+  const actions = useWalletActions()
   const held = useHeld(token).data ?? []
+  const [sending, setSending] = useState<string>()
   if (held.length === 0) return null
+  const sendBack = (h: HeldToken) => {
+    setSending(h.assetId)
+    void actions.sendBack(h).finally(() => setSending(undefined))
+  }
   return (
-    <section className="card flex flex-col gap-2 p-7">
+    <section className="card flex flex-col gap-3 p-7">
       <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">Also yours, in NEAR Intents</h2>
-      <ul className="flex flex-col gap-1 font-semibold">
-        {held.map((h) => <li key={h.assetId}>{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></li>)}
+      <ul className="flex flex-col gap-2">
+        {held.map((h) => (
+          <li key={h.assetId} className="flex flex-wrap items-center justify-between gap-2">
+            <span className="font-semibold">{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
+            {h.sendable && (
+              <Button size="sm" variant="light" disabled={sending !== undefined} onClick={() => sendBack(h)}>
+                {evm ? `Send to my wallet on ${chain(h.chain)}` : "Send to my NEAR wallet as USDC"}
+              </Button>
+            )}
+          </li>
+        ))}
       </ul>
       <p className="text-sm text-ink-soft">
-        1Click returns what you sent beyond a top-up's amount, and any refund, in the token you paid with, to your own NEAR Intents
-        account. Your wallet controls it, not Luckout: sign in on{" "}
-        <a href={INTENTS_APP} target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-2">near-intents.org</a>{" "}
-        with this same wallet to swap it or send it anywhere.
+        A refund, or the extra a top-up asked for, that 1Click sent back to your own NEAR Intents account in the token you paid with.
+        Your wallet controls it, not Luckout.{" "}
+        {held.every((h) => h.sendable)
+          ? "Sending it to your wallet takes one signature, and Luckout pays the network fee."
+          : <>You can also sign in on <a href={INTENTS_APP} target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-2">near-intents.org</a> with this same wallet to move it.</>}
       </p>
     </section>
   )
@@ -82,6 +102,8 @@ function Row({ t }: { t: Transfer }) {
   const incoming = t.direction === "in"
   const title = incoming
     ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${t.amountIn} ${t.symbol}` : ""}${on(t.chain)}`
+    : t.direction === "back"
+    ? `${t.amountOut ?? t.amountIn ?? ""} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
   const Icon = t.phase === "done" || t.phase === "in-wallet"
     ? CircleCheck
@@ -114,7 +136,7 @@ function Row({ t }: { t: Transfer }) {
         {t.late && (
           <p className="flex items-start gap-2 rounded-2xl bg-warn-soft p-3 text-sm text-warn">
             <Clock size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-            Taking longer than usual. It's safe: 1Click either delivers it or sends it back to your NEAR Intents account. You don't need to do anything.
+            Taking longer than usual. It's safe: 1Click either delivers it or sends it back to {refundPlace(t)}. You don't need to do anything.
           </p>
         )}
 
@@ -122,13 +144,8 @@ function Row({ t }: { t: Transfer }) {
           {t.phase === "in-wallet" && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
           )}
-          {evm && (t.phase === "in-intents" || (t.phase === "refunded" && !incoming)) && sitting >= 1_000_000 && (
+          {evm && (t.phase === "in-intents" || (t.phase === "refunded" && t.direction === "out")) && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(sitting)}>Move {usd(sitting)} into Luckout</Button>
-          )}
-          {t.phase === "refunded" && incoming && (
-            <a href={INTENTS_APP} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold underline-offset-2 hover:underline">
-              Get it back on near-intents.org<ExternalLink size={14} aria-hidden="true" />
-            </a>
           )}
           {t.deliveredTx && TX_EXPLORERS[t.chain] && (
             <a href={`${TX_EXPLORERS[t.chain]}${t.deliveredTx}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
@@ -153,12 +170,12 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
       return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
     case "incomplete":
       return open(t)
-        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to your NEAR Intents account.`
-        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs, too late to finish: it's going back to your NEAR Intents account.`
+        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
+        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ?? ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
     case "swapping":
       return t.direction === "in"
         ? `1Click has your ${t.symbol} and is ${t.symbol === "USDC" ? "bringing it over to NEAR" : "converting it to USDC"}. Usually ${usual}.`
-        : `On its way to your address${on(t.chain)}. Usually ${usual}.`
+        : `On its way to ${walletOn(t.chain)}. Usually ${usual}.`
     case "moving":
       return "Landed. Moving it into your Luckout balance now."
     case "in-wallet":
@@ -167,9 +184,11 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
       return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
     case "done":
       return t.direction === "in" ? "In your Luckout balance." : `Arrived: ${t.amountOut ?? usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
-    case "refunded":
-      return t.direction === "in"
-        ? `Didn't go through${t.detail ? ` (${t.detail})` : ""}. 1Click sent ${t.refunded ? `${t.refunded} ${t.symbol}` : "it"} back to your NEAR Intents account, which your wallet controls: sign in on near-intents.org with this same wallet to send it anywhere.`
-        : `Didn't go through${t.detail ? ` (${t.detail})` : ""}. 1Click sent it back to your NEAR Intents account${evm ? "; move it back into Luckout below." : "."}`
+    case "refunded": {
+      const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
+      if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`
+      if (t.direction === "out") return `${why} 1Click sent it back to your NEAR Intents account${evm ? "; move it back into Luckout below." : "."}`
+      return `${why} 1Click sent ${t.refunded ? `${t.refunded} ${t.symbol}` : "it"} back to ${refundPlace(t)}${t.refundsToWallet ? "." : ", listed below."}`
+    }
   }
 }
