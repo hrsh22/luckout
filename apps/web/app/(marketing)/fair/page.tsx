@@ -1,7 +1,6 @@
 import { DailyReset } from "@/components/local-time"
 import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
-import { MAX_CASHBACK } from "@/lib/modes"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import type { Metadata } from "next"
 import Link from "next/link"
@@ -12,7 +11,7 @@ export const metadata: Metadata = {
   description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the contract."
 }
 
-interface Reserve { free: string; locked: string; discount_cap: string }
+interface Reserve { free: string; locked: string; max_cashback: string }
 
 export default async function Fair() {
   const [stats, reserve, code] = await Promise.all([
@@ -59,11 +58,11 @@ export default async function Fair() {
           <div className="grid gap-4 sm:grid-cols-3">
             <Figure label="Free" value={usd(reserve.free)} />
             <Figure label="Locked for purchases in progress" value={usd(reserve.locked)} />
-            <Figure label="Most one purchase can cost it now" value={usd(reserve.discount_cap)} />
+            <Figure label="Most cashback one purchase can get now" value={usd(reserve.max_cashback)} />
           </div>
           <p className="text-ink-soft">
             Each lucky buy locks what its biggest possible cashback would cost before it starts, so every cashback is already covered. One
-            purchase can get at most {usd(MAX_CASHBACK)} back, and can't cost the reserve more than 20% of what's free.
+            purchase gets at most the lower of a fixed amount and a share of what's free, so the reserve always outlasts a run of luck.
           </p>
         </section>
       )}

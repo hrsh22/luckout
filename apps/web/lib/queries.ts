@@ -4,7 +4,7 @@ import { type Category, type Mode, type Purchase, type TransferPhase, VoucherSum
 import { keepPreviousData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
-import { modeSlug } from "./modes"
+import { modeSlug, type ReserveView } from "./modes"
 
 // Every server read goes through here, so the catalog, a card and its history share one cache:
 // going back to results is instant, and hovering a card has already fetched it.
@@ -85,11 +85,11 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     staleTime: 20_000
   })
 
-/** The Free Reserve (micro-USDC), straight from the chain: its Discount Cap shapes every Lucky Amount. Undefined until read. */
-export const useFreeReserve = () =>
+/** The Free Reserve and the Cashback Cap, straight from the chain: they shape every Lucky Amount. Undefined until read. */
+export const useReserve = () =>
   useQuery({
-    queryKey: ["free-reserve"],
-    queryFn: () => view<{ free: string }>(contractId, "get_reserve").then((r) => r.free),
+    queryKey: ["reserve"],
+    queryFn: () => view<ReserveView>(contractId, "get_reserve"),
     staleTime: 60_000
   }).data
 

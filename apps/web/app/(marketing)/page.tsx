@@ -2,8 +2,8 @@ import { HeroArt } from "@/components/hero-art"
 import { OddsGrid } from "@/components/odds-grid"
 import { buttonVariants } from "@/components/ui/button"
 import { contractId, liveAverage, network, type Stats, view } from "@/lib/chain"
-import { usd, usdUp } from "@/lib/format"
-import { cashbackChanceBps, MAX_CASHBACK, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
+import { usdUp } from "@/lib/format"
+import { AMPLE_RESERVE, cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import { Lock, Repeat2, ShieldCheck, SlidersHorizontal } from "lucide-react"
@@ -28,7 +28,7 @@ const FAQ = [
   },
   {
     q: "How random is the Draw?",
-    a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why one Draw can pay back at most ${usd(MAX_CASHBACK)}, and never more than a share of the reserve.`
+    a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why each Draw's cashback is capped: at most the lower of a fixed amount and a share of the reserve.`
   },
   { q: "Can the Telegram bot spend my money?", a: "Only when you tap Confirm, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it." },
   { q: "Which wallets work?", a: "NEAR wallets (HOT, Meteor, Intear, Ledger and the others in NEAR Connect; HOT also works inside Telegram), and EVM wallets like MetaMask and Rabby, which need no NEAR at all: Luckout pays every NEAR fee." }
@@ -87,7 +87,7 @@ export default async function Home() {
           {MODES.map((m) => {
             const p = modePalette(m.mode)
             // The model at its best, whatever today's reserve: the whole card in the Draw. The shop prices from the live reserve.
-            const q = simpleQuote(m, EXAMPLE, Number.MAX_SAFE_INTEGER)
+            const q = simpleQuote(m, EXAMPLE, AMPLE_RESERVE)
             const slabs = pricedOutcomes(m, q).filter((o) => o.cashback > 0)
             const freeSlab = slabs.find((o) => o.price === 0)
             return (
