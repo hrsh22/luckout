@@ -17,12 +17,12 @@ const label = (o: PricedOutcome, whole: boolean) =>
     ? `got ${whole ? `${o.pct}%` : usd(o.cashback)} back, paid ${usdUp(o.price)}`
     : `no cashback, paid ${usdUp(o.price)}`
 
-/** The honest odds, drawn: 100 buyers of a $20 card at today's Free Reserve, each dot what one of them paid. */
-export function OddsGrid({ free }: { free: string }) {
+/** The odds, drawn: 100 buyers of a $20 card with all of it in the Draw, each dot what one of them paid. */
+export function OddsGrid() {
   const [index, setIndex] = useState(1)
   const m = LUCKY[index]!
   const pal = modePalette(m.mode)
-  const q = simpleQuote(m, PRICE, free)
+  const q = simpleQuote(m, PRICE, Number.MAX_SAFE_INTEGER)
   const outcomes = pricedOutcomes(m, q)
   const cells = outcomes.flatMap((o) => Array.from({ length: o.chanceBps / 100 }, () => o))
 
