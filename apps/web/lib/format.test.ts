@@ -1,6 +1,17 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { dollars, toMicro } from "./format.ts"
+import { dollars, tokenAmount, toMicro } from "./format.ts"
+
+test("token amounts read at a sensible precision, rounded the safe way", () => {
+  assert.equal(tokenAmount("1.0663783", "USDC", "up"), "1.07", "what you send: never less than leaves the wallet")
+  assert.equal(tokenAmount("1.010224", "USDC", "up"), "1.02")
+  assert.equal(tokenAmount("1.07", "USDT", "up"), "1.07", "exact stays exact")
+  assert.equal(tokenAmount("0.997398", "USDC", "down"), "0.99", "what you get: never more than arrives")
+  assert.equal(tokenAmount("0.000530123456789", "ETH", "up"), "0.000530124")
+  assert.equal(tokenAmount("0.000530123456789", "ETH", "down"), "0.000530123")
+  assert.equal(tokenAmount("12.3456789", "SOL", "up"), "12.3457")
+  assert.equal(tokenAmount("abc", "USDC", "up"), "abc", "anything unreadable is shown as given")
+})
 
 test("prefills are exact: no rounding over the balance, no dust left behind", () => {
   assert.equal(dollars(5_555_555), "5.555555")
