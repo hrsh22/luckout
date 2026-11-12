@@ -21,7 +21,7 @@ const TX_EXPLORERS: Record<string, string> = {
 /** Where a customer moves money out of their NEAR Intents account themselves: same wallet, no Luckout needed. */
 const INTENTS_APP = "https://near-intents.org"
 
-const chain = (c: string) => CHAIN_NAMES[c] ?? c
+const chain = (c: string) => CHAIN_NAMES[c] ?? (c === "near" ? "NEAR" : c)
 /** " on Base", or nothing for a swap recorded before its chain was kept. */
 const on = (c: string) => (c ? ` on ${chain(c)}` : "")
 const walletOn = (c: string) => (c === "near" ? "your NEAR wallet" : `your wallet${on(c)}`)
@@ -123,7 +123,7 @@ function Row({ t }: { t: Transfer }) {
         <p className="font-semibold">{title}</p>
         <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
 
-        {(t.phase === "awaiting-transfer" || (t.phase === "incomplete" && open(t))) && (
+        {((t.phase === "awaiting-transfer" && !t.depositTx) || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-1 rounded-2xl bg-soft p-3 text-sm">
             <span className="font-mono break-all select-all">{t.depositAddress}</span>
             {t.depositMemo && <span>Memo (required): <span className="font-mono select-all">{t.depositMemo}</span></span>}
@@ -147,6 +147,11 @@ function Row({ t }: { t: Transfer }) {
           {evm && (t.phase === "in-intents" || (t.phase === "refunded" && t.direction === "out")) && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(sitting)}>Move {usd(sitting)} into Luckout</Button>
           )}
+          {t.depositTx && TX_EXPLORERS[t.chain] && (
+            <a href={`${TX_EXPLORERS[t.chain]}${t.depositTx}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
+              Your transfer on {chain(t.chain)}<ExternalLink size={14} aria-hidden="true" />
+            </a>
+          )}
           {t.deliveredTx && TX_EXPLORERS[t.chain] && (
             <a href={`${TX_EXPLORERS[t.chain]}${t.deliveredTx}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
               Delivery on {chain(t.chain)}<ExternalLink size={14} aria-hidden="true" />
@@ -167,6 +172,11 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
   const usual = minutes(t.timeEstimateSeconds)
   switch (t.phase) {
     case "awaiting-transfer":
+      if (t.depositTx) {
+        return open(t)
+          ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
+          : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
+      }
       return `Waiting for your transfer: send exactly ${t.amountIn ?? ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} to the address below.`
     case "incomplete":
       return open(t)
