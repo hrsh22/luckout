@@ -322,6 +322,7 @@ export class Purchases extends Context.Service<Purchases, {
           id: row.id,
           voucherId: row.voucher_id,
           voucherName: row.voucher_name,
+          ...bitrefill.logo(row.voucher_id),
           value: row.package_value,
           status,
           // Rejections are the contract's own words (limits, balance); internal details stay in the database.

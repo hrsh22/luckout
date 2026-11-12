@@ -1,13 +1,15 @@
 "use client"
 
+import { AmountField } from "@/components/amount-field"
 import { shortAccount } from "@/components/avatar"
+import { sortAssets, TokenPicker } from "@/components/token-picker"
 import { TopUp } from "@/components/top-up"
 import { TopUpEvm } from "@/components/top-up-evm"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
 import { api } from "@/lib/api"
-import { CHAIN_NAMES, EVM_CHAIN_IDS } from "@/lib/evm"
+import { EVM_CHAIN_IDS } from "@/lib/evm"
 import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
@@ -17,42 +19,7 @@ import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
 import { toast } from "sonner"
 import { useEffect, useState } from "react"
 
-/** An amount field with quick picks. Everything stays in micro-USDC except what's typed. */
-export function AmountField({ value, onChange, picks, label }: {
-  value: string
-  onChange: (v: string) => void
-  picks: ReadonlyArray<{ label: string; micro: number }>
-  label: string
-}) {
-  return (
-    <div className="flex flex-col gap-3">
-      <label className="relative block">
-        <span className="sr-only">{label}</span>
-        <span className="font-display pointer-events-none absolute top-1/2 left-5 -translate-y-1/2 text-3xl font-extrabold text-muted">$</span>
-        <input
-          className="field font-display !h-16 !rounded-[1.25rem] !pl-11 !text-3xl !font-extrabold"
-          inputMode="decimal"
-          value={value}
-          onChange={(e) => onChange(e.target.value.replace(/[^\d.]/g, ""))}
-          aria-invalid={value !== "" && !(toMicro(value) > 0)}
-        />
-      </label>
-      <div className="flex flex-wrap gap-2">
-        {picks.map((p) => (
-          <button
-            key={p.label}
-            type="button"
-            onClick={() => onChange(dollars(p.micro))}
-            aria-pressed={toMicro(value) === p.micro}
-            className="h-9 rounded-full bg-soft px-4 text-sm font-semibold transition-colors hover:bg-[#ebe9f3] aria-pressed:bg-ink aria-pressed:text-white"
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
+export { AmountField }
 
 /** Add funds without leaving the page, as a sheet. */
 export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onOpenChange: (o: boolean) => void; need?: number }) {
@@ -77,11 +44,18 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
   // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
   const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
   const actions = useWalletActions()
-  const [amount, setAmount] = useState(() => (need ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000) : "25"))
+  const inWallet = Number(walletUsdc ?? 0)
+  // What's needed for the card, or else $25, or all of it when the wallet holds less (and at least the $1 minimum).
+  const [amount, setAmount] = useState(() =>
+    need
+      ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000)
+      : inWallet >= 1_000_000 && inWallet < 25_000_000
+      ? dollars(Math.floor(inWallet / 10_000) * 10_000)
+      : "25"
+  )
   const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
   // An EVM wallet tops up from its own chain; "wallet" is then the USDC already in its NEAR Intents account.
   const [tab, setTab] = useState<"wallet" | "chain">(evm ? "chain" : "wallet")
-  const inWallet = Number(walletUsdc ?? 0)
   const micro = toMicro(amount)
 
   const done = async (ok: boolean) => {
@@ -130,7 +104,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
       )}
 
       {tab === "chain" && network === "mainnet"
-        ? evm ? <TopUpEvm onDone={done} /> : <TopUp onDone={done} />
+        ? evm ? <TopUpEvm need={need} onDone={done} /> : <TopUp need={need} onDone={done} />
         : (
           <div className="flex flex-col gap-4">
             {network === "testnet" && <p className="font-semibold">{evm ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
@@ -222,7 +196,7 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
   useEffect(() => {
     if (!open || !outward || !token) return
     api((c) => c.topup.assets(), token).then((all) => {
-      const usdc = all.filter((a) => EVM_CHAIN_IDS[a.chain] && (a.symbol === "USDC" || a.symbol === "USDT"))
+      const usdc = sortAssets(all.filter((a) => EVM_CHAIN_IDS[a.chain] && (a.symbol === "USDC" || a.symbol === "USDT")))
       setAssets(usdc)
       setTo((t) => t || (usdc.find((a) => a.symbol === "USDC" && a.chain === "base")?.assetId ?? ""))
     }, () => {})
@@ -250,14 +224,11 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
           picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }]}
         />
         {outward && (
-          <label className="flex flex-col gap-2 text-sm">
-            <span className="font-semibold">Send it to</span>
-            <select className="field" value={to} onChange={(e) => setTo(e.target.value)}>
-              {assets.map((a) => <option key={a.assetId} value={a.assetId}>{a.symbol} on {CHAIN_NAMES[a.chain] ?? a.chain} (your address)</option>)}
-              <option value="">Keep it in NEAR Intents</option>
-            </select>
+          <div className="flex flex-col gap-2 text-sm">
+            <span className="font-semibold text-muted">Send it to your own address, as</span>
+            <TokenPicker assets={assets} value={to} onChange={setTo} label="Send it to" none="Keep it in NEAR Intents" />
             {destination && <span className="text-muted">Withdrawals start at $1. The swap's spread comes out of what arrives; there's no fee to Luckout and no gas for you.</span>}
-          </label>
+          </div>
         )}
         <Button
           size="lg"

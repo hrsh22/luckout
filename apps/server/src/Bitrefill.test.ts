@@ -2,7 +2,7 @@ import { ConfigProvider, Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, isTestMerchant, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
   assert.equal(usdToMicro("5.53"), 5_530_000)
@@ -166,4 +166,13 @@ test("popular cards: the brands people know, one each, from the visitor's own co
   assert.deepEqual(ids(), ["roblox-usa"], "no country: worldwide cards only")
   const many = popularBrands(Array.from({ length: 30 }, (_, i) => card(`steam-${i}`, "Steam", "XI")))
   assert.deepEqual(pickPopular(many, "US").map((p) => p.id), ["steam-0"], "one card per brand")
+})
+
+test("Bitrefill's own test merchants are never listed or sold; a real brand named Test isn't one of them", () => {
+  const card = (id: string, name: string, country_code: string) => ({ id, name, country_code })
+  assert.ok(isTestMerchant(card("delos-syldavia", "Delos-Test Vouchers X0!", "KN")))
+  assert.ok(isTestMerchant(card("health-check-syldavia", "Health check test product", "KN")))
+  assert.ok(isTestMerchant(card("affiliate-tester", "Affiliate Tester", "KN")))
+  assert.ok(!isTestMerchant(card("test-kitchen-philippines", "Test Kitchen Philippines", "PH")))
+  assert.ok(!isTestMerchant(card("amazon-us", "Amazon", "US")))
 })

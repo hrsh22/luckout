@@ -50,7 +50,7 @@ export function AppNav() {
                   className="flex h-10 items-center gap-2 rounded-full bg-gold-soft px-4 text-sm font-semibold text-gold-ink transition-colors hover:bg-gold/40"
                 >
                   <Wallet size={16} aria-hidden="true" />
-                  {account === undefined ? <span className="skeleton h-4 w-12 rounded-full" /> : <Money micro={account?.balance ?? 0} />}
+                  {account === undefined ? <span className="skeleton h-4 w-12 rounded-full" /> : <Money micro={account?.balance ?? 0} down />}
                   <Arriving />
                 </Link>
               )}
