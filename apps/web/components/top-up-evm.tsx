@@ -8,7 +8,7 @@ import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
 import { api, cancelled, errorMessage } from "@/lib/api"
 import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet } from "@/lib/evm"
-import { toMicro, usd } from "@/lib/format"
+import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
@@ -165,7 +165,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
               if (Number(q.amountInFormatted) <= Number(p!.amountInFormatted) * 1.005) await sendNow(q)
             })}
         >
-          {p ? `Send ${p.amountInFormatted} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
+          {p ? `Send ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
         </Button>
         <button
           type="button"
@@ -188,7 +188,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
         : (
           <>
             <p>
-              Send <b>{quote.amountInFormatted} {quote.symbol}</b> on <b>{CHAIN_NAMES[quote.chain] ?? quote.chain}</b> and get <b>{usd(quote.usdcOut)}</b> in
+              Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{CHAIN_NAMES[quote.chain] ?? quote.chain}</b> and get <b>{usd(quote.usdcOut)}</b> in
               Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
             </p>
             {!signed && !manual && (

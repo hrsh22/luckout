@@ -6,7 +6,7 @@ import { chainLabel, sortAssets, TokenMark, TokenPicker } from "@/components/tok
 import { Button } from "@/components/ui/button"
 import { depositCall, useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { dollars, toMicro, usd, usdUp } from "@/lib/format"
+import { dollars, tokenAmount, toMicro, usd, usdUp } from "@/lib/format"
 import { usdcId, view } from "@/lib/near"
 import { useHeld } from "@/lib/queries"
 import { useSession } from "@/lib/session"
@@ -57,7 +57,7 @@ export function TopUpPreview({ q, stale, error }: { q: TopUpQuote | undefined; s
     <div className={`flex flex-col gap-1 rounded-2xl bg-soft p-4 transition-opacity ${stale ? "opacity-60" : ""}`} aria-live="polite">
       <p className="flex items-center gap-2">
         <TokenMark symbol={q.symbol} chain={q.chain} size={22} />
-        <span>You send <b>≈ {q.amountInFormatted} {q.symbol}</b> on {chain}</span>
+        <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
       </p>
       <p className="text-sm text-muted">
         Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee: {FEES[q.chain] ?? "set by your wallet"}

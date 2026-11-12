@@ -4,7 +4,7 @@ import { type HeldToken, type Mode, mtTransferArgs, type TopUpAsset, transferInt
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
-import { usd } from "./format"
+import { tokenAmount, usd } from "./format"
 import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
 import { type Call, contractId, intentsId, usdcId } from "./near"
@@ -89,7 +89,7 @@ export function useWalletActions() {
           void qc.invalidateQueries({ queryKey: ["transfers"] })
           const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, token: `nep141:${usdcId}`, amount: String(micro) }))
           await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
-          arriving = `${q.amountOutFormatted} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
+          arriving = `${tokenAmount(q.amountOutFormatted, q.symbol, "down")} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
         } catch (e) {
           throw new Error(`${usd(micro)} is in your NEAR Intents account, but sending it on didn't work: ${errorMessage(e)} Move it back into Luckout, or send it from near.com.`)
         }
@@ -116,7 +116,7 @@ export function useWalletActions() {
           void qc.invalidateQueries({ queryKey: ["held"] })
         }
         const where = q.chain === "near" ? "your NEAR wallet" : `your wallet on ${CHAIN_NAMES[q.chain] ?? q.chain}`
-        arriving = `${q.amountOutFormatted} ${q.symbol} arrives in ${where} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
+        arriving = `${tokenAmount(q.amountOutFormatted, q.symbol, "down")} ${q.symbol} arrives in ${where} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
       })
     },
     setDefaultMode: (mode: Mode) =>

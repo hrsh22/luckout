@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
 import { CHAIN_NAMES } from "@/lib/evm"
-import { usd } from "@/lib/format"
+import { tokenAmount, usd } from "@/lib/format"
 import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { HeldToken, Transfer } from "@luckout/api"
@@ -104,9 +104,9 @@ function Row({ t }: { t: Transfer }) {
   const actions = useWalletActions()
   const incoming = t.direction === "in"
   const title = incoming
-    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${t.amountIn} ${t.symbol}` : ""}${on(t.chain)}`
+    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""}${on(t.chain)}`
     : t.direction === "back"
-    ? `${t.amountOut ?? t.amountIn ?? ""} ${t.symbol} to ${walletOn(t.chain)}`
+    ? `${tokenAmount(t.amountOut ?? t.amountIn ?? "", t.symbol, "down")} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
   const Icon = t.phase === "done" || t.phase === "in-wallet"
     ? CircleCheck
@@ -235,7 +235,9 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
     case "in-intents":
       return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
     case "done":
-      return t.direction === "in" ? "In your Luckout balance." : `Arrived: ${t.amountOut ?? usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
+      return t.direction === "in"
+        ? "In your Luckout balance."
+        : `Arrived: ${t.amountOut ? tokenAmount(t.amountOut, t.symbol, "down") : usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
     case "refunded": {
       const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
       if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`
