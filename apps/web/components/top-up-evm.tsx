@@ -244,8 +244,9 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                     : !(status && DONE.has(status.status)) && (
                       <div className="flex flex-col gap-2 rounded-2xl bg-white p-3">
                         <p>
-                          Not approved yet: when it arrives it waits in your NEAR Intents account (yours, safe) until you move it in with one tap.
-                          Approve now and it goes straight into your balance.
+                          {busy === "sign"
+                            ? "Approve in your wallet, and it goes straight into your balance when it arrives."
+                            : "Not approved yet: when it arrives it waits in your NEAR Intents account (yours, safe) until you move it in with one tap. Approve now and it goes straight into your balance."}
                         </p>
                         <Button variant="light" size="sm" className="self-start" loading={busy === "sign"} disabled={!!busy} onClick={() => approve()}>
                           Approve now
