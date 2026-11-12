@@ -105,6 +105,12 @@ export const isLate = (r: Pick<SwapRow, "status" | "deposit_seen_at" | "time_est
   return now - seen > Math.max(10 * 60_000, 3 * (r.time_estimate ?? 0) * 1000)
 }
 
+/** 1Click gives refund reasons as codes (QUOTE_EXPIRED); the customer reads words. */
+const reasonText = (code: string) =>
+  code === "QUOTE_EXPIRED"
+    ? "the full amount didn't arrive before the deadline"
+    : /^[A-Z_]+$/.test(code) ? code.toLowerCase().replaceAll("_", " ") : code
+
 const explorerOf = (depositAddress: string) => `https://explorer.near-intents.org/transactions/${depositAddress}`
 
 /** The Telegram notice for what just happened to this swap, keyed so each is sent once. */
@@ -132,7 +138,7 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
     if (phase === "refunded") {
       return {
         key: "refunded",
-        text: `Your Top-Up (${from}) didn't go through${r.refund_reason ? `: ${r.refund_reason}` : ""}. 1Click sent ${r.refunded ? `${r.refunded} ${r.symbol ?? ""}`.trim() : "it"} back to your NEAR Intents account. See ${web}/wallet`
+        text: `Your Top-Up (${from}) didn't go through${r.refund_reason ? `: ${reasonText(r.refund_reason)}` : ""}. 1Click sent ${r.refunded ? `${r.refunded} ${r.symbol ?? ""}`.trim() : "it"} back to your NEAR Intents account. See ${web}/wallet`
       }
     }
   } else {
@@ -448,7 +454,7 @@ export class TopUp extends Context.Service<TopUp, {
                 ...(r.time_estimate !== null ? { timeEstimateSeconds: r.time_estimate } : {}),
                 ...(r.direction === "out" && r.delivered_tx ? { deliveredTx: r.delivered_tx } : {}),
                 ...(r.refunded ? { refunded: r.refunded } : {}),
-                ...(r.refund_reason || r.move_detail ? { detail: (r.refund_reason ?? r.move_detail)! } : {}),
+                ...(r.refund_reason ? { detail: reasonText(r.refund_reason) } : r.move_detail ? { detail: r.move_detail } : {}),
                 explorer: explorerOf(r.deposit_address)
               })
             )
