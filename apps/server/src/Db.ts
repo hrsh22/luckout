@@ -245,6 +245,11 @@ const migrations = Migrator.fromRecord({
   "0016_transfers_deposit_tx": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN deposit_tx TEXT`
+  }),
+  // A transfer notice Telegram didn't take: the swap stays tracked so it's sent again, for a day.
+  "0017_transfers_retell": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN retell BOOLEAN NOT NULL DEFAULT false`
   })
 })
 

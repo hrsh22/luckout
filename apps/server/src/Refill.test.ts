@@ -211,7 +211,7 @@ const world = (o: {
       Layer.succeed(Base, base),
       Layer.succeed(Bitrefill, bitrefill),
       Layer.succeed(OneClick, oneClick),
-      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.void }))
+      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
     )),
     Layer.provideMerge(DbMemory)
   )
