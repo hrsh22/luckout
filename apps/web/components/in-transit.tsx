@@ -1,5 +1,6 @@
 "use client"
 
+import { Qr } from "@/components/qr"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
@@ -126,13 +127,16 @@ function Row({ t }: { t: Transfer }) {
         <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
 
         {((t.phase === "awaiting-transfer" && !t.depositTx) || (t.phase === "incomplete" && open(t))) && (
-          <div className="flex flex-col gap-1 rounded-2xl bg-soft p-3 text-sm">
-            <span className="font-mono break-all select-all">{t.depositAddress}</span>
-            {t.depositMemo && <span>Memo (required): <span className="font-mono select-all">{t.depositMemo}</span></span>}
-            <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(t.depositAddress).then(() => toast.success("Address copied"))}>
-              <Copy />Copy address
-            </Button>
-            {t.phase === "awaiting-transfer" && <PasteTx t={t} />}
+          <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm sm:flex-row">
+            <Qr value={t.depositAddress} size={112} label="QR code of the deposit address" />
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+              <span className="font-mono break-all select-all">{t.depositAddress}</span>
+              {t.depositMemo && <span>Memo (required): <span className="font-mono select-all">{t.depositMemo}</span></span>}
+              <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(t.depositAddress).then(() => toast.success("Address copied"))}>
+                <Copy />Copy address
+              </Button>
+              {t.phase === "awaiting-transfer" && <PasteTx t={t} />}
+            </div>
           </div>
         )}
 

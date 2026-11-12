@@ -7,7 +7,7 @@
 import type { AppKitNetwork } from "@reown/appkit/networks"
 import type { Config } from "@wagmi/core"
 
-const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID || "bafd317da3819c2689b05a75752fe55f"
+export const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID || "bafd317da3819c2689b05a75752fe55f"
 
 /** 1Click's chain names → EVM chain ids, for the chains a Top-Up or withdrawal can use. */
 export const EVM_CHAIN_IDS: Record<string, number> = { eth: 1, arb: 42161, base: 8453, pol: 137, bsc: 56 }

@@ -408,8 +408,9 @@ export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
 
 export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("assets", "/topup/assets", { success: Schema.Array(TopUpAsset), error: TopUpUnavailable }),
+  /** `dry`: a preview only, with no deposit address and nothing recorded. */
   HttpApiEndpoint.post("quote", "/topup/quote", {
-    payload: Schema.Struct({ originAsset: Schema.String, usdc: MicroUsdc }),
+    payload: Schema.Struct({ originAsset: Schema.String, usdc: MicroUsdc, dry: Schema.optional(Schema.Boolean) }),
     success: TopUpQuote,
     error: TopUpUnavailable
   }),
