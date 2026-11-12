@@ -200,6 +200,7 @@ test("each notice says what happened and what to do, keyed so it's sent once", (
   const refund = n({ status: "REFUNDED", refunded: "2.5", refund_reason: "Deposit came in after the deadline" })!
   assert.equal(refund.key, "refunded")
   assert.match(refund.text, /2\.525765 USDC on Base\) didn't go through: Deposit came in after the deadline\. 1Click sent 2\.5 USDC back to your NEAR Intents account/)
+  assert.match(n({ status: "REFUNDED", refunded: "0.15", refund_reason: "QUOTE_EXPIRED" })!.text, /didn't go through: the full amount didn't arrive before the deadline\. 1Click sent 0\.15 USDC back/)
   assert.deepEqual(n({ direction: "out", status: "SUCCESS", amount_out: "1.419", chain: "base" }), { key: "arrived", text: "Your $2.50 withdrawal arrived: 1.419 USDC on Base." })
   assert.match(n({ direction: "out", status: "REFUNDED" })!.text, /withdrawal to Base was refunded to your NEAR Intents account/)
   const late = n({ status: "PROCESSING", deposit_seen_at: new Date(now - 30 * 60_000), deposit_address: "abc" })!
