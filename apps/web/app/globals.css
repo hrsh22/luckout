@@ -95,6 +95,16 @@
   }
 
   .blob { position: absolute; border-radius: 9999px; filter: blur(70px); pointer-events: none; }
+  /* Dialogs that scroll: a thin rounded thumb inset from the rounded corners, not the system's full-height bar
+     (shown whenever macOS is set to always show scroll bars), and no scrolling the page behind. */
+  .scroll-soft { overscroll-behavior: contain; }
+  .scroll-soft::-webkit-scrollbar { width: 12px; }
+  .scroll-soft::-webkit-scrollbar-track { background: transparent; margin-block: 28px; }
+  .scroll-soft::-webkit-scrollbar-thumb { border: 4px solid transparent; border-radius: 9999px; background: rgb(22 18 43 / 0.16) padding-box; }
+  .scroll-soft::-webkit-scrollbar-thumb:hover { background-color: rgb(22 18 43 / 0.3); }
+  @supports not selector(::-webkit-scrollbar) {
+    .scroll-soft { scrollbar-width: thin; scrollbar-color: rgb(22 18 43 / 0.2) transparent; }
+  }
 
   /* A voucher: two half-circle notches cut from its sides, like a ticket stub. */
   .voucher {

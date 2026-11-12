@@ -18,7 +18,7 @@ export function Sheet({ open, onOpenChange, title, description, children }: {
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-40 bg-ink/35 backdrop-blur-[6px] transition-opacity duration-200 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <Dialog.Popup className="fixed inset-x-0 bottom-0 z-50 max-h-[92dvh] overflow-y-auto rounded-t-[2rem] bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-pop outline-none transition-[translate,opacity] duration-300 ease-[cubic-bezier(.2,.9,.25,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full sm:inset-auto sm:top-1/2 sm:left-1/2 sm:w-[min(92vw,480px)] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-[2rem] sm:p-8 sm:data-[ending-style]:translate-y-[-46%] sm:data-[ending-style]:opacity-0 sm:data-[starting-style]:translate-y-[-46%] sm:data-[starting-style]:opacity-0">
+        <Dialog.Popup className="fixed inset-x-0 bottom-0 z-50 scroll-soft max-h-[92dvh] overflow-y-auto rounded-t-[2rem] bg-white p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-pop outline-none transition-[translate,opacity] duration-300 ease-[cubic-bezier(.2,.9,.25,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full sm:inset-auto sm:top-1/2 sm:left-1/2 sm:w-[min(92vw,480px)] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-[2rem] sm:p-7 sm:data-[ending-style]:translate-y-[-46%] sm:data-[ending-style]:opacity-0 sm:data-[starting-style]:translate-y-[-46%] sm:data-[starting-style]:opacity-0">
           <div className="mx-auto mb-4 h-1.5 w-10 rounded-full bg-line sm:hidden" aria-hidden="true" />
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -29,7 +29,7 @@ export function Sheet({ open, onOpenChange, title, description, children }: {
               <X size={20} />
             </Dialog.Close>
           </div>
-          <div className="mt-6">{children}</div>
+          <div className="mt-5">{children}</div>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

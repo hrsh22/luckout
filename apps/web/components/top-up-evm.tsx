@@ -145,7 +145,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
           <span className="text-sm font-semibold text-muted">Pay with</span>
           {ordered
             ? <TokenPicker assets={ordered} value={assetId} onChange={(id) => ((picked.current = true), setAssetId(id))} holdings={holdings} short={holdings && ((id) => !covers(id))} />
-            : <span className="skeleton h-16 rounded-[1.25rem]" />}
+            : <span className="skeleton h-14 rounded-[1.25rem]" />}
         </div>
         {micro >= 1_000_000 && assetId && <TopUpPreview q={p} stale={preview.isPlaceholderData || preview.isFetching} error={preview.error} />}
         {nothingCovers
