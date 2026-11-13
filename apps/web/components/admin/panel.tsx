@@ -8,7 +8,7 @@ import { BaseGasTile, GasTile, SendNearSheet } from "@/components/admin/gas"
 import { PurchasesCard } from "@/components/admin/purchases"
 import { RelayerCard } from "@/components/admin/relayer"
 import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
-import type { Tx } from "@/components/admin/shared"
+import { AdminTabs, type Tx } from "@/components/admin/shared"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -53,7 +53,7 @@ export function AdminPanel() {
   )
 }
 
-function NoPage() {
+export function NoPage() {
   return (
     <div className="flex max-w-xl flex-col gap-6 py-10">
       <h1 className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]">No page here</h1>
@@ -136,7 +136,8 @@ function Dashboard({ o }: { o: AdminOverview }) {
     <div className="flex flex-col gap-10">
       <header className="flex flex-wrap items-end justify-between gap-5">
         <div>
-          <p className="flex flex-wrap items-center gap-2 text-sm text-muted">
+          <AdminTabs />
+          <p className="mt-4 flex flex-wrap items-center gap-2 text-sm text-muted">
             <span className="pill bg-white! text-ink"><ShieldCheck size={14} aria-hidden="true" />Admin</span>
             <span className={`pill ${o.network === "mainnet" ? "bg-bad-soft! text-bad" : "bg-gold-soft! text-gold-ink"}`}>{o.network}</span>
             <span className="pill bg-white!">{shortAccount(accountId ?? "")}{isOwner ? " · owner" : ""}</span>

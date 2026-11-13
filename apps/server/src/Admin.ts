@@ -1,4 +1,4 @@
-import { AdminInvalid, AdminOverview, AttentionPurchase, type CreditSettings, PurchaseInvalid, type RefillView, type RelaySettings, type ShopStatus } from "@luckout/api"
+import { AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, type CreditSettings, PurchaseInvalid, type RefillView, type RelaySettings, type ShopStatus } from "@luckout/api"
 import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
@@ -36,6 +36,8 @@ const retryStep = (r: Pick<Row, "step" | "error">) =>
 export class Admin extends Context.Service<Admin, {
   isAdmin(accountId: string): boolean
   readonly overview: Effect.Effect<AdminOverview>
+  purchases(accountId?: string): Effect.Effect<ReadonlyArray<AdminPurchase>>
+  readonly users: Effect.Effect<ReadonlyArray<AdminUser>>
   configureRelay(settings: RelaySettings, by: string): Effect.Effect<RelaySettings>
   configureCredit(settings: CreditSettings, by: string): Effect.Effect<CreditSettings, AdminInvalid>
   refill(amount: number | undefined, by: string): Effect.Effect<RefillView, AdminInvalid>
@@ -175,6 +177,95 @@ export class Admin extends Context.Service<Admin, {
         })
       }).pipe(Effect.orDie)
 
+      const purchaseList = (accountId?: string) =>
+        sql<Row & {
+          requested_mode: AdminPurchase["mode"] | null
+          admitted: { mode: AdminPurchase["mode"]; max_price: string } | null
+          reference_price: string | number
+          draw: { final_price: string | number; cashback: string | number } | null
+          invoice_id: string | null
+          admit_tx: { hash: string } | null
+          settle_tx: { hash: string } | null
+          updated_at: Date | string
+        }>`
+          SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, updated_at,
+                 requested_mode, admitted, reference_price, draw, invoice_id, admit_tx, settle_tx
+          FROM purchases ${accountId ? sql`WHERE account_id = ${accountId}` : sql``}
+          ORDER BY created_at DESC LIMIT 300`.pipe(
+          Effect.map((rows) =>
+            rows.map((r) => {
+              const mode = r.admitted?.mode ?? r.requested_mode
+              // Same as the customer's own view: the Draw's final price, else the admitted maximum, else the reference price.
+              const paid = r.draw ? Number(r.draw.final_price) : r.step === "settled" ? Number(r.admitted?.max_price ?? r.reference_price) : undefined
+              return new AdminPurchase({
+                id: r.id,
+                accountId: r.account_id,
+                voucherName: r.voucher_name,
+                value: r.package_value,
+                step: r.step,
+                ...(mode ? { mode } : {}),
+                referencePrice: Number(r.reference_price),
+                ...(r.admitted ? { maxPrice: Number(r.admitted.max_price) } : {}),
+                ...(paid !== undefined ? { paid } : {}),
+                ...(r.draw ? { cashback: Number(r.draw.cashback) } : {}),
+                ...(r.error ? { error: r.error } : {}),
+                attempts: r.attempts,
+                ...(r.invoice_id ? { invoiceId: r.invoice_id } : {}),
+                ...(r.admit_tx ? { admitTx: r.admit_tx.hash } : {}),
+                ...(r.settle_tx ? { settleTx: r.settle_tx.hash } : {}),
+                createdAt: new Date(r.created_at).toISOString(),
+                updatedAt: new Date(r.updated_at).toISOString()
+              })
+            })
+          ),
+          Effect.orDie
+        )
+
+      // ponytail: one get_account view per known account on every load; page or cache it past a few hundred customers.
+      const users = Effect.gen(function*() {
+        const rows = yield* sql<{
+          account_id: string
+          first_seen: Date | string
+          telegram_name: string | null
+          purchases: number
+          delivered: number
+          spent: string | number
+          cashback: string | number
+          last_purchase_at: Date | string | null
+        }>`
+          SELECT k.account_id, k.first_seen, t.telegram_name,
+                 count(p.id)::int AS purchases,
+                 count(p.id) FILTER (WHERE p.step = 'settled')::int AS delivered,
+                 coalesce(sum(coalesce((p.draw->>'final_price')::bigint, (p.admitted->>'max_price')::bigint, p.reference_price))
+                   FILTER (WHERE p.step = 'settled'), 0) AS spent,
+                 coalesce(sum((p.draw->>'cashback')::bigint) FILTER (WHERE p.step = 'settled'), 0) AS cashback,
+                 max(p.created_at) AS last_purchase_at
+          FROM known_accounts k
+          LEFT JOIN purchases p ON p.account_id = k.account_id
+          LEFT JOIN telegram_links t ON t.account_id = k.account_id
+          GROUP BY k.account_id, k.first_seen, t.telegram_name
+          ORDER BY max(p.created_at) DESC NULLS LAST, k.first_seen DESC`.pipe(Effect.orDie)
+        const accounts = yield* Effect.forEach(rows, (r) =>
+          near.view<{ balance: string; per_purchase_limit: string; daily_limit: string } | null>("get_account", { account_id: r.account_id }).pipe(
+            Effect.orElseSucceed(() => undefined)
+          ), { concurrency: 8 })
+        return rows.map((r, i) => {
+          const a = accounts[i]
+          return new AdminUser({
+            accountId: r.account_id,
+            firstSeen: new Date(r.first_seen).toISOString(),
+            // null from the contract: never deposited, so nothing held.
+            ...(a === null ? { balance: 0 } : a ? { balance: Number(a.balance), perPurchaseLimit: a.per_purchase_limit, dailyLimit: a.daily_limit } : {}),
+            ...(r.telegram_name ? { telegram: r.telegram_name } : {}),
+            purchases: r.purchases,
+            delivered: r.delivered,
+            spent: Number(r.spent),
+            cashback: Number(r.cashback),
+            ...(r.last_purchase_at ? { lastPurchaseAt: new Date(r.last_purchase_at).toISOString() } : {})
+          })
+        })
+      })
+
       const configureRelay = (settings: RelaySettings, by: string) =>
         relay.configure(settings, by).pipe(
           Effect.tap((s) =>
@@ -213,6 +304,8 @@ export class Admin extends Context.Service<Admin, {
       return Admin.of({
         isAdmin: (a) => admins.has(a),
         overview,
+        purchases: purchaseList,
+        users,
         configureRelay,
         configureCredit,
         refill: refills.request,

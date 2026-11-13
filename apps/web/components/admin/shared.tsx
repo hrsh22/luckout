@@ -2,6 +2,8 @@
 
 import { network } from "@/lib/chain"
 import { motion } from "motion/react"
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 
 /** Signs with the admin's own wallet, toasts the result with a link, and refreshes. True if it went through. */
 export type Tx = (pending: string, done: string, f: (accountId: string) => Promise<unknown>) => Promise<boolean>
@@ -52,3 +54,18 @@ export const eth = (wei: string) => (Number(BigInt(wei) / 10n ** 12n) / 1e6).toF
 
 /** An address or transaction on Basescan (Base Sepolia on testnet), e.g. basescan(`tx/${hash}`). */
 export const basescan = (path: string) => `https://${network === "testnet" ? "sepolia." : ""}basescan.org/${path}`
+
+export function AdminTabs() {
+  const path = usePathname()
+  const tabs = [["/admin", "Control room"], ["/admin/purchases", "Purchases"], ["/admin/users", "Users"]] as const
+  return (
+    <nav aria-label="Admin" className="flex flex-wrap gap-2">
+      {tabs.map(([href, label]) => (
+        <Link key={href} href={href} aria-current={path === href ? "page" : undefined}
+          className={`pill transition-colors ${path === href ? "bg-ink! text-white" : "bg-white/60! text-muted hover:bg-white! hover:text-ink"}`}>
+          {label}
+        </Link>
+      ))}
+    </nav>
+  )
+}
