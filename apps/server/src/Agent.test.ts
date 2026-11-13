@@ -53,7 +53,7 @@ const deps = {
   },
   near: { view: () => Effect.succeed(rich) },
   web: "https://luckout.test",
-  shopOpen: Effect.succeed(true),
+  shopClosed: Effect.succeed(undefined),
   verify: async () => true
 } as never
 

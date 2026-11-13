@@ -152,11 +152,12 @@ export const useIsAdmin = (token: string | undefined) =>
     staleTime: Infinity
   }).data === true
 
-/** Whether purchases can start: an admin may have stopped sales, or the owner paused the contract. */
+/** Whether purchases can start: an admin may have stopped sales, the owner paused the contract, or Bitrefill's order limit is reached. */
 export const useShopStatus = () =>
   useQuery({
     queryKey: ["shop-status"],
     queryFn: () => api((c) => c.status()),
     staleTime: 20_000,
-    refetchInterval: 60_000
+    // At the order limit, checked again just after the time it reopens.
+    refetchInterval: (q) => Math.min(60_000, Math.max(5_000, (q.state.data?.reopensAt ?? Infinity) - Date.now() + 2_000))
   })
