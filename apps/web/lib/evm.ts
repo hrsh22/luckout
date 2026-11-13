@@ -31,7 +31,7 @@ async function setUp() {
     adapters: [adapter as never],
     networks,
     projectId,
-    metadata: { name: "Luckout", description: "Checkout, but lucky", url: window.location.origin, icons: [`${window.location.origin}/icon.svg`] },
+    metadata: { name: "Luckout", description: "Checkout, but lucky", url: window.location.origin, icons: [`${window.location.origin}/logo.png`] },
     // Regular accounts only: NEAR Intents checks signatures by key recovery, which smart accounts and
     // email or social logins can't pass.
     defaultAccountTypes: { eip155: "eoa" },
