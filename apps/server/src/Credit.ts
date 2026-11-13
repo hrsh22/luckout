@@ -46,17 +46,20 @@ export const settingsProblem = (s: CreditSettings) =>
     ? "The floor can't be above the ceiling."
     : s.dailyRefill < MIN_REFILL
     ? "The daily refill limit must be at least $10, the smallest refill."
+    : (s.refillBelow ?? 0) > 0 && (s.refillBelow ?? 0) > s.floor - MIN_REFILL
+    ? "Refill when below must be at least $10 under the amount refills top up to."
     : undefined
 
 /**
  * The credit to aim for, and the line below which a refill starts. The target covers two days of
  * sales (one with a Base float: Bitrefill credit can't be refunded, and refills then take a minute),
- * and the biggest card bought lately plus a refill's worth; the line never sits below that card, so
- * cards of the usual size buy at once. Both stay within the floor and the ceiling.
+ * and the biggest card bought lately plus a refill's worth; the line never sits below that card or the
+ * admin's own line, so cards of that size buy at once. Both stay within the floor and the ceiling, and
+ * the line stays a refill's worth under the target.
  */
-export const levels = (s: Pick<CreditSettings, "floor" | "ceiling" | "baseFloat">, avgDaily: number, biggest: number) => {
+export const levels = (s: Pick<CreditSettings, "floor" | "ceiling" | "baseFloat" | "refillBelow">, avgDaily: number, biggest: number) => {
   const target = Math.min(s.ceiling, Math.max(s.floor, targetDays(s) * avgDaily, biggest + MIN_REFILL))
-  const refillBelow = Math.max(Math.floor(target / 2), Math.min(biggest, target - MIN_REFILL))
+  const refillBelow = Math.max(Math.floor(target / 2), Math.min(Math.max(biggest, s.refillBelow ?? 0), target - MIN_REFILL))
   return { target, refillBelow }
 }
 

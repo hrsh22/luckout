@@ -157,13 +157,14 @@ function CreditCard({ c, ordersToday, cap }: { c: Credit; ordersToday: number; c
 
 function CreditSettingsSheet({ open, onClose, s }: { open: boolean; onClose: () => void; s: CreditSettings }) {
   const save = useSaveCredit()
-  const [f, setF] = useState({ floor: "", ceiling: "", dailyRefill: "", waitMinutes: "", baseFloat: "" })
+  const [f, setF] = useState({ floor: "", ceiling: "", refillBelow: "", dailyRefill: "", waitMinutes: "", baseFloat: "" })
   const [busy, setBusy] = useState(false)
   useEffect(() => {
     if (open) {
       setF({
         floor: dollars(s.floor),
         ceiling: dollars(s.ceiling),
+        refillBelow: dollars(s.refillBelow ?? 0),
         dailyRefill: dollars(s.dailyRefill),
         waitMinutes: String(s.waitMinutes),
         baseFloat: dollars(s.baseFloat ?? 0)
@@ -173,15 +174,17 @@ function CreditSettingsSheet({ open, onClose, s }: { open: boolean; onClose: () 
   const next = {
     floor: toMicro(f.floor),
     ceiling: toMicro(f.ceiling),
+    refillBelow: toMicro(f.refillBelow),
     dailyRefill: toMicro(f.dailyRefill),
     waitMinutes: Number(f.waitMinutes),
     baseFloat: toMicro(f.baseFloat)
   }
-  const valid = [next.floor, next.ceiling, next.dailyRefill, next.baseFloat].every((v) => v >= 0 && v <= 2_000_000_000) &&
+  const valid = [next.floor, next.ceiling, next.refillBelow, next.dailyRefill, next.baseFloat].every((v) => v >= 0 && v <= 2_000_000_000) &&
     Number.isInteger(next.waitMinutes) && next.waitMinutes >= 5 && next.waitMinutes <= 1440
   const fields: Array<{ key: keyof typeof f; label: string; hint: string; dollars: boolean }> = [
-    { key: "floor", label: "Keep at least", hint: "Whatever sales did.", dollars: true },
+    { key: "floor", label: "Top up to at least", hint: "Each refill brings credit back to at least this, whatever sales did.", dollars: true },
     { key: "ceiling", label: "Never hold more than", hint: "The most that can sit unused at Bitrefill. A refill for orders already waiting may go past it: that credit is spent within minutes.", dollars: true },
+    { key: "refillBelow", label: "Refill when below", hint: "A refill starts once credit falls under this, so a big card's worth stays ready and small sales don't each start one. At least $10 under the first number; 0 refills at half the target.", dollars: true },
     { key: "dailyRefill", label: "Refill at most, per day", hint: "Across all refills in 24 hours. Big orders wait for room here.", dollars: true },
     { key: "waitMinutes", label: "Minutes an order may wait", hint: "Up to 1440 (a day). Then it's cancelled, and the customer pays nothing.", dollars: false },
     {

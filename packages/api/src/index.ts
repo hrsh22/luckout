@@ -525,7 +525,13 @@ export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings
    * on a swap; topped back up in the background. 0 turns it off. Missing (saved before it existed): the
    * network's default.
    */
-  baseFloat: Schema.optional(Usd)
+  baseFloat: Schema.optional(Usd),
+  /**
+   * A refill starts once credit falls under this, so a big card's worth stays ready without every small
+   * sale starting a refill. Kept at least $10 under the target. Missing or 0: half the target, or the
+   * biggest recent card if that's more.
+   */
+  refillBelow: Schema.optional(Usd)
 }) {}
 
 /** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
