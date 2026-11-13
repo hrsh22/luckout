@@ -169,12 +169,18 @@ Where each piece is in the code, and where it runs on mainnet.
 | 💵 [Real-World Money](#real-world-money) | A stablecoin checkout for something people already buy every day, paid from any chain without gas. |
 | 🛡️ [AI Security & Defense](#ai-security--defense) | An agent that spends real money without holding any: contract limits, a three-method key and a verified TEE. |
 | 🏪 [Autonomous Business](#autonomous-business) | The shop sells, buys stock, pays Cashback and refills its supplier credit by itself. Humans set the limits. |
-| 💡 [Open Innovation](#open-innovation) | Cashback as a provably fair game, with a guaranteed voucher. |
+| 💡 [Open Innovation](#open-innovation) | A merchant with no keys on other chains, and customers with no NEAR: Chain Signatures one way, NEAR Intents accounts the other. |
 | 🎲 [Games With Real Economies](#games-with-real-economies) | A game of chance on purchases you'd make anyway. Its economy balances itself onchain, and players never notice the chain. |
 
 ### Real-World Money
 
-A working stablecoin checkout for something people already buy every day. Customers pay with whatever token they hold on any chain through 1Click, settle in native USDC on NEAR, and never buy NEAR for gas. The relayer only pays for calls to our own contract, with the exact deposit each one needs (`Relay.ts`). The merchant side runs on the same rails: the treasury refills our Bitrefill credit from sales proceeds through 1Click.
+A stablecoin checkout a normal shop could use tomorrow, on both sides of the counter.
+
+- **Customers pay in stablecoins from any chain.** Normal mode is a plain checkout: pay the card's price in USDC and get the code. Top-Ups swap any token on any chain into native USDC on NEAR through 1Click (`TopUp.ts`), and the contract holds balances in NEP-141 USDC (`ft_on_transfer`).
+- **No gas and no NEAR.** With NEP-366 meta transactions, the relayer pays only for calls to our own contract, with the exact deposit each one needs (`Relay.ts`, [a relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP)).
+- **The merchant pays its supplier in USDC, by itself.** When our Bitrefill credit runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to our Base wallet. That wallet then pays Bitrefill's invoice, signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)) (`Refill.ts`). On mainnet, the owner has topped up the treasury by hand so far. When its balance runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
+- **The lucky modes are optional.** Normal mode is a standard purchase. Chance-based cashback may count as a game of chance in some countries. We plan to geo-restrict where required, but that isn't built yet.
+- **Not used:** PingPay and x402. The `@x402/*` packages in `apps/web/package.json` are peer dependencies of Reown AppKit.
 
 ### AI Security & Defense
 
@@ -184,9 +190,25 @@ The agent spends real money without holding any.
 - The server's NEAR key is a function-call key limited to three contract methods.
 - The contract enforces each customer's Spending Limits, and a maximum debit on every purchase, whoever submits it.
 - The agent's model runs in a TEE that we verify every hour: NVIDIA GPU attestation, an Intel TDX quote, the signing key and our nonce bound in the report, and the attested container config.
-- Each reply must be signed by that key over the exact request and response, or the customer never sees it (`Attestation.ts`).
+- Each reply must be signed by that key over the exact request and response, or the customer never sees it (`Attestation.ts`). The latest check is live at [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) and on `/fair`.
 
 `attack.ts` shows what a stolen server key can and can't do ([below](#what-a-stolen-server-key-can-do)).
+
+#### Why our own limits, not the Agent API
+
+The Agent API puts an agent's own wallet under owner-signed policy. Luckout's agent has no wallet. It spends prepaid customer balances that our contract holds, so the limits live in that contract and apply to every purchase, whoever submits it: the web app, the agent, or a stolen server key.
+
+| Agent API policy | Luckout's equivalent |
+|---|---|
+| Per-transaction and daily limits | Spending Limits in the contract (`set_limits`), checked on every purchase |
+| Owner approval | The customer taps Confirm; the contract caps the debit |
+| Freeze | `set_paused`, signed by the owner |
+
+The Spending Limits overlap with what the Agent API offers. The rest is something a wallet policy can't express: each Lucky Buy locks its largest possible Cashback from a shared reserve before it starts, an order id is admitted once, and the Draw can't be retried or undone.
+
+**The treasury is the exception, and the next step.** It is the one account on our server that moves money by itself, with a full-access key so refills can run unattended. The contract limits it: it can pull proceeds only to itself, and only up to the owner's daily cap (`set_treasury`, shown by `get_config`). Putting the treasury behind an Agent API wallet, with withdrawals only to our Base wallet and a daily budget, would remove that key from the server. It's next after the hackathon.
+
+**Keys, plainly.** Our server holds three NEAR keys: `server.luckout.near`'s function-call key, and the full-access keys of the relayer and the treasury. The relayer holds only gas money. Each Luckout account also carries the owner's own wallet key (`E1GG…`, full access) for recovery. That key isn't on the server.
 
 ### Autonomous Business
 
@@ -201,9 +223,15 @@ Luckout runs a shop end to end without anyone tapping anything. Humans only set 
 | Paying customers' gas | Relayer on or off, per-account and daily caps |
 | Finishing or refunding stuck purchases (the reconciler), and alerts on low gas or credit | Who gets the admin panel and the alert chat |
 
+The AI only sells. Refill sizing and every money move follow fixed rules in code, by design, so a model never decides where money goes.
+
 ### Open Innovation
 
-A chance at Cashback with a guaranteed voucher, where the chance is provably fair. Game Versions are immutable onchain tables that must average exactly 105.6%. The Draw runs a block after delivery, so nobody can retry it or cancel after seeing the result. Every Draw can be recomputed in the browser. Chain abstraction carries the rest: EVM wallets act through their own NEAR Intents accounts, and our Base wallet pays suppliers through Chain Signatures with no key of its own.
+Chain abstraction in both directions, with a fair game on top.
+
+- **A merchant with no keys on other chains.** Our Base wallet [`0xBfE4…12eA`](https://basescan.org/address/0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA) has no private key. The server derives its address from `v1.signer`. The treasury signs each Base transaction through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)), and the server checks that the signature recovers to that wallet before sending (`Base.ts`). That's how we pay Bitrefill invoices on Base.
+- **Customers with no NEAR.** MetaMask users act through their own NEAR Intents accounts. `intents.near` checks their EVM signature and calls our contract's `on_auth`, which accepts calls only from `intents.near` ([mainnet tx](https://nearblocks.io/txns/3vLDQRBfA182UF3s5Zqo8AESu2r68LmGn5wWvAnDzEyW)).
+- **A chance anyone can check.** Game Versions are immutable onchain tables that must average exactly 105.6%. The Draw runs a block after delivery, so nobody can retry it or cancel after seeing the result. Every Draw can be recomputed in the browser.
 
 ### Games With Real Economies
 
@@ -211,19 +239,9 @@ A game of chance played on purchases people already make, with an economy that r
 
 - **The loop:** pick a mode once (Lite, Classic or Jackpot), buy a card you'd buy anyway, see the Draw land seconds later, and spend any Cashback on the next card.
 - **The economy is onchain and balances itself.** Every Game Version averages exactly 105.6%. The extra paid on Draws without Cashback flows into the Cashback Reserve that pays the lucky ones. When the reserve runs low, the Cashback Cap shrinks with it, and each Lucky Buy plays on a smaller part of the price. Nobody patches anything.
-- **Players never notice the chain.** No NEAR account, no gas, no seed phrase: a MetaMask wallet or a Telegram chat is enough.
-- **What we don't have:** items as NEP-245 tokens, or AI-run characters with their own wallets. Our agent is a shopping assistant.
-
-### Why our own limits, not the Agent API
-
-The Agent API puts an agent's own wallet under owner-signed policy. Luckout's agent has no wallet. It spends prepaid customer balances that our contract holds, so the limits live in that contract, next to things a wallet policy can't express:
-
-- each Lucky Buy locks its largest possible Cashback from a shared reserve before it starts,
-- an order id is admitted once,
-- the debit can't exceed what the customer confirmed,
-- and the Draw can't be retried or undone.
-
-The limits apply to every purchase, whoever submits it, including the web app and a stolen server key.
+- **Players never notice the chain.** There's no NEAR account, no gas and no seed phrase: a MetaMask wallet is enough. Once it's linked, you can also play from a Telegram chat.
+- **The track's hints, in our code:** NEAR Intents (`packages/api/src/intents.ts`, `on_auth`, `OneClick.ts`) and gas-free play (`Relay.ts`). NEP-245 appears only in `mt_transfer` refunds from `intents.near`, not as items.
+- **What we don't have:** items as NEP-245 tokens, AI-run characters with their own wallets, or email and social login. Email and social login are off because email wallets can be smart accounts, which NEAR Intents can't verify. Our agent is a shopping assistant.
 
 ## Security
 
@@ -266,7 +284,7 @@ With only the operator's key, the most a compromised server or agent can do is b
 
 - **Customers sign once, not per purchase.** The server's NEAR key is a function-call key that can only call `purchase`, `confirm_delivery` and `fail_purchase`. Raising limits, changing settings and withdrawing need the customer's own full-access signature.
 - **A compromised server or agent can spend at most your limits.** The contract checks the per-purchase and daily Spending Limits on every purchase, whoever submits it. New accounts start at $200 a purchase and $1,000 a day. A customer who turns a limit off (No limit) is bounded only by their balance, and the wallet page says so before they save it. Within those limits, the money isn't only spent on vouchers: the server could buy, confirm delivery without one, and have the treasury pull the proceeds (ADR-0009), up to the owner's daily treasury cap. The runbook's hard stop pauses the contract and sets that cap to 0.
-- **The agent can't buy on its own.** The model can only prepare a purchase. You tap Confirm, and the contract refuses to debit more than the maximum on the button. Voucher codes never enter the model's context, and the bot only talks in private chats. Telegram is linked from your signed-in wallet session, never the other way round.
+- **The agent can't buy on its own.** The model can only prepare a purchase. You tap Confirm, and the server passes the button's maximum to the contract, which refuses to debit more. A compromised server could pass a higher maximum, up to your Spending Limits (see [What you trust us for](#what-you-trust-us-for)). Voucher codes never enter the model's context, and the bot only talks in private chats. Telegram is linked from your signed-in wallet session, never the other way round.
 - **The agent's model is verified, not trusted.** It runs on NEAR AI Cloud in a TEE. Every hour, with a fresh nonce, the server checks NVIDIA's GPU attestation, Intel's TDX quotes for the model node and the gateway, that each enclave's signing key and our nonce are in its TDX report, and that the attested container config matches. Every completion's signature over the exact request and response bytes must recover to an attested key, or the reply and its Buy button are withheld. Without a passing check from the last two hours, the agent stays offline, and every failure alerts the admin chat (`Attestation.ts`).
 - **EVM wallets act only through NEAR Intents (ADR-0011).** `intents.near` checks your EVM signature and then calls our contract's `on_auth`. The contract accepts that call only from `intents.near` and only for `0x…` accounts, so NEAR-wallet customers don't depend on NEAR Intents at all. An EVM customer's withdrawal goes only to their own NEAR Intents account, never to an address the server picks, and the Intents account id is fixed in the contract's code. What you trust: NEAR Intents to say who signed. Your money already passes through it on every Top-Up and withdrawal. Only regular EVM accounts work, not smart-contract wallets, because NEAR Intents checks signatures by key recovery.
 - **The relayer can only send what you signed.** It pays the fee for your deposits, withdrawals, settings, Reclaims and Draw reruns, which you still sign with your own full-access key. It can refuse or delay one (your wallet can then send it instead), but never change it. It only pays for Luckout's own calls, with the exact deposit each needs, and holds nothing but gas money.
@@ -318,4 +336,5 @@ CONTEXT.md      domain glossary
   - Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl-node` (Intel TDX quote verification), `openai` (types only).
   - Web: Next.js, React, `@hot-labs/near-connect`, Reown AppKit with wagmi, TanStack Query, motion.
   - External services: Bitrefill (gift cards), NEAR Intents 1Click, NEAR AI Cloud, NVIDIA NRAS, Telegram.
+  - Not used: the Agent API, OutLayer, PingPay and x402. The `@x402/*` packages in `apps/web/package.json` are peer dependencies of Reown AppKit.
 - **License:** MIT. See [LICENSE](LICENSE).
