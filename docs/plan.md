@@ -9,7 +9,7 @@
 - **First pass:** Claude Code and Codex check that the repo runs and does what the README says. A README that works from a fresh clone is the first gate.
 - **Human judges:** technical implementation, design, impact, originality, sustainability.
 
-**Tracks we enter:** Real-World Money, AI Security & Defense, Autonomous Business, Open Innovation, Games With Real Economies (chosen 13 Nov; Games added the same day as a long shot).
+**Tracks we enter:** Real-World Money, AI Security & Defense, Autonomous Business, Open Innovation, Games With Real Economies (chosen 13 Nov).
 
 **Submission needs:**
 - A public GitHub repo with code written since the announcement.
