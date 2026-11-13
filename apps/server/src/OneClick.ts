@@ -106,7 +106,7 @@ export class OneClick extends Context.Service<OneClick, {
     OneClick,
     Effect.gen(function*() {
       const baseUrl = yield* Config.String("ONECLICK_API_URL").pipe(Config.withDefault("https://1click.chaindefuser.com/v0"))
-      // Optional partner key from partners.near-intents.org; quotes are priced the same without it.
+      // Partner key from partners.near-intents.org; without it, 1Click adds a 0.25% fee to every quote.
       const key = yield* Config.option(Config.Redacted("ONECLICK_API_KEY"))
       const http = (yield* HttpClient.HttpClient).pipe(
         HttpClient.mapRequest((r) => {
