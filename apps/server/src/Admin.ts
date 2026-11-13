@@ -203,7 +203,8 @@ export class Admin extends Context.Service<Admin, {
           if (problem) return yield* new AdminInvalid({ message: problem })
           const saved = yield* credit.configure(next, by)
           yield* alerts.admin(
-            `${by} set Bitrefill credit: auto-refill ${next.autoRefill ? "on" : "off"}, keep ${usd(next.floor)}–${usd(next.ceiling)}, ` +
+            `${by} set Bitrefill credit: auto-refill ${next.autoRefill ? "on" : "off"}, top up to at least ${usd(next.floor)}, hold at most ${usd(next.ceiling)}, ` +
+              `refill when below ${next.refillBelow ? usd(next.refillBelow) : "half the target"}, ` +
               `refill at most ${usd(next.dailyRefill)} a day, wait up to ${next.waitMinutes} min`
           )
           return saved
