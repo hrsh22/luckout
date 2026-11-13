@@ -25,4 +25,7 @@ git checkout -q -B "$branch" "origin/$branch"
 pnpm install --frozen-lockfile --filter @luckout/server... >/dev/null
 pm2 startOrReload deploy/ecosystem.config.cjs --update-env >/dev/null && pm2 save >/dev/null
 sleep 5
-curl -fsS -o /dev/null -w "$network $branch $(git rev-parse --short HEAD): health %{http_code}\n" "http://127.0.0.1:$port/health"
+# The port opens a few seconds before the server answers, and a request in that gap is never answered:
+# without a timeout this waited forever and held up every later deploy. Up to about two minutes in all.
+curl -fsS -m 10 --retry 10 --retry-delay 3 --retry-all-errors -o /dev/null \
+  -w "$network $branch $(git rev-parse --short HEAD): health %{http_code}\n" "http://127.0.0.1:$port/health"
