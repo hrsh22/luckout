@@ -15,7 +15,7 @@ Luckout is a gift card shop on NEAR, with a web app and a Telegram agent. Custom
 | Contract | [`app.luckout.near`](https://nearblocks.io/address/app.luckout.near), owner `luckout.near` |
 | A real Draw Proof, recomputed in your browser | [Classic Draw on mainnet](https://www.luckout.wtf/draw/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF) |
 | Live Average, reserve, code hash, AI enclave check | [luckout.wtf/fair](https://www.luckout.wtf/fair) |
-| Free testnet demo (test USDC, Bitrefill test cards) | [testnet.luckout.gamified.trade](https://testnet.luckout.gamified.trade), bot [@luckouttestingbot](https://t.me/luckouttestingbot) |
+| Free testnet demo (test USDC, Bitrefill test cards) | [testnet.luckout.wtf](https://testnet.luckout.wtf), bot [@luckouttestingbot](https://t.me/luckouttestingbot) |
 
 As of 13 November 2026, mainnet has settled 8 Lucky Buys of real cards and `app.luckout.near` has 95 transactions. `/fair` reads the current numbers from the contract.
 
@@ -46,7 +46,7 @@ Any cashback leaves you below the normal price. One purchase gets at most $50 ba
 
 ### 1. Free, on testnet (about 5 minutes)
 
-1. Open [testnet.luckout.gamified.trade/welcome](https://testnet.luckout.gamified.trade/welcome) and sign in with a testnet NEAR wallet or any EVM wallet. **You see** "How do you like to pay?"
+1. Open [testnet.luckout.wtf/welcome](https://testnet.luckout.wtf/welcome) and sign in with a testnet NEAR wallet or any EVM wallet. **You see** "How do you like to pay?"
 2. Pick a Default Mode (Classic is the one we suggest) and tap Continue. **You see** "Add funds".
 3. Tap "Get 100 test USDC". **You see** $100 in your balance, then "You're all set" with your mode and Spending Limits. An EVM wallet needs no testnet funds: the faucet pays its NEAR Intents account, and one signature moves the money in.
 4. In the shop, buy the $10 Bitrefill test gift card. **You see** the code, the Draw's result and your new balance within seconds.
@@ -85,7 +85,7 @@ pnpm test              # unit tests; tests that call Bitrefill or 1Click skip wi
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY` the catalog and prices work; with the operator key and `REDEMPTION_KEY` purchases work. All variables are in [`.env.example`](.env.example).
 
 - **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
-- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. `node apps/server/scripts/e2e-evm.ts` does the same for a fresh EVM wallet through NEAR Intents (it needs the server's relayer) and checks what must be refused. Set `API_URL=https://luckout-testnet-api.gamified.trade` to run them against the deployed testnet server.
+- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. `node apps/server/scripts/e2e-evm.ts` does the same for a fresh EVM wallet through NEAR Intents (it needs the server's relayer) and checks what must be refused. Set `API_URL=https://testnet-api.luckout.wtf` to run them against the deployed testnet server.
 - **Deploying:** [`deploy/README.md`](deploy/README.md) (server on a VM with pm2; web on Vercel).
 
 ## NEAR technology, where it is, and where it runs
