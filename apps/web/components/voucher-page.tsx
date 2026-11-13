@@ -7,6 +7,7 @@ import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { OddsBar, OddsList } from "@/components/odds"
 import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purchase-view"
+import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage, TimedOut } from "@/lib/api"
@@ -296,6 +297,7 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
   const [adding, setAdding] = useState(false)
   const [raising, setRaising] = useState(false)
   if (shop && !shop.open) {
+    if (shop.reason === "limit" && shop.reopensAt !== undefined) return <ReopensAt at={shop.reopensAt} />
     return (
       <p className="rounded-2xl bg-warn-soft p-4 text-[15px] font-medium text-warn">
         Purchases are paused for a few minutes. Your balance is safe; try again soon.

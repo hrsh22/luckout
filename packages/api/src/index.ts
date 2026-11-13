@@ -197,10 +197,14 @@ export class PurchaseInvalid extends Schema.TaggedError<PurchaseInvalid>()(
 
 export class NotFound extends Schema.TaggedError<NotFound>()("NotFound", {}, { httpApiStatus: 404 }) {}
 
-/** Whether new purchases can start: "stopped" by an admin on the server, or "paused" in the contract by the owner. */
+/**
+ * Whether new purchases can start: "stopped" by an admin on the server, "paused" in the contract by the owner,
+ * or "limit": Bitrefill's orders for the last 24 hours are used up until `reopensAt` (ms).
+ */
 export class ShopStatus extends Schema.Class<ShopStatus>("ShopStatus")({
   open: Schema.Boolean,
-  reason: Schema.optional(Schema.Literals(["stopped", "paused"]))
+  reason: Schema.optional(Schema.Literals(["stopped", "paused", "limit"])),
+  reopensAt: Schema.optional(Schema.Number)
 }) {}
 
 /**
