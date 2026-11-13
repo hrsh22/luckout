@@ -203,9 +203,26 @@ export class ShopStatus extends Schema.Class<ShopStatus>("ShopStatus")({
   reason: Schema.optional(Schema.Literals(["stopped", "paused"]))
 }) {}
 
+/**
+ * The latest check that the Telegram Agent's model runs inside NEAR AI Cloud's attested TEE, and how
+ * many of its replies were verified against it since the server started.
+ */
+export class AgentAttestation extends Schema.Class<AgentAttestation>("AgentAttestation")({
+  model: Schema.String,
+  ok: Schema.Boolean,
+  checkedAt: Schema.Number,
+  nonce: Schema.String,
+  modelKeys: Schema.Array(Schema.String),
+  gatewayKey: Schema.String,
+  checks: Schema.Array(Schema.Struct({ name: Schema.String, ok: Schema.Boolean })),
+  replies: Schema.Struct({ verified: Schema.Number, refused: Schema.Number })
+}) {}
+
 export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).add(
   HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent }),
-  HttpApiEndpoint.get("status", "/status", { success: ShopStatus })
+  HttpApiEndpoint.get("status", "/status", { success: ShopStatus }),
+  /** NotFound while the Agent is off (no bot or NEAR AI key) or before its first check. */
+  HttpApiEndpoint.get("attestation", "/attestation", { success: AgentAttestation, error: NotFound })
 ) {}
 
 export class CatalogApi extends HttpApiGroup.make("catalog").add(

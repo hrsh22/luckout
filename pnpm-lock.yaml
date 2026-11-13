@@ -25,6 +25,9 @@ importers:
       '@luckout/api':
         specifier: workspace:*
         version: link:../../packages/api
+      '@phala/dcap-qvl-node':
+        specifier: 0.3.3
+        version: 0.3.3
       '@toon-format/toon':
         specifier: 4.4.0
         version: 4.4.0
@@ -726,6 +729,9 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@phala/dcap-qvl-node@0.3.3':
+    resolution: {integrity: sha512-Iakz7N6VfWXWfgDkgJ5PFr414UV8BD3mk9ssEd0sFFiGNgiAwzD/wE2zwsGRya7qYYC+R8rvg4uEHXQfu1ArAQ==}
 
   '@phosphor-icons/webcomponents@2.1.5':
     resolution: {integrity: sha512-JcvQkZxvcX2jK+QCclm8+e8HXqtdFW9xV4/kk2aL9Y3dJA2oQVt+pzbv1orkumz3rfx4K9mn9fDoMr1He1yr7Q==}
@@ -4029,6 +4035,8 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.3
+
+  '@phala/dcap-qvl-node@0.3.3': {}
 
   '@phosphor-icons/webcomponents@2.1.5':
     dependencies:

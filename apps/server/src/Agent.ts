@@ -1,7 +1,6 @@
 import { type Mode, noLimit } from "@luckout/api"
 import { Effect } from "effect"
-import OpenAI from "openai"
-import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
+import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
 import type { Near } from "./Near.ts"
 import type { Purchases } from "./Purchases.ts"
@@ -12,7 +11,9 @@ import type { Purchases } from "./Purchases.ts"
 //   and the contract's Spending Limits still bound every purchase;
 // - a purchase the customer can't pay for (balance, limits) is never offered as a button;
 // - on testnet the catalog itself only holds test cards (Bitrefill.ts), so the model can't offer others;
-// - Redemption Data never enters the model's context (the bot sends codes itself).
+// - Redemption Data never enters the model's context (the bot sends codes itself);
+// - every completion must be signed inside NEAR AI's attested TEE (Attestation.ts), or the turn's
+//   reply and button are withheld.
 
 export interface Pending {
   readonly voucherId: string
@@ -149,8 +150,32 @@ export const makeAgent = (deps: {
   apiKey: string
   baseURL: string
   model: string
+  /** Whether NEAR AI signed exactly this request and response inside its attested TEE. */
+  verify: (request: string, response: string, chatId: string) => Promise<boolean>
 }) => {
-  const client = new OpenAI({ apiKey: deps.apiKey, baseURL: deps.baseURL, timeout: 45_000, maxRetries: 1 })
+  /** One completion. We send and keep the exact bytes, because the TEE signs their hashes. */
+  const complete = async (messages: Array<ChatCompletionMessageParam>) => {
+    const request = JSON.stringify({ model: deps.model, messages, tools: TOOLS })
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetch(`${deps.baseURL}/chat/completions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${deps.apiKey}`, "content-type": "application/json" },
+        body: request,
+        signal: AbortSignal.timeout(45_000)
+      }).catch((e: unknown) => {
+        if (attempt === 2) throw e
+        return undefined
+      })
+      if (res?.ok) {
+        const response = await res.text()
+        return { request, response, completion: JSON.parse(response) as ChatCompletion }
+      }
+      // One retry for a dropped connection or a busy server, like the OpenAI SDK's default.
+      if (res && (attempt === 2 || (res.status !== 429 && res.status < 500))) {
+        throw Object.assign(new Error(`NEAR AI answered ${res.status}`), { status: res.status })
+      }
+    }
+  }
 
   const run = <A>(e: Effect.Effect<A, { message: string }>) =>
     Effect.runPromise(Effect.match(e, { onFailure: (err) => ({ error: err.message }), onSuccess: (a) => a }))
@@ -233,8 +258,11 @@ export const makeAgent = (deps: {
     let pending: Pending | undefined
     const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, (p) => (pending = p))
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
+    // Signatures are checked alongside the tool loop and all awaited before anything reaches the customer.
+    const signed: Array<Promise<boolean>> = []
     for (let step = 0; step < 6; step++) {
-      const res = await client.chat.completions.create({ model: deps.model, messages, tools: TOOLS })
+      const { request, response, completion: res } = await complete(messages)
+      signed.push(deps.verify(request, response, res.id))
       const u = res.usage
       if (u) console.log(`agent tokens: prompt ${u.prompt_tokens}, cached ${u.prompt_tokens_details?.cached_tokens ?? 0}, completion ${u.completion_tokens}`)
       const msg = res.choices[0]?.message
@@ -242,6 +270,9 @@ export const makeAgent = (deps: {
       messages.push(msg)
       const calls = (msg.tool_calls ?? []).filter((c) => c.type === "function")
       if (calls.length === 0) {
+        if (!(await Promise.all(signed)).every(Boolean)) {
+          return { reply: "I couldn't prove that answer came from the secure enclave, so I didn't send it. Try again in a moment.", pending: undefined, history }
+        }
         // The whole transcript, tool calls included: the next turn's prompt then starts with exactly
         // this turn's tokens, which the provider has cached (cache reads cost 2% of fresh input).
         return { reply: msg.content ?? "", pending, history: messages.slice(1) }
@@ -253,6 +284,8 @@ export const makeAgent = (deps: {
         messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify(result) })
       }
     }
-    return { reply: "Sorry, I couldn't finish that. Try asking again in a simpler way.", pending, history: history }
+    // A button prepared along the way still needs every step behind it verified.
+    const verified = (await Promise.all(signed)).every(Boolean)
+    return { reply: "Sorry, I couldn't finish that. Try asking again in a simpler way.", pending: verified ? pending : undefined, history: history }
   }
 }

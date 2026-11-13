@@ -14,6 +14,7 @@
     "@effect/sql-pglite": "4.1.2",
     "@electric-sql/pglite": "0.5.15",
     "@luckout/api": "workspace:*",
+    "@phala/dcap-qvl-node": "0.3.3",
     "@toon-format/toon": "4.4.0",
     "borsh": "2.0.0",
     "effect": "4.1.2",
