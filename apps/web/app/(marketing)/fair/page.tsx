@@ -1,4 +1,5 @@
 import { DailyReset } from "@/components/local-time"
+import { api } from "@/lib/api"
 import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
@@ -14,10 +15,11 @@ export const metadata: Metadata = {
 interface Reserve { free: string; locked: string; max_cashback: string }
 
 export default async function Fair() {
-  const [stats, reserve, code] = await Promise.all([
+  const [stats, reserve, code, tee] = await Promise.all([
     view<Stats>(contractId, "get_stats").catch(() => undefined),
     view<Reserve>(contractId, "get_reserve").catch(() => undefined),
-    codeHash(contractId).catch(() => undefined)
+    codeHash(contractId).catch(() => undefined),
+    api((c) => c.attestation(), undefined, "10 seconds").catch(() => undefined)
   ])
   const avg = stats && liveAverage(stats)
 
@@ -90,6 +92,37 @@ export default async function Fair() {
           </p>
         )}
       </section>
+
+      {tee && (
+        <section className="card flex flex-col gap-4 p-8">
+          <h2 className="font-display text-3xl font-extrabold">The assistant's AI runs in a verified enclave</h2>
+          <p className="max-w-[64ch] text-ink-soft">
+            The Telegram assistant's model, <code className="font-mono text-sm text-ink">{tee.model}</code>, runs on NEAR AI Cloud inside a
+            secure enclave. Every hour our server checks that with a fresh nonce: NVIDIA verifies the GPUs, Intel verifies the CPU enclave,
+            and the enclave's signing key must be bound into both. Every reply must carry that key's signature over exactly what we sent
+            and got back, or the assistant doesn't send it. Without a passing check, the assistant stays offline.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Figure label="Latest check" value={tee.ok ? "Passed" : "Failed"} />
+            <Figure label="Replies verified since the server started" value={String(tee.replies.verified)} />
+            <Figure label="Replies withheld" value={String(tee.replies.refused)} />
+          </div>
+          <ul className="grid gap-1 text-ink-soft">
+            {tee.checks.map((c) => (
+              <li key={c.name}>
+                <span aria-hidden="true" className={c.ok ? "text-good" : "text-bad"}>{c.ok ? "✓" : "✗"}</span>{" "}
+                <span className="sr-only">{c.ok ? "Passed:" : "Failed:"}</span>
+                {c.name}
+              </li>
+            ))}
+          </ul>
+          <p className="text-sm break-all text-muted">
+            Checked {new Date(tee.checkedAt).toUTCString()} with nonce <code className="font-mono">{tee.nonce}</code>. Model signing key{" "}
+            <code className="font-mono">{tee.modelKeys.join(", ")}</code>.{" "}
+            <a href="https://docs.near.ai/cloud/verification" className="font-semibold text-ink underline underline-offset-4" target="_blank" rel="noreferrer">How NEAR AI attestation works</a>
+          </p>
+        </section>
+      )}
 
       <a className="self-start text-sm font-medium text-muted underline underline-offset-4 hover:text-ink" href={explorerAccount(contractId)} target="_blank" rel="noreferrer">
         Contract {contractId} on NearBlocks
