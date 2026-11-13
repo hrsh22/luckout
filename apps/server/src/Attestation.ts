@@ -81,7 +81,7 @@ export const gpusOk = (nras: unknown, nonce: string, now: number) => {
     )
 }
 
-const enclave = async (who: string, e: Enclave, nonce: string, now: number): Promise<Array<Check>> => {
+const enclave = async (who: string, e: Enclave, nonce: string, now: number, gpus = false): Promise<Array<Check>> => {
   const quote = Buffer.from(e.intel_quote, "hex")
   const tdx = js_verify(quote, await js_get_collateral(INTEL_PCCS, quote), BigInt(Math.floor(now / 1000))) as {
     status?: string
@@ -95,7 +95,8 @@ const enclave = async (who: string, e: Enclave, nonce: string, now: number): Pro
     { name: `${who}: its signing key and our nonce are in the TDX report`, ok: !!td && bindsKeyAndNonce(td.report_data, e.signing_address, nonce) },
     { name: `${who}: runs the container config it attests`, ok: !!td && composeMatches(tcb.app_compose, td.mr_config_id) }
   ]
-  if (!e.nvidia_payload) return checks
+  // A model node must prove its GPUs; the gateway has none.
+  if (!e.nvidia_payload) return gpus ? [...checks, { name: `${who}: NVIDIA verified its GPUs`, ok: false }] : checks
   const gpu = JSON.parse(e.nvidia_payload) as { nonce: string }
   const nras = await json(NRAS, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(gpu) })
   return [...checks, { name: `${who}: NVIDIA verified its GPUs`, ok: gpu.nonce === nonce && gpusOk(nras, nonce, now) }]
@@ -112,7 +113,7 @@ export const attest = async (ai: NearAi, now = Date.now()): Promise<Attested> =>
   const checks = [
     { name: "The model runs on at least one attested TEE node", ok: nodes.length > 0 },
     ...await enclave("Gateway", report.gateway_attestation, nonce, now),
-    ...(await Promise.all(nodes.map((n, i) => enclave(`Model node ${i + 1}`, n, nonce, now)))).flat()
+    ...(await Promise.all(nodes.map((n, i) => enclave(`Model node ${i + 1}`, n, nonce, now, true)))).flat()
   ]
   return {
     model: ai.model,
