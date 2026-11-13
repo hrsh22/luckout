@@ -22,8 +22,9 @@ process.env.ADMIN_ACCOUNTS = "boss.testnet, luckout.testnet"
 const NEAR = 10n ** 24n
 const near = fakeNear({
   relayerId: "relayer.test",
-  view: <A>(method: string) =>
+  view: <A>(method: string, args?: { account_id?: string }) =>
     Effect.succeed(({
+      get_account: args?.account_id === "alice.testnet" ? { balance: "120000000", per_purchase_limit: "200000000", daily_limit: "1000000000" } : null,
       get_config: { owner: "luckout.testnet", operator: "server.test", usdc: "usdc.test", paused: false, cashback_cap: { fixed: "50000000", reserve_bps: 2_000 } },
       get_reserve: { free: "1000000000", locked: "5000000", max_cashback: "50000000", proceeds: "236000000" },
       get_stats: { lucky_settled: 4, lucky_amount_total: "40000000", lucky_paid_total: "37200000" },
@@ -150,3 +151,22 @@ test("any admin can stop and restart sales, and it's announced", () =>
     assert.equal(open.open, true)
   })))
 
+
+test("the purchases and users lists show what each customer bought, paid and holds", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sql = yield* SqlClient.SqlClient
+    const lucky = "00000000-0000-4000-8000-000000000021"
+    yield* purchase(lucky, "settled", null, 2)
+    yield* sql`UPDATE purchases SET admitted = ${JSON.stringify({ mode: { lucky: 2 }, max_price: "11000000", lucky_amount: "10000000" })}::jsonb,
+               draw = ${JSON.stringify({ game_version: 2, final_price: "8000000", cashback: "3000000" })}::jsonb WHERE id = ${lucky}`
+    yield* sql`INSERT INTO known_accounts (account_id) VALUES ('alice.testnet'), ('bob.testnet') ON CONFLICT DO NOTHING`
+    const [p] = yield* admin.purchases("alice.testnet")
+    assert.deepEqual([p?.id, p?.paid, p?.cashback, p?.maxPrice], [lucky, 8_000_000, 3_000_000, 11_000_000])
+    const users = yield* admin.users
+    const alice = users.find((u) => u.accountId === "alice.testnet")
+    assert.equal(alice?.balance, 120_000_000)
+    assert.equal(alice?.cashback, 3_000_000)
+    assert.ok((alice?.spent ?? 0) >= 8_000_000, "the Lucky Buy counts at its final price")
+    assert.equal(users.find((u) => u.accountId === "bob.testnet")?.balance, 0, "never deposited")
+  })))

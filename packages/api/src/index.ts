@@ -681,11 +681,56 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   refills: Schema.Array(RefillView)
 }) {}
 
+/** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
+export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")({
+  id: Schema.String,
+  accountId: Schema.String,
+  voucherName: Schema.String,
+  value: Schema.String,
+  step: Schema.String,
+  mode: Schema.optional(Mode),
+  referencePrice: MicroUsdc,
+  maxPrice: Schema.optional(MicroUsdc),
+  /** What the customer finally paid and got back: set once a Lucky Buy draws, or a Normal one is delivered. */
+  paid: Schema.optional(MicroUsdc),
+  cashback: Schema.optional(MicroUsdc),
+  error: Schema.optional(Schema.String),
+  attempts: Schema.Int,
+  invoiceId: Schema.optional(Schema.String),
+  admitTx: Schema.optional(Schema.String),
+  settleTx: Schema.optional(Schema.String),
+  createdAt: Schema.String,
+  updatedAt: Schema.String
+}) {}
+
+/** One customer as the admin's Users page lists it. `balance` is missing when NEAR didn't answer. */
+export class AdminUser extends Schema.Class<AdminUser>("AdminUser")({
+  accountId: Schema.String,
+  firstSeen: Schema.String,
+  balance: Schema.optional(MicroUsdc),
+  perPurchaseLimit: Schema.optional(Schema.String),
+  dailyLimit: Schema.optional(Schema.String),
+  telegram: Schema.optional(Schema.String),
+  purchases: Schema.Int,
+  delivered: Schema.Int,
+  /** Paid for delivered cards, and Cashback they got back. */
+  spent: MicroUsdc,
+  cashback: MicroUsdc,
+  lastPurchaseAt: Schema.optional(Schema.String)
+}) {}
+
 // Left out of /openapi.json: to anyone but an admin, these endpoints don't exist.
 export class AdminApi extends HttpApiGroup.make("admin").add(
   /** 204 for an admin, NotFound for everyone else: decides whether the menu shows the Admin link. */
   HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
   HttpApiEndpoint.get("overview", "/admin", { success: AdminOverview, error: NotFound }),
+  /** The latest 300 purchases, or one account's. */
+  HttpApiEndpoint.get("purchases", "/admin/purchases", {
+    query: { account: Schema.optional(Schema.String) },
+    success: Schema.Array(AdminPurchase),
+    error: NotFound
+  }),
+  HttpApiEndpoint.get("users", "/admin/users", { success: Schema.Array(AdminUser), error: NotFound }),
   HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelaySettings, success: RelaySettings, error: NotFound }),
   /** Stops or restarts new purchases on the server, at once, without the owner's wallet. */
   HttpApiEndpoint.post("sales", "/admin/sales", { payload: Schema.Struct({ open: Schema.Boolean }), success: ShopStatus, error: NotFound }),
