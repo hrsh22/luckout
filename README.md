@@ -210,6 +210,6 @@ CONTEXT.md      domain glossary
 
 - **Built during NEAR HACKATHON.** The repository starts with its first commit on 7 November 2026, inside the hackathon window, and has no earlier history.
 - **Tracks:** Real-World Money, AI Security & Defense, Autonomous Business, Open Innovation.
-- **Written with AI:** most of the code was written with Claude Code, reviewed and directed by the team.
+- **Written with AI assistance:** most of the code was written by [@hrsh22](https://github.com/hrsh22) with the assistance of Claude Code.
 - **Libraries:** contract: `near-sdk`. Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl-node` (Intel TDX quote verification), `openai` (types only). Web: Next.js, React, `@hot-labs/near-connect`, Reown AppKit with wagmi, TanStack Query, motion. External services: Bitrefill (gift cards), NEAR Intents 1Click, NEAR AI Cloud, NVIDIA NRAS, Telegram.
 - **License:** MIT, see [LICENSE](LICENSE).
