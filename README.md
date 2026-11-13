@@ -168,7 +168,9 @@ Where each piece is in the code, and where it runs on mainnet.
 |---|---|
 | 💵 [Real-World Money](#real-world-money) | A stablecoin checkout for something people already buy every day, paid from any chain without gas. |
 | 🛡️ [AI Security & Defense](#ai-security--defense) | An agent that spends real money without holding any: contract limits, a three-method key and a verified TEE. |
+| 🔒 [Privacy & Private AI](#privacy--private-ai) | The shopping agent's model runs in a NEAR AI Cloud TEE that we verify with a fresh nonce every hour, and every reply must carry its signature. |
 | 🏪 [Autonomous Business](#autonomous-business) | The shop sells, buys stock, pays Cashback and refills its supplier credit by itself. Humans set the limits. |
+| 🤝 [Agent Economy](#agent-economy) | An AI-run shop that buys stock through Bitrefill's MCP tools and pays in crypto through NEAR Intents and Chain Signatures. |
 | 💡 [Open Innovation](#open-innovation) | A merchant with no keys on other chains, and customers with no NEAR: Chain Signatures one way, NEAR Intents accounts the other. |
 | 🎲 [Games With Real Economies](#games-with-real-economies) | A game of chance on purchases you'd make anyway. Its economy balances itself onchain, and players never notice the chain. |
 
@@ -206,6 +208,15 @@ On top of that, the contract does what a wallet policy can't express: each Lucky
 
 **The treasury moves money by itself, inside contract limits.** Refills run unattended. The contract lets the treasury pull proceeds only to itself, and only up to the owner's daily cap (`set_treasury`, shown by `get_config`). Each Luckout account also carries the owner's own wallet key (`E1GG…`) for recovery, which never leaves the owner's wallet.
 
+### Privacy & Private AI
+
+The shopping agent runs on private AI that we verify rather than trust.
+
+- **NEAR AI Cloud, attested with a fresh nonce.** Every hour the server fetches the model's attestation report with a new random nonce and checks it: NVIDIA's GPU attestation (NRAS), Intel TDX quotes for the model node and the gateway, the enclave's signing key and our nonce bound in each TDX report, and the attested container config (`Attestation.ts`).
+- **Every reply is signed inside the enclave.** Each completion's signature over the exact request and response bytes must recover to an attested key. If it doesn't, the reply and its Buy button are never shown. Without a passing check from the last two hours, the agent stays offline.
+- **What the model sees stays in the enclave.** The model reads your chat only inside the TEE, the bot talks only in private chats, and voucher codes never enter the model's context. Codes are encrypted at rest with AES-256-GCM.
+- **Check it live:** [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) returns the latest check, and `/fair` shows it, 10 of 10 passing.
+
 ### Autonomous Business
 
 Luckout runs a shop end to end without anyone tapping anything. Humans only set the limits.
@@ -220,6 +231,15 @@ Luckout runs a shop end to end without anyone tapping anything. Humans only set 
 | Finishing or refunding stuck purchases (the reconciler), and alerts on low gas or credit | Who gets the admin panel and the alert chat |
 
 The AI only sells. Refill sizing and every money move follow fixed rules in code, by design, so a model never decides where money goes.
+
+### Agent Economy
+
+An AI-run shop that earns and spends in crypto, buying from another business's agent tools.
+
+- **It buys through MCP.** Every card is bought from Bitrefill's MCP endpoint, using its `get-product-details` and `buy-products` tools (`Bitrefill.ts`). The shop pays from store credit that it tops up by itself.
+- **It pays in crypto, across chains.** Credit refills go treasury → NEAR Intents 1Click → our Base wallet → Bitrefill invoice, and every Base transaction is signed through Chain Signatures (`Refill.ts`, `Base.ts`).
+- **It earns and reinvests.** Card sales collect in the contract as USDC proceeds, which the treasury pulls to buy more stock. The lucky modes' 5.6% margin grows the Cashback Reserve.
+- **Its agent sells.** The Telegram agent on NEAR AI Cloud finds cards and prepares purchases, and customers pay from balances the contract holds.
 
 ### Open Innovation
 
@@ -324,7 +344,7 @@ CONTEXT.md      domain glossary
 ## Hackathon notes
 
 - **Built during NEAR HACKATHON.** The repository's first commit is from 7 November 2026, inside the hackathon window, and there is no earlier history.
-- **Tracks:** Real-World Money, AI Security & Defense, Autonomous Business, Open Innovation, Games With Real Economies.
+- **Tracks:** Real-World Money, AI Security & Defense, Privacy & Private AI, Autonomous Business, Agent Economy, Open Innovation, Games With Real Economies.
 - **Written with AI assistance:** most of the code was written by [@hrsh22](https://github.com/hrsh22) with the assistance of Claude Code.
 - **Libraries:**
   - Contract: `near-sdk`.
