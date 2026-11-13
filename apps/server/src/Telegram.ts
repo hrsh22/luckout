@@ -1,4 +1,4 @@
-import { LinkInvalid, NewPurchase, type Purchase } from "@luckout/api"
+import { AgentAttestation, LinkInvalid, NewPurchase, NotFound, type Purchase } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
@@ -6,6 +6,7 @@ import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
+import { makeAttestation } from "./Attestation.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Sales } from "./Sales.ts"
 import { Near, Network } from "./Near.ts"
@@ -101,6 +102,8 @@ export class Telegram extends Context.Service<Telegram, {
   /** A one-time deep link to the bot that links whichever Telegram user opens it. */
   linkCode(accountId: string): Effect.Effect<{ url: string; expiresAt: number }, LinkInvalid>
   unlink(accountId: string): Effect.Effect<void>
+  /** The latest check of the Agent's TEE (Attestation.ts); NotFound while the Agent is off. */
+  readonly attestation: Effect.Effect<AgentAttestation, NotFound>
 }>()("luckout/Telegram") {
   static readonly layer = Layer.effect(
     Telegram,
@@ -143,7 +146,7 @@ export class Telegram extends Context.Service<Telegram, {
 
       if (!bot) {
         yield* Effect.logInfo("TELEGRAM_BOT_TOKEN not set: the Telegram Agent is off")
-        return Telegram.of({ status, linkCode, unlink })
+        return Telegram.of({ status, linkCode, unlink, attestation: Effect.fail(new NotFound()) })
       }
       if (Option.isNone(aiKey)) {
         yield* Effect.logWarning("NEAR_AI_API_KEY not set: the bot can link accounts but can't chat")
@@ -152,7 +155,10 @@ export class Telegram extends Context.Service<Telegram, {
       const purchases = yield* Purchases
       const alerts = yield* Alerts
       const offline = `The assistant is offline right now. You can still buy in the web app: ${webOrigin}/shop`
-      const agent = Option.isSome(aiKey)
+      const ai = Option.isSome(aiKey) ? { apiKey: Redacted.value(aiKey.value), baseURL: aiBase, model: aiModel } : undefined
+      const tee = ai && makeAttestation(ai, (message) => void Effect.runPromise(alerts.admin(message)))
+      if (tee) yield* Effect.promise(tee.refresh).pipe(Effect.repeat(Schedule.spaced("1 hour")), Effect.forkScoped)
+      const agent = ai && tee
         ? makeAgent({
           bitrefill: yield* Bitrefill,
           purchases,
@@ -160,11 +166,14 @@ export class Telegram extends Context.Service<Telegram, {
           shopOpen: Effect.map((yield* Sales).status, (st) => st.open),
           testnet,
           web: webOrigin,
-          apiKey: Redacted.value(aiKey.value),
-          baseURL: aiBase,
-          model: aiModel
+          ...ai,
+          verify: tee.verify
         })
         : undefined
+      const attestation = Effect.suspend(() => {
+        const a = tee?.latest()
+        return a ? Effect.succeed(new AgentAttestation(a)) : Effect.fail(new NotFound())
+      })
 
       // ponytail: chat history and pending confirmations live in memory (lost on restart, one process).
       const history = new Map<number, { messages: Array<ChatCompletionMessageParam>; at: number }>()
@@ -232,6 +241,8 @@ export class Telegram extends Context.Service<Telegram, {
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
         if (!agent) return void ctx.reply(offline)
         await ctx.replyWithChatAction("typing")
+        // No passing TEE check on file, no chat: the model's replies couldn't be trusted.
+        if (!(await tee!.ready())) return void ctx.reply(offline)
         let failure: unknown
         const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text).catch((e) => {
           failure = e
@@ -323,7 +334,7 @@ export class Telegram extends Context.Service<Telegram, {
         () => Effect.promise(() => bot.stop())
       )
       yield* Effect.logInfo("Telegram Agent is running")
-      return Telegram.of({ status, linkCode, unlink })
+      return Telegram.of({ status, linkCode, unlink, attestation })
     })
   )
 }

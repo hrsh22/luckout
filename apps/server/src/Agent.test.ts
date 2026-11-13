@@ -10,18 +10,23 @@ import { blocker, makeAgent, trimHistory, usdUp } from "./Agent.ts"
 // A fake OpenAI-compatible endpoint that plays back scripted model turns and records what it was sent.
 const fakeModel = async (turns: Array<object>) => {
   const seen: Array<{ messages: Array<{ role: string; content?: string }> }> = []
+  /** The exact bytes of each exchange, which the TEE signature covers. */
+  const wire: Array<{ id: string; request: string; response: string }> = []
   const server = createServer((req, res) => {
     let body = ""
     req.on("data", (c) => (body += c))
     req.on("end", () => {
       seen.push(JSON.parse(body))
       const message = turns[seen.length - 1] ?? { role: "assistant", content: "done" }
+      const id = `chat-${seen.length}`
+      const response = JSON.stringify({ id, object: "chat.completion", created: 0, model: "fake", choices: [{ index: 0, finish_reason: "stop", message }] })
+      wire.push({ id, request: body, response })
       res.setHeader("content-type", "application/json")
-      res.end(JSON.stringify({ id: "x", object: "chat.completion", created: 0, model: "fake", choices: [{ index: 0, finish_reason: "stop", message }] }))
+      res.end(response)
     })
   })
   await new Promise<void>((r) => server.listen(0, r))
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, seen, close: () => server.close() }
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, seen, wire, close: () => server.close() }
 }
 
 const call = (name: string, args: object) => ({
@@ -48,7 +53,8 @@ const deps = {
   },
   near: { view: () => Effect.succeed(rich) },
   web: "https://luckout.test",
-  shopOpen: Effect.succeed(true)
+  shopOpen: Effect.succeed(true),
+  verify: async () => true
 } as never
 
 // An account that can afford the $15 test purchase, within its limits.
@@ -64,6 +70,20 @@ test("prepare_purchase returns a confirmation and buys nothing", async () => {
     voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000, country: "KN"
   })
   assert.equal(turn.reply, "Tap Buy to confirm.")
+})
+
+test("every completion's exact bytes are checked, and an unverified turn shows nothing", async () => {
+  const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "Tap Buy to confirm." }])
+  const checked: Array<{ id: string; request: string; response: string }> = []
+  // The tool step verifies; the final reply doesn't.
+  const verify = async (request: string, response: string, id: string) => (checked.push({ id, request, response }), id === "chat-1")
+  const agent = makeAgent({ ...(deps as object), verify, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.testnet", [], "buy me a 10 dollar test card on jackpot")
+  model.close()
+  assert.deepEqual(checked, model.wire, "the signature check sees exactly what went over the wire")
+  assert.equal(turn.pending, undefined, "no Buy button")
+  assert.match(turn.reply, /couldn't prove/)
+  assert.deepEqual(turn.history, [], "the unverified turn isn't kept")
 })
 
 test("voucher codes never reach the model", async () => {

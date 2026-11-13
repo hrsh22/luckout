@@ -29,9 +29,11 @@ const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const sales = yield* Sales
+    const telegram = yield* Telegram
     return handlers.handleAll({
       health: () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid),
-      status: () => sales.status
+      status: () => sales.status,
+      attestation: () => telegram.attestation
     })
   })
 )
