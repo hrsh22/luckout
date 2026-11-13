@@ -509,7 +509,7 @@ const Usd = MicroUsdc.check(Schema.isBetween({ minimum: 0, maximum: 2_000_000_00
 export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings")({
   /** Refill by itself; off, the panel and alerts only say when to. */
   autoRefill: Schema.Boolean,
-  /** Keep at least this much, whatever sales did. */
+  /** Refills top up to at least this, whatever sales did ("Top up to at least"). */
   floor: Usd,
   /**
    * Idle credit never goes above this: the most that can sit unused at Bitrefill. A refill for
