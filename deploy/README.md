@@ -5,7 +5,7 @@
 | | Testnet | Mainnet |
 |---|---|---|
 | Branch | `testnet` (where development happens) | `main` (changes only by PR from `testnet`, with CI passing) |
-| Web (Vercel) | Preview env vars, domain `testnet.luckout.gamified.trade` on branch `testnet` | Production env vars, `luckout.gamified.trade` |
+| Web (Vercel) | Preview env vars, domain `testnet.luckout.gamified.trade` on branch `testnet` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it; the old `luckout.gamified.trade` still works) |
 | API | `luckout-testnet-api.gamified.trade`, VM user `luckout-testnet-api`, port 8789 | `luckout-api.gamified.trade`, VM user `luckout-api`, port 8788 |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the mainnet bot |
@@ -22,9 +22,9 @@ The steps below set up one site; repeat them per environment with its own user, 
 1. **Money in place.** `luckout.near` (the owner's wallet unless `OWNER` names another) with about 5.7 NEAR and about $75 of USDC on NEAR, and a full-access key for it in `~/.near-credentials/mainnet` on the machine that deploys.
 2. **Accounts and contract.** `./contract/deploy-mainnet.sh` shows every step; run it again with `GO=1`. It creates `app.`, `server.`, `relayer.` and `treasury.luckout.near`, deploys the contract owned by `OWNER`, registers the contract and the treasury on USDC, and limits the server's key to the purchase methods. Afterwards, remove the deploying machine's key from `luckout.near`.
 3. **Database.** As the Postgres admin: `CREATE ROLE luckout_mainnet LOGIN PASSWORD '…'; CREATE DATABASE luckout_mainnet OWNER luckout_mainnet;` The server records the database's network on first start.
-4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key, `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
+4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key, `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf,https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
 5. **CI.** Add a forced-command key for `main` to that user's `authorized_keys`, the `MAINNET_DEPLOY_KEY` secret and `MAINNET_SSH_TARGET` variable, then set `DEPLOY_MAINNET=on`.
-6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://luckout-api.gamified.trade`. The testnet server then drops `https://luckout.gamified.trade` from `CORS_ORIGINS`.
+6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://luckout-api.gamified.trade`. The testnet server then drops the mainnet site from `CORS_ORIGINS`.
 7. **Merge** the PR from `testnet` into `main`: the web and the API go live.
 8. **As the owner, in the admin panel:** Treasury → Automatic (up to $40 a day), fund the reserve ($50), and send the treasury about $25 of USDC from the wallet, because proceeds start empty. Send about $1 of ETH on Base to the Base wallet the panel shows (gas for paying Bitrefill).
 9. **Prove it cheaply:** a $2–5 Normal purchase (which triggers the first refill), a small Lucky Buy, a relayed deposit and withdrawal, a $2 top-up from another chain. Raise the limits in the panel as it holds up.
@@ -88,7 +88,7 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 ## EVM wallets (ADR-0011)
 
 - **Nothing to configure on the server:** the NEAR Intents account is fixed per network (`intents.near`, `intents.luckout.testnet`), as in the contract, and EVM customers' intents go through the existing relayer, so it needs gas money on both networks. One relayed intent burns about 17 Tgas (about 0.002 NEAR).
-- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `luckout.gamified.trade`, `testnet.luckout.gamified.trade` and `localhost`, or WalletConnect refuses to connect there.
+- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `luckout.gamified.trade`, `testnet.luckout.gamified.trade` and `localhost`, or WalletConnect refuses to connect there.
 - **Testnet NEAR Intents** at `intents.luckout.testnet` is the exact wasm `intents.near` runs, deployed with `new({config:{wnear_id:"wrap.testnet",fees:{fee:0,fee_collector:"luckout.testnet"},roles:{super_admins:["luckout.testnet"]}}})` and registered on test USDC. To redeploy it after `intents.near` upgrades: fetch the code with the RPC's `view_code`, check its hash, and deploy it without an init call.
 
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).

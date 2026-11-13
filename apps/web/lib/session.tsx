@@ -95,7 +95,7 @@ const asIntent = (account: string, c: Call) => {
 }
 const SessionContext = createContext<Session | null>(null)
 
-// ponytail: the token sits in localStorage; move to an HttpOnly cookie on .gamified.trade if XSS risk grows.
+// ponytail: the token sits in localStorage; move to an HttpOnly cookie if XSS risk grows (needs the API on a luckout.wtf subdomain first).
 const load = (): { accountId: string; token: string; expiresAt: number } | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")

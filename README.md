@@ -10,11 +10,11 @@ Luckout is a gift card shop on NEAR, with a web app and a Telegram agent. Custom
 
 | What | Where |
 |---|---|
-| Web app (real USDC, real gift cards) | [luckout.gamified.trade](https://luckout.gamified.trade) |
+| Web app (real USDC, real gift cards) | [luckout.wtf](https://www.luckout.wtf) |
 | Telegram agent | [@luckoutbot](https://t.me/luckoutbot), linked from the web app's Wallet page |
 | Contract | [`app.luckout.near`](https://nearblocks.io/address/app.luckout.near), owner `luckout.near` |
-| A real Draw Proof, recomputed in your browser | [Classic Draw on mainnet](https://luckout.gamified.trade/draw/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF) |
-| Live Average, reserve, code hash, AI enclave check | [luckout.gamified.trade/fair](https://luckout.gamified.trade/fair) |
+| A real Draw Proof, recomputed in your browser | [Classic Draw on mainnet](https://www.luckout.wtf/draw/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF) |
+| Live Average, reserve, code hash, AI enclave check | [luckout.wtf/fair](https://www.luckout.wtf/fair) |
 | Free testnet demo (test USDC, Bitrefill test cards) | [testnet.luckout.gamified.trade](https://testnet.luckout.gamified.trade), bot [@luckouttestingbot](https://t.me/luckouttestingbot) |
 
 As of 13 November 2026, mainnet has settled 8 Lucky Buys of real cards and `app.luckout.near` has 95 transactions. `/fair` reads the current numbers from the contract.
@@ -59,14 +59,14 @@ Bitrefill allows about 15 free test cards a day across all testnet users. If the
 
 You need at least $1 of USDC (or another token) on a supported chain, plus that chain's gas.
 
-1. Sign in at [luckout.gamified.trade](https://luckout.gamified.trade) with a NEAR wallet or an EVM wallet.
+1. Sign in at [luckout.wtf](https://www.luckout.wtf) with a NEAR wallet or an EVM wallet.
 2. Wallet → Add funds: pick a chain and token, and send to the address shown. **You see** the Top-Up move through 1Click (often under a minute from Base), then land in your balance.
 3. Buy any card from the shop. The cheapest we've bought is a ₹50 Swiggy voucher, about $0.60. **You see** the real code and, on a lucky mode, the Draw.
 4. Withdraw what's left: Wallet → Withdraw. **You see** it go back to your wallet, or to your EVM address on the chain you pick, gas-free.
 
 ### 3. Check it without a wallet
 
-- **A Draw Proof:** open the [mainnet Draw Proof](https://luckout.gamified.trade/draw/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF). It fetches the transaction from NEAR RPC and recomputes the cashback in your browser.
+- **A Draw Proof:** open the [mainnet Draw Proof](https://www.luckout.wtf/draw/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF). It fetches the transaction from NEAR RPC and recomputes the cashback in your browser.
 - **`/fair`:** the Live Average from `get_stats`, the Cashback Reserve from `get_reserve`, the contract's code hash, and the latest TEE check of the agent's model.
 - **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows.
 - **The attack demo:** see [What a stolen server key can do](#what-a-stolen-server-key-can-do).
