@@ -2,7 +2,7 @@ import { ConfigProvider, Effect } from "effect"
 import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, isTestMerchant, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, isTestMerchant, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -10,6 +10,20 @@ test("USD strings convert to micro-USDC exactly", () => {
   assert.equal(usdToMicro("110"), 110_000_000)
   assert.equal(usdToMicro("0.000001"), 1)
   assert.throws(() => usdToMicro("1e3"))
+})
+
+test("Bitrefill's 15 orders are counted over a rolling 24 hours, and the next one fits when the oldest ages out", () => {
+  const H = 60 * 60 * 1000
+  const now = Date.parse("2026-11-13T16:20:00Z")
+  // Fourteen in the last day, one older than a day: room for one more.
+  const day = Array.from({ length: 14 }, (_, i) => now - 20 * H + i * H)
+  assert.deepEqual(orderRoom([now - 25 * H, ...day], 0, now), { used: 14, reopensAt: undefined })
+  // The fifteenth (here, one admitted but not yet placed) fills it until the oldest is 24 hours old.
+  assert.deepEqual(orderRoom(day, 1, now), { used: 15, reopensAt: day[0]! + 24 * H })
+  // Over by two (say, an order placed elsewhere): the second-oldest has to age out too. Order of the list doesn't matter.
+  assert.deepEqual(orderRoom([...day].reverse(), 2, now), { used: 16, reopensAt: day[1]! + 24 * H })
+  // Bitrefill's refusal, over REST (testnet) or as an MCP tool error.
+  assert.ok(ORDER_LIMIT.test(`HTTP 400 {"error_code":"purchase_limit_reached"}`) && ORDER_LIMIT.test("Purchase limit reached"))
 })
 
 // Live calls. Test products are free; real ones are only priced, never bought.

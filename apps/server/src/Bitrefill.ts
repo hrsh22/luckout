@@ -97,6 +97,22 @@ export type DepositState = "pending" | "credited" | "failed"
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/
 /** Bitrefill's words for a balance that can't cover an order. */
 const NO_CREDIT = /balance|insufficient|not enough|top ?up/i
+/** Bitrefill's words for an order past its limit (`purchase_limit_reached`): nothing was created or paid. */
+export const ORDER_LIMIT = /purchase[_ ]?limit/i
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** Bitrefill takes this many invoices from our account (orders and credit top-ups) in any 24 hours. */
+export const ORDERS_PER_DAY = 15
+/**
+ * How many orders the last 24 hours used, counting `inFlight` ones about to be placed, and when they're
+ * all used, when the next fits: each invoice frees its slot 24 hours after it was created.
+ */
+export const orderRoom = (invoices: ReadonlyArray<number>, inFlight: number, now: number) => {
+  const recent = invoices.filter((t) => t > now - DAY_MS).sort((a, b) => a - b)
+  const over = recent.length + inFlight - ORDERS_PER_DAY
+  return { used: recent.length + inFlight, reopensAt: over < 0 ? undefined : (recent[over] ?? now) + DAY_MS }
+}
+export type OrderRoom = ReturnType<typeof orderRoom>
 
 /** Bitrefill refused before creating or paying anything (e.g. balance too low). */
 class Rejected extends Data.TaggedError("Rejected")<{ readonly reason: string }> {}
@@ -107,6 +123,12 @@ const REFUSED_BEFORE_PAYMENT = new Set(["INVALID_INPUT", "PRODUCT_NOT_FOUND", "N
 // HTTP statuses that mean the MCP endpoint turned the request away without running the tool.
 const REFUSED_STATUS = new Set([400, 401, 403, 404, 429])
 const httpStatus = (e: unknown) => (HttpClientError.isHttpClientError(e) ? e.response?.status ?? 0 : 0)
+/** A refusal with its status and the start of Bitrefill's reply, which says why (e.g. purchase_limit_reached). */
+const refusal = (e: unknown) =>
+  (HttpClientError.isHttpClientError(e) && e.response ? e.response.text : Effect.succeed("")).pipe(
+    Effect.orElseSucceed(() => ""),
+    Effect.flatMap((body) => Effect.fail(new Rejected({ reason: `HTTP ${httpStatus(e)} ${body.slice(0, 300)}`.trim() })))
+  )
 
 // MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most
 // 20 of them, and browsing (catalog pages, quotes) at most 12, so junk lookups can never starve a
@@ -249,6 +271,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   /** Asks for `amount` (micro-USDC, whole cents) of USD credit, paid 1:1 in USDC on Base. */
   deposit(amount: number): Effect.Effect<CreditDeposit, BitrefillUnavailable>
   depositState(invoiceId: string): Effect.Effect<{ readonly state: DepositState; readonly status: string }, BitrefillUnavailable>
+  /** Bitrefill's order limit with `inFlight` orders about to be placed (see orderRoom); undefined if its invoices can't be read. */
+  orderLimit(inFlight: number): Effect.Effect<OrderRoom | undefined>
 }>()("luckout/Bitrefill") {
   static readonly layer = Layer.effect(
     Bitrefill,
@@ -292,7 +316,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
           mcpClient.execute,
           Effect.flatMap((r) => r.text),
-          Effect.mapError((e) => (REFUSED_STATUS.has(httpStatus(e)) ? new Rejected({ reason: `HTTP ${httpStatus(e)}` }) : unavailable(e))),
+          Effect.catch((e): Effect.Effect<never, Rejected | BitrefillUnavailable> => (REFUSED_STATUS.has(httpStatus(e)) ? refusal(e) : Effect.fail(unavailable(e)))),
           Effect.flatMap((body) =>
             Effect.try({
               try: () => {
@@ -304,7 +328,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
                 if (result?.isError) {
                   // Tool errors read like `error: Balance too low / code: INVALID_INPUT`.
                   const e = (() => { try { return parse() } catch { return {} } })() as { error?: string; code?: string }
-                  if (e.code && REFUSED_BEFORE_PAYMENT.has(e.code)) throw new Rejected({ reason: `${e.error ?? text} (${e.code})` })
+                  if ((e.code && REFUSED_BEFORE_PAYMENT.has(e.code)) || ORDER_LIMIT.test(text)) throw new Rejected({ reason: `${e.error ?? text} (${e.code})` })
                   throw new Error(`${name}: ${text}`)
                 }
                 return parse()
@@ -479,11 +503,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             rest.execute,
             Effect.flatMap(HttpClientResponse.schemaBodyJson(data(Invoice))),
             Effect.map((r) => r.data.id),
-            Effect.mapError((e) => {
-              // A 4xx (e.g. 403 not_available) means no invoice was created.
-              const status = httpStatus(e)
-              return status >= 400 && status < 500 ? new Rejected({ reason: `HTTP ${status}` }) : unavailable(e)
-            })
+            // A 4xx (e.g. 403 not_available, 400 purchase_limit_reached) means no invoice was created.
+            Effect.catch((e): Effect.Effect<never, Rejected | BitrefillUnavailable> => (httpStatus(e) >= 400 && httpStatus(e) < 500 ? refusal(e) : Effect.fail(unavailable(e))))
           )
           : mcp("buy-products", {
             cart_items: [{ product_id: id, package_value: value }],
@@ -491,11 +512,36 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             balance_currency: "USD"
           }, McpPurchase).pipe(Effect.map((r) => r.response.invoice_id))
 
+      // Bitrefill's own list of our invoices, which also counts any we didn't create. It's read at most every
+      // 5 minutes, and again after each invoice we create; the 24-hour window is applied when it's used.
+      const InvoiceTime = Schema.Struct({ created_time: Schema.String })
+      const invoiceTimes = yield* Cache.makeWith(
+        (_: "recent") => get("/invoices", Schema.Array(InvoiceTime), { limit: "50" }).pipe(Effect.map((l) => l.map((i) => Date.parse(i.created_time)))),
+        { capacity: 1, timeToLive: (exit) => (Exit.isSuccess(exit) ? "5 minutes" : "30 seconds") }
+      )
+      const invoiced = Cache.invalidate(invoiceTimes, "recent")
+      // ponytail: in memory, one process. If Bitrefill refuses for its limit while our count says there's
+      // room, the count is missing something: hold new orders for an hour rather than charge and refund each.
+      let refusedUntil = 0
+      const orderLimit = (inFlight: number) =>
+        Cache.get(invoiceTimes, "recent").pipe(
+          Effect.map((times): OrderRoom => {
+            const room = orderRoom(times, inFlight, Date.now())
+            return room.reopensAt === undefined && refusedUntil > Date.now() ? { ...room, reopensAt: refusedUntil } : room
+          }),
+          Effect.tapError((e) => Effect.logWarning(`couldn't read Bitrefill's invoices for its order limit: ${e.message}`)),
+          Effect.orElseSucceed(() => undefined)
+        )
+
       const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string) {
         return yield* createInvoice(id, value).pipe(
           Effect.map((invoiceId): Order => ({ _tag: "Ordered", invoiceId })),
-          Effect.catchTag("Rejected", (e) =>
-            Effect.succeed<Order>(NO_CREDIT.test(e.reason) ? { _tag: "NoCredit", reason: e.reason } : { _tag: "Refused", reason: e.reason }))
+          Effect.catchTag("Rejected", (e) => {
+            const limit = ORDER_LIMIT.test(e.reason)
+            if (limit) refusedUntil = Date.now() + 60 * 60 * 1000
+            return Effect.succeed<Order>(!limit && NO_CREDIT.test(e.reason) ? { _tag: "NoCredit", reason: e.reason } : { _tag: "Refused", reason: e.reason })
+          }),
+          Effect.ensuring(invoiced)
         )
       })
 
@@ -546,7 +592,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           // The response echoes the account's email; it's decoded here and never logged.
           Effect.flatMap(HttpClientResponse.schemaBodyJson(data(Deposit))),
           Effect.map((r) => r.data),
-          Effect.mapError(unavailable)
+          Effect.mapError(unavailable),
+          Effect.ensuring(invoiced)
         )
         // Pay only what buys exactly this much credit, in USDC on Base, to a well-formed address.
         if (d.payment.method !== "usdc_base" || d.payment.currency !== "USDC") {
@@ -572,7 +619,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
 
       const logo = (id: string) => logos.get(id) ?? {}
-      return Bitrefill.of({ search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState })
+      return Bitrefill.of({ search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState, orderLimit })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

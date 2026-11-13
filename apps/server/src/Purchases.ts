@@ -3,11 +3,11 @@ import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Redacted, Sche
 import { SqlClient } from "effect/sql"
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
-import { Bitrefill } from "./Bitrefill.ts"
+import { Bitrefill, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
 import { stepRows } from "./Rows.ts"
-import { CLOSED_MESSAGE, Sales } from "./Sales.ts"
+import { closedMessage, Sales } from "./Sales.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 
 // A purchase walks these steps (ADR-0001). Every step is saved before its side effect,
@@ -331,6 +331,8 @@ export class Purchases extends Context.Service<Purchases, {
             ? {
               error: row.error === "Reclaimed"
                 ? "You reclaimed the full amount after 24 hours."
+                : ORDER_LIMIT.test(row.error ?? "")
+                ? "Bitrefill's daily order limit was reached just then. The full amount went back to your balance."
                 : "Bitrefill couldn't deliver this voucher. The full amount went back to your balance."
             }
             : {}),
@@ -418,7 +420,7 @@ export class Purchases extends Context.Service<Purchases, {
       const create = Effect.fn("Purchases.create")(function*(accountId: string, input: NewPurchase) {
         if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
         // A retry of a purchase already made still returns it below; only new ones are held back.
-        const open = (yield* sales.status).open
+        const shop = yield* sales.status
         // Testnet balances are test money: never let them buy a real voucher paid from our real Bitrefill balance.
         if (testnet && !input.voucherId.startsWith("test-")) {
           return yield* new PurchaseInvalid({ message: "On testnet only Bitrefill test vouchers can be bought" })
@@ -427,7 +429,7 @@ export class Purchases extends Context.Service<Purchases, {
         const existing = yield* sql<{ id: string }>`SELECT id FROM purchases WHERE account_id = ${accountId} AND idempotency_key = ${input.idempotencyKey}`
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
-        if (!open) return yield* new PurchaseInvalid({ message: CLOSED_MESSAGE })
+        if (!shop.open) return yield* new PurchaseInvalid({ message: closedMessage(shop) })
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true)
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
@@ -535,7 +537,9 @@ export class Purchases extends Context.Service<Purchases, {
       const promote = Effect.gen(function*() {
         const { waitMinutes } = yield* credit.settings
         // While sales are closed, nothing new is admitted; waiting purchases keep their place (and their timer).
-        const open = (yield* sales.status).open
+        // At Bitrefill's order limit, charged ones wait too, rather than be refused and refunded.
+        const shop = yield* sales.status
+        const open = shop.open
         const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step IN ${sql.in(WAITING_STEPS)} ORDER BY created_at LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
           // Its own run may still be finishing the step that moved it here (refreshing the credit after
@@ -555,7 +559,7 @@ export class Purchases extends Context.Service<Purchases, {
             }
             continue
           }
-          if (row.step === "waiting" && !open) continue
+          if ((row.step === "waiting" && !open) || (row.step === "restock" && shop.reason === "limit")) continue
           const next: Step = row.step === "waiting" ? "admit" : "ordering"
           // Bitrefill refused a restock row for credit: order it again only on a balance read since then, never
           // on the estimate that was already wrong (that would re-order every 10 seconds, spending Bitrefill calls).

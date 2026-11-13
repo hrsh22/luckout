@@ -8,7 +8,7 @@ import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } f
 import { Alerts } from "./Alerts.ts"
 import { makeAttestation } from "./Attestation.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Sales } from "./Sales.ts"
+import { closedMessage, Sales } from "./Sales.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 
@@ -163,7 +163,7 @@ export class Telegram extends Context.Service<Telegram, {
           bitrefill: yield* Bitrefill,
           purchases,
           near: yield* Near,
-          shopOpen: Effect.map((yield* Sales).status, (st) => st.open),
+          shopClosed: Effect.map((yield* Sales).status, (st) => (st.open ? undefined : closedMessage(st))),
           testnet,
           web: webOrigin,
           ...ai,
