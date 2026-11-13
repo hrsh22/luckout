@@ -6,7 +6,7 @@
 |---|---|---|
 | Branch | `testnet` (where development happens) | `main` (changes only by PR from `testnet`, with CI passing) |
 | Web (Vercel) | Preview env vars, domain `testnet.luckout.gamified.trade` on branch `testnet` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it; the old `luckout.gamified.trade` still works) |
-| API | `luckout-testnet-api.gamified.trade`, VM user `luckout-testnet-api`, port 8789 | `luckout-api.gamified.trade`, VM user `luckout-api`, port 8788 |
+| API | `luckout-testnet-api.gamified.trade`, VM user `luckout-testnet-api`, port 8789 | `api.luckout.wtf` (also `luckout-api.gamified.trade`, same vhost and certificate), VM user `luckout-api`, port 8788 |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the mainnet bot |
 | Bitrefill | its own account (test cards are free) | its own account and key |
@@ -24,7 +24,7 @@ The steps below set up one site; repeat them per environment with its own user, 
 3. **Database.** As the Postgres admin: `CREATE ROLE luckout_mainnet LOGIN PASSWORD '…'; CREATE DATABASE luckout_mainnet OWNER luckout_mainnet;` The server records the database's network on first start.
 4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key, `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf,https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
 5. **CI.** Add a forced-command key for `main` to that user's `authorized_keys`, the `MAINNET_DEPLOY_KEY` secret and `MAINNET_SSH_TARGET` variable, then set `DEPLOY_MAINNET=on`.
-6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://luckout-api.gamified.trade`. The testnet server then drops the mainnet site from `CORS_ORIGINS`.
+6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://api.luckout.wtf`. The testnet server then drops the mainnet site from `CORS_ORIGINS`.
 7. **Merge** the PR from `testnet` into `main`: the web and the API go live.
 8. **As the owner, in the admin panel:** Treasury → Automatic (up to $40 a day), fund the reserve ($50), and send the treasury about $25 of USDC from the wallet, because proceeds start empty. Send about $1 of ETH on Base to the Base wallet the panel shows (gas for paying Bitrefill).
 9. **Prove it cheaply:** a $2–5 Normal purchase (which triggers the first refill), a small Lucky Buy, a relayed deposit and withdrawal, a $2 top-up from another chain. Raise the limits in the panel as it holds up.
@@ -33,7 +33,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
 
 ## Once
 
-1. **Site.** In CloudPanel: Add Site → Create a Node.js Site. Domain `luckout-api.gamified.trade`, site user `luckout-api`, app port `8788`. Point the domain's `A` record at the VM, then issue a Let's Encrypt certificate under SSL/TLS.
+1. **Site.** In CloudPanel: Add Site → Create a Node.js Site. Domain `luckout-api.gamified.trade`, site user `luckout-api`, app port `8788`. Point the domain's `A` record at the VM, then issue a Let's Encrypt certificate under SSL/TLS. Mainnet also answers on `api.luckout.wtf`: it is on the `server_name` line in the Vhost tab, and the certificate covers both names (`clpctl lets-encrypt:install:certificate --domainName=luckout-api.gamified.trade --subjectAlternativeName=api.luckout.wtf`).
 2. **Timeout.** A purchase request waits for the voucher to be delivered. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block.
 3. **Postgres.** As the Postgres admin:
    ```sql
@@ -60,7 +60,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    pm2 start deploy/ecosystem.config.cjs
    pm2 save
    ```
-   `https://luckout-api.gamified.trade/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://luckout-api.gamified.trade`.
+   `https://luckout-api.gamified.trade/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://api.luckout.wtf`.
 7. **Reboots and backups.** Put the password in `~/.pgpass` (`127.0.0.1:5432:luckout:luckout:<password>`, then `chmod 600`). Run `mkdir -p ~/backups`, then add to `crontab -e`. The `@reboot` line brings pm2 back without root, so `pm2 startup` isn't needed:
    ```cron
    PATH=/home/luckout-api/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
