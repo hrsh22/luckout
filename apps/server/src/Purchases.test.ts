@@ -317,6 +317,8 @@ test("credit settings are refused when they don't hang together", async () => {
   const { settingsProblem } = await import("./Credit.ts")
   assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, floor: 600_000_000 })) ?? "", /floor/)
   assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.testnet, dailyRefill: 5_000_000 })) ?? "", /daily refill limit/)
+  assert.match(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.mainnet, floor: 200_000_000, ceiling: 300_000_000, refillBelow: 195_000_000 })) ?? "", /Refill when below/)
+  assert.equal(settingsProblem(new CreditSettings({ ...CREDIT_DEFAULTS.mainnet, floor: 200_000_000, ceiling: 300_000_000, refillBelow: 160_000_000 })), undefined)
   assert.equal(settingsProblem(CREDIT_DEFAULTS.testnet), undefined)
   assert.equal(settingsProblem(CREDIT_DEFAULTS.mainnet), undefined)
 })

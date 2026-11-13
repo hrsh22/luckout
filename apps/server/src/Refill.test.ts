@@ -618,6 +618,15 @@ test("the refill line never sits below the biggest card bought lately, so cards 
   assert.deepEqual(levels(s, 20_000_000, 5_000_000), { target: 30_000_000, refillBelow: 15_000_000 }, "busy days: two days of sales, up to the ceiling")
 })
 
+test("an admin's refill line keeps a big card's worth ready, a refill's worth under the target", () => {
+  const s = { floor: 200_000_000, ceiling: 300_000_000, baseFloat: 300_000_000, refillBelow: 160_000_000 }
+  assert.deepEqual(levels(s, 1_000_000, 550_000), { target: 200_000_000, refillBelow: 160_000_000 }, "small sales: up to $200 once under $160")
+  assert.deepEqual(levels(s, 22_000_000, 150_000_000), { target: 200_000_000, refillBelow: 160_000_000 }, "after a $150 card: the same")
+  assert.deepEqual(levels(s, 280_000_000, 550_000), { target: 280_000_000, refillBelow: 160_000_000 }, "a busy day lifts the target, not the line")
+  assert.deepEqual(levels({ ...s, refillBelow: 250_000_000 }, 0, 0), { target: 200_000_000, refillBelow: 190_000_000 }, "never closer than $10 to the target")
+  assert.deepEqual(levels({ ...s, refillBelow: 0 }, 0, 0), { target: 200_000_000, refillBelow: 100_000_000 }, "0: half the target, as before")
+})
+
 test("a refill for purchases already waiting may go past the ceiling: that credit is spent within minutes", async () => {
   const w = world({ credit: 450_000_000, treasuryUsdc: 1_000_000_000 })
   const v = await w.run(Effect.gen(function*() {
