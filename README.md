@@ -49,7 +49,7 @@ Built during NEAR HACKATHON 2026. See [Hackathon notes](#hackathon-notes).
 | Live Average, reserve, Cashback Cap, code hash, AI enclave check | [luckout.wtf/fair](https://www.luckout.wtf/fair) |
 | Free testnet demo (test USDC, Bitrefill test cards) | [testnet.luckout.wtf](https://testnet.luckout.wtf), bot [@luckouttestingbot](https://t.me/luckouttestingbot) |
 
-As of 13 November 2026, mainnet has settled 10 Lucky Buys of real cards, and `app.luckout.near` has 103 transactions. `/fair` reads the current numbers from the contract.
+As of 13 November 2026, mainnet has settled 10 Lucky Buys of real cards, and `app.luckout.near` has 110 transactions. The Cashback Reserve holds $1,000, so one purchase can get up to $200 back. `/fair` reads the current numbers from the contract.
 
 ## How it works
 
@@ -100,7 +100,7 @@ Exact odds on a ₹500 voucher (chance → what you end up paying):
 6. Optional: on the Wallet page, tap "Connect Telegram" and ask the bot for "a $10 test gift card on Jackpot". **You see** one line and a Buy button. Nothing is bought until you tap it.
 
 > [!NOTE]
-> Bitrefill allows about 15 free test cards a day across all testnet users. If the shop says Bitrefill refused, try again after 00:00 UTC.
+> Our testnet Bitrefill account allows 15 orders in any 24 hours, shared by everyone trying it. If the shop says Bitrefill refused, try again a few hours later.
 
 ### 2. With real money, on mainnet
 
