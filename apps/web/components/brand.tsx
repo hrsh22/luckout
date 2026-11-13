@@ -1,14 +1,9 @@
 import { cn } from "cn"
 import Link from "next/link"
 
-/** A voucher stub with its notch: the Luckout mark. Same shape as app/icon.svg. */
+/** The Luckout mark: a cat in a shopping cart. Same image as app/icon.png. */
 export function Mark({ className = "size-7" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 32 32" className={className} aria-hidden="true">
-      <path d="M4 7a3 3 0 0 1 3-3h18a3 3 0 0 1 3 3v6a3 3 0 0 0 0 6v6a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-6a3 3 0 0 0 0-6Z" fill="#FFC53D" />
-      <path d="M12 10v12h8" fill="none" stroke="#16122B" strokeWidth="3" strokeLinecap="square" />
-    </svg>
-  )
+  return <img src="/logo.png" alt="" aria-hidden="true" className={cn("rounded-lg", className)} />
 }
 
 export function Wordmark({ href = "/", className }: { href?: string; className?: string }) {
