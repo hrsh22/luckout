@@ -55,11 +55,10 @@ As of 13 November 2026, mainnet has settled 10 Lucky Buys of real cards, and `ap
 
 ```mermaid
 flowchart LR
-  A["Any token<br/>on any chain"] -->|"NEAR Intents 1Click"| B["Your USDC balance<br/>in app.luckout.near"]
-  B -->|"Buy, on the web<br/>or in Telegram"| C["Our server buys<br/>the card from Bitrefill"]
-  C -->|"confirm_delivery"| D["The Draw, a block later,<br/>with onchain randomness"]
+  A["Any token,<br/>any chain"] -->|"1Click"| B["USDC balance in<br/>app.luckout.near"]
+  B -->|"Buy"| C["Card from<br/>Bitrefill"]
+  C -->|"Delivered"| D["Draw, a<br/>block later"]
   D -->|"Cashback"| B
-  D -.-> E["Draw Proof:<br/>anyone can recompute it"]
 ```
 
 1. **Top up from any chain.** NEAR Intents 1Click swaps what you send into native USDC on NEAR, and one deposit moves it into your Luckout balance, which the contract holds. Our relayer pays the NEAR network fee for deposits, withdrawals and settings with NEP-366 meta transactions (ADR-0008), so you never need NEAR.
