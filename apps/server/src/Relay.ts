@@ -194,6 +194,9 @@ export class Relay extends Context.Service<Relay, {
             if (!key) return yield* failed("That wallet key type isn't supported.")
             const [access, height] = yield* Effect.all([near.accessKey(d.senderId, key.toString()), near.height], { concurrency: 2 })
             if (!access) return yield* failed("That key isn't on your NEAR account. Sign in again with your wallet.")
+            // Full-access keys only, by design: deposits, withdrawals, settings and send-backs carry
+            // 1 yoctoNEAR (or USDC's storage fee), which NEAR never lets a function-call key attach.
+            // So a leaked function-call key can't move a customer's funds. Reclaims and reruns follow suit.
             if (!access.fullAccess) return yield* failed("Approve it with your wallet's full-access key.")
             if (BigInt(d.nonce) <= access.nonce) return yield* failed("That approval was already used. Try again.")
             if (BigInt(d.maxBlockHeight) < height) return yield* failed("That approval expired. Try again.")

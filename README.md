@@ -113,7 +113,7 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 
 ### 3. Check it without a wallet
 
-- **A Draw Proof:** open the [mainnet Draw Proof](https://www.luckout.wtf/draw/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62). It fetches the transaction from NEAR RPC and recomputes the Cashback in your browser.
+- **A Draw Proof:** open the [mainnet Draw Proof](https://www.luckout.wtf/draw/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62). It fetches the transaction from NEAR RPC and recomputes the Cashback in your browser. That browser code is tested against a real testnet Draw event (`apps/web/lib/draw.test.ts`), and the contract's test checks the same hash (`contract/src/tests.rs`).
 - **The same Draw, by hand:** its `draw` event logs `purchase_id` 10 and `seed` `3478d52f…185f`. Hash the two together as the contract does:
 
   ```sh
@@ -196,6 +196,7 @@ The agent spends real money without holding any.
 
 - The model can only prepare a purchase. The customer taps Confirm.
 - The server's NEAR key is a function-call key limited to three contract methods.
+- Deposits, withdrawals and settings carry 1 yoctoNEAR, which NEAR never lets a function-call key attach, so only the customer's full-access key can sign them. That's why our relayer only relays full-access signatures (`Relay.ts`): a leaked function-call key can't move funds.
 - The contract enforces each customer's Spending Limits, and a maximum debit on every purchase, whoever submits it.
 - The agent's model runs in a TEE that we verify every hour: NVIDIA GPU attestation, an Intel TDX quote, the signing key and our nonce bound in the report, and the attested container config.
 - Each reply must be signed by that key over the exact request and response, or the customer never sees it (`Attestation.ts`). The latest check is live at [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) and on `/fair`.
