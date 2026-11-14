@@ -54,7 +54,7 @@ const tool = (name: string, description: string, properties: Record<string, obje
 })
 const mode = { type: "string", enum: ["normal", "lite", "classic", "jackpot"], description: "Omit to use the customer's Default Mode" }
 
-const TOOLS = [
+export const TOOLS = [
   tool("search_vouchers", "Find gift cards by brand. Each result says where it works.", { query: { type: "string" } }, ["query"]),
   tool("get_voucher", "The amounts on sale for one voucher, with today's USD price for each.", { voucher_id: { type: "string" } }, ["voucher_id"]),
   tool("get_balance", "The customer's balance, Spending Limits, Default Mode and Running Total."),
