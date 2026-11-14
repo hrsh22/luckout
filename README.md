@@ -235,7 +235,7 @@ The shopping agent runs on private AI that we verify rather than trust.
 - **Every reply is signed inside the enclave.** Each completion's signature over the exact request and response bytes must recover to an attested key. If it doesn't, the reply and its Buy button are never shown. Without a passing check from the last two hours, the agent stays offline.
 - **What the model sees stays in the enclave.** The model reads your chat only inside the TEE, the bot talks only in private chats, and voucher codes never enter the model's context. Codes are encrypted at rest with AES-256-GCM.
 - **Chats aren't kept.** Telegram chat history lives only in the server's memory and is dropped after an hour of quiet, or on restart (`Telegram.ts`). It's never written to the database, and we log token counts, not messages.
-- **Check it live:** [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) returns the latest check, and `/fair` shows it, 10 of 10 passing.
+- **Check it live:** [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) returns the latest check, and `/fair` shows it, with every check passing.
 
 ### Autonomous Business
 
