@@ -14,6 +14,7 @@ import { Auth } from "./Auth.ts"
 import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbLive } from "./Db.ts"
+import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
 import { Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
@@ -219,11 +220,14 @@ const mainnetProblems = (env: Record<string, string | undefined>) => [
   ...(env.SESSION_SECRET && env.SESSION_SECRET.length < 32 ? ["SESSION_SECRET of at least 32 characters"] : [])
 ]
 
-const Routes = HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-  Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
-  Layer.provide(AuthorizationLive),
-  Layer.provide(Services)
-)
+const Routes = Layer.mergeAll(
+  HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
+    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
+    Layer.provide(AuthorizationLive)
+  ),
+  // Read-only tools for other AI agents (Mcp.ts).
+  McpRoute
+).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(
   Effect.gen(function*() {

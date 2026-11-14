@@ -35,7 +35,7 @@ const regions = new Intl.DisplayNames(["en"], { type: "region" })
 /** Where a card can be used, in words: "India only", or "anywhere" for a worldwide ("XI") card. */
 export const worksIn = (code: string, name?: string) => (code === "XI" ? "anywhere" : `${name ?? regions.of(code) ?? code} only`)
 
-const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
+export const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
 export const modeName = (m: Mode) => (m === "normal" ? "Normal" : ["Lite", "Classic", "Jackpot"][m.lucky] ?? "Lucky")
 
 /** Money as people read it. */
