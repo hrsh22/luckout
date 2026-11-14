@@ -121,6 +121,15 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
   ```
 
   **You see** `86c4aa61109c03ea43a85658f7da68f3c89a2f710b299cf3f02a311735eb50de 166`: the event's `random`, then the roll, 166 out of 10,000. In Classic, rolls 0–199 get 100% back, and that's what the event shows.
+- **As an AI agent, over MCP:** ask our [MCP server](#agent-economy) to recompute the same Draw:
+
+  ```sh
+  curl -s https://api.luckout.wtf/mcp -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"verify_draw","arguments":{"tx_hash":"EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62"}}}' \
+    | jq -r '.result.content[0].text'
+  ```
+
+  **You see** `"all_match": true`, with each recomputed value beside the one the contract logged.
 - **`/fair`:** the Live Average from `get_stats`, the Cashback Reserve and Cashback Cap from `get_reserve`, the contract's code hash, and the latest TEE check of the agent's model.
 - **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows.
 - **The attack demo:** see [What a stolen server key can do](#what-a-stolen-server-key-can-do).
@@ -178,7 +187,7 @@ Where each piece is in the code, and where it runs on mainnet.
 | 🛡️ [AI Security & Defense](#ai-security--defense) | An agent that spends real money without holding any: contract limits, a three-method key and a verified TEE. |
 | 🔒 [Privacy & Private AI](#privacy--private-ai) | The shopping agent's model runs in a NEAR AI Cloud TEE that we verify with a fresh nonce every hour, and every reply must carry its signature. |
 | 🏪 [Autonomous Business](#autonomous-business) | The shop sells, buys stock, pays Cashback and refills its supplier credit by itself. Humans set the limits. |
-| 🤝 [Agent Economy](#agent-economy) | An AI-run shop that buys stock through Bitrefill's MCP tools and pays in crypto through NEAR Intents and Chain Signatures. |
+| 🤝 [Agent Economy](#agent-economy) | An AI-run shop that buys stock through Bitrefill's MCP tools, serves other agents through its own MCP server, and pays in crypto through NEAR Intents and Chain Signatures. |
 | 💡 [Open Innovation](#open-innovation) | A merchant with no keys on other chains, and customers with no NEAR: Chain Signatures one way, NEAR Intents accounts the other. |
 | 🎲 [Games With Real Economies](#games-with-real-economies) | A game of chance on purchases you'd make anyway. Its economy balances itself onchain, and players never notice the chain. |
 
@@ -200,6 +209,7 @@ The agent spends real money without holding any.
 - The contract enforces each customer's Spending Limits, and a maximum debit on every purchase, whoever submits it.
 - The agent's model runs in a TEE that we verify every hour: NVIDIA GPU attestation, an Intel TDX quote, the signing key and our nonce bound in the report, and the attested container config.
 - Each reply must be signed by that key over the exact request and response, or the customer never sees it (`Attestation.ts`). The latest check is live at [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) and on `/fair`.
+- **There's no receiver to scam-check.** Customer money only ever goes back to the customer. The contract's `withdraw` pays the account that calls it. For withdrawals to EVM chains, the server sets 1Click's recipient to the signed-in account and refuses a quote that comes back with any other (`TopUp.ts`). The only outside party we pay is a Bitrefill invoice our own server created. The agent's six tools (`search_vouchers`, `get_voucher`, `get_balance`, `quote`, `prepare_purchase`, `recent_purchases`) can read and prepare, but none of them moves money.
 
 `attack.ts` shows what a stolen server key can and can't do ([below](#what-a-stolen-server-key-can-do)).
 
@@ -224,6 +234,7 @@ The shopping agent runs on private AI that we verify rather than trust.
 - **NEAR AI Cloud, attested with a fresh nonce.** Every hour the server fetches the model's attestation report with a new random nonce and checks it: NVIDIA's GPU attestation (NRAS), Intel TDX quotes for the model node and the gateway, the enclave's signing key and our nonce bound in each TDX report, and the attested container config (`Attestation.ts`).
 - **Every reply is signed inside the enclave.** Each completion's signature over the exact request and response bytes must recover to an attested key. If it doesn't, the reply and its Buy button are never shown. Without a passing check from the last two hours, the agent stays offline.
 - **What the model sees stays in the enclave.** The model reads your chat only inside the TEE, the bot talks only in private chats, and voucher codes never enter the model's context. Codes are encrypted at rest with AES-256-GCM.
+- **Chats aren't kept.** Telegram chat history lives only in the server's memory and is dropped after an hour of quiet, or on restart (`Telegram.ts`). It's never written to the database, and we log token counts, not messages.
 - **Check it live:** [`api.luckout.wtf/attestation`](https://api.luckout.wtf/attestation) returns the latest check, and `/fair` shows it, 10 of 10 passing.
 
 ### Autonomous Business
@@ -249,6 +260,7 @@ An AI-run shop that earns and spends in crypto, buying from another business's a
 - **It pays in crypto, across chains.** Credit refills go treasury → NEAR Intents 1Click → our Base wallet → Bitrefill invoice, and every Base transaction is signed through Chain Signatures (`Refill.ts`, `Base.ts`).
 - **It earns and reinvests.** Card sales collect in the contract as USDC proceeds, which the treasury pulls to buy more stock. The lucky modes' 5.6% margin grows the Cashback Reserve.
 - **Its agent sells.** The Telegram agent on NEAR AI Cloud finds cards and prepares purchases, and customers pay from balances the contract holds.
+- **Other agents can shop here too.** `https://api.luckout.wtf/mcp` is a read-only MCP server (`Mcp.ts`, Streamable HTTP). Any agent can search cards, quote every mode with the exact odds from the contract, read the live fairness numbers, and recompute any Draw from its transaction. It can't spend: the agent hands its human the `buy_url`, and the human confirms. To add it to an MCP client: `claude mcp add --transport http luckout https://api.luckout.wtf/mcp`.
 
 ### Open Innovation
 
@@ -335,7 +347,7 @@ The contract does **not** prove these:
 ```text
 apps/web        Next.js web app: landing page, shop, wallet, purchases, Draw Proof, /fair, Win Cards, admin
 apps/server     Effect server: HTTP API, purchase workflow and reconciler, Telegram agent and its TEE checks,
-                Top-Ups, relayer, Bitrefill credit refills
+                Top-Ups, relayer, Bitrefill credit refills, read-only MCP server for other agents
 packages/api    shared HttpApi definition and schemas (typed client for the web app)
 contract/       Rust NEAR contract, plus a testnet-only test-USDC token with a faucet
 deploy/         pm2 config, VM setup and the runbook for the server
