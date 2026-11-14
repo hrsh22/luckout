@@ -64,7 +64,7 @@ flowchart LR
 1. **Top up from any chain.** NEAR Intents 1Click swaps what you send into native USDC on NEAR, and one deposit moves it into your Luckout balance, which the contract holds. Our relayer pays the NEAR network fee for deposits, withdrawals and settings with NEP-366 meta transactions (ADR-0008), so you never need NEAR.
    - **With an EVM wallet** (MetaMask, Rabby and the like; ADR-0011), you don't need a NEAR account at all. Your USDC lands in your own NEAR Intents account, which your EVM key controls, and an intent you sign moves it into Luckout. Every later step is a message you sign and our relayer sends. The only fee you pay is your own chain's gas for the Top-Up transfer. Withdrawals go back to your address on Base, Ethereum, Arbitrum, Polygon or BNB Chain, gas-free.
 2. **Buy** in the web app or ask the Telegram agent. Our server submits the purchase with a key that can only call the contract's purchase methods, so you don't sign every purchase. The contract enforces the Spending Limits you set.
-3. **Draw.** When the card is delivered, the contract draws your Cashback a block later and credits it to your balance. The code and the result arrive together, seconds after you buy.
+3. **Draw.** When the card is delivered, the contract draws your Cashback a block later and credits it to your balance. The Draw's random value is `sha256(block random seed ‖ purchase ID)`, so two Draws in the same block come out different. The code and the result arrive together, seconds after you buy.
 4. **Check it.** Every Draw has a Draw Proof page that recomputes it in your browser from the chain. `/fair` shows the live average against the promised 105.6%.
 
 ### The odds
@@ -114,6 +114,13 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 ### 3. Check it without a wallet
 
 - **A Draw Proof:** open the [mainnet Draw Proof](https://www.luckout.wtf/draw/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62). It fetches the transaction from NEAR RPC and recomputes the Cashback in your browser.
+- **The same Draw, by hand:** its `draw` event logs `purchase_id` 10 and `seed` `3478d52f…185f`. Hash the two together as the contract does:
+
+  ```sh
+  python3 -c "import hashlib; r = hashlib.sha256(bytes.fromhex('3478d52fc08eac75e970886ced4d42e02a49bce522a6a75a31b5de667a62185f') + (10).to_bytes(8, 'little')).digest(); print(r.hex(), int.from_bytes(r[:8], 'little') % 10000)"
+  ```
+
+  **You see** `86c4aa61109c03ea43a85658f7da68f3c89a2f710b299cf3f02a311735eb50de 166`: the event's `random`, then the roll, 166 out of 10,000. In Classic, rolls 0–199 get 100% back, and that's what the event shows.
 - **`/fair`:** the Live Average from `get_stats`, the Cashback Reserve and Cashback Cap from `get_reserve`, the contract's code hash, and the latest TEE check of the agent's model.
 - **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows.
 - **The attack demo:** see [What a stolen server key can do](#what-a-stolen-server-key-can-do).
@@ -153,11 +160,12 @@ Where each piece is in the code, and where it runs on mainnet.
 | Our contract: balances, Spending Limits, reserve locks, the Draw | [`contract/src/lib.rs`](contract/src/lib.rs): `purchase`, `confirm_delivery`, `on_draw`, `set_limits`, `reclaim` | [`app.luckout.near`](https://nearblocks.io/address/app.luckout.near) |
 | NEP-141 native USDC: deposits via `ft_transfer_call` | `ft_on_transfer` in `contract/src/lib.rs` | USDC `17208628f84f…36133a1` |
 | Function-call access key: the server can only call `purchase`, `confirm_delivery` and `fail_purchase` | [`contract/deploy-mainnet.sh`](contract/deploy-mainnet.sh), [`apps/server/src/Near.ts`](apps/server/src/Near.ts) | [`purchase` by `server.luckout.near`](https://nearblocks.io/txns/4wt8X2yxVwVZZL4n6UgA4LXAQuSJXN3TtVtgXWWzzF8g) |
-| Onchain randomness: the Draw a block after delivery | `on_draw` (`env::random_seed_array`) | [`confirm_delivery` → Draw](https://nearblocks.io/txns/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62) |
+| Onchain randomness: the Draw a block after delivery, random value = `sha256(random_seed ‖ purchase_id)` | `on_draw` → [`draw_random`](contract/src/lib.rs#L1203-L1210) (`env::random_seed_array`, hashed with the purchase ID by `env::sha256_array`) | [`confirm_delivery` → Draw](https://nearblocks.io/txns/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62) |
 | NEAR Intents 1Click: Top-Ups from any chain, refills, withdrawals to EVM chains | [`apps/server/src/OneClick.ts`](apps/server/src/OneClick.ts), [`TopUp.ts`](apps/server/src/TopUp.ts), [`Refill.ts`](apps/server/src/Refill.ts) | 1Click deposits into customers' NEAR and Intents accounts |
 | NEAR Intents accounts for EVM wallets: signed intents call our contract's `on_auth` | `on_auth` in `contract/src/lib.rs`, [`packages/api/src/intents.ts`](packages/api/src/intents.ts), [`apps/server/src/Intents.ts`](apps/server/src/Intents.ts) | [`intents.near` → `on_auth`](https://nearblocks.io/txns/3vLDQRBfA182UF3s5Zqo8AESu2r68LmGn5wWvAnDzEyW) |
 | NEP-366 meta transactions: our relayer pays customers' gas, only for Luckout's own calls | [`apps/server/src/Relay.ts`](apps/server/src/Relay.ts) | [A relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP) by `relayer.luckout.near` |
 | Chain Signatures: our Base wallet has no private key; the treasury signs through `v1.signer` | [`apps/server/src/Base.ts`](apps/server/src/Base.ts) | [`sign` by `treasury.luckout.near`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ), wallet [`0xBfE4…12eA`](https://basescan.org/address/0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA) |
+| Automatic Bitrefill credit refills: treasury → 1Click → our Base wallet → Bitrefill invoice | [`Refill.ts`](apps/server/src/Refill.ts#L862-L863): the server plans a refill every minute and resumes open ones every 10 seconds; nobody has to start it | [treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv), [Base wallet → Bitrefill invoice](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b) |
 | NEAR AI Cloud: the agent's model, in a TEE we verify (attestation and per-reply signatures) | [`apps/server/src/Agent.ts`](apps/server/src/Agent.ts), [`Attestation.ts`](apps/server/src/Attestation.ts) | `deepseek-ai/DeepSeek-V4.1-Flash-1017`; the check result is on `/fair` |
 | NEP-413 signed messages: sign-in, accepted only from a full-access key | [`apps/server/src/Auth.ts`](apps/server/src/Auth.ts) | |
 | NEAR Connect (HOT and other wallets) | [`apps/web/lib/near.ts`](apps/web/lib/near.ts) | |
@@ -180,7 +188,7 @@ A stablecoin checkout a normal shop could use tomorrow, on both sides of the cou
 
 - **Customers pay in stablecoins from any chain.** Normal mode is a plain checkout: pay the card's price in USDC and get the code. Top-Ups swap any token on any chain into native USDC on NEAR through 1Click (`TopUp.ts`), and the contract holds balances in NEP-141 USDC (`ft_on_transfer`).
 - **No gas and no NEAR.** With NEP-366 meta transactions, the relayer pays only for calls to our own contract, with the exact deposit each one needs (`Relay.ts`, [a relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP)).
-- **The merchant pays its supplier in USDC, by itself.** When our Bitrefill credit runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to our Base wallet. That wallet then pays Bitrefill's invoice, signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)) (`Refill.ts`). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
+- **The merchant pays its supplier in USDC, by itself.** When our Bitrefill credit runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to our Base wallet. That wallet then pays Bitrefill's invoice ([Base payment](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b)), signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)). No one starts it: the server checks every minute whether a refill is due ([`Refill.ts`](apps/server/src/Refill.ts#L862-L863)). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
 
 ### AI Security & Defense
 
@@ -318,7 +326,7 @@ The contract does **not** prove these:
 - **Delivery.** The operator confirms delivery, because the chain can't see a Bitrefill code. A purchase we never confirm or fail can be reclaimed after 24 hours.
 - **The mode and amount within your limits.** The operator submits each purchase. The contract caps the debit at what you confirmed and at your Spending Limits, but a compromised server could buy for you, in any mode, up to those limits.
 - **The daily limit is per UTC day.** It resets at 00:00 UTC, so up to twice the daily limit can be spent across midnight.
-- **Randomness.** The Draw uses NEAR's `random_seed`, which a block producer could bias. The Cashback Cap and Spending Limits bound what that could be worth.
+- **Randomness.** The Draw hashes NEAR's block `random_seed` with the purchase ID. A block producer could bias that seed. The Cashback Cap and Spending Limits bound what that could be worth.
 - **Upgrades.** The contract account (`app.luckout.near` on mainnet) keeps full-access keys held by Luckout's owner, so the owner can deploy new code, and new code could move any balance. Spending Limits don't protect against that. Every deploy is a public transaction on the contract account, and mainnet code is the reproducible build CI makes for the released commit: build it yourself with `cd contract && cargo near build reproducible-wasm` (needs Docker), and its code hash matches the one `/fair` shows. We plan to move upgrades behind a multisig with a timelock, or delete the key, before balances grow. This section will say when it's done.
 
 ## Repository

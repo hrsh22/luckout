@@ -564,6 +564,7 @@ impl Contract {
             env::panic_str("Not a Lucky Buy")
         };
         let version = self.version(v).clone();
+        // The block's seed is never used raw: random = sha256(seed ‖ purchase_id), see draw_random.
         let seed = env::random_seed_array();
         let random = draw_random(&seed, purchase_id);
         let roll = roll_from_random(&random);
@@ -1199,6 +1200,9 @@ pub fn validate_game_version(v: &GameVersion) {
     );
 }
 
+/// The Draw's random value: sha256(block random seed ‖ purchase_id as 8 little-endian bytes).
+/// The purchase ID makes Draws in the same block independent. The Draw Proof recomputes this in
+/// the browser (apps/web/lib/draw.ts).
 pub fn draw_random(seed: &[u8; 32], purchase_id: u64) -> [u8; 32] {
     let mut input = seed.to_vec();
     input.extend_from_slice(&purchase_id.to_le_bytes());

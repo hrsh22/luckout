@@ -1,3 +1,4 @@
+// Tests only the contract's proceeds pull; the automatic refill system itself is src/Refill.ts.
 // Live check of the treasury on testnet (ADR-0009), signing the way the server does (Near.treasurySend):
 // - a pull the token can't deliver (treasury not registered on USDC) puts the proceeds and the cap back;
 // - the treasury registers itself, then pulls 1 USDC: proceeds go down, the treasury's USDC goes up;
