@@ -68,7 +68,10 @@ export const TOOLS = [
     value: { type: "string" },
     mode
   }, ["voucher_id", "value"]),
-  tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included).")
+  tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included)."),
+  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards' receipts to. Needed before buying when prepare_purchase says so.", {
+    email: { type: "string" }
+  }, ["email"])
 ]
 
 const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards (from Bitrefill) with the USDC balance they keep in Luckout.
@@ -94,7 +97,8 @@ Rules:
 - Only offer a purchase they can pay for. If a tool says they're short or over a limit, say by how much and give the link.
 - To buy, call prepare_purchase; they confirm with a button. Never say it's bought before they confirm.
 - No cashback means they paid the up-front amount; never call that a win.
-- The bot sends voucher codes itself; never ask for or repeat them.${testnet
+- The bot sends voucher codes itself; never ask for or repeat them.
+- If prepare_purchase says they have no email for their cards, ask for one in a line (Bitrefill sends receipts there and can help with a bad code; a throwaway one is fine), save it with set_checkout_email, then prepare again. Don't ask for it otherwise.${testnet
   ? `\n- This is the testnet demo: only Bitrefill's test cards can be bought, with free test USDC. If they ask for a real brand, say so in one line and offer the $10 test gift card.`
   : ""}`
 
@@ -204,8 +208,8 @@ export const makeAgent = (deps: {
           : {})
       })))),
     get_balance: () =>
-      run(account(accountId).pipe(Effect.map((a) =>
-        a
+      run(Effect.all([account(accountId), deps.purchases.checkoutEmail(accountId)]).pipe(Effect.map(([a, e]) => ({
+        ...(a
           ? {
             balance: usd(Number(a.balance)),
             per_purchase_limit: limit(a.per_purchase_limit),
@@ -213,8 +217,9 @@ export const makeAgent = (deps: {
             default_mode: modeName(a.default_mode),
             running_total: usd(Number(a.cashback_received) - Number(a.premiums_paid))
           }
-          : { balance: "$0.00", note: `No deposit yet. Add funds at ${deps.web}/wallet` }
-      ))),
+          : { balance: "$0.00", note: `No deposit yet. Add funds at ${deps.web}/wallet` }),
+        ...(e.needed ? { card_email: e.email ?? "not set yet" } : {})
+      })))),
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {
         const a = yield* account(accountId)
@@ -239,11 +244,18 @@ export const makeAgent = (deps: {
         if (closed) return { error: closed }
         const why = blocker(a, q.maxPrice, deps.web)
         if (why) return { error: why }
+        // Bitrefill needs an email with each card (ADR-0012): without one the Buy button would only fail.
+        const email = yield* deps.purchases.checkoutEmail(accountId)
+        if (email.needed && !email.email) {
+          return { error: "They haven't given an email for their cards yet. Ask for one, save it with set_checkout_email, then prepare again." }
+        }
         prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
         return {
           shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
         }
       })),
+    set_checkout_email: ({ email }: { email: string }) =>
+      run(deps.purchases.setCheckoutEmail(accountId, email).pipe(Effect.map((e) => ({ saved: e.email })))),
     recent_purchases: () =>
       run(deps.purchases.list(accountId).pipe(Effect.map((ps) => ps.slice(0, 5).map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,

@@ -172,3 +172,23 @@ test("the purchases and users lists show what each customer bought, paid and hol
     assert.ok((alice?.spent ?? 0) >= 8_000_000, "the Lucky Buy counts at its final price")
     assert.equal(users.find((u) => u.accountId === "bob.testnet")?.balance, 0, "never deposited")
   })))
+
+test("the overview shows how near the busiest Checkout Email is to Bitrefill's limits", () =>
+  run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO checkout_emails (account_id, email, email_key) VALUES ('alice.testnet', 'sealed', 'k1'), ('bob.testnet', 'sealed', 'k2')`
+    // Two cards for one email today, one for the other, one rejected (never reached Bitrefill) and one 2 days old.
+    const add = (id: string, key: string, step: string, price: number, hoursAgo: number, invoice: string | null) =>
+      sql`INSERT INTO purchases (id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, email_key, invoice_id, created_at)
+          VALUES (${id}, 'alice.testnet', ${id}, 'Card', 'amazon-us', '10', ${price}, ${step}, ${key}, ${invoice}, now() - make_interval(hours => ${hoursAgo}))`
+    yield* add("00000000-0000-0000-0000-0000000000c1", "k1", "settled", 10_000_000, 1, "i1")
+    yield* add("00000000-0000-0000-0000-0000000000c2", "k1", "pay", 5_000_000, 2, "i2")
+    yield* add("00000000-0000-0000-0000-0000000000c3", "k1", "rejected", 50_000_000, 1, null)
+    yield* add("00000000-0000-0000-0000-0000000000c4", "k1", "settled", 20_000_000, 48, "i4")
+    yield* add("00000000-0000-0000-0000-0000000000c5", "k2", "settled", 7_000_000, 1, "i5")
+    const o = yield* (yield* Admin).overview
+    assert.equal(o.checkout.guest, false)
+    assert.equal(o.checkout.emails, 2)
+    assert.deepEqual(o.checkout.limits, { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 })
+    assert.deepEqual(o.checkout.busiest, { orders: 2, daily: 15_000_000, monthly: 35_000_000 })
+  })))

@@ -1,7 +1,7 @@
 "use client"
 
 import { type Category, type Mode, type Purchase, type TransferPhase, VoucherSummary } from "@luckout/api"
-import { keepPreviousData, type QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query"
+import { keepPreviousData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
 import { modeSlug, type ReserveView } from "./modes"
@@ -107,6 +107,24 @@ export const usePurchases = (token: string | undefined) =>
       return open.length === 0 ? false : open.some(fresh) ? 4000 : 60_000
     }
   })
+
+/** The Checkout Email Bitrefill gets with each card (ADR-0012). `needed` is false where buying takes none (testnet). */
+export const useCheckoutEmail = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["checkout-email", token],
+    queryFn: () => api((c) => c.purchases.checkoutEmail(), token),
+    enabled: !!token,
+    staleTime: 5 * 60_000
+  })
+
+/** Saves the Checkout Email; the server checks it and answers with what it kept. */
+export const useSaveCheckoutEmail = (token: string | undefined) => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (email: string) => api((c) => c.purchases.setCheckoutEmail({ payload: { email } }), token),
+    onSuccess: (saved) => qc.setQueryData(["checkout-email", token], saved)
+  })
+}
 
 /** While `waiting` (the customer is off in Telegram tapping Start), check every 2 s until linked. */
 export const useTelegram = (token: string | undefined, waiting = false) =>

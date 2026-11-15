@@ -131,6 +131,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
   const contractCall = (method: string, args: object, tgas = 30): Call => ({ receiverId: contractId, method, args, deposit: "1", tgas })
   const average = liveAverage({ lucky_settled: o.stats.luckySettled, lucky_amount_total: String(o.stats.luckyAmountTotal), lucky_paid_total: String(o.stats.luckyPaidTotal) })
   const close = () => setOpen(undefined)
+  const guest = o.checkout.guest
 
   return (
     <div className="flex flex-col gap-10">
@@ -204,7 +205,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
             <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
             <span>
               The reserve, its cashback cap, proceeds, the contract's pause and the treasury's mode need the owner's wallet, <b>{o.contract.owner}</b>. Any admin can stop
-              sales, send gas, and change the relayer and credit settings.
+              sales, send gas, and change the relayer and {guest ? "float" : "credit"} settings.
             </span>
           </p>
         )}
@@ -230,7 +231,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         <div className="card flex flex-col p-7">
           <p className="text-ink-soft">Proceeds</p>
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.proceeds} /></p>
-          <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills Bitrefill from it.</p>
+          <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills {guest ? "the Base Float" : "Bitrefill"} from it.</p>
           <p className={`mt-4 text-sm ${o.reserve.customers < 0 ? "font-semibold text-bad" : "text-muted"}`}>
             {o.reserve.customers < 0
               ? `The contract holds ${usd(o.reserve.held)}, less than the reserve and proceeds alone. Pause it and investigate now.`
@@ -248,8 +249,8 @@ function Dashboard({ o }: { o: AdminOverview }) {
       <section className="flex flex-col gap-4">
         <SectionTitle title="Gas" body="What our accounts spend on network fees: NEAR on NEAR, ETH on Base. Each alerts below its line; any admin can top it up." />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {o.gas.map((g) => <GasTile key={g.role} g={g} onSend={() => setOpen({ gas: g })} />)}
-          {o.treasury.wallet && <BaseGasTile w={o.treasury.wallet} />}
+          {o.gas.map((g) => <GasTile key={g.role} g={g} guest={guest} onSend={() => setOpen({ gas: g })} />)}
+          {o.treasury.wallet && <BaseGasTile w={o.treasury.wallet} guest={guest} />}
         </div>
       </section>
 
@@ -279,7 +280,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         title="Withdraw proceeds"
         available={o.reserve.proceeds}
         to={o.contract.owner}
-        preview={() => "Leave enough for Bitrefill refills: the treasury pulls them from here."}
+        preview={() => `Leave enough for ${guest ? "refills of the Base Float" : "Bitrefill refills"}: the treasury pulls them from here.`}
         onWithdraw={(m) => tx(`Withdrawing ${usd(m)} of proceeds`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
           send(id, contractCall("withdraw_proceeds", { amount: String(m) }, 60)))}
       />

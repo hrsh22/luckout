@@ -1,6 +1,7 @@
 "use client"
 
 import { SignInButton } from "@/components/app-nav"
+import { CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet } from "@/components/funds"
 import { GiftCard } from "@/components/gift-card"
 import { ModePicker } from "@/components/mode-picker"
@@ -16,7 +17,7 @@ import { usd, usdUp } from "@/lib/format"
 import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { rememberViewed, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
+import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -135,7 +136,7 @@ function Voucher() {
                   <p className="self-start rounded-full bg-ink px-3 py-1 text-sm font-semibold text-white">
                     {flag(look.countryCode)} {look.countryCode === WORLDWIDE ? "Works worldwide" : `Works in ${countryName(look.countryCode, look.countryName)} only`}
                   </p>
-                  <p className="text-ink-soft">Paid out in {look.currency}. Delivered as a code in seconds.</p>
+                  <p className="text-ink-soft">Paid out in {look.currency}. Delivered as a code, usually within a minute.</p>
                 </>
               )}
             </div>
@@ -289,11 +290,12 @@ function Receipt({ shown, exact, info, error, children }: {
   )
 }
 
-/** One button that knows what's in the way: signing in, funds, or limits, and fixes it on the spot. */
+/** One button that knows what's in the way: signing in, funds, limits, or the Checkout Email, and fixes it on the spot. */
 function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
-  const { accountId, account, accountError, refresh, evm, gasFree } = useSession()
+  const { accountId, account, accountError, refresh, evm, gasFree, token } = useSession()
   const actions = useWalletActions()
   const shop = useShopStatus().data
+  const checkout = useCheckoutEmail(token).data
   const [adding, setAdding] = useState(false)
   const [raising, setRaising] = useState(false)
   if (shop && !shop.open) {
@@ -351,6 +353,14 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
         <p className="text-sm">
           {evm || gasFree ? "One approval, no fee" : "One approval"}, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
         </p>
+      </div>
+    )
+  }
+  // Bitrefill needs one with each card (ADR-0012): asked here once, instead of a refused purchase. Saving it brings the Buy button.
+  if (checkout?.needed && !checkout.email) {
+    return (
+      <div className="rounded-2xl bg-soft p-4">
+        <CheckoutEmailForm />
       </div>
     )
   }

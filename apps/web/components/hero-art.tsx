@@ -48,7 +48,7 @@ export function HeroArt() {
         >
           <span className="flex items-center gap-2 text-sm font-semibold opacity-80"><Gift size={16} />Gift card</span>
           <p className="font-display mt-6 text-[44px] leading-none font-extrabold">$20</p>
-          <p className="mt-1 text-sm opacity-75">Code delivered in 6 seconds</p>
+          <p className="mt-1 text-sm opacity-75">Code delivered in under a minute</p>
         </motion.div>
 
         <motion.div
@@ -94,7 +94,7 @@ export function HeroArt() {
           <ShieldCheck size={16} strokeWidth={2.4} />Provably fair
         </motion.span>
         <motion.span variants={rise} custom={{ delay: 0.65, rotate: -8 }} className="sticker absolute top-[480px] left-6 z-20 bg-sky">
-          <Zap size={16} strokeWidth={2.4} />Code in seconds
+          <Zap size={16} strokeWidth={2.4} />Code within a minute
         </motion.span>
         <motion.span variants={rise} custom={{ delay: 0.75, rotate: 4 }} className="sticker absolute top-[380px] right-[-16px] z-20 bg-gold text-gold-ink">
           100% off 2% of the time

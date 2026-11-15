@@ -115,7 +115,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
   )
 }
 
-/** An honest wait: no fake steps, just time passing. Purchases usually take 5 to 15 seconds. */
+/** An honest wait: no fake steps, just time passing. Bitrefill sends the code once it sees our payment on Base, usually within a minute (ADR-0012). */
 export function Progress() {
   const [seconds, setSeconds] = useState(0)
   useEffect(() => {
@@ -125,9 +125,9 @@ export function Progress() {
   return (
     <div className="mt-4 flex flex-col gap-2">
       <div className="h-1.5 overflow-hidden rounded-full bg-white/50">
-        <motion.div className="h-full rounded-full bg-current" initial={{ width: "4%" }} animate={{ width: "88%" }} transition={{ duration: 14, ease: [0.1, 0.6, 0.3, 1] }} />
+        <motion.div className="h-full rounded-full bg-current" initial={{ width: "4%" }} animate={{ width: "88%" }} transition={{ duration: 50, ease: [0.1, 0.6, 0.3, 1] }} />
       </div>
-      <p className="text-sm opacity-80">Bitrefill sends the code, then the Draw runs on NEAR. {seconds}s</p>
+      <p className="text-sm opacity-80">Bitrefill sends the code once it sees our payment, usually within a minute. Then the Draw runs on NEAR. {seconds}s</p>
     </div>
   )
 }
@@ -350,7 +350,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
               <SafetyNet p={p} />
-              {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code. This updates by itself.</p>}
+              {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code, usually within a minute. This updates by itself.</p>}
               {p.status === "waiting" && (
                 <>
                   <p className="text-sm text-muted">{WAITING_TEXT}</p>

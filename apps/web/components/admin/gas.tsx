@@ -30,7 +30,7 @@ const GAS_COPY = {
   contract: { label: "Contract storage", purpose: "Each purchase stores a record; storage is paid in NEAR." }
 } as const
 
-export function GasTile({ g, onSend }: { g: AdminOverview["gas"][number]; onSend: () => void }) {
+export function GasTile({ g, guest, onSend }: { g: AdminOverview["gas"][number]; guest: boolean; onSend: () => void }) {
   const low = BigInt(g.spendable) < BigInt(g.alertBelow)
   // The bar is full at four times the alert line, so the line sits at a quarter.
   const fill = Number((BigInt(g.spendable) * 1000n) / (BigInt(g.alertBelow) * 4n)) / 1000
@@ -40,7 +40,9 @@ export function GasTile({ g, onSend }: { g: AdminOverview["gas"][number]; onSend
         <p className="flex items-center gap-2 font-semibold"><Fuel size={18} className="text-muted" aria-hidden="true" />{GAS_COPY[g.role].label}</p>
         <span className={`pill ${low ? "bg-warn-soft! text-warn" : "bg-good-soft! text-good"}`}>{low ? "Low" : "OK"}</span>
       </div>
-      <p className="mt-1 text-sm text-muted">{GAS_COPY[g.role].purpose}</p>
+      <p className="mt-1 text-sm text-muted">
+        {guest && g.role === "treasury" ? "Signs refills of the Base Float and each card's payment from the Base Wallet." : GAS_COPY[g.role].purpose}
+      </p>
       <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">
         {nearAmount(g.spendable)} <span className="text-lg font-bold text-muted">NEAR</span>
       </p>
@@ -61,7 +63,7 @@ export function GasTile({ g, onSend }: { g: AdminOverview["gas"][number]; onSend
  * The Base wallet's ETH, which pays for every Bitrefill payment on Base. It has no NEAR key to send
  * to from here: top it up by sending ETH on Base to its address from any wallet or exchange.
  */
-export function BaseGasTile({ w }: { w: NonNullable<AdminOverview["treasury"]["wallet"]> }) {
+export function BaseGasTile({ w, guest }: { w: NonNullable<AdminOverview["treasury"]["wallet"]>; guest: boolean }) {
   const low = BigInt(w.eth) < BigInt(w.alertBelow)
   const fill = Number((BigInt(w.eth) * 1000n) / (BigInt(w.alertBelow) * 4n)) / 1000
   return (
@@ -70,7 +72,9 @@ export function BaseGasTile({ w }: { w: NonNullable<AdminOverview["treasury"]["w
         <p className="flex items-center gap-2 font-semibold"><Fuel size={18} className="text-muted" aria-hidden="true" />Base wallet</p>
         <span className={`pill ${low ? "bg-warn-soft! text-warn" : "bg-good-soft! text-good"}`}>{low ? "Low" : "OK"}</span>
       </div>
-      <p className="mt-1 text-sm text-muted">Pays Bitrefill on Base, a fraction of a cent each. Signed by the treasury.</p>
+      <p className="mt-1 text-sm text-muted">
+        {guest ? "Pays each card's Bitrefill invoice on Base" : "Pays Bitrefill on Base"}, a fraction of a cent each. Signed by the treasury.
+      </p>
       <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">
         {eth(w.eth)} <span className="text-lg font-bold text-muted">ETH</span>
       </p>

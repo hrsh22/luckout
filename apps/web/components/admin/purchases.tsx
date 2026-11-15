@@ -1,7 +1,7 @@
 "use client"
 
 import { shortAccount } from "@/components/avatar"
-import { ago } from "@/components/admin/shared"
+import { ago, stepLabel } from "@/components/admin/shared"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { useSession } from "@/lib/session"
@@ -55,7 +55,7 @@ function AttentionRow({ a }: { a: AttentionPurchase }) {
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-center gap-2 font-semibold">
           {a.voucherName} {a.value}
-          <span className={`pill ${a.step === "stuck" ? "bg-bad-soft! text-bad" : "bg-warn-soft! text-warn"}`}>{a.step}</span>
+          <span className={`pill ${a.step === "stuck" ? "bg-bad-soft! text-bad" : "bg-warn-soft! text-warn"}`}>{stepLabel(a.step)}</span>
         </p>
         <p className="mt-1 text-sm text-muted">{shortAccount(a.accountId)} · {ago(a.createdAt)} · {a.attempts} attempts</p>
         {a.error && <p className="mt-2 line-clamp-3 text-sm text-ink-soft">{a.error}</p>}

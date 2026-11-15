@@ -49,6 +49,9 @@ export const TONE = {
   busy: "bg-lilac-soft! text-ink"
 } as const
 
+/** A purchase's step as the server names it, except a guest order paying Bitrefill from the Base Float (ADR-0012). */
+export const stepLabel = (step: string) => (step === "pay" ? "Paying Bitrefill" : step)
+
 /** wei → "0.0012" (ETH, at most 5 decimals). */
 export const eth = (wei: string) => (Number(BigInt(wei) / 10n ** 12n) / 1e6).toFixed(5).replace(/0+$/, "").replace(/\.$/, "")
 

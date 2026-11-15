@@ -2,6 +2,7 @@
 
 import { SignInButton } from "@/components/app-nav"
 import { Avatar, shortAccount } from "@/components/avatar"
+import { CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsPanel } from "@/components/funds"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
@@ -12,6 +13,7 @@ import { limitsText } from "@/lib/format"
 import { MODES, modeName, RECOMMENDED, sameMode } from "@/lib/modes"
 import { markWelcomed, pendingMode, setPendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
+import { useCheckoutEmail } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode } from "@luckout/api"
 import { ArrowLeft, Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
@@ -19,16 +21,19 @@ import { AnimatePresence, motion } from "motion/react"
 import { useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
 
-const STEPS = ["Sign in", "Choose a mode", "Add funds", "Ready"] as const
-type Step = 0 | 1 | 2 | 3
+const STEPS = ["Sign in", "Choose a mode", "Your email", "Add funds", "Ready"] as const
+type Step = 0 | 1 | 2 | 3 | 4
+/** Asked only where buying needs a Checkout Email (ADR-0012). */
+const EMAIL = 2
 
 /**
- * Welcome: sign in, choose how you like to pay, add funds, done. Each step is one decision,
- * and nothing here buys anything. It runs as its own page (/welcome) or over the page a new
+ * Welcome: sign in, choose how you like to pay, give an email for cards (where Bitrefill needs one), add funds,
+ * done. Each step is one decision, and nothing here buys anything. It runs as its own page (/welcome) or over the page a new
  * customer signed in on; `onDone` closes it there.
  */
 export function Welcome({ onDone }: { onDone?: () => void }) {
-  const { accountId, account, signInError } = useSession()
+  const { accountId, account, signInError, token } = useSession()
+  const askEmail = useCheckoutEmail(token).data?.needed === true
   const actions = useWalletActions()
   const router = useRouter()
   // Already signed in: start at the first real decision, with no step-to-step animation on open.
@@ -69,17 +74,17 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
         setSaving(false)
         if (!ok) return
       }
-      go(3)
+      go(askEmail ? EMAIL : 4)
     } else {
       setPendingMode(accountId, mode)
-      go(2)
+      go(askEmail ? EMAIL : 3)
     }
   }
 
   return (
     <div ref={top} className="mx-auto flex w-full max-w-[760px] scroll-mt-28 flex-col gap-6">
-      <ol className="grid grid-cols-4 gap-2" aria-label="Welcome steps">
-        {STEPS.map((label, i) => (
+      <ol className={`grid gap-2 ${askEmail ? "grid-cols-5" : "grid-cols-4"}`} aria-label="Welcome steps">
+        {STEPS.map((label, i) => i === EMAIL && !askEmail ? null : (
           <li key={label} className="flex flex-col gap-2" aria-current={i === step ? "step" : undefined}>
             <span className="h-1.5 overflow-hidden rounded-full bg-white">
               <motion.span className="block h-full rounded-full bg-ink" initial={false} animate={{ width: i <= step ? "100%" : "0%" }} transition={{ type: "spring", stiffness: 200, damping: 30 }} />
@@ -108,7 +113,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
             <>
               <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with a NEAR or EVM wallet to start." />
               <div className="grid gap-3 sm:grid-cols-3">
-                <Point icon={Zap} tint="sky" title="Codes in seconds" body="Bitrefill delivers the card the moment you buy." />
+                <Point icon={Zap} tint="sky" title="Codes in about a minute" body="Bitrefill sends the code once it sees our payment." />
                 <Point icon={Sparkles} tint="gold" title="Cashback by chance" body="Lucky modes can pay back part of the price, sometimes all of it." />
                 <Point icon={ShieldCheck} tint="lilac" title="Checkable" body="Every Draw is on NEAR. Anyone can recompute it." />
               </div>
@@ -136,23 +141,38 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
             </>
           )}
 
-          {step === 2 && (
+          {step === EMAIL && (
             <>
               <button type="button" onClick={() => go(1)} className="-mb-2 inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
                 <ArrowLeft size={16} aria-hidden="true" />Back to modes
               </button>
-              <Heading title="Add funds" body="Your balance pays for cards, and you can withdraw what you don't spend at any time." />
+              <Heading title="An email for your cards" body="Bitrefill, which delivers the cards, needs one with each card you buy. You can change it later in Wallet." />
               <div className="card p-5 sm:p-6">
-                <AddFundsPanel onDone={(ok) => ok && go(3)} />
+                <CheckoutEmailForm label="Continue" onSaved={() => go(account ? 4 : 3)} />
               </div>
-              {/* Over a page, "Skip for now" is in the header already. */}
               {!onDone && (
-                <Button variant="ghost" className="self-start" onClick={() => go(3)}>Skip for now</Button>
+                <Button variant="ghost" className="self-start" onClick={() => go(account ? 4 : 3)}>Skip for now</Button>
               )}
             </>
           )}
 
-          {step === 3 && accountId && (
+          {step === 3 && (
+            <>
+              <button type="button" onClick={() => go(askEmail ? EMAIL : 1)} className="-mb-2 inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
+                <ArrowLeft size={16} aria-hidden="true" />{askEmail ? "Back to email" : "Back to modes"}
+              </button>
+              <Heading title="Add funds" body="Your balance pays for cards, and you can withdraw what you don't spend at any time." />
+              <div className="card p-5 sm:p-6">
+                <AddFundsPanel onDone={(ok) => ok && go(4)} />
+              </div>
+              {/* Over a page, "Skip for now" is in the header already. */}
+              {!onDone && (
+                <Button variant="ghost" className="self-start" onClick={() => go(4)}>Skip for now</Button>
+              )}
+            </>
+          )}
+
+          {step === 4 && accountId && (
             <>
               <Heading title="You're all set." body="Here's how your account is set up. All of it can be changed in Wallet." />
               <div className="grid gap-3 sm:grid-cols-3">
