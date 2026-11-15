@@ -1,6 +1,6 @@
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import { SqlClient } from "effect/sql"
-import { Network } from "./Near.ts"
+import { ContractId, Network } from "./Near.ts"
 
 /**
  * Operator alerts and customer notices. Everything is logged; with TELEGRAM_BOT_TOKEN set,
@@ -21,8 +21,9 @@ export class Alerts extends Context.Service<Alerts, {
       const sql = yield* SqlClient.SqlClient
       const token = yield* Config.option(Config.Redacted("TELEGRAM_BOT_TOKEN"))
       const adminChat = yield* Config.option(Config.String("ALERT_TELEGRAM_CHAT_ID"))
-      // Both networks may alert the same chat: every alert says which one it's about.
-      const network = yield* Network
+      // Every deployment may alert the same chat, so each alert names its own: luckout.near (production),
+      // luckout-staging.near or luckout.testnet, from the contract's account.
+      const where = (yield* ContractId).replace(/^app\./, "") || (yield* Network)
 
       /**
        * "sent" once Telegram took the message; "retry" when it didn't answer, rate-limited us or failed itself;
@@ -59,13 +60,13 @@ export class Alerts extends Context.Service<Alerts, {
       const lastSent = new Map<string, number>()
       const admin = (text: string) =>
         Effect.gen(function*() {
-          yield* Effect.logError(`ALERT [${network}] ${text}`)
+          yield* Effect.logError(`ALERT [${where}] ${text}`)
           const now = Date.now()
           for (const [t, at] of lastSent) if (at <= now - DEDUPE_MS) lastSent.delete(t)
           if (lastSent.has(text) || Option.isNone(adminChat)) return
           // Held while sending, so the same alert at the same moment isn't sent twice; only a delivered one counts.
           lastSent.set(text, now)
-          if ((yield* telegram(adminChat.value, `⚠️ Luckout [${network}]: ${text}`)) !== "sent") lastSent.delete(text)
+          if ((yield* telegram(adminChat.value, `⚠️ Luckout [${where}]: ${text}`)) !== "sent") lastSent.delete(text)
         })
 
       const customer = (accountId: string, text: string) =>

@@ -4,7 +4,7 @@ import { PGlite } from "@electric-sql/pglite"
 import { Config, Effect, Layer, Option } from "effect"
 import { Migrator, SqlClient } from "effect/sql"
 import { mkdirSync } from "node:fs"
-import { Network } from "./Near.ts"
+import { ContractId, Network } from "./Near.ts"
 
 // Exactly one server process per database (ADR-0006): a second one would poll Telegram twice
 // and race the operator's transaction nonces. The lock lives as long as this connection.
@@ -256,23 +256,27 @@ const migrations = Migrator.fromRecord({
 const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
 
 /**
- * A database belongs to one network for good: the first server to start records it, and a server
- * for the other network refuses to start against it, so testnet and mainnet data can never mix.
+ * A database belongs to one deployment for good: the first server to start records its network and
+ * contract, and a server for another refuses to start against it. So testnet and mainnet data never
+ * mix, and neither do staging and production, which are both on mainnet (ADR-0010).
  */
-const NetworkLock = Layer.effectDiscard(
+export const DeploymentLock = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const network = yield* Network
-    yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('network', ${JSON.stringify(network)}::jsonb, 'server')
-               ON CONFLICT (key) DO NOTHING`
-    const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'network'`
-    if (row?.value !== network) {
-      return yield* Effect.die(`This database belongs to ${String(row?.value)}, but NEAR_NETWORK is ${network}. Point DATABASE_URL at the ${network} database.`)
+    const contract = yield* ContractId
+    for (const [key, value, setting] of [["network", network, "NEAR_NETWORK"], ["contract", contract, "LUCKOUT_CONTRACT_ID"]]) {
+      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')
+                 ON CONFLICT (key) DO NOTHING`
+      const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = ${key}`
+      if (row?.value !== value) {
+        return yield* Effect.die(`This database belongs to ${String(row?.value)}, but ${setting} is ${value}. Point DATABASE_URL at that deployment's own database.`)
+      }
     }
   }).pipe(Effect.orDie)
 )
 
-export const DbLive = NetworkLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
+export const DbLive = DeploymentLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
 
 // Tests migrate one database per process and start each fresh one from its dump: ~70ms instead of
 // ~1s to boot and migrate. (The template is closed once dumped; left open, the process lingers 10s.)

@@ -18,7 +18,10 @@ const mixed = ["NEXT_PUBLIC_LUCKOUT_CONTRACT_ID", "NEXT_PUBLIC_USDC_CONTRACT_ID"
   return network === "mainnet" ? v.endsWith(".testnet") || v === "" : v.endsWith(".near") || /^[0-9a-f]{64}$/.test(v)
 })
 const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? ""
-if (network === "mainnet" ? apiUrl.includes("testnet") : ["api.luckout.wtf", "luckout-api.gamified.trade"].includes(URL.parse(apiUrl)?.hostname ?? "")) mixed.push("NEXT_PUBLIC_API_URL")
+const productionApi = ["api.luckout.wtf", "luckout-api.gamified.trade"].includes(URL.parse(apiUrl)?.hostname ?? "")
+if (network === "mainnet" ? apiUrl.includes("testnet") : productionApi) mixed.push("NEXT_PUBLIC_API_URL")
+// Staging is on mainnet too, with its own contract and API: production's contract goes only with production's API.
+if (network === "mainnet" && (process.env.NEXT_PUBLIC_LUCKOUT_CONTRACT_ID === "app.luckout.near") !== productionApi) mixed.push("NEXT_PUBLIC_LUCKOUT_CONTRACT_ID with NEXT_PUBLIC_API_URL")
 if (mixed.length > 0) throw new Error(`NEXT_PUBLIC_NEAR_NETWORK=${network}, but these point elsewhere: ${mixed.join(", ")}`)
 
 // ponytail: no script-src. NEAR Connect runs each wallet's code, fetched from that wallet's own

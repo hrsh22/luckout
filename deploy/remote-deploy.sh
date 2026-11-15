@@ -3,6 +3,7 @@
 # ~/.ssh/authorized_keys (which fixes the branch per site, so CI can't choose it), or by hand:
 #   bash deploy/remote-deploy.sh testnet     # luckout-testnet-api.gamified.trade
 #   bash deploy/remote-deploy.sh main        # luckout-api.gamified.trade (mainnet)
+#   bash deploy/remote-deploy.sh staging     # staging-api.luckout.wtf (mainnet, its own contract)
 # CI sends the commit it tested as the SSH command, which the forced command leaves in
 # SSH_ORIGINAL_COMMAND; then the branch must still point at it. By hand, there's no such check.
 set -euo pipefail
@@ -11,10 +12,11 @@ cd "$(dirname "$0")/.."
 . ~/.nvm/nvm.sh >/dev/null
 port=$(grep -E '^PORT=' .env | cut -d= -f2)
 network=$(grep -E '^NEAR_NETWORK=' .env | cut -d= -f2)
-# A site only ever runs its own branch: testnet code on mainnet (or the reverse) is refused.
-case "$branch:$network" in
-  testnet:testnet | main:mainnet) ;;
-  *) echo "refusing to deploy $branch on a $network site" >&2; exit 1 ;;
+# A site only ever runs its own branch: testnet code on mainnet (or the reverse) is refused, and so is
+# staging code on production (or the reverse), which share a network but never a site user.
+case "$branch:$network:$(id -un)" in
+  testnet:testnet:luckout-testnet-api | main:mainnet:luckout-api | staging:mainnet:luckout-staging-api) ;;
+  *) echo "refusing to deploy $branch on $(id -un), a $network site" >&2; exit 1 ;;
 esac
 git fetch -q origin "$branch"
 tested="${SSH_ORIGINAL_COMMAND:-}"

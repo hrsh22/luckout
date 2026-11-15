@@ -9,6 +9,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "deploy:testnet": "ssh luckout-testnet-api-milesvm 'bash ~/htdocs/luckout-testnet-api.gamified.trade/deploy/remote-deploy.sh testnet'",
-    "deploy:mainnet": "ssh luckout-milesvm 'bash ~/htdocs/luckout-api.gamified.trade/deploy/remote-deploy.sh main'"
+    "deploy:mainnet": "ssh luckout-milesvm 'bash ~/htdocs/luckout-api.gamified.trade/deploy/remote-deploy.sh main'",
+    "deploy:staging": "ssh luckout-staging-api-milesvm 'bash ~/htdocs/staging-api.luckout.wtf/deploy/remote-deploy.sh staging'"
   }
 }

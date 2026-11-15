@@ -203,7 +203,8 @@ const MAINNET_REQUIRES = [
   "LUCKOUT_CONTRACT_ID",
   "OPERATOR_ACCOUNT_ID",
   "OPERATOR_PRIVATE_KEY",
-  "BITREFILL_API_KEY",
+  // Not BITREFILL_API_KEY: staging runs without one until purchases move to Bitrefill's MCP guest
+  // checkout, which needs no key. Without it the shop says so and sells nothing.
   // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
   "BASE_RPC_URL",
   // Real money: alerts must reach a human (through the bot), and someone must be able to open the admin panel.
