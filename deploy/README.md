@@ -7,12 +7,12 @@
 | Branch | `testnet` | `staging` (PRs from feature branches, with CI passing) | `main` (changes only by PR from `staging`, with CI passing) |
 | Web (Vercel) | Preview env vars, domain `testnet.luckout.wtf` on branch `testnet` (the old `testnet.luckout.gamified.trade` still works) | Preview env vars for branch `staging`, domain `staging.luckout.wtf` on branch `staging` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it; the old `luckout.gamified.trade` still works) |
 | API | `testnet-api.luckout.wtf` (also `luckout-testnet-api.gamified.trade`), VM user `luckout-testnet-api`, port 8789 | `staging-api.luckout.wtf`, VM user `luckout-staging-api`, port 8791 | `api.luckout.wtf` (also `luckout-api.gamified.trade`, same vhost and certificate), VM user `luckout-api`, port 8788 |
-| NEAR accounts | `*.luckout.testnet` | `*.luckout-staging.near` (`ROOT=luckout-staging.near ./contract/deploy-mainnet.sh`) | `*.luckout.near` |
+| NEAR accounts | `*.luckout.testnet` | `*.staging.luckout.near` (`ROOT=staging.luckout.near`, smaller amounts: see `contract/deploy-mainnet.sh`) | `*.luckout.near` |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_staging` (role `luckout_staging`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the staging bot | the mainnet bot |
 | Bitrefill | its own account (test cards are free) | none until purchases move to Bitrefill's MCP guest checkout (no key needed) | its own account and key |
 
-Staging is a small copy of production on mainnet (ADR-0010): real money in small amounts, its own contract and caps, so a release is tried there before it reaches `main`. After the hackathon's judging, hosted testnet retires and runs locally instead.
+Staging is a small copy of production on mainnet (ADR-0010): real money in small amounts, its own contract and caps, so a release is tried there before it reaches `main`. Its accounts hold about a fifth of production's NEAR, so its server sets `GAS_ALERT_PERCENT=20` to scale the low-NEAR alerts to match. After the hackathon's judging, hosted testnet retires and runs locally instead.
 
 Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, a merge into `staging` deploys staging, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_STAGING` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK` and VM user, or one that has moved past the commit CI tested. By hand: `pnpm deploy:testnet`, `pnpm deploy:staging` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
 

@@ -12,7 +12,7 @@ test("a database stays with the deployment that first used it: staging and produ
     return [
       yield* Effect.exit(start(production)),
       yield* Effect.exit(start(production)),
-      yield* Effect.exit(start({ NEAR_NETWORK: "mainnet", LUCKOUT_CONTRACT_ID: "app.luckout-staging.near" })),
+      yield* Effect.exit(start({ NEAR_NETWORK: "mainnet", LUCKOUT_CONTRACT_ID: "app.staging.luckout.near" })),
       yield* Effect.exit(start({ NEAR_NETWORK: "testnet" }))
     ]
   })).pipe(Effect.provide(DbMemory)))
