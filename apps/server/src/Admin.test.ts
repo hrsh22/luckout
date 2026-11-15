@@ -6,6 +6,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Admin } from "./Admin.ts"
 import { Alerts } from "./Alerts.ts"
+import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
@@ -13,7 +14,7 @@ import { Near } from "./Near.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
-import { fakeBitrefill, fakeNear } from "./testing.ts"
+import { fakeBitrefill, fakeNear, fakeBase } from "./testing.ts"
 
 // The admin panel's server side on an in-memory database, with NEAR and Bitrefill faked.
 process.env.NEAR_NETWORK = "testnet"
@@ -55,6 +56,7 @@ const layer = Admin.layer.pipe(
   Layer.provide(Layer.mergeAll(
     Layer.succeed(Near, near),
     Layer.succeed(Bitrefill, bitrefill),
+    Layer.succeed(Base, fakeBase()),
     Layer.succeed(Refill, refill),
     Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
   )),

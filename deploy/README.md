@@ -10,7 +10,7 @@
 | NEAR accounts | `*.luckout.testnet` | `*.staging.luckout.near` (`ROOT=staging.luckout.near`, smaller amounts: see `contract/deploy-mainnet.sh`) | `*.luckout.near` |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_staging` (role `luckout_staging`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the staging bot | the mainnet bot |
-| Bitrefill | its own account (test cards are free) | none until purchases move to Bitrefill's MCP guest checkout (no key needed) | its own account and key |
+| Bitrefill | its own account (test cards are free) | its own guest client for orders (ADR-0012); the testnet account's key ($0 credit) reads the catalog | its own guest client for orders; its account's key reads the catalog |
 
 Staging is a small copy of production on mainnet (ADR-0010): real money in small amounts, its own contract and caps, so a release is tried there before it reaches `main`. Its accounts hold about a fifth of production's NEAR, so its server sets `GAS_ALERT_PERCENT=20` to scale the low-NEAR alerts to match. After the hackathon's judging, hosted testnet retires and runs locally instead.
 

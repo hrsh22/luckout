@@ -100,7 +100,9 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
       cancel: ({ params }) =>
         UUID.test(params.id)
           ? CurrentAccount.use((a) => purchases.cancel(a.accountId, params.id))
-          : Effect.fail(new NotFound())
+          : Effect.fail(new NotFound()),
+      checkoutEmail: () => CurrentAccount.use((a) => purchases.checkoutEmail(a.accountId)),
+      setCheckoutEmail: ({ payload }) => CurrentAccount.use((a) => purchases.setCheckoutEmail(a.accountId, payload.email))
     })
   })
 )
@@ -188,7 +190,9 @@ const AuthorizationLive = Layer.effect(
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
-  Layer.provideMerge(Layer.mergeAll(Credit.layer, Base.layer)),
+  // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
+  Layer.provideMerge(Credit.layer),
+  Layer.provideMerge(Base.layer),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
@@ -203,8 +207,10 @@ const MAINNET_REQUIRES = [
   "LUCKOUT_CONTRACT_ID",
   "OPERATOR_ACCOUNT_ID",
   "OPERATOR_PRIVATE_KEY",
-  // Not BITREFILL_API_KEY: staging runs without one until purchases move to Bitrefill's MCP guest
-  // checkout, which needs no key. Without it the shop says so and sells nothing.
+  // The key only reads the catalog and prices; orders go through the guest client (ADR-0012).
+  "BITREFILL_API_KEY",
+  "BITREFILL_CLIENT_ID",
+  "BITREFILL_CLIENT_SECRET",
   // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
   "BASE_RPC_URL",
   // Real money: alerts must reach a human (through the bot), and someone must be able to open the admin panel.

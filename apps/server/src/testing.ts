@@ -30,6 +30,7 @@ export const fakeNear = (overrides: Partial<Near["Service"]> = {}) =>
 
 export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
   Bitrefill.of({
+    guest: false,
     search: unused("bitrefill.search"),
     browse: unused("bitrefill.browse"),
     popular: unused("bitrefill.popular"),
@@ -53,5 +54,6 @@ export const fakeBase = (overrides: Partial<Base["Service"]> = {}) =>
     sign: unused("base.sign"),
     send: unused("base.send"),
     status: unused("base.status"),
+    pay: unused("base.pay"),
     ...overrides
   })

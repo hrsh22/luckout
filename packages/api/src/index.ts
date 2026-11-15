@@ -281,6 +281,15 @@ export class SessionApi extends HttpApiGroup.make("session").add(
   HttpApiEndpoint.post("signOutEverywhere", "/session/sign-out-everywhere", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}
 
+/**
+ * The email Bitrefill gets with each of the customer's cards (the Checkout Email, ADR-0012). `needed`: buying
+ * a card needs one here (guest checkout); `email` is unset until they give one.
+ */
+export class CheckoutEmail extends Schema.Class<CheckoutEmail>("CheckoutEmail")({
+  needed: Schema.Boolean,
+  email: Schema.optional(Schema.String)
+}) {}
+
 export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.post("create", "/purchases", {
     payload: NewPurchase,
@@ -290,7 +299,13 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.get("list", "/purchases", { success: Schema.Array(Purchase) }),
   HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound }),
   /** Cancels a purchase still waiting for credit; nothing was charged. */
-  HttpApiEndpoint.post("cancel", "/purchases/:id/cancel", { params: { id: Schema.String }, success: Purchase, error: [NotFound, PurchaseInvalid] })
+  HttpApiEndpoint.post("cancel", "/purchases/:id/cancel", { params: { id: Schema.String }, success: Purchase, error: [NotFound, PurchaseInvalid] }),
+  HttpApiEndpoint.get("checkoutEmail", "/checkout-email", { success: CheckoutEmail }),
+  HttpApiEndpoint.put("setCheckoutEmail", "/checkout-email", {
+    payload: Schema.Struct({ email: Schema.String }),
+    success: CheckoutEmail,
+    error: PurchaseInvalid
+  })
 ).middleware(Authorization) {}
 
 export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(

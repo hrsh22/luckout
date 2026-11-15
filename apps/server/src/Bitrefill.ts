@@ -1,14 +1,15 @@
 import { BitrefillUnavailable, CatalogPage, type Category, Voucher, VoucherSummary } from "@luckout/api"
 import { decode as decodeToon } from "@toon-format/toon"
-import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Schedule, Schema } from "effect"
+import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Redacted, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
-// Our float is the USD store-credit sub-account (docs/research/bitrefill-funding.md).
-// REST v2 only sees the primary sub-account (BTC), so real products are priced and
-// bought through Bitrefill's MCP endpoint, which can target USD. MCP has no test
-// products, so on testnet those stay on REST and are priced at face value.
+// On mainnet, cards are bought as a guest through Bitrefill's MCP endpoint with the customer's Checkout
+// Email, and each invoice is paid in USDC on Base from our Base Wallet (ADR-0012). The API key only reads:
+// the catalog, logos and prices. Testnet buys Bitrefill's free test cards on REST with its own account,
+// since a guest can't buy those. Without a guest client (BITREFILL_CLIENT_ID), mainnet still buys from the
+// account's USD store credit (ADR-0009), until it's switched over.
 
 const Product = Schema.Struct({
   id: Schema.String,
@@ -60,6 +61,29 @@ const McpProduct = Schema.Struct({
   }))
 })
 const McpPurchase = Schema.Struct({ response: Schema.Struct({ invoice_id: Schema.String }) })
+/** A guest invoice to pay in USDC on Base: exactly `altBasePrice` base units of `contractAddress`, to `address`. */
+const GuestPurchase = Schema.Struct({
+  response: Schema.Struct({
+    invoice_id: Schema.String,
+    invoice_access_token: Schema.String,
+    payment_info: Schema.Struct({ address: Schema.String, altBasePrice: Schema.Number, contractAddress: Schema.String })
+  })
+})
+/** A guest invoice as get-invoice-by-id reads it back. */
+const GuestInvoice = Schema.Struct({
+  invoice_status: Schema.String,
+  orders: Schema.Array(Schema.Struct({
+    order_id: Schema.String,
+    status: Schema.String,
+    redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
+  }))
+})
+const Token = Schema.Struct({ access_token: Schema.String, expires_in: Schema.Number })
+/** Native USDC on Base: the only coin a guest invoice is paid in. */
+const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+const MCP_RESOURCE = "https://api.bitrefill.com/mcp"
+/** A guest invoice that ended without delivering; anything else unfinished is still on its way. */
+const GUEST_FAILED = /expired|refunded|blocked|error|failed|cancel/i
 const Invoice = Schema.Struct({
   id: Schema.String,
   status: Schema.String,
@@ -80,6 +104,8 @@ export type Delivery =
 
 export type Order =
   | { readonly _tag: "Ordered"; readonly invoiceId: string }
+  /** A guest invoice, unpaid: pay exactly `amount` (USDC base units) to `payTo` on Base; read it back with `accessToken`. */
+  | { readonly _tag: "Invoiced"; readonly invoiceId: string; readonly accessToken: string; readonly payTo: string; readonly amount: number }
   /** Our USD credit can't cover it; nothing was created or paid, so it can be ordered again later. */
   | { readonly _tag: "NoCredit"; readonly reason: string }
   /** Bitrefill refused before creating or paying anything. */
@@ -250,6 +276,8 @@ export const forSale = <P extends { priceMicroUsdc: number }>(packages: Readonly
 export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc < MIN_PRICE)
 
 export class Bitrefill extends Context.Service<Bitrefill, {
+  /** Orders are guest invoices paid from the Base Wallet (ADR-0012), not store credit. */
+  readonly guest: boolean
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
   /** The catalog a page at a time, filtered only by what the customer chose. */
   browse(opts: BrowseOptions): Effect.Effect<CatalogPage, BitrefillUnavailable>
@@ -262,10 +290,13 @@ export class Bitrefill extends Context.Service<Bitrefill, {
    * the lookup may use the whole budget, not just browsing's share.
    */
   voucher(id: string, options?: { readonly purchase?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
-  /** Places a paid order from the USD balance. Save the invoice id before awaiting delivery. */
-  order(id: string, value: string): Effect.Effect<Order, BitrefillUnavailable>
-  /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). */
-  delivery(invoiceId: string): Effect.Effect<Delivery, BitrefillUnavailable>
+  /**
+   * Orders a card. A guest (with the customer's Checkout Email) gets an unpaid invoice to pay from the Base
+   * Wallet; otherwise it's paid at once from the USD balance. Save the invoice before going on.
+   */
+  order(id: string, value: string, email?: string): Effect.Effect<Order, BitrefillUnavailable>
+  /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). A guest invoice needs its access token. */
+  delivery(invoiceId: string, accessToken?: string): Effect.Effect<Delivery, BitrefillUnavailable>
   /** Our USD store credit, and how much more Bitrefill lets us hold (micro-USDC). */
   readonly credit: Effect.Effect<{ readonly balance: number; readonly room: number }, BitrefillUnavailable>
   /** Asks for `amount` (micro-USDC, whole cents) of USD credit, paid 1:1 in USDC on Base. */
@@ -281,17 +312,21 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       const restUrl = yield* Config.String("BITREFILL_API_URL").pipe(Config.withDefault("https://api.bitrefill.com/v2"))
       const testnet = (yield* Network) === "testnet"
       const isTest = (id: string) => testnet && id.startsWith("test-")
+      // Our OAuth client for guest checkout (ADR-0012), registered with Bitrefill once per deployment.
+      const clientId = yield* Config.option(Config.String("BITREFILL_CLIENT_ID"))
+      const clientSecret = yield* Config.option(Config.Redacted("BITREFILL_CLIENT_SECRET"))
+      const guest = !testnet && Option.isSome(clientId)
 
-      const base = (yield* HttpClient.HttpClient).pipe(
-        HttpClient.mapRequest(Option.isSome(apiKey) ? HttpClientRequest.bearerToken(apiKey.value) : (r) => r),
-        HttpClient.filterStatusOk
-      )
+      const http = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk)
+      const base = http.pipe(HttpClient.mapRequest(Option.isSome(apiKey) ? HttpClientRequest.bearerToken(apiKey.value) : (r) => r))
       const rest = base.pipe(
         HttpClient.mapRequest(flow(HttpClientRequest.prependUrl(restUrl), HttpClientRequest.acceptJson)),
         HttpClient.timeout("15 seconds")
       )
       // A timed-out buy is an unknown outcome (left to the reconciler), so this one is generous.
       const mcpClient = base.pipe(HttpClient.timeout("45 seconds"))
+      // A guest's calls carry the guest login instead of the API key.
+      const guestClient = http.pipe(HttpClient.timeout("45 seconds"))
       const mcpUrl = new URL("/mcp", restUrl).href
       // Only reads are retried: retrying a purchase could buy twice.
       const retry = <A, E>(self: Effect.Effect<A, E>) => Effect.retry(self, { schedule: Schedule.exponential(200), times: 3 })
@@ -310,11 +345,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
 
       // MCP tools reply over SSE with one text result: JSON for buy-products, TOON for the rest.
-      const mcp = <A, I>(name: string, args: object, schema: Schema.Codec<A, I>) =>
+      // With `token` (a guest login) the call is a guest's; otherwise it's the API key's.
+      const mcp = <A, I>(name: string, args: object, schema: Schema.Codec<A, I>, token?: string) =>
         HttpClientRequest.post(mcpUrl).pipe(
           HttpClientRequest.setHeader("Accept", "application/json, text/event-stream"),
           HttpClientRequest.bodyJsonUnsafe({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
-          mcpClient.execute,
+          token === undefined ? mcpClient.execute : (r) => guestClient.execute(HttpClientRequest.bearerToken(r, token)),
           Effect.flatMap((r) => r.text),
           Effect.catch((e): Effect.Effect<never, Rejected | BitrefillUnavailable> => (REFUSED_STATUS.has(httpStatus(e)) ? refusal(e) : Effect.fail(unavailable(e)))),
           Effect.flatMap((body) =>
@@ -338,6 +374,34 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           ),
           Effect.flatMap((u) => Schema.decodeUnknownEffect(schema)(u).pipe(Effect.mapError(unavailable)))
         )
+
+      // The guest login lasts 6 hours (expires_in); it's renewed 5 minutes early, or at once when Bitrefill
+      // stops taking it (a 401 means the tool didn't run, so the call is safe to make again).
+      let login: { readonly token: string; readonly until: number } | undefined
+      const guestToken = Effect.suspend(() =>
+        login && login.until > Date.now()
+          ? Effect.succeed(login.token)
+          : HttpClientRequest.post(new URL("/oauth/mcp/token", restUrl).href).pipe(
+            HttpClientRequest.bodyUrlParams({
+              grant_type: "client_credentials",
+              client_id: Option.getOrElse(clientId, () => ""),
+              client_secret: Option.match(clientSecret, { onNone: () => "", onSome: Redacted.value }),
+              scope: "mcp",
+              resource: MCP_RESOURCE
+            }),
+            http.execute,
+            Effect.flatMap(HttpClientResponse.schemaBodyJson(Token)),
+            Effect.tap((t) => Effect.sync(() => void (login = { token: t.access_token, until: Date.now() + (t.expires_in - 300) * 1000 }))),
+            Effect.map((t) => t.access_token),
+            Effect.mapError((e) => new BitrefillUnavailable({ message: `Bitrefill guest login failed: ${e}` }))
+          )
+      )
+      const asGuest = <A, I>(name: string, args: object, schema: Schema.Codec<A, I>) => {
+        const once = Effect.flatMap(guestToken, (token) => mcp(name, args, schema, token))
+        return once.pipe(
+          Effect.catchTag("Rejected", (e) => (e.reason.startsWith("HTTP 401") ? Effect.andThen(Effect.sync(() => void (login = undefined)), once) : Effect.fail(e)))
+        )
+      }
 
       const images = (p: { image?: string | undefined; logo_background?: string | undefined }) => ({
         ...(p.image ? { image: p.image } : {}),
@@ -523,8 +587,9 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // ponytail: in memory, one process. If Bitrefill refuses for its limit while our count says there's
       // room, the count is missing something: hold new orders for an hour rather than charge and refund each.
       let refusedUntil = 0
+      // A guest has no account-wide limit: Bitrefill's limits are per Checkout Email (Purchases counts them).
       const orderLimit = (inFlight: number) =>
-        Cache.get(invoiceTimes, "recent").pipe(
+        guest ? Effect.succeed(undefined) : Cache.get(invoiceTimes, "recent").pipe(
           Effect.map((times): OrderRoom => {
             const room = orderRoom(times, inFlight, Date.now())
             return room.reopensAt === undefined && refusedUntil > Date.now() ? { ...room, reopensAt: refusedUntil } : room
@@ -533,7 +598,31 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           Effect.orElseSucceed(() => undefined)
         )
 
-      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string) {
+      // A guest invoice is paid by us afterwards, so creating one moves no money: one we can't use (wrong coin,
+      // a malformed address) is simply refused here and expires unpaid.
+      const guestOrder = (id: string, value: string, email: string) =>
+        asGuest("buy-products", {
+          cart_items: [{ product_id: id, package_value: value }],
+          payment_method: "usdc_base",
+          email,
+          return_payment_link: false
+        }, GuestPurchase).pipe(
+          Effect.flatMap(({ response: r }): Effect.Effect<Order, Rejected> => {
+            const pay = r.payment_info
+            if (pay.contractAddress.toLowerCase() !== BASE_USDC) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Base` }))
+            if (!EVM_ADDRESS.test(pay.address)) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} has a malformed address` }))
+            if (!Number.isSafeInteger(pay.altBasePrice) || pay.altBasePrice <= 0) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} has no usable amount` }))
+            return Effect.succeed({ _tag: "Invoiced", invoiceId: r.invoice_id, accessToken: r.invoice_access_token, payTo: pay.address, amount: pay.altBasePrice })
+          })
+        )
+
+      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string, email?: string) {
+        if (guest) {
+          if (!email) return { _tag: "Refused", reason: "no Checkout Email" } as Order
+          return yield* guestOrder(id, value, email).pipe(
+            Effect.catchTag("Rejected", (e) => Effect.succeed<Order>({ _tag: "Refused", reason: e.reason }))
+          )
+        }
         return yield* createInvoice(id, value).pipe(
           Effect.map((invoiceId): Order => ({ _tag: "Ordered", invoiceId })),
           Effect.catchTag("Rejected", (e) => {
@@ -545,7 +634,28 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
       })
 
-      const delivery = Effect.fn("Bitrefill.delivery")(function*(invoiceId: string) {
+      // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.
+      const guestDelivery = (invoiceId: string, accessToken: string) =>
+        asGuest("get-invoice-by-id", { invoice_id: invoiceId, invoice_access_token: accessToken }, GuestInvoice).pipe(
+          Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
+          retry,
+          Effect.repeat({
+            schedule: Schedule.spaced("5 seconds"),
+            until: (i) => !!i.orders[0]?.redemption_info || GUEST_FAILED.test(i.invoice_status) || GUEST_FAILED.test(i.orders[0]?.status ?? ""),
+            times: 12
+          }),
+          Effect.flatMap((i): Effect.Effect<Delivery, BitrefillUnavailable> => {
+            const o = i.orders[0]
+            if (o?.redemption_info) return Effect.succeed({ _tag: "Delivered", invoiceId, orderId: o.order_id, redemption: o.redemption_info })
+            if (GUEST_FAILED.test(i.invoice_status) || GUEST_FAILED.test(o?.status ?? "")) {
+              return Effect.succeed({ _tag: "Failed", reason: `invoice ${invoiceId} is ${i.invoice_status}, order ${o?.status ?? "missing"}` })
+            }
+            return Effect.fail(unavailable(`invoice ${invoiceId} is still ${i.invoice_status}, order ${o?.status ?? "missing"}`))
+          })
+        )
+
+      const delivery = Effect.fn("Bitrefill.delivery")(function*(invoiceId: string, accessToken?: string) {
+        if (accessToken !== undefined) return yield* guestDelivery(invoiceId, accessToken)
         // Delivery normally takes well under a second; poll for up to ~1 minute.
         const invoice = yield* get(`/invoices/${invoiceId}`, Invoice).pipe(
           Effect.repeat({
@@ -619,7 +729,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
 
       const logo = (id: string) => logos.get(id) ?? {}
-      return Bitrefill.of({ search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState, orderLimit })
+      return Bitrefill.of({ guest, search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState, orderLimit })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }
