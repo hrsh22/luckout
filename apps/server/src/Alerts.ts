@@ -22,7 +22,7 @@ export class Alerts extends Context.Service<Alerts, {
       const token = yield* Config.option(Config.Redacted("TELEGRAM_BOT_TOKEN"))
       const adminChat = yield* Config.option(Config.String("ALERT_TELEGRAM_CHAT_ID"))
       // Every deployment may alert the same chat, so each alert names its own: luckout.near (production),
-      // staging.luckout.near or luckout.testnet, from the contract's account.
+      // luckout-staging.near or luckout.testnet, from the contract's account.
       const where = (yield* ContractId).replace(/^app\./, "") || (yield* Network)
 
       /**

@@ -7,7 +7,7 @@
 | Branch | `testnet` | `staging` (PRs from feature branches, with CI passing) | `main` (changes only by PR from `staging`, with CI passing) |
 | Web (Vercel) | Preview env vars, domain `testnet.luckout.wtf` on branch `testnet` (the old `testnet.luckout.gamified.trade` still works) | Preview env vars for branch `staging`, domain `staging.luckout.wtf` on branch `staging` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it; the old `luckout.gamified.trade` still works) |
 | API | `testnet-api.luckout.wtf` (also `luckout-testnet-api.gamified.trade`), VM user `luckout-testnet-api`, port 8789 | `staging-api.luckout.wtf`, VM user `luckout-staging-api`, port 8791 | `api.luckout.wtf` (also `luckout-api.gamified.trade`, same vhost and certificate), VM user `luckout-api`, port 8788 |
-| NEAR accounts | `*.luckout.testnet` | `*.staging.luckout.near` (`ROOT=staging.luckout.near ./contract/deploy-mainnet.sh`) | `*.luckout.near` |
+| NEAR accounts | `*.luckout.testnet` | `*.luckout-staging.near` (`ROOT=luckout-staging.near ./contract/deploy-mainnet.sh`) | `*.luckout.near` |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_staging` (role `luckout_staging`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the staging bot | the mainnet bot |
 | Bitrefill | its own account (test cards are free) | none until purchases move to Bitrefill's MCP guest checkout (no key needed) | its own account and key |

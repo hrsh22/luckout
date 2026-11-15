@@ -10,7 +10,7 @@ So the deployments never share anything that could move money:
 | Branch | `testnet` | `staging`, changed only by a PR with CI passing | `main`, changed only by a PR from `staging` with CI passing (enforced for admins too) |
 | Web | Vercel Preview env, `testnet.luckout.wtf` pinned to branch `testnet` | Vercel Preview env for branch `staging`, `staging.luckout.wtf` | Vercel Production env, `www.luckout.wtf` |
 | API | `testnet-api.luckout.wtf`, VM user `luckout-testnet-api` | `staging-api.luckout.wtf`, VM user `luckout-staging-api`, port 8791 | `api.luckout.wtf`, VM user `luckout-api` |
-| Contract and NEAR accounts | `*.luckout.testnet` | `*.staging.luckout.near` | `*.luckout.near` |
+| Contract and NEAR accounts | `*.luckout.testnet` | `*.luckout-staging.near` | `*.luckout.near` |
 | Database, Telegram bot, Bitrefill | each its own | each its own; no Bitrefill key until purchases move to Bitrefill's MCP guest checkout | each its own |
 
 **Staging (added 2026-11-15).** Testnet can't exercise what only exists on mainnet: 1Click top-ups and send-backs (NEAR Intents has no testnet), real Bitrefill delivery, and refills through our Base wallet. Staging is a smaller copy of production on mainnet, with its own contract, accounts and small caps, so a release meets real money there before it reaches `main`. Tests spend small amounts of real money; that is accepted.
