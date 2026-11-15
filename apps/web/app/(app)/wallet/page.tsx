@@ -1,5 +1,6 @@
 "use client"
 
+import { CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
 import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
@@ -13,6 +14,7 @@ import { useWalletActions } from "@/lib/actions"
 import { dollars, toMicro, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
+import { useCheckoutEmail } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode, NO_LIMIT, noLimit } from "@luckout/api"
 import { Plus } from "lucide-react"
@@ -20,7 +22,8 @@ import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
 
 export default function WalletPage() {
-  const { accountId, account, walletUsdc, ready, evm } = useSession()
+  const { accountId, account, walletUsdc, ready, evm, token } = useSession()
+  const checkout = useCheckoutEmail(token).data
   const actions = useWalletActions()
   const [adding, setAdding] = useState(false)
   const [withdrawing, setWithdrawing] = useState(false)
@@ -114,6 +117,20 @@ export default function WalletPage() {
       </section>
 
       {account && <Limits per={account.per_purchase_limit} daily={daily} />}
+
+      {checkout?.needed && (
+        <section className="flex flex-col gap-4">
+          <div>
+            <h2 className="font-display text-3xl font-extrabold">Email for your cards</h2>
+            <p className="mt-1 max-w-[60ch] text-ink-soft">
+              {checkout.email ? "Bitrefill gets this with each card you buy." : "Bitrefill needs one with each card you buy. Add it before your first card."}
+            </p>
+          </div>
+          <div className="card p-6">
+            <CheckoutEmailForm onSaved={() => toast.success("Email saved")} />
+          </div>
+        </section>
+      )}
 
       <section className="flex flex-col gap-4">
         <h2 className="font-display text-3xl font-extrabold">Telegram</h2>

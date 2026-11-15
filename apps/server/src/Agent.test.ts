@@ -1,4 +1,4 @@
-import { Purchase, Quote, Voucher } from "@luckout/api"
+import { CheckoutEmail, Purchase, Quote, Voucher } from "@luckout/api"
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
@@ -43,6 +43,9 @@ const deps = {
   purchases: {
     quote: () => Effect.succeed(new Quote({ mode: { lucky: 2 }, referencePrice: 10_000_000, luckyAmount: 10_000_000, maxPrice: 15_000_000 })),
     create: () => Effect.sync(() => void bought++),
+    // Testnet: no Checkout Email needed. Mainnet tests swap in their own.
+    checkoutEmail: () => Effect.succeed(new CheckoutEmail({ needed: false })),
+    setCheckoutEmail: (_: string, email: string) => Effect.succeed(new CheckoutEmail({ needed: true, email })),
     list: () =>
       Effect.succeed([
         new Purchase({
@@ -145,3 +148,24 @@ test("amounts the customer pays round up to the cent, never down", () => {
   assert.equal(usdUp(1_330_000), "$1.33")
   assert.equal(usdUp(0), "$0.00")
 })
+
+test("on mainnet, no Buy button until they've given an email for their cards; the model asks and saves it", async () => {
+  let email: string | undefined
+  const purchases = {
+    ...(deps as unknown as { purchases: object }).purchases,
+    checkoutEmail: () => Effect.sync(() => new CheckoutEmail({ needed: true, ...(email ? { email } : {}) })),
+    setCheckoutEmail: (_: string, e: string) => Effect.sync(() => new CheckoutEmail({ needed: true, email: (email = e) }))
+  }
+  const prepare = call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" })
+  const model = await fakeModel([prepare, { role: "assistant", content: "Which email should Bitrefill send the receipt to?" }, call("set_checkout_email", { email: "me@example.com" }), prepare, { role: "assistant", content: "Tap Buy." }])
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: false, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const first = await agent("alice.near", [], "buy me a 10 dollar card on jackpot")
+  const second = await agent("alice.near", first.history, "me@example.com")
+  model.close()
+  assert.equal(first.pending, undefined, "no button without an email")
+  assert.match(String(model.seen[1]!.messages.at(-1)!.content), /haven't given an email/)
+  assert.equal(email, "me@example.com")
+  assert.equal(second.pending?.voucherId, "test-gift-card-code")
+  assert.equal(bought, 0)
+})
+

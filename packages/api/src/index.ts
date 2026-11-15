@@ -697,7 +697,21 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
       alertBelow: Schema.String
     }))
   }),
-  refills: Schema.Array(RefillView)
+  refills: Schema.Array(RefillView),
+  /**
+   * How cards are bought (ADR-0012). `guest`: each is a guest order on Bitrefill's MCP with the customer's
+   * Checkout Email, paid from the Base Float (credit above is then the float); otherwise from the account's
+   * store credit.
+   */
+  checkout: Schema.Struct({
+    guest: Schema.Boolean,
+    /** Customers who have given a Checkout Email. */
+    emails: Schema.Int,
+    /** Bitrefill's limits for one Checkout Email: cards a day, and USD a day and a month. */
+    limits: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc }),
+    /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
+    busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
+  })
 }) {}
 
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
@@ -716,6 +730,9 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   error: Schema.optional(Schema.String),
   attempts: Schema.Int,
   invoiceId: Schema.optional(Schema.String),
+  /** A guest order's payment from the Base Wallet (ADR-0012): its Base transaction, and the USDC it sends. */
+  payTx: Schema.optional(Schema.String),
+  payAmount: Schema.optional(MicroUsdc),
   admitTx: Schema.optional(Schema.String),
   settleTx: Schema.optional(Schema.String),
   createdAt: Schema.String,
@@ -735,7 +752,9 @@ export class AdminUser extends Schema.Class<AdminUser>("AdminUser")({
   /** Paid for delivered cards, and Cashback they got back. */
   spent: MicroUsdc,
   cashback: MicroUsdc,
-  lastPurchaseAt: Schema.optional(Schema.String)
+  lastPurchaseAt: Schema.optional(Schema.String),
+  /** They've given a Checkout Email (ADR-0012); the email itself stays sealed. */
+  checkoutEmail: Schema.Boolean
 }) {}
 
 // Left out of /openapi.json: to anyone but an admin, these endpoints don't exist.

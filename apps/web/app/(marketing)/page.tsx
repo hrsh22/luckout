@@ -16,7 +16,7 @@ const EXAMPLE = 20_000_000
 const STEPS = [
   { title: "Add USDC", body: "Deposit USDC on NEAR, or send a token from Ethereum, Base, Solana, Bitcoin and more. Withdraw what you don't spend.", bg: "#E2F4FF" },
   { title: "Pick a card and a mode", body: "Pay exactly the price, or a little more up front for a chance at cashback. You see every outcome before you buy.", bg: "#EEE8FF" },
-  { title: "Get the code, then the Draw", body: "Bitrefill delivers the code in seconds. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
+  { title: "Get the code, then the Draw", body: "Bitrefill delivers the code, usually within a minute. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
 ]
 
 const FAQ = [

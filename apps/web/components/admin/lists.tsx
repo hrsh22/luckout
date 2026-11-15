@@ -1,11 +1,11 @@
 "use client"
 
 import { NoPage } from "@/components/admin/panel"
-import { AdminTabs, ago, TONE } from "@/components/admin/shared"
+import { AdminTabs, ago, basescan, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
 import { api, errorMessage } from "@/lib/api"
 import { explorer, explorerAccount } from "@/lib/chain"
-import { limitsText, usd } from "@/lib/format"
+import { dollars, limitsText, usd } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { useSession } from "@/lib/session"
 import type { AdminPurchase, AdminUser } from "@luckout/api"
@@ -81,7 +81,7 @@ export function AdminPurchases() {
   const { data, gate } = useAdminList(["purchases", account], (token) =>
     api((c) => c.admin.purchases({ query: account ? { account } : {} }), token))
   const [q, setQ] = useState("")
-  const shown = data?.filter((p) => matches(q, p.accountId, p.voucherName, p.step, p.id)) ?? []
+  const shown = data?.filter((p) => matches(q, p.accountId, p.voucherName, stepLabel(p.step), p.id)) ?? []
   return (
     <Page
       title="Purchases"
@@ -109,7 +109,7 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
           <span className="truncate text-sm text-muted sm:max-w-56">{p.accountId}</span>
           <span className="text-sm text-ink-soft">{modeName(p.mode)}</span>
           <span className="w-20 text-right font-medium tabular-nums">{usd(p.paid ?? p.maxPrice ?? p.referencePrice)}</span>
-          <span className={`pill ${stepTone(p.step)}`}>{p.step}</span>
+          <span className={`pill ${stepTone(p.step)}`}>{stepLabel(p.step)}</span>
           <span className="w-24 text-right text-sm text-muted">{ago(p.createdAt)}</span>
         </summary>
         <div className="border-t border-soft p-4">
@@ -124,6 +124,8 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
               p.error !== undefined && ["Error", <span key="e" className="text-bad">{p.error}</span>],
               ["Attempts", p.attempts],
               p.invoiceId !== undefined && ["Bitrefill invoice", p.invoiceId],
+              p.payAmount !== undefined && ["Paid to Bitrefill", `${dollars(p.payAmount)} USDC from the Base Float`],
+              p.payTx !== undefined && ["Base payment", <Ext key="b" href={basescan(`tx/${p.payTx}`)}>{p.payTx.slice(0, 12)}…</Ext>],
               p.admitTx !== undefined && ["Admit tx", <Ext key="x" href={explorer(p.admitTx)}>{p.admitTx.slice(0, 12)}…</Ext>],
               p.settleTx !== undefined && ["Settle tx", <Ext key="s" href={explorer(p.settleTx)}>{p.settleTx.slice(0, 12)}…</Ext>],
               ["Created", new Date(p.createdAt).toLocaleString()],
@@ -179,6 +181,7 @@ function UserRow({ u }: { u: AdminUser }) {
               ["Cashback received", usd(u.cashback)],
               ["Purchases", <Link key="p" href={`/admin/purchases?account=${encodeURIComponent(u.accountId)}`} className="underline">{u.purchases} ({u.delivered} delivered)</Link>],
               u.telegram !== undefined && ["Telegram", u.telegram],
+              ["Checkout Email", u.checkoutEmail ? "Given" : "None yet"],
               ["First seen", new Date(u.firstSeen).toLocaleString()],
               ["Explorer", <Ext key="x" href={explorerAccount(u.accountId)}>nearblocks</Ext>]
             ]}

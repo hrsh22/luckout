@@ -2,10 +2,11 @@ import { AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchas
 import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
+import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, settingsProblem } from "./Credit.ts"
 import { BASE_GAS_ALERT, GAS_ALERT, spendable } from "./Monitor.ts"
 import { Near, Network } from "./Near.ts"
-import { OPEN_STEPS } from "./Purchases.ts"
+import { GUEST_LIMITS, OPEN_STEPS } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
@@ -58,6 +59,7 @@ export class Admin extends Context.Service<Admin, {
       const sales = yield* Sales
       const alerts = yield* Alerts
       const network = yield* Network
+      const bitrefill = yield* Bitrefill
       const admins = new Set(
         (yield* Config.String("ADMIN_ACCOUNTS").pipe(Config.withDefault(""))).split(",").map((a) => a.trim()).filter(Boolean)
       )
@@ -67,7 +69,7 @@ export class Admin extends Context.Service<Admin, {
           accountId
             ? spendable(near, accountId).pipe(Effect.map((s) => [{ role, accountId, spendable: String(s), alertBelow: String(GAS_ALERT[role]) }]))
             : Effect.succeed([])
-        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop, held] = yield* Effect.all([
+        const [config, reserve, stats, gas, settings, relays, top, purchases, attention, c, r, shop, held, checkout] = yield* Effect.all([
           near.view<{ owner: string; pending_owner?: string | null; operator: string; usdc: string; paused: boolean; cashback_cap: { fixed: string | null; reserve_bps: number | null } }>("get_config"),
           near.view<{ free: string; locked: string; max_cashback: string; proceeds: string }>("get_reserve"),
           near.view<{ lucky_settled: number; lucky_amount_total: string; lucky_paid_total: string }>("get_stats"),
@@ -96,7 +98,19 @@ export class Admin extends Context.Service<Admin, {
           credit.view,
           refills.status,
           sales.status,
-          near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId)
+          near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
+          // Per Checkout Email, counted the way Purchases checks Bitrefill's limits; the busiest on each figure.
+          sql<{ emails: number; orders: number; daily: string; monthly: string }>`
+            SELECT (SELECT count(*)::int FROM checkout_emails) AS emails,
+                   COALESCE(max(orders), 0)::int AS orders, COALESCE(max(daily), 0)::text AS daily, COALESCE(max(monthly), 0)::text AS monthly
+            FROM (
+              SELECT count(*) FILTER (WHERE created_at > now() - interval '1 day') AS orders,
+                     COALESCE(sum(reference_price) FILTER (WHERE created_at > now() - interval '1 day'), 0) AS daily,
+                     sum(reference_price) AS monthly
+              FROM purchases
+              WHERE email_key IS NOT NULL AND created_at > now() - interval '30 days'
+                AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)
+              GROUP BY email_key) per_email`
         ], { concurrency: "unbounded" })
         const p = purchases[0] ?? { today: 0, delivered: 0, ordered: 0 }
         return new AdminOverview({
@@ -173,7 +187,13 @@ export class Admin extends Context.Service<Admin, {
             ...(r.needs !== undefined ? { needs: r.needs } : {}),
             ...(r.wallet ? { wallet: { address: r.wallet.address, usdc: r.wallet.usdc, eth: String(r.wallet.eth), alertBelow: String(BASE_GAS_ALERT) } } : {})
           },
-          refills: r.refills
+          refills: r.refills,
+          checkout: {
+            guest: bitrefill.guest,
+            emails: checkout[0]?.emails ?? 0,
+            limits: { orders: GUEST_LIMITS.orders, daily: GUEST_LIMITS.daily, monthly: GUEST_LIMITS.monthly },
+            busiest: { orders: checkout[0]?.orders ?? 0, daily: Number(checkout[0]?.daily ?? 0), monthly: Number(checkout[0]?.monthly ?? 0) }
+          }
         })
       }).pipe(Effect.orDie)
 
@@ -184,12 +204,14 @@ export class Admin extends Context.Service<Admin, {
           reference_price: string | number
           draw: { final_price: string | number; cashback: string | number } | null
           invoice_id: string | null
+          pay_tx: { hash: string } | null
+          pay_amount: string | number | null
           admit_tx: { hash: string } | null
           settle_tx: { hash: string } | null
           updated_at: Date | string
         }>`
           SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, updated_at,
-                 requested_mode, admitted, reference_price, draw, invoice_id, admit_tx, settle_tx
+                 requested_mode, admitted, reference_price, draw, invoice_id, pay_tx, pay_amount, admit_tx, settle_tx
           FROM purchases ${accountId ? sql`WHERE account_id = ${accountId}` : sql``}
           ORDER BY created_at DESC LIMIT 300`.pipe(
           Effect.map((rows) =>
@@ -211,6 +233,8 @@ export class Admin extends Context.Service<Admin, {
                 ...(r.error ? { error: r.error } : {}),
                 attempts: r.attempts,
                 ...(r.invoice_id ? { invoiceId: r.invoice_id } : {}),
+                ...(r.pay_tx ? { payTx: r.pay_tx.hash } : {}),
+                ...(r.pay_amount !== null ? { payAmount: Number(r.pay_amount) } : {}),
                 ...(r.admit_tx ? { admitTx: r.admit_tx.hash } : {}),
                 ...(r.settle_tx ? { settleTx: r.settle_tx.hash } : {}),
                 createdAt: new Date(r.created_at).toISOString(),
@@ -232,8 +256,9 @@ export class Admin extends Context.Service<Admin, {
           spent: string | number
           cashback: string | number
           last_purchase_at: Date | string | null
+          checkout_email: boolean
         }>`
-          SELECT k.account_id, k.first_seen, t.telegram_name,
+          SELECT k.account_id, k.first_seen, t.telegram_name, (e.account_id IS NOT NULL) AS checkout_email,
                  count(p.id)::int AS purchases,
                  count(p.id) FILTER (WHERE p.step = 'settled')::int AS delivered,
                  coalesce(sum(coalesce((p.draw->>'final_price')::bigint, (p.admitted->>'max_price')::bigint, p.reference_price))
@@ -243,7 +268,8 @@ export class Admin extends Context.Service<Admin, {
           FROM known_accounts k
           LEFT JOIN purchases p ON p.account_id = k.account_id
           LEFT JOIN telegram_links t ON t.account_id = k.account_id
-          GROUP BY k.account_id, k.first_seen, t.telegram_name
+          LEFT JOIN checkout_emails e ON e.account_id = k.account_id
+          GROUP BY k.account_id, k.first_seen, t.telegram_name, e.account_id
           ORDER BY max(p.created_at) DESC NULLS LAST, k.first_seen DESC`.pipe(Effect.orDie)
         const accounts = yield* Effect.forEach(rows, (r) =>
           near.view<{ balance: string; per_purchase_limit: string; daily_limit: string } | null>("get_account", { account_id: r.account_id }).pipe(
@@ -261,7 +287,8 @@ export class Admin extends Context.Service<Admin, {
             delivered: r.delivered,
             spent: Number(r.spent),
             cashback: Number(r.cashback),
-            ...(r.last_purchase_at ? { lastPurchaseAt: new Date(r.last_purchase_at).toISOString() } : {})
+            ...(r.last_purchase_at ? { lastPurchaseAt: new Date(r.last_purchase_at).toISOString() } : {}),
+            checkoutEmail: r.checkout_email
           })
         })
       })

@@ -31,16 +31,18 @@ const STEP: Record<string, { label: string; tone: "good" | "warn" | "bad" | "mut
   cancelled: { label: "Gave way to a refill", tone: "muted" }
 }
 
-export function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> }) {
+/** `guest`: refills only top up the Base Float (ADR-0012), so none goes on to pay Bitrefill. */
+export function RefillsCard({ refills, guest }: { refills: ReadonlyArray<RefillView>; guest: boolean }) {
   const [resolving, setResolving] = useState<RefillView>()
   return (
     <div className="card flex flex-col gap-4 p-7">
       <h3 className="font-display text-2xl font-extrabold">Refills</h3>
       <ul className="flex flex-col divide-y divide-line">
         {refills.map((r) => {
-          // A float top-up ends with the USDC in our wallet, not as Bitrefill credit.
-          const step = r.reason === "float" && r.step === "done"
-            ? { label: "In our Base wallet", tone: "good" as const }
+          // A float top-up ends with the USDC in our wallet, not as Bitrefill credit; with guest checkout every refill does
+          // (one with an invoice is from before, when it was credited).
+          const step = r.step === "done" && (r.reason === "float" || (guest && !r.invoiceId))
+            ? { label: guest ? "In the Base Float" : "In our Base wallet", tone: "good" as const }
             : STEP[r.step] ?? { label: r.step, tone: "muted" as const }
           return (
             <li key={r.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center">
@@ -77,12 +79,12 @@ export function RefillsCard({ refills }: { refills: ReadonlyArray<RefillView> })
           )
         })}
       </ul>
-      <ResolveSheet refill={resolving} onClose={() => setResolving(undefined)} />
+      <ResolveSheet refill={resolving} guest={guest} onClose={() => setResolving(undefined)} />
     </div>
   )
 }
 
-function ResolveSheet({ refill, onClose }: { refill: RefillView | undefined; onClose: () => void }) {
+function ResolveSheet({ refill, guest, onClose }: { refill: RefillView | undefined; guest: boolean; onClose: () => void }) {
   const { token } = useSession()
   const qc = useQueryClient()
   const [note, setNote] = useState("")
@@ -93,7 +95,7 @@ function ResolveSheet({ refill, onClose }: { refill: RefillView | undefined; onC
       open={refill !== undefined}
       onOpenChange={(v) => !v && onClose()}
       title="Resolve this refill"
-      description={refill ? `${usd(refill.amount)}, ${shortAccount(refill.id)}. Check 1Click's status and Bitrefill's credit first: automatic refills start again once it's resolved.` : undefined}
+      description={refill ? `${usd(refill.amount)}, ${shortAccount(refill.id)}. Check 1Click's status and ${guest ? "the Base Wallet" : "Bitrefill's credit"} first: automatic refills start again once it's resolved.` : undefined}
     >
       <div className="flex flex-col gap-4">
         {refill?.error && <p className="rounded-[1.25rem] bg-soft p-4 text-sm text-ink-soft">{refill.error}</p>}
