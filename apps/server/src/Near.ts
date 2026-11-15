@@ -65,6 +65,13 @@ const toOutcome = (hash: string, tx: Tx): Effect.Effect<Outcome, ContractRejecte
 /** testnet or mainnet. Anything else refuses to start, so a typo can't switch off the testnet guards. */
 export const Network = Config.Literals(["testnet", "mainnet"], "NEAR_NETWORK").pipe(Config.withDefault("testnet"))
 
+/** The Luckout contract this deployment runs (testnet defaults to ours). Staging and production share
+ * mainnet, so the contract is what tells them apart (ADR-0010). */
+export const ContractId = Effect.gen(function*() {
+  const network = yield* Network
+  return yield* Config.String("LUCKOUT_CONTRACT_ID").pipe(Config.withDefault(network === "testnet" ? "app.luckout.testnet" : ""))
+})
+
 /** Settings that name NEAR accounts: on mainnet none may end in .testnet, and on testnet none in .near. */
 const ACCOUNT_SETTINGS = ["LUCKOUT_CONTRACT_ID", "USDC_CONTRACT_ID", "OPERATOR_ACCOUNT_ID", "RELAYER_ACCOUNT_ID", "TREASURY_ACCOUNT_ID", "ADMIN_ACCOUNTS"]
 
@@ -191,9 +198,7 @@ export class Near extends Context.Service<Near, {
         Config.withDefault(testnet ? TESTNET_RPC_URLS : MAINNET_RPC_URLS),
         Config.map((s) => s.split(",").map((u) => u.trim()).filter(Boolean))
       )
-      const contractId = yield* Config.String("LUCKOUT_CONTRACT_ID").pipe(
-        Config.withDefault(testnet ? "app.luckout.testnet" : "")
-      )
+      const contractId = yield* ContractId
       const operatorId = yield* Config.option(Config.String("OPERATOR_ACCOUNT_ID"))
       const operatorKey = yield* Config.option(Config.Redacted("OPERATOR_PRIVATE_KEY"))
       const relayerId = yield* Config.option(Config.String("RELAYER_ACCOUNT_ID"))

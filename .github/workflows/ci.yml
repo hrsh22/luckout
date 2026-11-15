@@ -1,10 +1,10 @@
 name: CI
 on:
   push:
-    branches: [main, testnet]
+    branches: [main, staging, testnet]
   pull_request:
 
-# A new push to a PR cancels that PR's run still in progress. Pushes to main and testnet each get
+# A new push to a PR cancels that PR's run still in progress. Pushes to main, staging and testnet each get
 # their own group (head_ref is empty there), so every one of their commits is still tested and deployed.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -68,11 +68,11 @@ jobs:
           path: contract/target/near/luckout.wasm
           if-no-files-found: error
 
-  # Deploys the server after both jobs pass: the testnet branch to the testnet site, main to the
-  # mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
+  # Deploys the server after both jobs pass: the testnet branch to the testnet site, staging to the
+  # staging site, main to the mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
   # fixes the branch per site, so this key can't deploy anything else (deploy/remote-deploy.sh).
   deploy:
-    if: github.event_name == 'push' && ((github.ref == 'refs/heads/testnet' && vars.DEPLOY_TESTNET == 'on') || (github.ref == 'refs/heads/main' && vars.DEPLOY_MAINNET == 'on'))
+    if: github.event_name == 'push' && ((github.ref == 'refs/heads/testnet' && vars.DEPLOY_TESTNET == 'on') || (github.ref == 'refs/heads/main' && vars.DEPLOY_MAINNET == 'on') || (github.ref == 'refs/heads/staging' && vars.DEPLOY_STAGING == 'on'))
     needs: [apps, contract]
     runs-on: ubuntu-latest
     concurrency: deploy-${{ github.ref_name }}
@@ -85,8 +85,8 @@ jobs:
           tags: tag:ci
       - name: Deploy over SSH
         env:
-          KEY: ${{ github.ref == 'refs/heads/main' && secrets.MAINNET_DEPLOY_KEY || secrets.TESTNET_DEPLOY_KEY }}
-          TARGET: ${{ github.ref == 'refs/heads/main' && vars.MAINNET_SSH_TARGET || vars.TESTNET_SSH_TARGET }}
+          KEY: ${{ github.ref == 'refs/heads/main' && secrets.MAINNET_DEPLOY_KEY || github.ref == 'refs/heads/staging' && secrets.STAGING_DEPLOY_KEY || secrets.TESTNET_DEPLOY_KEY }}
+          TARGET: ${{ github.ref == 'refs/heads/main' && vars.MAINNET_SSH_TARGET || github.ref == 'refs/heads/staging' && vars.STAGING_SSH_TARGET || vars.TESTNET_SSH_TARGET }}
           KNOWN_HOSTS: ${{ vars.VM_KNOWN_HOSTS }}
           # The commit the jobs above tested: the VM refuses to deploy anything else.
           SHA: ${{ github.sha }}
