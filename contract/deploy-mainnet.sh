@@ -37,7 +37,9 @@ python3 code-hash.py "$WASM"
 
 # 1. The accounts under luckout.near. Balances leave room above each account's alert line (Monitor):
 #    the contract's storage holds its ~250 KB of code (~2.5 NEAR) plus a NEAR free for records.
-for sub in "$APP:3.6" "$SERVER:0.7" "$RELAYER:0.7" "$TREASURY:0.3"; do
+#    Staging runs on less (ADR-0010), with its alert lines lowered to match (GAS_ALERT_PERCENT=20):
+#    ROOT=staging.luckout.near APP_NEAR=3.16 SERVER_NEAR=0.15 RELAYER_NEAR=0.15 TREASURY_NEAR=0.05
+for sub in "$APP:${APP_NEAR:-3.6}" "$SERVER:${SERVER_NEAR:-0.7}" "$RELAYER:${RELAYER_NEAR:-0.7}" "$TREASURY:${TREASURY_NEAR:-0.3}"; do
   run account create-account fund-myself "${sub%%:*}" "${sub##*:} NEAR" autogenerate-new-keypair save-to-legacy-keychain sign-as "$ROOT" "${NET[@]}" "${SIGN[@]}"
 done
 

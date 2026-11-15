@@ -8,8 +8,18 @@ const NEAR = 10n ** 24n
 /** NEAR storage staking: 1e19 yoctoNEAR per byte. */
 const PER_BYTE = 10n ** 19n
 
-/** Below these, each of our accounts gets an alert (the admin panel shows the same lines). */
-export const GAS_ALERT = { operator: NEAR / 2n, relayer: NEAR / 2n, treasury: NEAR / 10n, contract: NEAR } as const
+/**
+ * Below these, each of our accounts gets an alert (the admin panel shows the same lines). Production
+ * keeps the full lines; staging runs on a fifth of the NEAR, so it sets GAS_ALERT_PERCENT=20.
+ */
+const PERCENT = BigInt(process.env.GAS_ALERT_PERCENT || 100)
+export const GAS_ALERT = {
+  operator: NEAR * PERCENT / 200n,
+  relayer: NEAR * PERCENT / 200n,
+  treasury: NEAR * PERCENT / 1000n,
+  contract: NEAR * PERCENT / 100n
+} as const
+const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
 /** The Base wallet's ETH (wei): about 150 Bitrefill payments' worth of gas. */
 export const BASE_GAS_ALERT = 100_000_000_000_000n // 0.0001 ETH
 
@@ -33,16 +43,16 @@ export const Monitor = Layer.effectDiscard(
 
     const check = Effect.gen(function*() {
       if (near.operatorId && (yield* spendable(near, near.operatorId)) < GAS_ALERT.operator) {
-        yield* alerts.admin(`operator ${near.operatorId} has under 0.5 NEAR left for gas`)
+        yield* alerts.admin(`operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
       }
       if (near.relayerId && (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer) {
-        yield* alerts.admin(`relayer ${near.relayerId} has under 0.5 NEAR left; customers' wallets pay their own fees when it runs out`)
+        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; customers' wallets pay their own fees when it runs out`)
       }
       if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
-        yield* alerts.admin(`treasury ${near.treasuryId} has under 0.1 NEAR left for gas; Bitrefill refills stop when it runs out`)
+        yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; Bitrefill refills stop when it runs out`)
       }
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
-        yield* alerts.admin(`contract ${near.contractId} has under 1 NEAR free for storage; purchases fail when it runs out`)
+        yield* alerts.admin(`contract ${near.contractId} has under ${nearText(GAS_ALERT.contract)} free for storage; purchases fail when it runs out`)
       }
       // The contract owes customers' balances, the reserve and the proceeds, and must hold at least that much;
       // below it, customers' money is gone (a bug or an attack). Balances aren't summed onchain, so this sums
