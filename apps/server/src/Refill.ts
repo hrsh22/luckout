@@ -217,6 +217,9 @@ export class Refill extends Context.Service<Refill, {
       const credit = yield* Credit
       const alerts = yield* Alerts
       const mainnet = (yield* Network) === "mainnet"
+      // With guest checkout every refill ends in the Base Float, which pays the cards (ADR-0012); only a float
+      // top-up (isFloat) still waits for money quietly.
+      const endsInFloat = (row: { readonly reason: string }) => bitrefill.guest || isFloat(row)
       const planLock = yield* Semaphore.make(1)
       const running = new Set<string>()
       // Refills run in fibers owned by this service, so a shutdown waits for the step in progress.
@@ -348,7 +351,7 @@ export class Refill extends Context.Service<Refill, {
               }
               // A refill uses what the wallet holds first (the float, or a swap that finished late); a float
               // top-up brings its whole amount in.
-              const out = isFloat(row) ? amount : swapFor(amount, w.usdc)
+              const out = endsInFloat(row) ? amount : swapFor(amount, w.usdc)
               if (out === 0) {
                 // The wallet already holds it: no swap needed.
                 yield* move(row, { step: "invoice", error: null })
@@ -417,7 +420,7 @@ export class Refill extends Context.Service<Refill, {
             }
             case "quote": {
               const [wallet, w] = yield* Effect.all([base.address, base.balances])
-              const out = isFloat(row) ? amount : swapFor(amount, w.usdc)
+              const out = endsInFloat(row) ? amount : swapFor(amount, w.usdc)
               if (out === 0) {
                 yield* move(row, { step: "invoice", error: null })
                 return "next"
@@ -504,7 +507,7 @@ export class Refill extends Context.Service<Refill, {
               yield* save(row.id, { swap_status: status, error: null })
               if (status === "SUCCESS") {
                 // A float top-up is done once its USDC is in our wallet; a refill goes on to pay Bitrefill.
-                if (isFloat(row)) return yield* floatLanded(row, "")
+                if (endsInFloat(row)) return yield* floatLanded(row, "")
                 yield* move(row, { step: "invoice" })
                 return "next"
               }
@@ -733,7 +736,8 @@ export class Refill extends Context.Service<Refill, {
           }
           // No refill due: top the Base float back up, so the next one pays Bitrefill in a minute.
           const w = yield* base.balances.pipe(Effect.orElseSucceed(() => undefined))
-          const top = w ? floatTopUp(floatOf(c.settings), w.usdc) : 0
+          // A guest's refills already aim at the Base Float, so there's no separate top-up.
+          const top = w && !bitrefill.guest ? floatTopUp(floatOf(c.settings), w.usdc) : 0
           if (top > 0) {
             const row = yield* start(top, "float", null)
             yield* Effect.log(`refill ${row.id} started: ${usd(top)} to top up the Base float`)
@@ -840,7 +844,7 @@ export class Refill extends Context.Service<Refill, {
                 return
               }
               if (status === "SUCCESS") {
-                if (isFloat(row)) return void (yield* floatLanded(row, `${was} | 1Click finished it late.`))
+                if (endsInFloat(row)) return void (yield* floatLanded(row, `${was} | 1Click finished it late.`))
                 // The USDC lands in our own wallet: once it's there, the refill simply carries on to Bitrefill.
                 if ((yield* base.balances).usdc < Number(row.amount)) return
                 if (yield* move(row, { step: "invoice", swap_status: status, error: `${was} | 1Click finished it late; carried on.` })) {

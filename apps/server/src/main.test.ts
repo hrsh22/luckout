@@ -14,6 +14,8 @@ const MAINNET = {
   OPERATOR_ACCOUNT_ID: "server.luckout.near",
   OPERATOR_PRIVATE_KEY: "ed25519:none",
   BITREFILL_API_KEY: "none",
+  BITREFILL_CLIENT_ID: "none",
+  BITREFILL_CLIENT_SECRET: "none",
   // Nothing reachable, in case it ever gets past the check.
   BASE_RPC_URL: "http://127.0.0.1:1",
   NEAR_RPC_URL: "http://127.0.0.1:1",

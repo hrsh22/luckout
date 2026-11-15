@@ -1,4 +1,4 @@
-import { Config, Context, Data, Effect, Layer, Option, Redacted } from "effect"
+import { Config, Context, Data, Effect, Layer, Option, Redacted, Schedule, Semaphore } from "effect"
 import { actions, baseDecode, teraToGas } from "near-api-js"
 import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, type Hex, http, isAddress, keccak256, recoverAddress, serializeTransaction } from "viem"
 import { publicKeyToAddress } from "viem/accounts"
@@ -36,6 +36,7 @@ export interface BasePayment {
 
 /** pending: not mined (or not known); success: the transfer happened; reverted: mined, but nothing moved. */
 export type PaymentStatus = "pending" | "success" | "reverted"
+export type SignedPayment = BasePayment & { raw: Hex; hash: Hex }
 
 export class Base extends Context.Service<Base, {
   /** Base RPC is set (BASE_RPC_URL) and the server has a treasury key to sign with. */
@@ -51,6 +52,18 @@ export class Base extends Context.Service<Base, {
   send(p: BasePayment & { raw: Hex; hash: Hex }): Effect.Effect<PaymentStatus, BaseUnavailable>
   /** Where a payment is, without sending anything. */
   status(hash: Hex): Effect.Effect<PaymentStatus, BaseUnavailable>
+  /**
+   * Pays `amount` (USDC base units) to `to` exactly once. `saved` is this payment's earlier attempt, sent
+   * again as the same bytes; a new one is signed, handed to `save` before it's sent, then sent. The wallet is
+   * locked from preparing until mined, so two payments never share a nonce. "pending": not mined yet (call
+   * again with what was saved).
+   */
+  pay(
+    to: Hex,
+    amount: number,
+    saved: SignedPayment | null,
+    save: (p: SignedPayment) => Effect.Effect<void>
+  ): Effect.Effect<PaymentStatus, BaseUnavailable | NearUnavailable | ContractRejected>
 }>()("luckout/Base") {
   static readonly layer = Layer.effect(
     Base,
@@ -165,7 +178,33 @@ export class Base extends Context.Service<Base, {
           Effect.andThen(status(p.hash))
         )
 
-      return Base.of({ configured, address, balances, prepare, sign, send, status })
+      // Base makes a block every 2 seconds; half a minute covers a busy one.
+      const mined = (p: SignedPayment) =>
+        status(p.hash).pipe(Effect.repeat({ schedule: Schedule.spaced("2 seconds"), until: (s) => s !== "pending", times: 15 }))
+
+      const lock = yield* Semaphore.make(1)
+      const pay = (to: Hex, amount: number, saved: SignedPayment | null, save: (p: SignedPayment) => Effect.Effect<void>) =>
+        lock.withPermits(1)(Effect.gen(function*() {
+          if (saved) {
+            const s = yield* send(saved)
+            if (s !== "pending") return s
+            // A saved payment whose nonce another transaction took (one sent after a crash, before this was
+            // resent) can never be mined, so only then is a new one safe. The receipt is read after the nonce,
+            // with a pause, so our own payment mined in between is never taken for a lost one.
+            const latest = yield* Effect.flatMap(address, (a) => call("nonce", () => client!.getTransactionCount({ address: a, blockTag: "latest" })))
+            yield* Effect.sleep("4 seconds")
+            const again = yield* status(saved.hash)
+            if (again !== "pending") return again
+            if (latest <= saved.nonce) return yield* mined(saved)
+            yield* Effect.logWarning(`Base payment ${saved.hash} lost its nonce ${saved.nonce} to another transaction; paying again`)
+          }
+          const p = yield* sign(yield* prepare(to, amount))
+          yield* save(p)
+          yield* send(p)
+          return yield* mined(p)
+        }))
+
+      return Base.of({ configured, address, balances, prepare, sign, send, status, pay })
     })
   )
 }

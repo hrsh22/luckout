@@ -1,8 +1,10 @@
-import { BitrefillUnavailable, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, Quote } from "@luckout/api"
+import { BitrefillUnavailable, CheckoutEmail, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, Quote } from "@luckout/api"
 import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto"
+import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
+import { Base, BaseUnavailable, type SignedPayment } from "./Base.ts"
 import { Bitrefill, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
@@ -12,8 +14,11 @@ import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Si
 
 // A purchase walks these steps (ADR-0001). Every step is saved before its side effect,
 // so after a crash the reconciler resumes it without buying or charging twice:
-//   (waiting →) admit → ordering → delivery → confirm → settled
+//   (waiting →) admit → ordering → (pay →) delivery → confirm → settled
 //                    ↘ fail → failed          (admit refused → rejected)
+// A guest order (ADR-0012) gets an unpaid invoice at "ordering" and pays it from the Base Float at "pay":
+// creating an invoice moves no money, so an unknown outcome there is simply ordered again, and the payment is
+// saved before it's sent, so it's only ever sent again as the same transaction.
 // A real card our Bitrefill credit can't cover yet starts as "waiting": nothing is charged, a
 // refill starts, and it moves on once the credit is there, or is cancelled after waitMinutes
 // (ADR-0009). If Bitrefill still says the credit is too low at ordering, it waits as "restock"
@@ -21,7 +26,7 @@ import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Si
 // "ordering" found by the reconciler means we may have paid Bitrefill without saving the
 // invoice id; it becomes "stuck" for a human, and the customer can still Reclaim after 24h.
 // The reconciler backs off on each retry and gives up (stuck, with an alert) after MAX_ATTEMPTS.
-type Step = "waiting" | "admit" | "ordering" | "restock" | "delivery" | "confirm" | "fail" | "settled" | "failed" | "rejected" | "stuck"
+type Step = "waiting" | "admit" | "ordering" | "restock" | "pay" | "delivery" | "confirm" | "fail" | "settled" | "failed" | "rejected" | "stuck"
 
 interface Row {
   id: string
@@ -41,6 +46,13 @@ interface Row {
   /** A Lucky Buy's Lucky Amount when it was accepted: admission plays exactly it, or is refused. */
   quoted_lucky_amount: number | string | bigint | null
   invoice_id: string | null
+  /** A guest invoice's access token, sealed; and what paying it takes (ADR-0012). */
+  invoice_token: string | null
+  invoice_at: Date | string | null
+  pay_to: string | null
+  pay_amount: number | string | bigint | null
+  pay_tx: SignedPayment | null
+  email_key: string | null
   redemption: string | null
   settle_tx: Signed | null
   draw: Record<string, unknown> | null
@@ -64,9 +76,15 @@ interface OnchainPurchase {
 }
 
 /** Thrown on to stop a run; the reconciler picks the purchase up again later. */
-type Unknown = NearUnavailable | BitrefillUnavailable
+type Unknown = NearUnavailable | BitrefillUnavailable | BaseUnavailable
 
-export const OPEN_STEPS = ["admit", "ordering", "delivery", "confirm", "fail"]
+export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "fail"]
+/** Bitrefill's limits for one Checkout Email (its Terms §8, guests): orders a day, and USD a day and a month. */
+export const GUEST_LIMITS = { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 } as const
+/** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
+const INVOICE_TTL_MS = 40 * 60_000
+/** The email shape Bitrefill's buy-products accepts. */
+const EMAIL = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/
 /** About six hours of retries with backoff (30s doubling, capped at an hour). */
 const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */
@@ -107,6 +125,9 @@ export class Purchases extends Context.Service<Purchases, {
   cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
   /** One pass over purchases waiting for credit (also runs every 10 seconds by itself). */
   readonly promoteWaiting: Effect.Effect<void>
+  /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
+  checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
+  setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
 }>()("luckout/Purchases") {
   static readonly layer = Layer.effect(
     Purchases,
@@ -114,6 +135,7 @@ export class Purchases extends Context.Service<Purchases, {
       const sql = yield* SqlClient.SqlClient
       const near = yield* Near
       const bitrefill = yield* Bitrefill
+      const base = yield* Base
       const credit = yield* Credit
       const refill = yield* Refill
       const sales = yield* Sales
@@ -137,6 +159,49 @@ export class Purchases extends Context.Service<Purchases, {
           .setAuthTag(b.subarray(12, 28))
         return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]).toString())
       }
+
+      // The Checkout Email is sealed like Redemption Data (bound to its account). Its keyed hash lets Bitrefill's
+      // per-email limits be counted without reading it, and gives the same value for the same email on any account.
+      const emailKey = (email: string) => createHmac("sha256", Option.getOrThrow(key)).update(`checkout-email:${email}`).digest("hex")
+      const emailOf = (accountId: string) =>
+        sql<{ email: string; email_key: string }>`SELECT email, email_key FROM checkout_emails WHERE account_id = ${accountId}`.pipe(
+          Effect.orDie,
+          Effect.map(([r]) => (r ? { email: String(unseal(`email:${accountId}`, r.email)), key: r.email_key } : undefined))
+        )
+      const checkoutEmail = (accountId: string) =>
+        (Option.isNone(key) ? Effect.succeed(undefined) : emailOf(accountId)).pipe(
+          Effect.map((e) => new CheckoutEmail({ needed: bitrefill.guest, ...(e ? { email: e.email } : {}) }))
+        )
+      const setCheckoutEmail = (accountId: string, input: string) =>
+        Effect.gen(function*() {
+          if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
+          const email = input.trim().toLowerCase()
+          if (email.length > 254 || !EMAIL.test(email)) return yield* new PurchaseInvalid({ message: "That doesn't look like an email address." })
+          yield* sql`INSERT INTO checkout_emails (account_id, email, email_key) VALUES (${accountId}, ${seal(`email:${accountId}`, email)}, ${emailKey(email)})
+                     ON CONFLICT (account_id) DO UPDATE SET email = EXCLUDED.email, email_key = EXCLUDED.email_key, updated_at = now()`.pipe(Effect.orDie)
+          return yield* checkoutEmail(accountId)
+        })
+
+      /** Why Bitrefill would refuse one more card of `price` for this email now, if it would (GUEST_LIMITS). */
+      const overGuestLimit = (emailKeyValue: string, price: number) =>
+        sql<{ orders: number; day: string; month: string }>`
+          SELECT count(*) FILTER (WHERE created_at > now() - interval '1 day')::int AS orders,
+                 COALESCE(sum(reference_price) FILTER (WHERE created_at > now() - interval '1 day'), 0)::text AS day,
+                 COALESCE(sum(reference_price), 0)::text AS month
+          FROM purchases
+          WHERE email_key = ${emailKeyValue} AND created_at > now() - interval '30 days'
+            AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`.pipe(
+          Effect.orDie,
+          Effect.map(([u]) =>
+            (u?.orders ?? 0) >= GUEST_LIMITS.orders
+              ? `Bitrefill allows ${GUEST_LIMITS.orders} cards a day per email, and yours has had ${u?.orders} in the last 24 hours. Try again later.`
+              : Number(u?.day ?? 0) + price > GUEST_LIMITS.daily
+              ? `Bitrefill allows ${usd(GUEST_LIMITS.daily)} of cards a day per email; this one would go over it. Try a smaller card or wait a day.`
+              : Number(u?.month ?? 0) + price > GUEST_LIMITS.monthly
+              ? `Bitrefill allows ${usd(GUEST_LIMITS.monthly)} of cards a month per email; this one would go over it.`
+              : undefined
+          )
+        )
 
       const load = (id: string) =>
         sql<Row>`SELECT * FROM purchases WHERE id = ${id}`.pipe(Effect.map((r) => r[0]!), Effect.orDie)
@@ -194,6 +259,26 @@ export class Purchases extends Context.Service<Purchases, {
               return yield* move(row, { step: "ordering", contract_purchase_id: purchaseId, admitted })
             }
             case "ordering": {
+              if (bitrefill.guest) {
+                const email = yield* emailOf(row.account_id)
+                const order = yield* bitrefill.order(row.voucher_id, row.package_value, email?.email)
+                if (order._tag !== "Invoiced") {
+                  return yield* move(row, { step: "fail", error: `Bitrefill refused: ${"reason" in order ? order.reason : order._tag}` })
+                }
+                // Never pay Bitrefill more than the price the contract admitted (what the customer is charged).
+                if (order.amount > Number(row.reference_price)) {
+                  return yield* move(row, { step: "fail", error: `Bitrefill's invoice ${order.invoiceId} costs ${usd(order.amount)}, more than the admitted ${usd(Number(row.reference_price))}` })
+                }
+                return yield* move(row, {
+                  step: "pay",
+                  invoice_id: order.invoiceId,
+                  invoice_token: seal(`invoice:${row.id}`, order.accessToken),
+                  invoice_at: new Date().toISOString(),
+                  pay_to: order.payTo,
+                  pay_amount: order.amount,
+                  pay_tx: null
+                })
+              }
               if (resumed) {
                 yield* move(row, { step: "stuck", error: "Bitrefill order outcome unknown; check the Bitrefill account" })
                 yield* Effect.logError("purchase stuck at ordering", row.id)
@@ -209,10 +294,33 @@ export class Purchases extends Context.Service<Purchases, {
                 yield* Effect.all([credit.refresh, refill.kick], { discard: true })
                 return false
               }
-              return yield* move(row, { step: "fail", error: `Bitrefill refused: ${order.reason}` })
+              return yield* move(row, { step: "fail", error: `Bitrefill refused: ${"reason" in order ? order.reason : order._tag}` })
+            }
+            case "pay": {
+              // Never signed for in time: ask for a fresh invoice (this one would expire before Bitrefill saw it).
+              if (!row.pay_tx && Date.now() - time(row.invoice_at!) > INVOICE_TTL_MS) {
+                return yield* move(row, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null })
+              }
+              // `ordered_at` marks the money leaving the Base Float (Credit counts it from then).
+              const status = yield* base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, (p) => save(row.id, { pay_tx: p, ordered_at: new Date().toISOString() })).pipe(
+                Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
+              )
+              if (status === "pending") return false
+              if (status === "reverted") {
+                // Nothing moved (say, the float ran short): wait for money like any other, then order afresh.
+                yield* move(row, { step: "restock", error: "The Base payment reverted; nothing was paid", pay_tx: null, invoice_id: null, invoice_token: null, invoice_at: null, ordered_at: null })
+                yield* alerts.admin(`purchase ${row.id}: its Base payment to Bitrefill reverted (nothing moved); it waits for the float`)
+                yield* Effect.all([credit.refresh, refill.kick], { discard: true })
+                return false
+              }
+              return yield* move(row, { step: "delivery" })
             }
             case "delivery": {
-              const d = yield* bitrefill.delivery(row.invoice_id!)
+              const d = yield* bitrefill.delivery(row.invoice_id!, row.invoice_token ? String(unseal(`invoice:${row.id}`, row.invoice_token)) : undefined)
+              if (d._tag === "Failed" && row.pay_tx) {
+                // We paid this invoice from the Base Float: the customer is refunded in full, and the money is ours to recover.
+                yield* alerts.admin(`purchase ${row.id}: Bitrefill didn't deliver paid invoice ${row.invoice_id} (${d.reason}); Base payment ${row.pay_tx.hash}. Ask Bitrefill support for a refund.`)
+              }
               return yield* d._tag === "Delivered"
                 ? move(row, { step: "confirm", redemption: seal(row.id, d.redemption) })
                 : move(row, { step: "fail", error: d.reason })
@@ -444,6 +552,13 @@ export class Purchases extends Context.Service<Purchases, {
             return yield* new PurchaseInvalid({ message: `That card is bigger than we can buy right now (up to ${usd(most)}). Please choose a smaller one.` })
           }
         }
+        // A guest order needs the customer's Checkout Email, and stays within Bitrefill's limits for it (ADR-0012).
+        const email = real && bitrefill.guest ? yield* emailOf(accountId) : undefined
+        if (real && bitrefill.guest) {
+          if (!email) return yield* new PurchaseInvalid({ message: "Add the email for your cards first: Bitrefill needs one for each card (a throwaway one is fine)." })
+          const over = yield* overGuestLimit(email.key, referencePrice)
+          if (over) return yield* new PurchaseInvalid({ message: over })
+        }
         yield* preflight(accountId, referencePrice, input.maxPrice)
         // A Lucky Buy is admitted at the Lucky Amount it's accepted under, or refused: it may wait a day for
         // credit while the reserve moves. (Default Mode isn't known here; those admit as before.)
@@ -465,9 +580,10 @@ export class Purchases extends Context.Service<Purchases, {
               if ((w?.n ?? 0) > 0) return yield* new PurchaseInvalid({ message: "You already have a card on its way; try again when it's ready." })
             }
             return yield* sql<{ id: string; step: Step }>`
-              INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, quoted_lucky_amount, step)
+              INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, quoted_lucky_amount, step, email_key)
               VALUES (${accountId}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value},
-                      ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${luckyAmount}, ${wait ? "waiting" : "admit"})
+                      ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${luckyAmount}, ${wait ? "waiting" : "admit"},
+                      ${email?.key ?? null})
               ON CONFLICT (account_id, idempotency_key) DO NOTHING
               RETURNING id, step`.pipe(Effect.orDie)
           })
@@ -590,7 +706,7 @@ export class Purchases extends Context.Service<Purchases, {
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
       yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote })
+      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, checkoutEmail, setCheckoutEmail })
     })
   )
 }

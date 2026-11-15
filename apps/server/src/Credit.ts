@@ -2,6 +2,7 @@ import { CreditSettings } from "@luckout/api"
 import { Context, Effect, Layer, Option, Ref, Schedule, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
+import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
@@ -29,10 +30,15 @@ export const MIN_REFILL = 10_000_000
 /** Micro-USDC as dollars, for alerts and messages. */
 export const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed(2)}`
 
-/** Steps after which a real card's price will soon leave the credit (it's being admitted or ordered). */
-const HELD_STEPS = ["admit", "ordering"]
+/**
+ * Steps after which a real card's price will soon leave the credit: it's being admitted, ordered, or (a guest
+ * order, ADR-0012) paid from the Base Float. A payment counts from when it's signed (`ordered_at`).
+ */
+const HELD_STEPS = ["admit", "ordering", "pay"]
 /** Purchases waiting for credit: before being charged, or charged and waiting to be ordered. */
 export const WAITING_STEPS = ["waiting", "restock"]
+/** The Base Float has no cap of its own: a card it can't cover waits for a refill sized for it. */
+const GUEST_ROOM = 1_000_000_000_000
 /** A balance older than this is read again before deciding on a purchase. */
 const STALE_MS = 10 * 60_000
 /** USDC kept ready on Base (`CreditSettings.baseFloat`); 0 when off. */
@@ -110,6 +116,7 @@ export class Credit extends Context.Service<Credit, {
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
       const bitrefill = yield* Bitrefill
+      const base = yield* Base
       const alerts = yield* Alerts
       const network = yield* Network
       // Testnet sells only test cards, which are free: no credit to track, refill or alert on.
@@ -151,18 +158,24 @@ export class Credit extends Context.Service<Credit, {
       const refresh = Effect.gen(function*() {
         if (!tracked) return Option.none<Snapshot>()
         const readAt = new Date()
-        const read = yield* bitrefill.credit.pipe(Effect.timeout("15 seconds"), Effect.option)
+        // A guest's cards are paid from the Base Float, which holds whatever refills bring (ADR-0012).
+        const source: Effect.Effect<{ readonly balance: number; readonly room: number }, unknown> = bitrefill.guest
+          ? Effect.map(base.balances, (b) => ({ balance: b.usdc, room: GUEST_ROOM }))
+          : bitrefill.credit
+        const read = yield* source.pipe(Effect.timeout("15 seconds"), Effect.option)
         if (Option.isNone(read)) return Option.none<Snapshot>()
         const previous = yield* Ref.get(snapshot)
         const next: Snapshot = { balance: read.value.balance, room: read.value.room, readAt }
         // Credit only goes up when we refill; a drop our own orders don't explain means
-        // someone else is spending it (or the API key leaked).
+        // someone else is spending it (or the API key, or the treasury's key, leaked).
         if (previous) {
           const orderedBetween = (yield* ledger(previous.readAt)).orderedSince
           const unexplained = previous.balance - orderedBetween - next.balance
           if (unexplained > 1_000_000) {
             yield* alerts.admin(
-              `Bitrefill credit dropped ${usd(unexplained)} more than our orders explain. Check the Bitrefill account for purchases we didn't make.`
+              bitrefill.guest
+                ? `The Base Float dropped ${usd(unexplained)} more than our payments explain. Check the Base Wallet for transfers we didn't make.`
+                : `Bitrefill credit dropped ${usd(unexplained)} more than our orders explain. Check the Bitrefill account for purchases we didn't make.`
             )
           }
         }

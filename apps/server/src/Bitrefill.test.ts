@@ -42,7 +42,7 @@ const liveBuy = { skip: !process.env.BITREFILL_LIVE_BUY && "set BITREFILL_LIVE_B
 test("test card is delivered with Redemption Data", liveBuy, async () => {
   const d = await run((b) =>
     Effect.flatMap(b.order("test-gift-card-code", "10"), (o) =>
-      o._tag === "Ordered" ? b.delivery(o.invoiceId) : Effect.die(o.reason)))
+      o._tag === "Ordered" ? b.delivery(o.invoiceId) : Effect.die("reason" in o ? o.reason : o._tag)))
   assert.equal(d._tag, "Delivered")
   assert.ok(d._tag === "Delivered" && typeof d.redemption.code === "string")
 })

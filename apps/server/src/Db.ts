@@ -250,6 +250,19 @@ const migrations = Migrator.fromRecord({
   "0017_transfers_retell": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN retell BOOLEAN NOT NULL DEFAULT false`
+  }),
+  // Guest checkout (ADR-0012): each customer's Checkout Email, sealed, with a keyed hash so Bitrefill's
+  // per-email limits can be counted without reading it; and each purchase's invoice and Base payment.
+  "0018_guest_checkout": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TABLE checkout_emails (
+      account_id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      email_key TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+    yield* sql`ALTER TABLE purchases ADD COLUMN email_key TEXT, ADD COLUMN invoice_token TEXT, ADD COLUMN invoice_at TIMESTAMPTZ,
+               ADD COLUMN pay_to TEXT, ADD COLUMN pay_amount BIGINT, ADD COLUMN pay_tx JSONB`
+    yield* sql`CREATE INDEX purchases_email_key ON purchases (email_key, created_at) WHERE email_key IS NOT NULL`
   })
 })
 

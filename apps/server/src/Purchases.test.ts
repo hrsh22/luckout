@@ -4,6 +4,7 @@ import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
+import { Base, type PaymentStatus, type SignedPayment } from "./Base.ts"
 import { Bitrefill, type Order } from "./Bitrefill.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
@@ -11,7 +12,7 @@ import { ContractRejected, Near, NearUnavailable, type Outcome } from "./Near.ts
 import { Purchases } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Sales } from "./Sales.ts"
-import { fakeBitrefill, fakeNear } from "./testing.ts"
+import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
 
 // The purchase workflow end to end on an in-memory database, with NEAR and Bitrefill faked.
 process.env.NEAR_NETWORK = "testnet"
@@ -36,6 +37,12 @@ const world = (opts: {
   /** Our Bitrefill credit, micro-USDC; change it with `w.setCredit`. */
   credit?: number
   orders?: Array<Order["_tag"]>
+  /** Guest checkout (ADR-0012): orders are invoices paid from the Base Float, whose USDC is `credit`. */
+  guest?: boolean
+  /** What a guest invoice costs; the card's price unless set. */
+  invoiceAmount?: number
+  /** How each Base payment ends; "success" unless set. */
+  payments?: Array<PaymentStatus>
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
@@ -50,6 +57,21 @@ const world = (opts: {
   const mode = opts.mode ?? "normal"
   const voucherId = opts.real ? "amazon-us" : "test-card"
   const outcome = (value: unknown, events: Outcome["events"] = []): Outcome => ({ hash: "h", value, events, failures: [] })
+  /** Base payments made: each signed once, then sent (again only as the same bytes). */
+  const paid: Array<{ to: string; amount: number; resent: boolean }> = []
+  const payments = [...(opts.payments ?? [])]
+  const base = fakeBase({
+    balances: Effect.suspend(() => Effect.succeed({ usdc: creditBalance, eth: 10n ** 15n })),
+    pay: (to, amount, saved, save) =>
+      Effect.gen(function*() {
+        const p = saved ?? ({ to, amount: String(amount), nonce: paid.length, maxFeePerGas: "1", maxPriorityFeePerGas: "1", raw: "0x01", hash: `0x${paid.length}` } as SignedPayment)
+        if (!saved) yield* save(p)
+        paid.push({ to, amount, resent: !!saved })
+        const status = payments.shift() ?? "success"
+        if (status === "success" && !saved) creditBalance -= amount
+        return status
+      })
+  })
   const near = fakeNear({
     view: <A>(method: string) =>
       Effect.succeed(
@@ -75,18 +97,24 @@ const world = (opts: {
       })
   })
   const bitrefill = fakeBitrefill({
+    guest: opts.guest ?? false,
     voucher: () =>
       Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] })),
-    order: () =>
+    order: (_id, _value, email) =>
       Effect.sync((): Order => {
-        calls.push("order")
-        const tag = orders.shift() ?? "Ordered"
+        calls.push(opts.guest ? `order:${email}` : "order")
+        const tag = orders.shift() ?? (opts.guest ? "Invoiced" : "Ordered")
+        if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId: `inv-${calls.length}`, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price }
         if (tag === "NoCredit") return { _tag: "NoCredit", reason: "Balance too low (INVALID_INPUT)" }
         // Ordering spends the credit, as Bitrefill would.
         creditBalance -= price
         return { _tag: "Ordered", invoiceId: "inv-1" }
       }),
-    delivery: () => Effect.succeed({ _tag: "Delivered" as const, invoiceId: "inv-1", orderId: "o-1", redemption: { code: "ABC-123" } }),
+    delivery: (invoiceId, token) =>
+      Effect.sync(() => {
+        if (token) calls.push(`delivery:${token}`)
+        return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123" } }
+      }),
     // Each read takes `creditDelay` (set when it starts), like a slow Bitrefill.
     credit: Effect.suspend(() => Effect.delay(Effect.sync(() => ({ balance: creditBalance, room: 2_000_000_000 })), creditDelay))
   })
@@ -102,6 +130,7 @@ const world = (opts: {
     Layer.provide(Layer.mergeAll(
       Layer.succeed(Near, near),
       Layer.succeed(Bitrefill, bitrefill),
+      Layer.succeed(Base, base),
       Layer.succeed(Refill, refill),
       Layer.succeed(Sales, Sales.of({ status: Effect.sync(() => shop), setOpen: () => Effect.die("not used") })),
       Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
@@ -119,6 +148,7 @@ const world = (opts: {
     calls,
     alerts,
     admits,
+    paid,
     layer,
     buy,
     run,
@@ -492,4 +522,80 @@ test("a purchase that waited for credit is admitted at today's price", async () 
   }))
   assert.equal(step, "settled")
   assert.equal(w.admits[0]!.reference_price, "10000000", "admitted at the current price, within what they confirmed")
+})
+
+// Guest checkout (ADR-0012): each real card is a guest invoice carrying the customer's Checkout Email,
+// paid exactly once from the Base Float.
+const withEmail = (email: string, who = "alice.test") => Purchases.use((p) => p.setCheckoutEmail(who, email))
+
+test("a guest card carries the customer's email, is paid once from the Base Float, and is delivered", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("  Alice@Example.com ")
+    const p = yield* w.buy()
+    const sql = yield* SqlClient.SqlClient
+    const [stored] = yield* sql<{ email: string }>`SELECT email FROM checkout_emails WHERE account_id = 'alice.test'`
+    const seen = yield* Purchases.use((s) => s.checkoutEmail("alice.test"))
+    return { p, stored: stored!.email, seen }
+  }))
+  assert.equal(r.p.status, "delivered")
+  assert.equal(r.p.redemption?.code, "ABC-123")
+  assert.deepEqual(w.calls, ["purchase", "order:alice@example.com", "delivery:secret-token", "confirm_delivery"])
+  assert.deepEqual(w.paid, [{ to: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: 10_000_000, resent: false }])
+  assert.ok(!r.stored.includes("alice"), "the email is sealed at rest")
+  assert.deepEqual({ needed: r.seen.needed, email: r.seen.email }, { needed: true, email: "alice@example.com" })
+})
+
+test("a guest card needs the customer's email first, and a malformed one is refused", async () => {
+  const w = world({ real: true, guest: true })
+  const r = await w.run(Effect.gen(function*() {
+    const noEmail = yield* w.buy().pipe(Effect.flip)
+    const bad = yield* withEmail("not an email").pipe(Effect.flip)
+    return { noEmail, bad }
+  }))
+  assert.match(r.noEmail.message, /Add the email for your cards first/)
+  assert.match(r.bad.message, /doesn't look like an email/)
+  assert.deepEqual(w.calls, [], "nothing signed or ordered")
+})
+
+test("Bitrefill's limits count per email, across accounts: the 16th card in a day is refused before anything is signed", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000 })
+  const e = await w.run(Effect.gen(function*() {
+    yield* withEmail("shared@example.com", "bob.test")
+    yield* withEmail("SHARED@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'bob.test'`) as [{ email_key: string }]
+    for (let i = 0; i < 15; i++) {
+      yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
+                 VALUES ('bob.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
+    }
+    return yield* w.buy().pipe(Effect.flip)
+  }))
+  assert.match(e.message, /15 cards a day per email/)
+  assert.deepEqual(w.calls, [])
+})
+
+test("a guest invoice costing more than the admitted price is never paid: the customer is refunded in full", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, invoiceAmount: 10_000_001 })
+  const p = await w.run(Effect.andThen(withEmail("alice@example.com"), w.buy()))
+  assert.equal(p.status, "failed")
+  assert.deepEqual(w.paid, [], "nothing paid")
+  assert.deepEqual(w.calls, ["purchase", "order:alice@example.com", "fail_purchase"])
+})
+
+test("a reverted Base payment moves nothing: the card waits for the float, then a fresh invoice is paid once", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payments: ["reverted"] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const p = yield* w.buy()
+    yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
+    yield* Effect.sleep("300 millis")
+    const after = yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", p.id))
+    return { first: p.status, after: after.status }
+  }))
+  assert.equal(r.first, "waiting")
+  assert.equal(r.after, "delivered")
+  assert.deepEqual(w.paid.map((x) => x.resent), [false, false], "two separate payments: the first reverted, the second went through")
+  assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 2, "a fresh invoice for the second payment")
+  assert.match(w.alerts.join(" "), /reverted/)
 })

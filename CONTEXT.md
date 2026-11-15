@@ -41,11 +41,11 @@ The browser storefront where a customer connects their NEAR wallet, tops up, set
 _Avoid_: Dashboard, admin console
 
 **Bitrefill Credit**:
-Our USD store credit at Bitrefill, which pays for every real card and can't be refunded; kept between a floor and a ceiling at about a day of sales with a Base Float (two without).
+Our USD store credit at Bitrefill. Retired on mainnet (ADR-0012): only local testnet still buys its free test cards with it.
 _Avoid_: Float, balance (that's the customer's), wallet
 
 **Refill**:
-Topping up the Bitrefill Credit: a NEAR Intents swap from the Treasury into the Base Wallet, then an exact USD deposit paid from the Base Wallet to Bitrefill.
+Topping up the Base Float: a NEAR Intents swap from the Treasury's USDC into the Base Wallet.
 _Avoid_: Top-Up (that's the customer's), recharge
 
 **Treasury**:
@@ -53,11 +53,15 @@ The server-held account that pays Refills. The contract lets it pull Proceeds on
 _Avoid_: Hot wallet, float account
 
 **Base Wallet**:
-Our address on Base, derived from the Treasury through NEAR Chain Signatures, with no key of its own. Refills land here and pay Bitrefill from here, so a late swap can never pay an expired invoice.
+Our address on Base, derived from the Treasury through NEAR Chain Signatures, with no key of its own. Refills land here, and every card is paid from here.
 _Avoid_: EVM wallet, hot wallet
 
 **Base Float**:
-USDC kept ready in the Base Wallet, so a Refill pays Bitrefill in about a minute instead of waiting on a swap; topped back up from the Treasury once it's under half. Unlike Bitrefill Credit, it's still ours.
+The USDC in the Base Wallet that pays each card's Bitrefill invoice; kept between a floor and a ceiling at about a day of sales and topped up from the Treasury by Refills.
+
+**Checkout Email**:
+The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) count per customer, and Bitrefill can reach them about a bad code. A throwaway one is fine.
+_Avoid_: Login, account email
 _Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
 **Relayer**:

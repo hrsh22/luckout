@@ -1,5 +1,7 @@
 # Keep Bitrefill credit dynamic and refill it from a treasury
 
+**Superseded on mainnet by ADR-0012 (2026-11-15):** cards are bought as a guest through Bitrefill's MCP and paid per order from the Base Float, so there is no Bitrefill credit to keep. The Treasury and its refills stay, topping up the Base Float only.
+
 Every real card is paid from our USD store credit at Bitrefill (ADR-0001, `docs/research/bitrefill-funding.md`). That credit delivers codes in about a second, but Bitrefill never refunds it, so any credit we hold beyond what sales use is stranded. Paying each order directly in USDC instead was considered and rejected: delivery would take minutes instead of seconds, each card would cost about 1% more, and there would be more ways for an order to fail.
 
 So the server keeps only as much credit as recent sales need and refills it by itself:
