@@ -64,6 +64,10 @@ The email a customer gives for their cards. Each guest order on Bitrefill carrie
 _Avoid_: Login, account email
 _Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
+**Bitrefill Connection**:
+A customer's own Bitrefill account, logged in from our site, that their cards are then bought on, under its limits instead of a guest's. We still pay for every card from the Base Wallet. While it lasts, buying needs no Checkout Email.
+_Avoid_: Linked account, Bitrefill login (that's the act of connecting)
+
 **Relayer**:
 The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.
 _Avoid_: Paymaster, gas station, sponsor

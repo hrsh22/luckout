@@ -88,7 +88,8 @@ function CheckoutCard({ c }: { c: AdminOverview["checkout"] }) {
         <p className="font-display mt-1 text-2xl font-extrabold">Guest checkout through Bitrefill's MCP</p>
         <p className="mt-1 text-sm text-muted">
           Each card carries its customer's Checkout Email, and Bitrefill limits each email to {c.limits.orders} cards and {usd(c.limits.daily)} a day,{" "}
-          {usd(c.limits.monthly)} a month. {c.emails} {c.emails === 1 ? "customer has" : "customers have"} given one.
+          {usd(c.limits.monthly)} a month. {c.emails} {c.emails === 1 ? "customer has" : "customers have"} given one, and {c.connected}{" "}
+          {c.connected === 1 ? "buys" : "buy"} on their own Bitrefill account instead, under its limits.
         </p>
       </div>
       <div className="flex flex-col gap-3">

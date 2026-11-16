@@ -1,18 +1,20 @@
 import { CreditSettings, type Mode, NewPurchase, ShopStatus, Voucher } from "@luckout/api"
 import { ConfigProvider, Effect, Fiber, Layer } from "effect"
+import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Base, type PaymentStatus, type SignedPayment } from "./Base.ts"
 import { Bitrefill, type Order } from "./Bitrefill.ts"
+import { Connect } from "./Connect.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { ContractRejected, Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Sales } from "./Sales.ts"
-import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
+import { fakeBase, fakeBitrefill, fakeBitrefillOAuth, fakeNear } from "./testing.ts"
 
 // The purchase workflow end to end on an in-memory database, with NEAR and Bitrefill faked.
 process.env.NEAR_NETWORK = "testnet"
@@ -43,6 +45,10 @@ const world = (opts: {
   invoiceAmount?: number
   /** How each Base payment ends; "success" unless set. */
   payments?: Array<PaymentStatus>
+  /** Bitrefill's OAuth endpoints, for customers who connect their own Bitrefill account. */
+  oauth?: ReturnType<typeof fakeBitrefillOAuth>
+  /** Why an order tagged "Refused" is refused; a lapsed login (401) unless set. */
+  refusal?: string
   /** Bitrefill takes this long (ms) to deliver. */
   deliveryDelay?: number
   /** How long a buy request waits (ms) before answering "pending". */
@@ -106,10 +112,12 @@ const world = (opts: {
     guest: opts.guest ?? false,
     voucher: () =>
       Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] })),
-    order: (_id, _value, email) =>
+    order: (_id, _value, buyer) =>
       Effect.sync((): Order => {
-        calls.push(opts.guest ? `order:${email}` : "order")
+        calls.push(!opts.guest ? "order" : buyer && "token" in buyer ? `order:token:${buyer.token}` : `order:${buyer?.email}`)
         const tag = orders.shift() ?? (opts.guest ? "Invoiced" : "Ordered")
+        // A token Bitrefill no longer takes: the tool never ran.
+        if (tag === "Refused") return { _tag: "Refused", reason: opts.refusal ?? "HTTP 401 invalid_token" }
         if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId: `inv-${calls.length}`, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price }
         if (tag === "NoCredit") return { _tag: "NoCredit", reason: "Balance too low (INVALID_INPUT)" }
         // Ordering spends the credit, as Bitrefill would.
@@ -132,7 +140,7 @@ const world = (opts: {
     status: Effect.die("not used")
   })
   const layer = Purchases.layer.pipe(
-    Layer.provideMerge(Credit.layer),
+    Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, (opts.oauth ?? fakeBitrefillOAuth()).fetch))))),
     Layer.provide(Layer.mergeAll(
       Layer.succeed(Near, near),
       Layer.succeed(Bitrefill, bitrefill),
@@ -144,12 +152,17 @@ const world = (opts: {
     Layer.provideMerge(DbMemory),
     // Real cards are only sold on mainnet.
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({
-      env: { ...(process.env as Record<string, string>), NEAR_NETWORK: opts.real ? "mainnet" : "testnet", ...(opts.requestWait ? { PURCHASE_REQUEST_WAIT_MS: String(opts.requestWait) } : {}) }
+      env: {
+        ...(process.env as Record<string, string>),
+        NEAR_NETWORK: opts.real ? "mainnet" : "testnet",
+        BITREFILL_REDIRECT_URI: "https://api.luckout.test/bitrefill/callback",
+        ...(opts.requestWait ? { PURCHASE_REQUEST_WAIT_MS: String(opts.requestWait) } : {})
+      }
     })))
   )
   const buy = (key: string = crypto.randomUUID(), who = "alice.test") =>
     Purchases.use((p) => p.create(who, new NewPurchase({ voucherId, value: "10", mode, maxPrice: price + (mode === "normal" ? 0 : 1_200_000), idempotencyKey: key })))
-  const run = <A, E>(e: Effect.Effect<A, E, Purchases | Credit | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
+  const run = <A, E>(e: Effect.Effect<A, E, Purchases | Credit | Connect | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
   return {
     calls,
     alerts,
@@ -630,4 +643,96 @@ test("a reverted Base payment moves nothing: the card waits for the float, then 
   assert.deepEqual(w.paid.map((x) => x.resent), [false, false], "two separate payments: the first reverted, the second went through")
   assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 2, "a fresh invoice for the second payment")
   assert.match(w.alerts.join(" "), /reverted/)
+})
+
+// Connect Bitrefill: a customer who logs in to their own Bitrefill account has their cards ordered on it, under its
+// limits instead of a guest's, and still paid from the Base Float.
+
+/** Connects `who`'s Bitrefill account the way the browser does: our authorize URL, Bitrefill's redirect back, then the Wallet page. */
+const connectAs = (who = "alice.test") =>
+  Connect.use((c) =>
+    Effect.gen(function*() {
+      const state = new URL(yield* c.url(who)).searchParams.get("state")!
+      const back = new URL(yield* c.callback(new URLSearchParams({ code: "the-code", state, iss: "https://api.bitrefill.com/oauth/mcp" }))).searchParams
+      yield* c.finish(who, back.get("code")!, back.get("state")!)
+      return back.get("bitrefill")
+    })
+  )
+const buyerOf = (id: string) =>
+  Effect.flatMap(SqlClient.SqlClient, (sql) =>
+    sql<{ buyer: string | null; email_key: string | null }>`SELECT buyer, email_key FROM purchases WHERE id = ${id}`).pipe(Effect.map((r) => r[0]!))
+
+test("a connected customer's card is ordered on their own Bitrefill account, with no email and none of the guest limits", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    // Their email has had a day's 15 guest cards, so as a guest the next would be refused.
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'alice.test'`) as [{ email_key: string }]
+    for (let i = 0; i < 15; i++) {
+      yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
+                 VALUES ('alice.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
+    }
+    const connected = yield* connectAs()
+    const seen = yield* Purchases.use((s) => s.checkoutEmail("alice.test"))
+    const p = yield* w.buy()
+    return { connected, seen, p, row: yield* buyerOf(p.id) }
+  }))
+  assert.equal(r.connected, "finish")
+  assert.deepEqual({ needed: r.seen.needed, bitrefill: r.seen.bitrefill }, { needed: false, bitrefill: true })
+  assert.equal(r.p.status, "delivered")
+  assert.deepEqual(w.calls, ["purchase", "order:token:access-1", "delivery:secret-token", "confirm_delivery"], "their token and no email; delivery still reads the invoice by its access token")
+  assert.deepEqual(r.row, { buyer: "account", email_key: null }, "not counted against the email's guest limits")
+  assert.equal(w.paid.length, 1, "paid once from the Base Float, as any card")
+})
+
+test("a lapsed Bitrefill login falls back to a guest order with the Checkout Email, or with none fails and refunds in full", async () => {
+  // The login from connecting ends within a minute, so the order renews it first, and Bitrefill refuses.
+  const oauth = fakeBitrefillOAuth(60)
+  const w = world({ real: true, guest: true, credit: 100_000_000, oauth })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    yield* connectAs()
+    oauth.lapse()
+    const p = yield* w.buy()
+    return { p, row: yield* buyerOf(p.id), seen: yield* Purchases.use((s) => s.checkoutEmail("alice.test")) }
+  }))
+  assert.equal(r.p.status, "delivered")
+  assert.deepEqual(w.calls, ["purchase", "order:alice@example.com", "delivery:secret-token", "confirm_delivery"])
+  assert.equal(r.row.buyer, "guest")
+  assert.ok(r.row.email_key, "counted against the email's guest limits")
+  assert.deepEqual({ needed: r.seen.needed, bitrefill: r.seen.bitrefill }, { needed: true, bitrefill: false }, "the lapsed login is forgotten")
+
+  const lapsing = fakeBitrefillOAuth(60)
+  const bare = world({ real: true, guest: true, credit: 100_000_000, oauth: lapsing })
+  const p = await bare.run(Effect.gen(function*() {
+    yield* connectAs()
+    lapsing.lapse()
+    return yield* bare.buy()
+  }))
+  assert.equal(p.status, "failed")
+  assert.match(p.error ?? "", /Your Bitrefill login expired\. Connect again or add an email in Wallet\. The full amount went back/)
+  assert.deepEqual(bare.calls, ["purchase", "fail_purchase"], "nothing ordered")
+  assert.deepEqual(bare.paid, [])
+})
+
+test("two purchases at once renew a login only once: its refresh token works once", async () => {
+  const oauth = fakeBitrefillOAuth(60)
+  const w = world({ real: true, guest: true, credit: 100_000_000, oauth })
+  const ps = await w.run(Effect.andThen(connectAs(), Effect.all([w.buy(), w.buy()], { concurrency: "unbounded" })))
+  assert.deepEqual(ps.map((p) => p.status), ["delivered", "delivered"])
+  assert.equal(oauth.grants("refresh_token").length, 1)
+  assert.deepEqual(w.calls.filter((c) => c.startsWith("order:")), ["order:token:access-2", "order:token:access-2"])
+})
+
+test("a login Bitrefill stops taking (401) is renewed once and the card ordered again; its limit reads as the account's", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, orders: ["Refused"] })
+  const p = await w.run(Effect.andThen(connectAs(), w.buy()))
+  assert.equal(p.status, "delivered")
+  assert.deepEqual(w.calls.filter((c) => c.startsWith("order:")), ["order:token:access-1", "order:token:access-2"])
+
+  const limited = world({ real: true, guest: true, credit: 100_000_000, orders: ["Refused"], refusal: "Purchase limit reached (INVALID_INPUT)" })
+  const refused = await limited.run(Effect.andThen(connectAs(), limited.buy()))
+  assert.equal(refused.status, "failed")
+  assert.match(refused.error ?? "", /^Your Bitrefill account's limit was reached/)
 })

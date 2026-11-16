@@ -57,6 +57,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    - `WEB_ORIGIN=` the web app's URL, for CORS
    - `SESSION_SECRET` and `REDEMPTION_KEY` (`openssl rand -hex 32` each). Back up `REDEMPTION_KEY` somewhere safe: without it, stored voucher codes can't be decrypted.
    - the NEAR, Bitrefill, Telegram and NEAR AI values. On mainnet, the operator account should hold only a function-call key for the contract, and the server refuses to start if any required value is missing.
+   - optionally `BITREFILL_REDIRECT_URI=https://<this API's domain>/bitrefill/callback`, once Bitrefill has that exact URI on our client: customers can then connect their own Bitrefill account for higher limits (ADR-0012). Staging's is `https://staging-api.luckout.wtf/bitrefill/callback`.
    - `ALERT_TELEGRAM_CHAT_ID`, so alerts (low gas, contract storage, stuck or late purchases) reach you in Telegram. They're always in the logs too.
 6. **Run.**
    ```sh

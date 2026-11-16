@@ -5,7 +5,7 @@ import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
 import { Refill } from "./Refill.ts"
 import { Config, Effect, Layer, Redacted } from "effect"
-import { HttpRouter, HttpServerRequest } from "effect/http"
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
@@ -13,6 +13,7 @@ import { Alerts } from "./Alerts.ts"
 import { Auth } from "./Auth.ts"
 import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
+import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
@@ -90,6 +91,7 @@ const SessionHandlers = HttpApiBuilder.group(Api, "session", (handlers) =>
 const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
   Effect.gen(function*() {
     const purchases = yield* Purchases
+    const connect = yield* Connect
     return handlers.handleAll({
       create: ({ payload }) => CurrentAccount.use((a) => purchases.create(a.accountId, payload)),
       list: () => CurrentAccount.use((a) => purchases.list(a.accountId)),
@@ -102,7 +104,10 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
           ? CurrentAccount.use((a) => purchases.cancel(a.accountId, params.id))
           : Effect.fail(new NotFound()),
       checkoutEmail: () => CurrentAccount.use((a) => purchases.checkoutEmail(a.accountId)),
-      setCheckoutEmail: ({ payload }) => CurrentAccount.use((a) => purchases.setCheckoutEmail(a.accountId, payload.email))
+      setCheckoutEmail: ({ payload }) => CurrentAccount.use((a) => purchases.setCheckoutEmail(a.accountId, payload.email)),
+      connectBitrefill: () => CurrentAccount.use((a) => Effect.map(connect.url(a.accountId), (url) => ({ url }))),
+      finishBitrefill: ({ payload }) => CurrentAccount.use((a) => Effect.andThen(connect.finish(a.accountId, payload.code, payload.state), purchases.checkoutEmail(a.accountId))),
+      disconnectBitrefill: () => CurrentAccount.use((a) => Effect.andThen(connect.disconnect(a.accountId), purchases.checkoutEmail(a.accountId)))
     })
   })
 )
@@ -191,7 +196,7 @@ const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.laye
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
   Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
   // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
-  Layer.provideMerge(Credit.layer),
+  Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer)),
   Layer.provideMerge(Base.layer),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
@@ -233,7 +238,14 @@ const Routes = Layer.mergeAll(
     Layer.provide(AuthorizationLive)
   ),
   // Read-only tools for other AI agents (Mcp.ts).
-  McpRoute
+  McpRoute,
+  // Bitrefill sends the customer's browser back here after they log in. No session here: it checks the reply and
+  // forwards the code to the Wallet page, which finishes connecting in the customer's own session.
+  Layer.unwrap(Effect.gen(function*() {
+    const connect = yield* Connect
+    return HttpRouter.add("GET", "/bitrefill/callback", (request) =>
+      Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
+  }))
 ).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(

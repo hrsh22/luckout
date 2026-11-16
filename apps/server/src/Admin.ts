@@ -100,8 +100,8 @@ export class Admin extends Context.Service<Admin, {
           sales.status,
           near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
           // Per Checkout Email, counted the way Purchases checks Bitrefill's limits; the busiest on each figure.
-          sql<{ emails: number; orders: number; daily: string; monthly: string }>`
-            SELECT (SELECT count(*)::int FROM checkout_emails) AS emails,
+          sql<{ emails: number; connected: number; orders: number; daily: string; monthly: string }>`
+            SELECT (SELECT count(*)::int FROM checkout_emails) AS emails, (SELECT count(*)::int FROM bitrefill_connections) AS connected,
                    COALESCE(max(orders), 0)::int AS orders, COALESCE(max(daily), 0)::text AS daily, COALESCE(max(monthly), 0)::text AS monthly
             FROM (
               SELECT count(*) FILTER (WHERE created_at > now() - interval '1 day') AS orders,
@@ -191,6 +191,7 @@ export class Admin extends Context.Service<Admin, {
           checkout: {
             guest: bitrefill.guest,
             emails: checkout[0]?.emails ?? 0,
+            connected: checkout[0]?.connected ?? 0,
             limits: { orders: GUEST_LIMITS.orders, daily: GUEST_LIMITS.daily, monthly: GUEST_LIMITS.monthly },
             busiest: { orders: checkout[0]?.orders ?? 0, daily: Number(checkout[0]?.daily ?? 0), monthly: Number(checkout[0]?.monthly ?? 0) }
           }
@@ -257,8 +258,10 @@ export class Admin extends Context.Service<Admin, {
           cashback: string | number
           last_purchase_at: Date | string | null
           checkout_email: boolean
+          bitrefill_connected: boolean
         }>`
           SELECT k.account_id, k.first_seen, t.telegram_name, (e.account_id IS NOT NULL) AS checkout_email,
+                 (b.account_id IS NOT NULL) AS bitrefill_connected,
                  count(p.id)::int AS purchases,
                  count(p.id) FILTER (WHERE p.step = 'settled')::int AS delivered,
                  coalesce(sum(coalesce((p.draw->>'final_price')::bigint, (p.admitted->>'max_price')::bigint, p.reference_price))
@@ -269,7 +272,8 @@ export class Admin extends Context.Service<Admin, {
           LEFT JOIN purchases p ON p.account_id = k.account_id
           LEFT JOIN telegram_links t ON t.account_id = k.account_id
           LEFT JOIN checkout_emails e ON e.account_id = k.account_id
-          GROUP BY k.account_id, k.first_seen, t.telegram_name, e.account_id
+          LEFT JOIN bitrefill_connections b ON b.account_id = k.account_id
+          GROUP BY k.account_id, k.first_seen, t.telegram_name, e.account_id, b.account_id
           ORDER BY max(p.created_at) DESC NULLS LAST, k.first_seen DESC`.pipe(Effect.orDie)
         const accounts = yield* Effect.forEach(rows, (r) =>
           near.view<{ balance: string; per_purchase_limit: string; daily_limit: string } | null>("get_account", { account_id: r.account_id }).pipe(
@@ -288,7 +292,8 @@ export class Admin extends Context.Service<Admin, {
             spent: Number(r.spent),
             cashback: Number(r.cashback),
             ...(r.last_purchase_at ? { lastPurchaseAt: new Date(r.last_purchase_at).toISOString() } : {}),
-            checkoutEmail: r.checkout_email
+            checkoutEmail: r.checkout_email,
+            bitrefillConnected: r.bitrefill_connected
           })
         })
       })

@@ -182,6 +182,7 @@ function UserRow({ u }: { u: AdminUser }) {
               ["Purchases", <Link key="p" href={`/admin/purchases?account=${encodeURIComponent(u.accountId)}`} className="underline">{u.purchases} ({u.delivered} delivered)</Link>],
               u.telegram !== undefined && ["Telegram", u.telegram],
               ["Checkout Email", u.checkoutEmail ? "Given" : "None yet"],
+              ["Bitrefill account", u.bitrefillConnected ? "Connected" : "Not connected"],
               ["First seen", new Date(u.firstSeen).toLocaleString()],
               ["Explorer", <Ext key="x" href={explorerAccount(u.accountId)}>nearblocks</Ext>]
             ]}
