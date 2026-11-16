@@ -37,7 +37,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
 ## Once
 
 1. **Site.** In CloudPanel: Add Site → Create a Node.js Site. Domain `luckout-api.gamified.trade`, site user `luckout-api`, app port `8788`. Point the domain's `A` record at the VM, then issue a Let's Encrypt certificate under SSL/TLS. Mainnet also answers on `api.luckout.wtf`: it is on the `server_name` line in the Vhost tab, and the certificate covers both names (`clpctl lets-encrypt:install:certificate --domainName=luckout-api.gamified.trade --subjectAlternativeName=api.luckout.wtf`).
-2. **Timeout.** A purchase request waits for the voucher to be delivered. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block.
+2. **Timeout.** A purchase request waits up to a minute for the card (`PURCHASE_REQUEST_WAIT_MS`, 60 s), then answers "pending" and the page follows it, which keeps it under Cloudflare's 100 s. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block.
 3. **Postgres.** As the Postgres admin:
    ```sql
    CREATE ROLE luckout LOGIN PASSWORD '<openssl rand -hex 24>';
@@ -71,6 +71,18 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    @reboot cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect
    0 3 * * * pg_dump -h 127.0.0.1 -U luckout luckout | gzip > ~/backups/luckout-$(date +\%F).sql.gz && find ~/backups -name 'luckout-*.sql.gz' -mtime +14 -delete
    ```
+
+## Switching production to guest checkout (ADR-0012)
+
+Staging has run it since 2026-11-16. Mainnet won't start without a guest client, so the `.env` comes first, and the release from `staging` switches production over the moment it deploys.
+
+1. **A Bitrefill client for production.** Register it at `https://api.bitrefill.com/oauth/mcp/register`: client name `Luckout`, `redirect_uris: ["https://api.luckout.wtf/bitrefill/callback"]`, `grant_types: ["client_credentials", "authorization_code", "refresh_token"]`, `token_endpoint_auth_method: "client_secret_post"`. Keep the reply private: it holds the secret.
+2. **Server `.env`** on `luckout-api`, before merging: `BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`, `BITREFILL_REDIRECT_URI=https://api.luckout.wtf/bitrefill/callback`. Keep `BITREFILL_API_KEY`: it now only reads the catalog. The running server ignores the new lines until it restarts.
+3. **Bitrefill credit.** Nothing spends it after the switch. About a day before, turn automatic refills off in Admin, so sales spend it down. Whatever is left stays on the account, so keep the key private as before.
+4. **No refill in flight.** Merge only while Admin → Refills shows none running, because a refill started in credit mode would end in the Base Float.
+5. **Merge** the release PR from `staging` into `main`. Migrations 0018 and 0019 run at start.
+6. **Base Float.** Every card is now paid from the Base wallet's USDC. Refills fill it to about a day of sales from the treasury, so the treasury needs proceeds (Automatic) or a manual top-up. Keep about $1 of ETH there for gas.
+7. **Prove it:** a ₹50 card on the site (with a Checkout Email), one through the Telegram bot, and Connect Bitrefill from Wallet. Then check Admin → Base Float, Checkout and the purchase's Base payment.
 
 ## Updating
 
