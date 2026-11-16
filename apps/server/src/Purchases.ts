@@ -1,15 +1,17 @@
 import { BitrefillUnavailable, CheckoutEmail, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, Quote } from "@luckout/api"
-import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Redacted, Schedule } from "effect"
+import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto"
+import { createHmac } from "node:crypto"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type SignedPayment } from "./Base.ts"
 import { Bitrefill, ORDER_LIMIT } from "./Bitrefill.ts"
+import { Connect } from "./Connect.ts"
 import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
 import { stepRows } from "./Rows.ts"
 import { closedMessage, Sales } from "./Sales.ts"
+import { SealKey, sealWith, unsealWith } from "./Seal.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
 
 // A purchase walks these steps (ADR-0001). Every step is saved before its side effect,
@@ -53,6 +55,8 @@ interface Row {
   pay_amount: number | string | bigint | null
   pay_tx: SignedPayment | null
   email_key: string | null
+  /** Whom a guest-checkout order was placed for: a guest (Checkout Email) or the customer's own Bitrefill account. */
+  buyer: "guest" | "account" | null
   redemption: string | null
   settle_tx: Signed | null
   draw: Record<string, unknown> | null
@@ -83,6 +87,8 @@ export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "f
 export const GUEST_LIMITS = { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 } as const
 /** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
 const INVOICE_TTL_MS = 40 * 60_000
+/** Why a card couldn't be ordered: their Bitrefill login lapsed, and there's no Checkout Email to fall back on. */
+const LOGIN_LAPSED = "Your Bitrefill login expired. Connect again or add an email in Wallet."
 /** The email shape Bitrefill's buy-products accepts. */
 const EMAIL = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/
 /** About six hours of retries with backoff (30s doubling, capped at an hour). */
@@ -140,25 +146,14 @@ export class Purchases extends Context.Service<Purchases, {
       const refill = yield* Refill
       const sales = yield* Sales
       const alerts = yield* Alerts
-      const keyHex = yield* Config.option(Config.Redacted("REDEMPTION_KEY"))
+      const connect = yield* Connect
+      const key = yield* SealKey
       const testnet = (yield* Network) === "testnet"
       const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-      const key = Option.map(keyHex, (k) => Buffer.from(Redacted.value(k), "hex")).pipe(Option.filter((k) => k.length === 32))
 
-      // Redemption Data is encrypted at rest (AES-256-GCM), bound to its purchase id.
-      const seal = (id: string, data: unknown) => {
-        const iv = randomBytes(12)
-        const c = createCipheriv("aes-256-gcm", Option.getOrThrow(key), iv).setAAD(Buffer.from(id))
-        const body = Buffer.concat([c.update(JSON.stringify(data)), c.final()])
-        return Buffer.concat([iv, c.getAuthTag(), body]).toString("base64")
-      }
-      const unseal = (id: string, sealed: string): Record<string, unknown> => {
-        const b = Buffer.from(sealed, "base64")
-        const d = createDecipheriv("aes-256-gcm", Option.getOrThrow(key), b.subarray(0, 12))
-          .setAAD(Buffer.from(id))
-          .setAuthTag(b.subarray(12, 28))
-        return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]).toString())
-      }
+      // Redemption Data is encrypted at rest (Seal.ts), bound to its purchase id.
+      const seal = (id: string, data: unknown) => sealWith(Option.getOrThrow(key), id, data)
+      const unseal = (id: string, sealed: string) => unsealWith(Option.getOrThrow(key), id, sealed) as Record<string, unknown>
 
       // The Checkout Email is sealed like Redemption Data (bound to its account). Its keyed hash lets Bitrefill's
       // per-email limits be counted without reading it, and gives the same value for the same email on any account.
@@ -168,9 +163,12 @@ export class Purchases extends Context.Service<Purchases, {
           Effect.orDie,
           Effect.map(([r]) => (r ? { email: String(unseal(`email:${accountId}`, r.email)), key: r.email_key } : undefined))
         )
+      // A customer who connected their own Bitrefill account needs no email: their cards are bought on it.
       const checkoutEmail = (accountId: string) =>
-        (Option.isNone(key) ? Effect.succeed(undefined) : emailOf(accountId)).pipe(
-          Effect.map((e) => new CheckoutEmail({ needed: bitrefill.guest, ...(e ? { email: e.email } : {}) }))
+        Effect.all([Option.isNone(key) ? Effect.succeed(undefined) : emailOf(accountId), connect.connected(accountId)]).pipe(
+          Effect.map(([e, connected]) =>
+            new CheckoutEmail({ needed: bitrefill.guest && !connected, ...(e ? { email: e.email } : {}), ...(connect.offered ? { bitrefill: connected } : {}) })
+          )
         )
       const setCheckoutEmail = (accountId: string, input: string) =>
         Effect.gen(function*() {
@@ -260,10 +258,22 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "ordering": {
               if (bitrefill.guest) {
-                const email = yield* emailOf(row.account_id)
-                const order = yield* bitrefill.order(row.voucher_id, row.package_value, email?.email)
+                // On the customer's own Bitrefill account if they connected it (a login Bitrefill stops taking is
+                // renewed once); without one, or once it lapsed, as a guest with their Checkout Email.
+                const place = (renew: boolean) =>
+                  Effect.gen(function*() {
+                    const token = yield* connect.token(row.account_id, renew)
+                    if (token) return { buyer: "account" as const, email_key: null, order: yield* bitrefill.order(row.voucher_id, row.package_value, { token }) }
+                    const email = yield* emailOf(row.account_id)
+                    if (!email) return undefined
+                    return { buyer: "guest" as const, email_key: email.key, order: yield* bitrefill.order(row.voucher_id, row.package_value, { email: email.email }) }
+                  })
+                let placed = yield* place(false)
+                if (placed?.buyer === "account" && placed.order._tag === "Refused" && placed.order.reason.startsWith("HTTP 401")) placed = yield* place(true)
+                if (!placed) return yield* move(row, { step: "fail", error: LOGIN_LAPSED })
+                const { order, ...buyer } = placed
                 if (order._tag !== "Invoiced") {
-                  return yield* move(row, { step: "fail", error: `Bitrefill refused: ${"reason" in order ? order.reason : order._tag}` })
+                  return yield* move(row, { step: "fail", error: `Bitrefill refused: ${"reason" in order ? order.reason : order._tag}`, ...buyer })
                 }
                 // Never pay Bitrefill more than the price the contract admitted (what the customer is charged).
                 if (order.amount > Number(row.reference_price)) {
@@ -271,6 +281,7 @@ export class Purchases extends Context.Service<Purchases, {
                 }
                 return yield* move(row, {
                   step: "pay",
+                  ...buyer,
                   invoice_id: order.invoiceId,
                   invoice_token: seal(`invoice:${row.id}`, order.accessToken),
                   invoice_at: new Date().toISOString(),
@@ -439,8 +450,12 @@ export class Purchases extends Context.Service<Purchases, {
             ? {
               error: row.error === "Reclaimed"
                 ? "You reclaimed the full amount after 24 hours."
+                : row.error === LOGIN_LAPSED
+                ? `${LOGIN_LAPSED} The full amount went back to your balance.`
                 : ORDER_LIMIT.test(row.error ?? "")
-                ? "Bitrefill's daily order limit was reached just then. The full amount went back to your balance."
+                ? row.buyer === "account"
+                  ? "Your Bitrefill account's limit was reached just then. The full amount went back to your balance."
+                  : "Bitrefill's daily order limit was reached just then. The full amount went back to your balance."
                 : "Bitrefill couldn't deliver this voucher. The full amount went back to your balance."
             }
             : {}),
@@ -553,8 +568,10 @@ export class Purchases extends Context.Service<Purchases, {
           }
         }
         // A guest order needs the customer's Checkout Email, and stays within Bitrefill's limits for it (ADR-0012).
-        const email = real && bitrefill.guest ? yield* emailOf(accountId) : undefined
-        if (real && bitrefill.guest) {
+        // One on the customer's own Bitrefill account is under that account's limits, which Bitrefill checks.
+        const asGuest = real && bitrefill.guest && !(yield* connect.connected(accountId))
+        const email = asGuest ? yield* emailOf(accountId) : undefined
+        if (asGuest) {
           if (!email) return yield* new PurchaseInvalid({ message: "Add the email for your cards first: Bitrefill needs one for each card (a throwaway one is fine)." })
           const over = yield* overGuestLimit(email.key, referencePrice)
           if (over) return yield* new PurchaseInvalid({ message: over })

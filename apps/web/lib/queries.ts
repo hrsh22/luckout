@@ -108,7 +108,10 @@ export const usePurchases = (token: string | undefined) =>
     }
   })
 
-/** The Checkout Email Bitrefill gets with each card (ADR-0012). `needed` is false where buying takes none (testnet). */
+/**
+ * The Checkout Email Bitrefill gets with each card (ADR-0012). `needed` is false where buying takes none (testnet,
+ * or they connected their own Bitrefill account: `bitrefill`, missing where connecting isn't offered).
+ */
 export const useCheckoutEmail = (token: string | undefined) =>
   useQuery({
     queryKey: ["checkout-email", token],

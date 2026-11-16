@@ -263,6 +263,18 @@ const migrations = Migrator.fromRecord({
     yield* sql`ALTER TABLE purchases ADD COLUMN email_key TEXT, ADD COLUMN invoice_token TEXT, ADD COLUMN invoice_at TIMESTAMPTZ,
                ADD COLUMN pay_to TEXT, ADD COLUMN pay_amount BIGINT, ADD COLUMN pay_tx JSONB`
     yield* sql`CREATE INDEX purchases_email_key ON purchases (email_key, created_at) WHERE email_key IS NOT NULL`
+  }),
+  // Connect Bitrefill (ADR-0012): a customer's own Bitrefill login, one per account, its tokens sealed together; and
+  // whom each guest-checkout order was placed for: a guest with the Checkout Email, or the customer's own account.
+  "0019_bitrefill_connections": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TABLE bitrefill_connections (
+      account_id TEXT PRIMARY KEY,
+      tokens TEXT NOT NULL,
+      access_expires_at TIMESTAMPTZ NOT NULL,
+      refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+    yield* sql`ALTER TABLE purchases ADD COLUMN buyer TEXT CHECK (buyer IN ('guest', 'account'))`
   })
 })
 

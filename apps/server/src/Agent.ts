@@ -218,7 +218,8 @@ export const makeAgent = (deps: {
             running_total: usd(Number(a.cashback_received) - Number(a.premiums_paid))
           }
           : { balance: "$0.00", note: `No deposit yet. Add funds at ${deps.web}/wallet` }),
-        ...(e.needed ? { card_email: e.email ?? "not set yet" } : {})
+        ...(e.needed ? { card_email: e.email ?? "not set yet" } : {}),
+        ...(e.bitrefill ? { cards_bought_on: "their own Bitrefill account" } : {})
       })))),
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {
@@ -247,7 +248,11 @@ export const makeAgent = (deps: {
         // Bitrefill needs an email with each card (ADR-0012): without one the Buy button would only fail.
         const email = yield* deps.purchases.checkoutEmail(accountId)
         if (email.needed && !email.email) {
-          return { error: "They haven't given an email for their cards yet. Ask for one, save it with set_checkout_email, then prepare again." }
+          return {
+            error: `They haven't given an email for their cards yet. Ask for one, save it with set_checkout_email, then prepare again.${
+              email.bitrefill === false ? ` Or they can connect their own Bitrefill account at ${deps.web}/wallet instead, for higher limits.` : ""
+            }`
+          }
         }
         prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
         return {

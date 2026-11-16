@@ -1,6 +1,6 @@
 "use client"
 
-import { CheckoutEmailForm } from "@/components/checkout-email"
+import { BitrefillAccount, CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
 import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
@@ -129,6 +129,13 @@ export default function WalletPage() {
           <div className="card p-6">
             <CheckoutEmailForm onSaved={() => toast.success("Email saved")} />
           </div>
+        </section>
+      )}
+
+      {checkout?.bitrefill !== undefined && (
+        <section className="flex flex-col gap-4">
+          <h2 className="font-display text-3xl font-extrabold">Bitrefill account</h2>
+          <BitrefillAccount />
         </section>
       )}
 

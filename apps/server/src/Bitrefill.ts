@@ -6,7 +6,8 @@ import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
 // On mainnet, cards are bought as a guest through Bitrefill's MCP endpoint with the customer's Checkout
-// Email, and each invoice is paid in USDC on Base from our Base Wallet (ADR-0012). The API key only reads:
+// Email, or on their own Bitrefill account once they've connected it (Connect.ts), and each invoice is paid
+// in USDC on Base from our Base Wallet (ADR-0012). The API key only reads:
 // the catalog, logos and prices. Testnet buys Bitrefill's free test cards on REST with its own account,
 // since a guest can't buy those. Without a guest client (BITREFILL_CLIENT_ID), mainnet still buys from the
 // account's USD store credit (ADR-0009), until it's switched over.
@@ -81,7 +82,7 @@ const GuestInvoice = Schema.Struct({
 const Token = Schema.Struct({ access_token: Schema.String, expires_in: Schema.Number })
 /** Native USDC on Base: the only coin a guest invoice is paid in. */
 const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-const MCP_RESOURCE = "https://api.bitrefill.com/mcp"
+export const MCP_RESOURCE = "https://api.bitrefill.com/mcp"
 /** A guest invoice that ended without delivering; anything else unfinished is still on its way. */
 const GUEST_FAILED = /expired|refunded|blocked|error|failed|cancel/i
 const Invoice = Schema.Struct({
@@ -110,6 +111,9 @@ export type Order =
   | { readonly _tag: "NoCredit"; readonly reason: string }
   /** Bitrefill refused before creating or paying anything. */
   | { readonly _tag: "Refused"; readonly reason: string }
+
+/** Who an order is placed for: a guest with their Checkout Email, or the customer's own Bitrefill login (Connect.ts). */
+export type Buyer = { readonly email: string } | { readonly token: string }
 
 /** A USD credit deposit: sending exactly `price` (USDC base units) to `address` on Base buys `amount` of credit. */
 export interface CreditDeposit {
@@ -291,10 +295,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
    */
   voucher(id: string, options?: { readonly purchase?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
   /**
-   * Orders a card. A guest (with the customer's Checkout Email) gets an unpaid invoice to pay from the Base
-   * Wallet; otherwise it's paid at once from the USD balance. Save the invoice before going on.
+   * Orders a card. With guest checkout it's an unpaid invoice to pay from the Base Wallet, placed as a guest
+   * with the customer's Checkout Email or on their own Bitrefill account; otherwise it's paid at once from the
+   * USD balance. Save the invoice before going on.
    */
-  order(id: string, value: string, email?: string): Effect.Effect<Order, BitrefillUnavailable>
+  order(id: string, value: string, buyer?: Buyer): Effect.Effect<Order, BitrefillUnavailable>
   /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). A guest invoice needs its access token. */
   delivery(invoiceId: string, accessToken?: string): Effect.Effect<Delivery, BitrefillUnavailable>
   /** Our USD store credit, and how much more Bitrefill lets us hold (micro-USDC). */
@@ -599,14 +604,13 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
 
       // A guest invoice is paid by us afterwards, so creating one moves no money: one we can't use (wrong coin,
-      // a malformed address) is simply refused here and expires unpaid.
-      const guestOrder = (id: string, value: string, email: string) =>
-        asGuest("buy-products", {
-          cart_items: [{ product_id: id, package_value: value }],
-          payment_method: "usdc_base",
-          email,
-          return_payment_link: false
-        }, GuestPurchase).pipe(
+      // a malformed address) is simply refused here and expires unpaid. On the customer's own account it's the
+      // same invoice, without an email (the receipt goes to the account's); a 401 there means their login lapsed.
+      const invoiceOrder = (id: string, value: string, buyer: Buyer) => {
+        const args = { cart_items: [{ product_id: id, package_value: value }], payment_method: "usdc_base", return_payment_link: false }
+        return ("email" in buyer
+          ? asGuest("buy-products", { ...args, email: buyer.email }, GuestPurchase)
+          : mcp("buy-products", args, GuestPurchase, buyer.token)).pipe(
           Effect.flatMap(({ response: r }): Effect.Effect<Order, Rejected> => {
             const pay = r.payment_info
             if (pay.contractAddress.toLowerCase() !== BASE_USDC) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Base` }))
@@ -615,11 +619,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             return Effect.succeed({ _tag: "Invoiced", invoiceId: r.invoice_id, accessToken: r.invoice_access_token, payTo: pay.address, amount: pay.altBasePrice })
           })
         )
+      }
 
-      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string, email?: string) {
+      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string, buyer?: Buyer) {
         if (guest) {
-          if (!email) return { _tag: "Refused", reason: "no Checkout Email" } as Order
-          return yield* guestOrder(id, value, email).pipe(
+          if (!buyer) return { _tag: "Refused", reason: "no Checkout Email" } as Order
+          return yield* invoiceOrder(id, value, buyer).pipe(
             Effect.catchTag("Rejected", (e) => Effect.succeed<Order>({ _tag: "Refused", reason: e.reason }))
           )
         }

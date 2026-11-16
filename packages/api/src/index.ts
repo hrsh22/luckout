@@ -283,11 +283,14 @@ export class SessionApi extends HttpApiGroup.make("session").add(
 
 /**
  * The email Bitrefill gets with each of the customer's cards (the Checkout Email, ADR-0012). `needed`: buying
- * a card needs one here (guest checkout); `email` is unset until they give one.
+ * a card needs one here (guest checkout, not connected); `email` is unset until they give one. `bitrefill`:
+ * they've connected their own Bitrefill account, whose limits their cards are then bought under; missing
+ * where connecting isn't offered.
  */
 export class CheckoutEmail extends Schema.Class<CheckoutEmail>("CheckoutEmail")({
   needed: Schema.Boolean,
-  email: Schema.optional(Schema.String)
+  email: Schema.optional(Schema.String),
+  bitrefill: Schema.optional(Schema.Boolean)
 }) {}
 
 export class PurchasesApi extends HttpApiGroup.make("purchases").add(
@@ -305,7 +308,11 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
     payload: Schema.Struct({ email: Schema.String }),
     success: CheckoutEmail,
     error: PurchaseInvalid
-  })
+  }),
+  /** Where the customer logs in to their own Bitrefill account; Bitrefill sends them back through /bitrefill/callback. */
+  HttpApiEndpoint.post("connectBitrefill", "/bitrefill/connect", { success: Schema.Struct({ url: Schema.String }), error: PurchaseInvalid }),
+  /** Revokes and forgets their Bitrefill login: their cards go back to guest checkout with the Checkout Email. */
+  HttpApiEndpoint.post("disconnectBitrefill", "/bitrefill/disconnect", { success: CheckoutEmail })
 ).middleware(Authorization) {}
 
 export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
@@ -707,6 +714,8 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     guest: Schema.Boolean,
     /** Customers who have given a Checkout Email. */
     emails: Schema.Int,
+    /** Customers whose cards are bought on their own Bitrefill account (Connect Bitrefill). */
+    connected: Schema.Int,
     /** Bitrefill's limits for one Checkout Email: cards a day, and USD a day and a month. */
     limits: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc }),
     /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
@@ -754,7 +763,9 @@ export class AdminUser extends Schema.Class<AdminUser>("AdminUser")({
   cashback: MicroUsdc,
   lastPurchaseAt: Schema.optional(Schema.String),
   /** They've given a Checkout Email (ADR-0012); the email itself stays sealed. */
-  checkoutEmail: Schema.Boolean
+  checkoutEmail: Schema.Boolean,
+  /** Their cards are bought on their own Bitrefill account. */
+  bitrefillConnected: Schema.Boolean
 }) {}
 
 // Left out of /openapi.json: to anyone but an admin, these endpoints don't exist.
