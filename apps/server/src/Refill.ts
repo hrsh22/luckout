@@ -220,6 +220,9 @@ export class Refill extends Context.Service<Refill, {
       // With guest checkout every refill ends in the Base Float, which pays the cards (ADR-0012); only a float
       // top-up (isFloat) still waits for money quietly.
       const endsInFloat = (row: { readonly reason: string }) => bitrefill.guest || isFloat(row)
+      // What the alerts and the admin panel call the money refills top up (ADR-0012).
+      const refillName = bitrefill.guest ? "Base Float refill" : "Bitrefill refill"
+      const section = bitrefill.guest ? "Admin → Base Float" : "Admin → Bitrefill credit"
       const planLock = yield* Semaphore.make(1)
       const running = new Set<string>()
       // Refills run in fibers owned by this service, so a shutdown waits for the step in progress.
@@ -388,7 +391,7 @@ export class Refill extends Context.Service<Refill, {
               const tell = (text: string) => (isFloat(row) ? Effect.void : alerts.admin(text))
               if (t.dailyCap === 0) {
                 yield* save(row.id, { error: `Waiting for ${usd(shortfall)} of proceeds in the treasury (manual mode).` })
-                yield* tell(`A Bitrefill refill is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
+                yield* tell(`A ${refillName} is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
                 return "wait"
               }
               const capLeft = t.dailyCap - t.sweptToday
@@ -398,7 +401,7 @@ export class Refill extends Context.Service<Refill, {
                   ? `Today's cap allows ${usd(Math.max(0, capLeft))} more (${usd(t.sweptToday)} of ${usd(t.dailyCap)} used): raise it in Admin → Treasury → Change mode, say to ${usd(suggestedCap(t.dailyCap, t.sweptToday + shortfall))}, or it carries on when the cap resets.`
                   : `The proceeds hold only ${usd(t.proceeds)}: it carries on as sales come in, or send USDC to ${near.treasuryId} to cover it now.`
                 yield* save(row.id, { error: `The treasury needs ${usd(shortfall)} more. ${fix}` })
-                yield* tell(`A ${usd(amount)} Bitrefill refill needs ${usd(shortfall)} more in the treasury. ${fix}`)
+                yield* tell(`A ${usd(amount)} ${refillName} needs ${usd(shortfall)} more in the treasury. ${fix}`)
                 return "wait"
               }
               // Pull exactly the shortfall: the treasury never holds more than refills need.
@@ -654,7 +657,7 @@ export class Refill extends Context.Service<Refill, {
       const size = (requested: number | undefined) =>
         Effect.gen(function*() {
           // Money moves on this number: read Bitrefill afresh, and never size a refill blind.
-          if ((yield* credit.refresh)._tag === "None") return { amount: 0, why: "Bitrefill's balance can't be read right now." }
+          if ((yield* credit.refresh)._tag === "None") return { amount: 0, why: bitrefill.guest ? "The Base Float's balance can't be read right now." : "Bitrefill's balance can't be read right now." }
           const c = yield* credit.view
           const s = c.settings
           const free = Math.max(0, c.free)
@@ -669,10 +672,10 @@ export class Refill extends Context.Service<Refill, {
           const amount = Math.floor(Math.min(cents(Math.max(wanted, MIN_REFILL)), limit) / 10_000) * 10_000
           if (amount < MIN_REFILL) {
             const why = limit === left
-              ? `today's refills have reached the ${usd(s.dailyRefill)} daily limit. It carries on as the 24-hour window frees up, or raise the limit in Admin → Bitrefill credit → Settings.`
+              ? `today's refills have reached the ${usd(s.dailyRefill)} daily limit. It carries on as the 24-hour window frees up, or raise the limit in ${section} → Settings.`
               : limit === room
               ? "Bitrefill's account holds as much credit as it allows. Ask Bitrefill to raise the account limit."
-              : "the ceiling. Raise it in Admin → Bitrefill credit → Settings."
+              : `the ceiling. Raise it in ${section} → Settings.`
             return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)}: ${why}` }
           }
           return { amount, why: c.waiting.total > 0 ? "waiting" : "target" }
@@ -724,7 +727,7 @@ export class Refill extends Context.Service<Refill, {
         if (why === AUTO_OFF) {
           // Off by choice: still say when a refill is due, so nobody has to watch the number.
           const due = yield* size(undefined)
-          if (due.amount > 0) yield* alerts.admin(`Bitrefill credit is low and automatic refills are off: a ${usd(due.amount)} refill is due (Admin → Bitrefill credit).`)
+          if (due.amount > 0) yield* alerts.admin(`${bitrefill.guest ? "The Base Float" : "Bitrefill credit"} is low and automatic refills are off: a ${usd(due.amount)} refill is due (${section}).`)
         }
         if (why) return
         const s = yield* size(undefined)
@@ -759,7 +762,7 @@ export class Refill extends Context.Service<Refill, {
           const s = yield* size(amount)
           if (s.amount === 0) return yield* new AdminInvalid({ message: s.why })
           const row = yield* start(s.amount, "manual", by)
-          yield* alerts.admin(`${by} started a ${usd(s.amount)} Bitrefill refill.`)
+          yield* alerts.admin(`${by} started a ${usd(s.amount)} ${refillName}.`)
           yield* FiberSet.run(workflows, advance(row.id))
           return toView(row)
         }))

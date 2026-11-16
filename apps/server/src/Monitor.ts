@@ -49,7 +49,7 @@ export const Monitor = Layer.effectDiscard(
         yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; customers' wallets pay their own fees when it runs out`)
       }
       if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
-        yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; Bitrefill refills stop when it runs out`)
+        yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`)
       }
       if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
         yield* alerts.admin(`contract ${near.contractId} has under ${nearText(GAS_ALERT.contract)} free for storage; purchases fail when it runs out`)
@@ -78,7 +78,7 @@ export const Monitor = Layer.effectDiscard(
         // A Base RPC hiccup only skips this check.
         const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
         if (w && w[1].eth < BASE_GAS_ALERT) {
-          yield* alerts.admin(`the Base wallet ${w[0]} has under 0.0001 ETH left for gas; Bitrefill refills stop when it runs out (send about $1 of ETH on Base)`)
+          yield* alerts.admin(`the Base wallet ${w[0]} has under 0.0001 ETH left for gas; Base payments to Bitrefill stop when it runs out (send about $1 of ETH on Base)`)
         }
       }
       const [r] = yield* sql<{ stuck: number; late: number }>`
