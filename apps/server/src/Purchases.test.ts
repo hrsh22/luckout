@@ -43,9 +43,15 @@ const world = (opts: {
   invoiceAmount?: number
   /** How each Base payment ends; "success" unless set. */
   payments?: Array<PaymentStatus>
+  /** Bitrefill takes this long (ms) to deliver. */
+  deliveryDelay?: number
+  /** How long a buy request waits (ms) before answering "pending". */
+  requestWait?: number
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
+  /** Telegram notices to customers. */
+  const notices: Array<string> = []
   /** What admission was asked for, each time. */
   const admits: Array<Record<string, unknown>> = []
   let creditBalance = opts.credit ?? 1_000_000_000
@@ -114,7 +120,7 @@ const world = (opts: {
       Effect.sync(() => {
         if (token) calls.push(`delivery:${token}`)
         return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123" } }
-      }),
+      }).pipe(Effect.delay(opts.deliveryDelay ?? 0)),
     // Each read takes `creditDelay` (set when it starts), like a slow Bitrefill.
     credit: Effect.suspend(() => Effect.delay(Effect.sync(() => ({ balance: creditBalance, room: 2_000_000_000 })), creditDelay))
   })
@@ -133,12 +139,12 @@ const world = (opts: {
       Layer.succeed(Base, base),
       Layer.succeed(Refill, refill),
       Layer.succeed(Sales, Sales.of({ status: Effect.sync(() => shop), setOpen: () => Effect.die("not used") })),
-      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
+      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: (_, t) => Effect.sync(() => (notices.push(t), true)) }))
     )),
     Layer.provideMerge(DbMemory),
     // Real cards are only sold on mainnet.
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({
-      env: { ...(process.env as Record<string, string>), NEAR_NETWORK: opts.real ? "mainnet" : "testnet" }
+      env: { ...(process.env as Record<string, string>), NEAR_NETWORK: opts.real ? "mainnet" : "testnet", ...(opts.requestWait ? { PURCHASE_REQUEST_WAIT_MS: String(opts.requestWait) } : {}) }
     })))
   )
   const buy = (key: string = crypto.randomUUID(), who = "alice.test") =>
@@ -147,6 +153,7 @@ const world = (opts: {
   return {
     calls,
     alerts,
+    notices,
     admits,
     paid,
     layer,
@@ -544,6 +551,31 @@ test("a guest card carries the customer's email, is paid once from the Base Floa
   assert.deepEqual(w.paid, [{ to: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: 10_000_000, resent: false }])
   assert.ok(!r.stored.includes("alice"), "the email is sealed at rest")
   assert.deepEqual({ needed: r.seen.needed, email: r.seen.email }, { needed: true, email: "alice@example.com" })
+})
+
+test("a buy request stops waiting after its limit and answers pending; the card still arrives and Telegram says so", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveryDelay: 400, requestWait: 50 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const p = yield* w.buy()
+    const before = [...w.notices]
+    yield* Effect.sleep("1 second")
+    const after = yield* Purchases.use((s) => s.get("alice.test", p.id))
+    return { p, before, after }
+  }))
+  assert.equal(r.p.status, "pending", "the request answered before the card arrived")
+  assert.deepEqual(r.before, [])
+  assert.equal(r.after.status, "delivered")
+  assert.equal(w.notices.length, 1)
+  assert.match(w.notices[0]!, /is ready/)
+  // A card that arrives within the wait is answered in the request, with no extra message.
+  const fast = world({ real: true, guest: true, credit: 100_000_000 })
+  const q = await fast.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    return yield* fast.buy()
+  }))
+  assert.equal(q.status, "delivered")
+  assert.deepEqual(fast.notices, [])
 })
 
 test("a guest card needs the customer's email first, and a malformed one is refused", async () => {

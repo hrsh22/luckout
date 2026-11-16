@@ -150,9 +150,8 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               <div className="card p-5 sm:p-6">
                 <CheckoutEmailForm label="Continue" onSaved={() => go(account ? 4 : 3)} />
               </div>
-              {!onDone && (
-                <Button variant="ghost" className="self-start" onClick={() => go(account ? 4 : 3)}>Skip for now</Button>
-              )}
+              {/* Its own skip even over a page: the header's "Skip for now" would also skip Add funds. */}
+              <Button variant="ghost" className="self-start" onClick={() => go(account ? 4 : 3)}>Add it later</Button>
             </>
           )}
 
@@ -178,7 +177,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="card flex flex-col gap-2 p-6">
                   <span className="flex items-center gap-2 text-sm text-muted"><Avatar id={accountId} size={20} />{shortAccount(accountId)}</span>
-                  <span className="font-display text-4xl font-extrabold"><Money micro={account?.balance ?? 0} /></span>
+                  <span className="font-display text-4xl font-extrabold"><Money micro={account?.balance ?? 0} down /></span>
                   <span className="text-sm text-muted">{account ? "in your balance" : "No funds yet. Add them any time."}</span>
                 </div>
                 <ModeTile mode={account?.default_mode ?? pendingMode(accountId) ?? mode} saved={!!account} />

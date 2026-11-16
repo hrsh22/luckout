@@ -143,6 +143,8 @@ export class Purchases extends Context.Service<Purchases, {
       const keyHex = yield* Config.option(Config.Redacted("REDEMPTION_KEY"))
       const testnet = (yield* Network) === "testnet"
       const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
+      /** How long a buy request waits for its card before answering "pending" (under Cloudflare's 100 s). */
+      const requestWait = yield* Config.Number("PURCHASE_REQUEST_WAIT_MS").pipe(Config.withDefault(60_000))
       const key = Option.map(keyHex, (k) => Buffer.from(Redacted.value(k), "hex")).pipe(Option.filter((k) => k.length === 32))
 
       // Redemption Data is encrypted at rest (AES-256-GCM), bound to its purchase id.
@@ -593,7 +595,14 @@ export class Purchases extends Context.Service<Purchases, {
           (yield* sql<{ id: string }>`SELECT id FROM purchases WHERE account_id = ${accountId} AND idempotency_key = ${input.idempotencyKey}`
             .pipe(Effect.orDie))[0]!.id
         if (inserted[0]?.step === "waiting") yield* refill.kick
-        else if (inserted.length > 0) yield* Fiber.join(yield* FiberSet.run(workflows, advance(id, false)))
+        else if (inserted.length > 0) {
+          // A guest card can take over a minute (Base payment, then Bitrefill), and Cloudflare drops a request at 100 s:
+          // stop waiting at requestWait and answer "pending". The run carries on; the web follows it, and Telegram hears when it ends.
+          const run = yield* FiberSet.run(workflows, advance(id, false))
+          if (Option.isNone(yield* Fiber.join(run).pipe(Effect.timeoutOption(requestWait)))) {
+            yield* FiberSet.run(workflows, Effect.andThen(Fiber.await(run), Effect.flatMap(load(id), notify)).pipe(Effect.ignore))
+          }
+        }
         return view(yield* load(id))
       })
 
