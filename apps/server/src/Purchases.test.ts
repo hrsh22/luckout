@@ -611,12 +611,14 @@ test("a reverted Base payment moves nothing: the card waits for the float, then 
 // Connect Bitrefill: a customer who logs in to their own Bitrefill account has their cards ordered on it, under its
 // limits instead of a guest's, and still paid from the Base Float.
 
-/** Connects `who`'s Bitrefill account the way the browser does: our authorize URL, then Bitrefill's redirect back. */
+/** Connects `who`'s Bitrefill account the way the browser does: our authorize URL, Bitrefill's redirect back, then the Wallet page. */
 const connectAs = (who = "alice.test") =>
   Connect.use((c) =>
     Effect.gen(function*() {
       const state = new URL(yield* c.url(who)).searchParams.get("state")!
-      return yield* c.callback(new URLSearchParams({ code: "the-code", state, iss: "https://api.bitrefill.com/oauth/mcp" }))
+      const back = new URL(yield* c.callback(new URLSearchParams({ code: "the-code", state, iss: "https://api.bitrefill.com/oauth/mcp" }))).searchParams
+      yield* c.finish(who, back.get("code")!, back.get("state")!)
+      return back.get("bitrefill")
     })
   )
 const buyerOf = (id: string) =>
@@ -639,7 +641,7 @@ test("a connected customer's card is ordered on their own Bitrefill account, wit
     const p = yield* w.buy()
     return { connected, seen, p, row: yield* buyerOf(p.id) }
   }))
-  assert.equal(r.connected, "http://localhost:3000/wallet?bitrefill=connected")
+  assert.equal(r.connected, "finish")
   assert.deepEqual({ needed: r.seen.needed, bitrefill: r.seen.bitrefill }, { needed: false, bitrefill: true })
   assert.equal(r.p.status, "delivered")
   assert.deepEqual(w.calls, ["purchase", "order:token:access-1", "delivery:secret-token", "confirm_delivery"], "their token and no email; delivery still reads the invoice by its access token")

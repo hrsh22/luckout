@@ -106,6 +106,7 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
       checkoutEmail: () => CurrentAccount.use((a) => purchases.checkoutEmail(a.accountId)),
       setCheckoutEmail: ({ payload }) => CurrentAccount.use((a) => purchases.setCheckoutEmail(a.accountId, payload.email)),
       connectBitrefill: () => CurrentAccount.use((a) => Effect.map(connect.url(a.accountId), (url) => ({ url }))),
+      finishBitrefill: ({ payload }) => CurrentAccount.use((a) => Effect.andThen(connect.finish(a.accountId, payload.code, payload.state), purchases.checkoutEmail(a.accountId))),
       disconnectBitrefill: () => CurrentAccount.use((a) => Effect.andThen(connect.disconnect(a.accountId), purchases.checkoutEmail(a.accountId)))
     })
   })
@@ -238,7 +239,8 @@ const Routes = Layer.mergeAll(
   ),
   // Read-only tools for other AI agents (Mcp.ts).
   McpRoute,
-  // Bitrefill sends the customer's browser back here after they log in: no session, the sealed state says who it is.
+  // Bitrefill sends the customer's browser back here after they log in. No session here: it checks the reply and
+  // forwards the code to the Wallet page, which finishes connecting in the customer's own session.
   Layer.unwrap(Effect.gen(function*() {
     const connect = yield* Connect
     return HttpRouter.add("GET", "/bitrefill/callback", (request) =>

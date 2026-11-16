@@ -34,9 +34,12 @@ test("connecting exchanges the code with PKCE and saves the login sealed", async
     const connect = yield* Connect
     const url = new URL(yield* connect.url("alice.test"))
     const back = yield* connect.callback(new URLSearchParams({ code: "the-code", state: url.searchParams.get("state")!, iss: ISS }))
+    const exchangedBefore = oauth.calls.length
+    const q = new URL(back).searchParams
+    yield* connect.finish("alice.test", q.get("code")!, q.get("state")!)
     const sql = yield* SqlClient.SqlClient
     const [row] = yield* sql<{ tokens: string }>`SELECT tokens FROM bitrefill_connections WHERE account_id = 'alice.test'`
-    return { url, back, tokens: row!.tokens, connected: yield* connect.connected("alice.test"), token: yield* connect.token("alice.test") }
+    return { url, back, exchangedBefore, tokens: row!.tokens, connected: yield* connect.connected("alice.test"), token: yield* connect.token("alice.test") }
   }))
   assert.equal(`${r.url.origin}${r.url.pathname}`, "https://api.bitrefill.com/oauth/mcp/authorize")
   const asked = Object.fromEntries(r.url.searchParams)
@@ -55,7 +58,10 @@ test("connecting exchanges the code with PKCE and saves the login sealed", async
   )
   assert.match(asked.state!, /^[\w-]+$/, "a URL-safe state")
   assert.ok(!r.url.href.includes("client-secret"))
-  assert.equal(r.back, "https://luckout.test/wallet?bitrefill=connected")
+  const back = new URL(r.back)
+  assert.equal(`${back.origin}${back.pathname}`, "https://luckout.test/wallet")
+  assert.deepEqual([back.searchParams.get("bitrefill"), back.searchParams.get("code"), back.searchParams.get("state")], ["finish", "the-code", asked.state])
+  assert.equal(r.exchangedBefore, 0, "the callback has no session, so it exchanges nothing")
   const exchange = oauth.grants("authorization_code")[0]!.params
   assert.equal(exchange.get("code"), "the-code")
   assert.equal(exchange.get("redirect_uri"), env.BITREFILL_REDIRECT_URI)
@@ -95,11 +101,28 @@ test("disconnecting revokes the login at Bitrefill and forgets it", async () => 
   const r = await run(oauth, Effect.gen(function*() {
     const connect = yield* Connect
     const state = new URL(yield* connect.url("alice.test")).searchParams.get("state")!
-    yield* connect.callback(new URLSearchParams({ code: "the-code", state, iss: ISS }))
+    yield* connect.finish("alice.test", "the-code", state)
     yield* connect.disconnect("alice.test")
     return { connected: yield* connect.connected("alice.test"), token: yield* connect.token("alice.test") }
   }))
   const revoke = oauth.calls.find((c) => c.path === "/oauth/mcp/revoke")!.params
   assert.deepEqual([revoke.get("token"), revoke.get("token_type_hint")], ["refresh-1", "refresh_token"])
   assert.deepEqual(r, { connected: false, token: undefined })
+})
+
+test("a login started from another Luckout account is refused when finished here, so nobody can attach their Bitrefill login to ours", async () => {
+  const oauth = fakeBitrefillOAuth()
+  const r = await run(oauth, Effect.gen(function*() {
+    const connect = yield* Connect
+    // Mallory starts connecting, then gets Alice to finish the Bitrefill login: Alice's browser lands on our Wallet page.
+    const state = new URL(yield* connect.url("mallory.test")).searchParams.get("state")!
+    const back = new URL(yield* connect.callback(new URLSearchParams({ code: "alices-code", state, iss: ISS }))).searchParams
+    const refused = yield* connect.finish("alice.test", back.get("code")!, back.get("state")!).pipe(Effect.flip)
+    const expired = yield* connect.finish("alice.test", "c", sealWith(Buffer.from(KEY, "hex"), "bitrefill-state", { account: "alice.test", verifier: "v", until: Date.now() - 1 })).pipe(Effect.flip)
+    return { refused: refused.message, expired: expired.message, alice: yield* connect.connected("alice.test"), mallory: yield* connect.connected("mallory.test") }
+  }))
+  assert.match(r.refused, /started from another Luckout account/)
+  assert.match(r.expired, /took too long/)
+  assert.deepEqual([r.alice, r.mallory], [false, false])
+  assert.deepEqual(oauth.calls, [], "no code exchanged")
 })

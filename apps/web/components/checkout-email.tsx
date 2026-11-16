@@ -6,7 +6,7 @@ import { useCheckoutEmail, useSaveCheckoutEmail } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { useQueryClient } from "@tanstack/react-query"
 import { KeyRound } from "lucide-react"
-import { useEffect, useId, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { toast } from "sonner"
 
 /**
@@ -53,7 +53,7 @@ export function CheckoutEmailForm({ label = "Save", onSaved }: { label?: string;
 
 /**
  * Connect Bitrefill (ADR-0012): the customer logs in to their own Bitrefill account, and their cards are bought on
- * it, under its limits instead of a guest's. Bitrefill sends them back to /wallet?bitrefill=connected (or failed).
+ * it, under its limits instead of a guest's. Bitrefill sends them back to /wallet?bitrefill=finish (or failed).
  */
 export function BitrefillAccount() {
   const { token } = useSession()
@@ -61,15 +61,28 @@ export function BitrefillAccount() {
   const connected = useCheckoutEmail(token).data?.bitrefill === true
   const [busy, setBusy] = useState(false)
 
-  // Back from Bitrefill: say how it went once, and drop the flag from the address.
+  // Back from Bitrefill with a code: it's exchanged here, in this session, so a login started from someone else's
+  // account (their link) is refused by the server. Then the code leaves the address.
+  const finishing = useRef(false)
   useEffect(() => {
-    const outcome = new URLSearchParams(window.location.search).get("bitrefill")
-    if (!outcome) return
+    const q = new URLSearchParams(window.location.search)
+    const outcome = q.get("bitrefill")
+    if (!outcome || (outcome === "finish" && !token) || finishing.current) return
+    finishing.current = true
     window.history.replaceState(null, "", window.location.pathname)
-    if (outcome === "connected") toast.success("Bitrefill connected", { description: "Your cards are now bought on your Bitrefill account." })
-    else toast.error("Couldn't connect Bitrefill", { description: "Nothing changed. Try again in a moment." })
-    void qc.invalidateQueries({ queryKey: ["checkout-email"] })
-  }, [qc])
+    if (outcome !== "finish") {
+      toast.error("Couldn't connect Bitrefill", { description: "Nothing changed. Try again in a moment." })
+      return
+    }
+    setBusy(true)
+    api((c) => c.purchases.finishBitrefill({ payload: { code: q.get("code") ?? "", state: q.get("state") ?? "" } }), token).then(
+      (saved) => {
+        qc.setQueryData(["checkout-email", token], saved)
+        toast.success("Bitrefill connected", { description: "Your cards are now bought on your Bitrefill account." })
+      },
+      (e) => toast.error("Couldn't connect Bitrefill", { description: errorMessage(e) })
+    ).finally(() => setBusy(false))
+  }, [qc, token])
 
   const connect = async () => {
     setBusy(true)

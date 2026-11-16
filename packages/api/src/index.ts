@@ -309,8 +309,14 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
     success: CheckoutEmail,
     error: PurchaseInvalid
   }),
-  /** Where the customer logs in to their own Bitrefill account; Bitrefill sends them back through /bitrefill/callback. */
+  /** Where the customer logs in to their own Bitrefill account; Bitrefill sends them back through /bitrefill/callback to the Wallet page. */
   HttpApiEndpoint.post("connectBitrefill", "/bitrefill/connect", { success: Schema.Struct({ url: Schema.String }), error: PurchaseInvalid }),
+  /** Back from Bitrefill: the Wallet page hands over the code, which is exchanged only for the account that started connecting. */
+  HttpApiEndpoint.post("finishBitrefill", "/bitrefill/finish", {
+    payload: Schema.Struct({ code: Schema.String, state: Schema.String }),
+    success: CheckoutEmail,
+    error: PurchaseInvalid
+  }),
   /** Revokes and forgets their Bitrefill login: their cards go back to guest checkout with the Checkout Email. */
   HttpApiEndpoint.post("disconnectBitrefill", "/bitrefill/disconnect", { success: CheckoutEmail })
 ).middleware(Authorization) {}

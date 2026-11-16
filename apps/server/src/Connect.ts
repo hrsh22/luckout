@@ -29,8 +29,16 @@ export class Connect extends Context.Service<Connect, {
   readonly offered: boolean
   /** Where the customer logs in to Bitrefill. */
   url(accountId: string): Effect.Effect<string, PurchaseInvalid>
-  /** Bitrefill sends the browser back with these: saves the connection, and says where to send the browser next. */
+  /**
+   * Bitrefill sends the browser back with these. Checks the state and that the reply is Bitrefill's, then sends the
+   * browser to the Wallet page with the code, which finishes there in the customer's own session (`finish`).
+   */
   callback(query: URLSearchParams): Effect.Effect<string>
+  /**
+   * Exchanges the code and saves the connection, only for the account that started connecting: a login started
+   * from another Luckout account (someone else's link) is refused, so nobody can attach their Bitrefill login to ours.
+   */
+  finish(accountId: string, code: string, state: string): Effect.Effect<void, PurchaseInvalid>
   connected(accountId: string): Effect.Effect<boolean>
   /**
    * An access token for the customer's own account, renewed first if it's about to end (or `renew`, after a 401);
@@ -141,25 +149,38 @@ export class Connect extends Context.Service<Connect, {
         }
       }
 
-      // Anyone can call this, so it trusts only the sealed state, and Bitrefill (the issuer) for the code.
-      const callback = (q: URLSearchParams) => {
-        const back = (outcome: "connected" | "failed") => `${webOrigin}/wallet?bitrefill=${outcome}`
-        const refuse = (why: string) => Effect.as(Effect.logWarning(`Bitrefill connect failed: ${why}`), back("failed"))
-        return Effect.gen(function*() {
-          if (!offered || Option.isNone(redirectUri)) return yield* refuse("not offered here")
-          const s = openState(q.get("state"))
-          if (!s) return yield* refuse("state missing, altered or expired")
-          if (q.get("iss") !== issuer) return yield* refuse(`${s.account}: the reply isn't from Bitrefill`)
+      // Anyone can call this (it has no session), so it only checks the reply and hands the code to the Wallet page.
+      const callback = (q: URLSearchParams) =>
+        Effect.suspend(() => {
+          const failed = (why: string) => Effect.as(Effect.logWarning(`Bitrefill connect failed: ${why}`), `${webOrigin}/wallet?bitrefill=failed`)
+          if (!offered) return failed("not offered here")
+          const state = q.get("state")
+          const s = openState(state)
+          if (!s) return failed("state missing, altered or expired")
+          if (q.get("iss") !== issuer) return failed(`${s.account}: the reply isn't from Bitrefill`)
           const code = q.get("code")
           // Declined at Bitrefill (access_denied) or anything else without a code.
-          if (!code) return yield* refuse(`${s.account}: ${(q.get("error") ?? "no code").slice(0, 60)}`)
-          const t = yield* grant({ grant_type: "authorization_code", code, redirect_uri: redirectUri.value, code_verifier: s.verifier })
-          if (t === "invalid_grant") return yield* refuse(`${s.account}: Bitrefill refused the code`)
-          yield* locked(s.account, save(s.account, t))
-          yield* Effect.log(`${s.account} connected their Bitrefill account`)
-          return back("connected")
-        }).pipe(Effect.catch((e) => refuse(e.message)))
-      }
+          if (!code) return failed(`${s.account}: ${(q.get("error") ?? "no code").slice(0, 60)}`)
+          return Effect.succeed(`${webOrigin}/wallet?${new URLSearchParams({ bitrefill: "finish", code, state: state! })}`)
+        })
+
+      const finish = (accountId: string, code: string, state: string) =>
+        Effect.gen(function*() {
+          if (!offered || Option.isNone(redirectUri)) return yield* new PurchaseInvalid({ message: "Connecting a Bitrefill account isn't available here." })
+          const s = openState(state)
+          if (!s) return yield* new PurchaseInvalid({ message: "That Bitrefill login took too long. Connect again." })
+          // OAuth login CSRF: a code from someone else's link must not attach their Bitrefill login to this account.
+          if (s.account !== accountId) {
+            yield* Effect.logWarning(`Bitrefill connect refused: started by ${s.account}, finished by ${accountId}`)
+            return yield* new PurchaseInvalid({ message: "This Bitrefill login was started from another Luckout account. Connect again from here." })
+          }
+          const t = yield* grant({ grant_type: "authorization_code", code, redirect_uri: redirectUri.value, code_verifier: s.verifier }).pipe(
+            Effect.mapError(() => new PurchaseInvalid({ message: "Bitrefill didn't answer. Try connecting again in a moment." }))
+          )
+          if (t === "invalid_grant") return yield* new PurchaseInvalid({ message: "Bitrefill didn't accept that login. Connect again." })
+          yield* locked(accountId, save(accountId, t))
+          yield* Effect.log(`${accountId} connected their Bitrefill account`)
+        })
 
       const connected = (accountId: string) =>
         !offered ? Effect.succeed(false) : sql`SELECT 1 FROM bitrefill_connections WHERE account_id = ${accountId}`.pipe(
@@ -194,7 +215,7 @@ export class Connect extends Context.Service<Connect, {
       )
       if (offered) yield* sweep.pipe(Effect.repeat(Schedule.spaced("1 day")), Effect.forkScoped)
 
-      return Connect.of({ offered, url, callback, connected, token, disconnect })
+      return Connect.of({ offered, url, callback, finish, connected, token, disconnect })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

@@ -19,6 +19,7 @@ export const sealWith = (key: Buffer, aad: string, data: unknown) => {
 /** Throws if `sealed` was altered, or sealed under another key or `aad`. */
 export const unsealWith = (key: Buffer, aad: string, sealed: string): unknown => {
   const b = Buffer.from(sealed, "base64")
-  const d = createDecipheriv("aes-256-gcm", key, b.subarray(0, 12)).setAAD(Buffer.from(aad)).setAuthTag(b.subarray(12, 28))
+  // Only a full 16-byte tag: a short sealed value must not pass with a truncated one.
+  const d = createDecipheriv("aes-256-gcm", key, b.subarray(0, 12), { authTagLength: 16 }).setAAD(Buffer.from(aad)).setAuthTag(b.subarray(12, 28))
   return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]).toString())
 }
