@@ -61,7 +61,7 @@ export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: As
         </p>
       )}
       <div className="mt-auto flex flex-wrap gap-2">
-        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={mode === "none" || mode === "unknown"} onClick={asOwner(() => setSheet("mode"))}>
+        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={!OUR_TREASURY} onClick={asOwner(() => setSheet("mode"))}>
           {mode === "mismatch" ? "Fix it" : "Change mode"}
         </Button>
         <Button size="sm" variant={t.needs ? "primary" : "soft"} disabled={(mode !== "auto" && mode !== "manual") || !o.reserve.proceeds} onClick={asOwner(() => setSheet("move"))}>
@@ -118,6 +118,8 @@ function TreasuryModeSheet({ open, onClose, treasury, mode, tx }: { open: boolea
   const live = useQuery({
     queryKey: ["contract-config", contractId],
     queryFn: () => view<{ sweep_daily_cap?: string }>(contractId, "get_config"),
+    // Only the cap: get_config's other fields change on a refetch, and that mustn't overwrite what the owner typed.
+    select: (c) => c.sweep_daily_cap ?? "0",
     enabled: open,
     staleTime: 0
   })
@@ -128,7 +130,7 @@ function TreasuryModeSheet({ open, onClose, treasury, mode, tx }: { open: boolea
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!open || !live.data) return
-    const now = Number(live.data.sweep_daily_cap ?? 0)
+    const now = Number(live.data)
     // Manual (0) or unread: the field starts empty and the owner types the cap.
     setCap(now > 0 ? dollars(now) : "")
   }, [open, live.data])

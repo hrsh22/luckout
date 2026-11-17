@@ -24,11 +24,13 @@ export const toMicro = (usdc: string) => {
 }
 /**
  * What an amount field keeps of what was typed: digits and the decimal point. Phones set to a region that writes
- * "12,5" show only "," on the decimal keypad, so a lone comma is the decimal point. A comma with any other separator
- * is left as typed for toMicro to refuse: a wrong guess at thousands separators changes an amount a thousandfold.
+ * "12,5" show only "," on the decimal keypad, so a lone comma is the decimal point; so is the Arabic decimal mark
+ * (U+066B) or a full-width comma (U+FF0C), which would otherwise be dropped and make the amount ten times larger. A
+ * comma with any other separator is left as typed for toMicro to refuse: a wrong guess at thousands separators
+ * changes an amount a thousandfold.
  */
 export const typedAmount = (typed: string) => {
-  const kept = typed.replace(/[^\d.,]/g, "")
+  const kept = typed.replace(/[\u066B\uFF0C]/g, ",").replace(/[^\d.,]/g, "")
   return /^[^.,]*,[^.,]*$/.test(kept) ? kept.replace(",", ".") : kept
 }
 const YOCTO = 10n ** 24n

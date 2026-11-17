@@ -71,6 +71,8 @@ test("a typed amount keeps a decimal comma as the decimal point, and never guess
   assert.equal(typedAmount("12,5"), "12.5", "a phone set to a comma-decimal region types 12,5")
   assert.equal(typedAmount("50,00"), "50.00", "fifty, not five thousand")
   assert.equal(typedAmount("12,"), "12.", "the comma is typed before the cents")
+  assert.equal(typedAmount("12\u066B5"), "12.5", "the Arabic decimal mark is a decimal point, not dropped")
+  assert.equal(typedAmount("12\uFF0C5"), "12.5", "so is a full-width comma")
   assert.equal(typedAmount("12.5"), "12.5")
   assert.equal(typedAmount("$ 1 250"), "1250", "anything but digits and separators is dropped, as before")
   assert.equal(typedAmount(""), "")
