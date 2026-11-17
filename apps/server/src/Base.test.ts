@@ -1,4 +1,4 @@
-import { ConfigProvider, Effect, Fiber, Layer } from "effect"
+import { Clock, ConfigProvider, Effect, Fiber, Layer } from "effect"
 import { TestClock } from "effect/testing"
 import { baseEncode } from "near-api-js"
 import assert from "node:assert/strict"
@@ -132,6 +132,9 @@ const overTime = <A, E, R>(e: Effect.Effect<A, E, R>) =>
     return yield* Fiber.join(fiber)
   })
 
+/** For payments whose invoice isn't near expiry. */
+const NO_DEADLINE = Number.POSITIVE_INFINITY
+
 /** A payment signed earlier with `nonce`, as a purchase would have saved it. */
 const savedPayment = (nonce: number) =>
   Base.use((b) => Effect.flatMap(b.sign({ to: BITREFILL, amount: "10000000", nonce, maxFeePerGas: "2000000000", maxPriorityFeePerGas: "1" }), (p) => Effect.succeed(p as SignedPayment)))
@@ -140,7 +143,7 @@ test("a new payment is the wallet's own USDC transfer, saved before it is sent, 
   const r = await world({ pending: 7, latest: 7, receipt: (hash) => receipt(hash) }, (w) =>
     Effect.gen(function*() {
       const saved: Array<SignedPayment> = []
-      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, null, (p) => Effect.sync(() => void (w.log.push("save"), saved.push(p))))))
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, null, (p) => Effect.sync(() => void (w.log.push("save"), saved.push(p))), NO_DEADLINE)))
       return { status, saved, sent: w.sent, log: w.log }
     }))
   assert.equal(r.status, "success")
@@ -160,7 +163,7 @@ test("a saved payment is sent again as the same bytes and never signed again whi
     Effect.gen(function*() {
       const saved = yield* savedPayment(7)
       const before = w.signed()
-      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("a saved payment must not be saved over"))))
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("a saved payment must not be saved over"), NO_DEADLINE)))
       return { status, resigned: w.signed() - before, sent: w.sent, raw: saved.raw }
     }))
   assert.equal(r.status, "success")
@@ -172,7 +175,7 @@ test("a payment mined but reverted is reported as reverted, not as paid", async 
   const r = await world({ pending: 8, latest: 8, sendError: "nonce too low", receipt: (hash) => receipt(hash, false) }, () =>
     Effect.gen(function*() {
       const saved = yield* savedPayment(7)
-      return yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("not expected"))))
+      return yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("not expected"), NO_DEADLINE)))
     }))
   assert.equal(r, "reverted")
 })
@@ -195,7 +198,7 @@ test("a saved payment is replaced only when its nonce was taken and its receipt 
       // The replacement is mined at once.
       lost.receipt = (hash) => (hash === saved.hash ? undefined : receipt(hash))
       const replaced: Array<SignedPayment> = []
-      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, (p) => Effect.sync(() => void replaced.push(p)))))
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, (p) => Effect.sync(() => void replaced.push(p)), NO_DEADLINE)))
       return { status, replaced, sent: w.sent, old: saved }
     }))
   assert.equal(r.status, "success")
@@ -211,7 +214,7 @@ test("a saved payment is replaced only when its nonce was taken and its receipt 
     Effect.gen(function*() {
       const saved = yield* savedPayment(7)
       const before = w.signed()
-      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"))))
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"), NO_DEADLINE)))
       return { status, resigned: w.signed() - before, sent: w.sent.length }
     }))
   assert.equal(s.status, "success")
@@ -224,8 +227,26 @@ test("a saved payment whose nonce is still its own is never signed again, even w
     Effect.gen(function*() {
       const saved = yield* savedPayment(7)
       const before = w.signed()
-      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"))))
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"), NO_DEADLINE)))
       return { status, resigned: w.signed() - before, sent: w.sent.length }
     }))
   assert.deepEqual(r, { status: "pending", resigned: 0, sent: 1 })
+})
+
+test("a saved payment that waits on the wallet's lock past its deadline is never sent again: its receipt is only looked up", async () => {
+  // The first payment holds the lock for half a minute, watching for a receipt that doesn't show up.
+  const r = await world({ pending: 9, latest: 7, sendError: "already known", receipt: () => undefined }, (w) =>
+    Effect.gen(function*() {
+      const first = yield* savedPayment(7)
+      const second = yield* savedPayment(8)
+      const now = yield* Clock.currentTimeMillis
+      const holding = yield* Effect.forkChild(Base.use((b) => b.pay(BITREFILL, 10_000_000, first, () => Effect.die("not expected"), now + 3_600_000)))
+      yield* Effect.promise(() => new Promise((done) => setTimeout(done, 100)))
+      // The second one's invoice nears expiry ten seconds in, while it's still waiting for the lock.
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, second, () => Effect.die("must not sign a new payment"), now + 10_000)))
+      yield* Fiber.join(holding)
+      return { status, sent: w.sent, first: first.raw }
+    }))
+  assert.equal(r.status, "pending")
+  assert.deepEqual(r.sent, [r.first], "only the first payment reached the node")
 })

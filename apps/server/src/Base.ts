@@ -1,4 +1,4 @@
-import { Config, Context, Data, Effect, Layer, Option, Redacted, Schedule, Semaphore } from "effect"
+import { Clock, Config, Context, Data, Effect, Layer, Option, Redacted, Schedule, Semaphore } from "effect"
 import { actions, baseDecode, teraToGas } from "near-api-js"
 import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, type Hex, http, isAddress, keccak256, recoverAddress, serializeTransaction, TransactionReceiptNotFoundError } from "viem"
 import { publicKeyToAddress } from "viem/accounts"
@@ -56,13 +56,15 @@ export class Base extends Context.Service<Base, {
    * Pays `amount` (USDC base units) to `to` exactly once. `saved` is this payment's earlier attempt, sent
    * again as the same bytes; a new one is signed, handed to `save` before it's sent, then sent. The wallet is
    * locked from preparing until mined, so two payments never share a nonce. "pending": not mined yet (call
-   * again with what was saved).
+   * again with what was saved). From `sendBefore` (epoch ms) on, nothing is sent or signed, not even again:
+   * only the saved payment's receipt is looked up ("pending" when nothing was saved).
    */
   pay(
     to: Hex,
     amount: number,
     saved: SignedPayment | null,
-    save: (p: SignedPayment) => Effect.Effect<void>
+    save: (p: SignedPayment) => Effect.Effect<void>,
+    sendBefore: number
   ): Effect.Effect<PaymentStatus, BaseUnavailable | NearUnavailable | ContractRejected>
 }>()("luckout/Base") {
   static readonly layer = Layer.effect(
@@ -185,8 +187,12 @@ export class Base extends Context.Service<Base, {
         status(p.hash).pipe(Effect.repeat({ schedule: Schedule.spaced("2 seconds"), until: (s) => s !== "pending", times: 15 }))
 
       const lock = yield* Semaphore.make(1)
-      const pay = (to: Hex, amount: number, saved: SignedPayment | null, save: (p: SignedPayment) => Effect.Effect<void>) =>
+      const pay = (to: Hex, amount: number, saved: SignedPayment | null, save: (p: SignedPayment) => Effect.Effect<void>, sendBefore: number) =>
         lock.withPermits(1)(Effect.gen(function*() {
+          // Decided here, holding the lock, right before sending: a caller can wait on the lock past its deadline,
+          // and a saved payment is watched for half a minute before it may be replaced.
+          const late = Effect.map(Clock.currentTimeMillis, (now) => now >= sendBefore)
+          if (yield* late) return saved ? yield* status(saved.hash) : "pending"
           if (saved) {
             const s = yield* send(saved)
             if (s !== "pending") return s
@@ -196,7 +202,7 @@ export class Base extends Context.Service<Base, {
             // receipt, is never taken for a lost one: signing again then would pay the invoice twice.
             const latest = yield* Effect.flatMap(address, (a) => call("nonce", () => client!.getTransactionCount({ address: a, blockTag: "latest" })))
             const again = yield* mined(saved)
-            if (again !== "pending" || latest <= saved.nonce) return again
+            if (again !== "pending" || latest <= saved.nonce || (yield* late)) return again
             yield* Effect.logWarning(`Base payment ${saved.hash} lost its nonce ${saved.nonce} to another transaction; paying again`)
           }
           const p = yield* sign(yield* prepare(to, amount))
