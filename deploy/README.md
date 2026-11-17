@@ -70,8 +70,9 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    ```cron
    # bash, because cron's sh can't load nvm; nvm's default Node is the one in .nvmrc (step 4)
    @reboot bash -c '. ~/.nvm/nvm.sh && cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect'
-   0 3 * * * pg_dump -h 127.0.0.1 -U luckout luckout | gzip > ~/backups/luckout-$(date +\%F).sql.gz && find ~/backups -name 'luckout-*.sql.gz' -mtime +14 -delete
+   0 3 * * * bash ~/htdocs/luckout-api.gamified.trade/deploy/backup.sh -h 127.0.0.1 -U luckout luckout >> ~/backups/backup.log 2>&1
    ```
+   `deploy/backup.sh` keeps a dump only if it is complete and of this site's database, deletes dumps older than 14 days only after a good one, and alerts the admin chat (`TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` from `.env`) when a night's dump fails. Restoring one is in [RUNBOOK.md](RUNBOOK.md#restoring-from-a-dump).
 
 ## Switching production to guest checkout (ADR-0012)
 

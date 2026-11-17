@@ -110,3 +110,24 @@ No deployment refills Bitrefill credit once production has switched: testnet's t
 - `NEAR_NETWORK=mainnet also needs …`: fill in the listed values in `.env`.
 - `Another Luckout server is already running`: `pm2 list`; stop the extra process. Exactly one may run.
 - Logs: `pm2 logs luckout-api --lines 200`. A Monitor check that couldn't run is logged as `monitor: the <name> check failed`; its other checks still alert.
+
+## Restoring from a dump
+
+Every night at 03:00 each site dumps its database to `~/backups/luckout-<date>.sql.gz` (`deploy/backup.sh`, from the site user's crontab), keeps the last 15 days, and writes one line per night to `~/backups/backup.log`. A dump that failed, came out incomplete, or isn't of this site's database is thrown away, older dumps are kept, and the admin chat gets "the nightly database dump failed (…)". To see why, run the crontab's command by hand as the site user (`crontab -l` shows it). The dumps are on the VM itself: they don't survive losing the VM, so copy a recent one to your own machine now and then (`scp luckout-milesvm:backups/luckout-<date>.sql.gz .`).
+
+To restore a broken or lost database (`<db>` and `<role>` are the site's, as in its `DATABASE_URL`: `luckout_mainnet`, `luckout_staging` or `luckout_testnet`):
+
+1. **Stop the server**, so nothing writes while you restore: `pm2 stop luckout-api`. Customers' Balances are in the contract and stay safe; purchases wait.
+2. **An empty database.** A dump only loads into an empty one: into a database that still has the tables it stops at the first `CREATE TABLE` and changes nothing. As the Postgres admin, keep the broken one aside instead of dropping it (close any open `psql` sessions on it first):
+   ```sql
+   ALTER DATABASE <db> RENAME TO <db>_broken;
+   CREATE DATABASE <db> OWNER <role>;
+   ```
+3. **Load the dump**, as the site user, all or nothing:
+   ```sh
+   gunzip -c ~/backups/luckout-<date>.sql.gz | psql -h 127.0.0.1 -U <role> -d <db> -v ON_ERROR_STOP=1 --single-transaction
+   ```
+   Use the VM's own `psql`: recent `pg_dump` versions write `\restrict` lines that an older `psql` refuses.
+4. **Keep the site's `.env` as it is.** Redemption Data, Checkout Emails and Bitrefill logins are sealed with its `REDEMPTION_KEY`: a dump restored under another key can't be read, so the key's backup matters as much as the dump. The database also records its network and contract, so only this site's server starts on it.
+5. **Start it:** `pm2 start luckout-api`. It runs any migration newer than the dump; `/health` should answer 204.
+6. **What happened after the dump is missing.** The dump's newest purchase is `SELECT max(contract_purchase_id) FROM purchases`. The contract numbers purchases in order, so `get_purchase` (as in "A purchase is stuck") with the next ids, one by one until it returns `null`, lists the purchases made since. The server doesn't know them and won't finish them: for each, check Bitrefill's orders by time and product. If the card was delivered, send the customer the code from Bitrefill; if not, the customer gets the full amount back by Reclaim 24 hours after buying. Customers who signed in, linked Telegram or set a Checkout Email since the dump do it again. Check Admin → refills for one that started after the dump: its money is on chain (the treasury, 1Click, the Base wallet), not in the database.
