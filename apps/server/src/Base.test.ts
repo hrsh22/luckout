@@ -218,3 +218,14 @@ test("a saved payment is replaced only when its nonce was taken and its receipt 
   assert.equal(s.resigned, 0)
   assert.equal(s.sent, 1)
 })
+
+test("a saved payment whose nonce is still its own is never signed again, even when no receipt shows up", async () => {
+  const r = await world({ pending: 8, latest: 7, sendError: "already known", receipt: () => undefined }, (w) =>
+    Effect.gen(function*() {
+      const saved = yield* savedPayment(7)
+      const before = w.signed()
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"))))
+      return { status, resigned: w.signed() - before, sent: w.sent.length }
+    }))
+  assert.deepEqual(r, { status: "pending", resigned: 0, sent: 1 })
+})

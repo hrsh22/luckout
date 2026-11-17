@@ -83,7 +83,7 @@ export const echoProblem = (echo: QuoteResponse["quoteRequest"], asked: QuoteReq
   return undefined
 }
 
-/** Where a swap is:PENDING_DEPOSIT, KNOWN_DEPOSIT_TX, INCOMPLETE_DEPOSIT, PROCESSING, SUCCESS, REFUNDED or FAILED. */
+/** Where a swap is: PENDING_DEPOSIT, KNOWN_DEPOSIT_TX, INCOMPLETE_DEPOSIT, PROCESSING, SUCCESS, REFUNDED or FAILED. */
 export type SwapStatus = string
 
 const Hashes = Schema.optional(Schema.NullOr(Schema.Array(Schema.Struct({ hash: Schema.String }))))
