@@ -733,6 +733,13 @@ export class Purchases extends Context.Service<Purchases, {
       const giveUp = (id: string) =>
         Effect.gen(function*() {
           const row = yield* load(id)
+          // A guest order that never got as far as a payment cost us nothing (an unpaid invoice just expires):
+          // the customer is refunded in full now, rather than left "stuck" for a human until they can Reclaim.
+          if (bitrefill.guest && row.step === "ordering" && !row.pay_tx) {
+            if (!(yield* move(row, { step: "fail", error: "We couldn't order this card from Bitrefill" }))) return
+            yield* alerts.admin(`purchase ${id} couldn't be ordered from Bitrefill in ${MAX_ATTEMPTS} attempts (nothing was paid); refunding it in full`)
+            return yield* advance(id, true)
+          }
           if (!(yield* move(row, { step: "stuck", error: `Gave up after ${MAX_ATTEMPTS} attempts at ${row.step}: ${row.error ?? ""}` }))) return
           yield* alerts.admin(`purchase ${id} stuck after ${MAX_ATTEMPTS} attempts at ${row.step}`)
           yield* notify(yield* load(id))

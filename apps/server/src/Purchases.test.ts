@@ -61,6 +61,8 @@ const world = (opts: {
   payDown?: boolean
   /** What Base says when it is only asked where a saved payment is; "pending" unless set. */
   statuses?: Array<PaymentStatus>
+  /** Bitrefill can't be reached (or is rate limiting us) for this call: its outcome is unknown. */
+  bitrefillDown?: "order" | "delivery"
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
@@ -134,7 +136,7 @@ const world = (opts: {
           : Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] }))
       }),
     order: (_id, _value, buyer) =>
-      Effect.sync((): Order => {
+      Effect.suspend(() => (opts.bitrefillDown === "order" ? Effect.fail(new BitrefillUnavailable({ message: "Bitrefill is rate limiting us" })) : Effect.void)).pipe(Effect.andThen(Effect.sync((): Order => {
         calls.push(!opts.guest ? "order" : buyer && "token" in buyer ? `order:token:${buyer.token}` : `order:${buyer?.email}`)
         const tag = orders.shift() ?? (opts.guest ? "Invoiced" : "Ordered")
         // A token Bitrefill no longer takes: the tool never ran.
@@ -144,12 +146,14 @@ const world = (opts: {
         // Ordering spends the credit, as Bitrefill would.
         creditBalance -= price
         return { _tag: "Ordered", invoiceId: "inv-1" }
-      }),
+      }))),
     delivery: (invoiceId, token) =>
-      Effect.sync(() => {
-        if (token) calls.push(`delivery:${token}`)
-        return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123" } }
-      }).pipe(Effect.delay(opts.deliveryDelay ?? 0)),
+      opts.bitrefillDown === "delivery"
+        ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
+        : Effect.sync(() => {
+          if (token) calls.push(`delivery:${token}`)
+          return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123" } }
+        }).pipe(Effect.delay(opts.deliveryDelay ?? 0)),
     // Each read takes `creditDelay` (set when it starts), like a slow Bitrefill.
     credit: Effect.suspend(() => Effect.delay(Effect.sync(() => ({ balance: creditBalance, room: 2_000_000_000 })), creditDelay))
   })
@@ -907,4 +911,39 @@ test("an account with no money, or one that keeps asking for cards we can't find
   }))
   assert.match(e.message, /couldn't find several cards/)
   assert.equal(w.lookups(), 3, "the fourth asked Bitrefill nothing")
+})
+
+test("a guest order Bitrefill never took is refunded in full once the retries run out; a paid one still stops for a human", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, bitrefillDown: "order" })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const p = yield* w.buy()
+    const before = (yield* rowOf(p.id)).step
+    // Twelve tries later Bitrefill still hasn't taken the order.
+    yield* sql`UPDATE purchases SET attempts = 12`
+    yield* reconcilePass
+    return { before, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.before, "ordering")
+  assert.equal(r.after, "failed")
+  assert.deepEqual(w.paid, [], "nothing was ever paid")
+  assert.ok(w.calls.includes("fail_purchase"), "refunded through the contract")
+  assert.match(w.alerts.join(" "), /couldn't be ordered from Bitrefill in 12 attempts/)
+  assert.match(w.notices.join(" "), /full amount is back/)
+
+  // Paid, and the card never arrives: that outcome isn't ours to guess.
+  const paid = world({ real: true, guest: true, credit: 100_000_000, bitrefillDown: "delivery" })
+  const after = await paid.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const p = yield* paid.buy()
+    yield* sql`UPDATE purchases SET attempts = 12`
+    yield* reconcilePass
+    return yield* settled(p.id)
+  }))
+  assert.equal(after, "stuck")
+  assert.equal(paid.paid.length, 1)
+  assert.ok(!paid.calls.includes("fail_purchase"), "never refunded while Bitrefill may still deliver")
+  assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery/)
 })
