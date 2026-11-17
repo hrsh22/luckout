@@ -1,6 +1,6 @@
 "use client"
 
-import { BitrefillAccount, CheckoutEmailForm } from "@/components/checkout-email"
+import { BitrefillAccount, BitrefillLimits, CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
 import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
@@ -44,10 +44,13 @@ export default function WalletPage() {
   const running = account ? Number(account.cashback_received) - Number(account.premiums_paid) : 0
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
   const daily = account?.daily_limit ?? String(DEFAULT_LIMITS.daily)
-  const chosen = account?.default_mode ?? (accountId ? pendingMode(accountId) : undefined) ?? "normal"
+  // Still loading: no figure and no mode is shown as theirs until the chain has answered.
+  const loading = account === undefined
+  const chosen = loading ? undefined : account?.default_mode ?? (accountId ? pendingMode(accountId) : undefined) ?? "normal"
+  const figure = <span className="inline-block h-10 w-32 animate-pulse rounded-full bg-soft align-middle" />
 
   const pickMode = async (m: Mode) => {
-    if (!accountId || sameMode(m, chosen)) return
+    if (!accountId || !chosen || sameMode(m, chosen)) return
     // Before the first deposit the contract has no account to save it on; it's saved with the deposit.
     if (!account) {
       setPendingMode(accountId, m)
@@ -84,7 +87,7 @@ export default function WalletPage() {
         <div className={`flex flex-col rounded-[2.25rem] p-7 ${running > 0 ? "bg-gold-soft text-gold-ink" : "card"}`}>
           <p className={running > 0 ? "opacity-80" : "text-ink-soft"}>Running total</p>
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]">
-            {running >= 0 ? "+" : "−"}<Money micro={Math.abs(running)} />
+            {loading ? figure : <>{running >= 0 ? "+" : "−"}<Money micro={Math.abs(running)} /></>}
           </p>
           <p className={`mt-auto pt-6 text-sm ${running > 0 ? "opacity-80" : "text-muted"}`}>
             Cashback you've received, minus the extra you paid up front on lucky buys.
@@ -93,7 +96,7 @@ export default function WalletPage() {
 
         <div className="card flex flex-col p-7">
           <p className="text-ink-soft">Spent today</p>
-          <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={today} /></p>
+          <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]">{loading ? figure : <Money micro={today} />}</p>
           <div className="mt-auto pt-6">
             <div className="h-2 overflow-hidden rounded-full bg-soft">
               <div className="h-full rounded-full bg-ink transition-[width] duration-500" style={{ width: `${Math.min(100, (today / Number(daily)) * 100)}%` }} />
@@ -129,12 +132,14 @@ export default function WalletPage() {
           <div className="card p-6">
             <CheckoutEmailForm onSaved={() => toast.success("Email saved")} />
           </div>
+          {checkout.bitrefill === undefined && <BitrefillLimits />}
         </section>
       )}
 
       {checkout?.bitrefill !== undefined && (
         <section className="flex flex-col gap-4">
           <h2 className="font-display text-3xl font-extrabold">Bitrefill account</h2>
+          <BitrefillLimits />
           <BitrefillAccount />
         </section>
       )}

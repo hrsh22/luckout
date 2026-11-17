@@ -205,6 +205,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved) })
       else leftBehind()
     }, leftBehind).finally(() => setReady(true))
+    // The NEAR connector loads its wallet list from elsewhere first. If that hangs, the page must not: Sign in
+    // appears anyway (an EVM wallet doesn't need it), and a late answer still restores the session above.
+    const waited = setTimeout(() => setReady(true), 8000)
+    return () => clearTimeout(waited)
   }, [])
 
   // One cookie serves every tab. Another tab signed in as someone else, or signed out: this tab's calls no

@@ -95,6 +95,8 @@ function Voucher() {
     onSettled: () => {
       refresh().catch(() => {})
       qc.invalidateQueries({ queryKey: ["purchases"] })
+      // What this email has used of Bitrefill's limits just moved.
+      qc.invalidateQueries({ queryKey: ["checkout-email"] })
       // The reserve may have moved (or been the reason for a refusal): confirming again needs a fresh quote.
       qc.invalidateQueries({ queryKey: ["quote", id] })
     }
@@ -418,9 +420,17 @@ function BuyAction({ quote, need, onBuy, onAdd }: {
     )
   }
   return (
-    <Button size="lg" loading={!quote} onClick={() => quote && onBuy(quote)}>
-      {quote ? `Buy for ${usdUp(quote.maxPrice)}` : "Checking the price"}
-    </Button>
+    <div className="flex flex-col gap-2">
+      <Button size="lg" loading={!quote} onClick={() => quote && onBuy(quote)}>
+        {quote ? `Buy for ${usdUp(quote.maxPrice)}` : "Checking the price"}
+      </Button>
+      {checkout?.needed && checkout.email && (
+        <p className="text-sm text-muted">
+          Also emailed to <span className="font-medium break-all text-ink-soft">{checkout.email}</span>.{" "}
+          <Link href="/wallet" className="underline underline-offset-2">Change</Link>
+        </p>
+      )}
+    </div>
   )
 }
 

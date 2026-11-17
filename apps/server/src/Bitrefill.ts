@@ -437,6 +437,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       const offered = (p: typeof Product.Type) => (testnet ? p.id.startsWith("test-") : sellable(p))
 
       const search = Effect.fn("Bitrefill.search")(function*(q: string) {
+        // Nothing typed finds nothing: Bitrefill refuses an empty search, which would read as an outage.
+        if (!q.trim()) return []
         const products = yield* get("/products/search", Schema.Array(Product), { q, include_test_products: String(testnet) })
         return products.filter(offered).map(summary)
       })
