@@ -775,7 +775,7 @@ export class Purchases extends Context.Service<Purchases, {
       // backoff, so a few broken purchases can never starve newer ones.
       const reconcile = sql<{ id: string; attempts: number }>`
         UPDATE purchases SET attempts = attempts + 1,
-          next_attempt_at = now() + LEAST(interval '1 hour', interval '30 seconds' * power(2, attempts))
+          next_attempt_at = now() + LEAST(interval '1 hour', interval '30 seconds' * power(2, LEAST(attempts, 7)))
         WHERE id IN (
           SELECT id FROM purchases
           WHERE step IN ${sql.in(OPEN_STEPS)} AND updated_at < now() - interval '30 seconds' AND next_attempt_at <= now()

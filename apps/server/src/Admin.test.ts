@@ -1,5 +1,5 @@
 import { Api, CreditSettings } from "@luckout/api"
-import { Effect, Exit, Layer } from "effect"
+import { ConfigProvider, Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
@@ -295,3 +295,27 @@ test("a purchase is found by its id however old, past the latest 300 an account'
     assert.deepEqual((yield* admin.purchases(undefined, old)).map((p) => p.id), [old])
     assert.deepEqual(yield* admin.purchases(undefined, "00000000-0000-4000-8000-000000000999"), [], "no such purchase")
   })))
+
+test("with guest checkout the overview's credit figures are the Base Float, read from the Base Wallet, never from Bitrefill", async () => {
+  const guestLayer = Admin.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
+    Layer.provide(Layer.mergeAll(
+      Layer.succeed(Near, near),
+      // No `credit` here: the fake dies if Bitrefill's credit is read, which guest checkout must never do.
+      Layer.succeed(Bitrefill, fakeBitrefill({ guest: true })),
+      Layer.succeed(Base, fakeBase({ balances: Effect.succeed({ usdc: 65_000_000, eth: 10n ** 15n }) })),
+      Layer.succeed(Refill, refill),
+      Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
+    )),
+    Layer.provideMerge(DbMemory),
+    // The Base Float is only tracked on mainnet.
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...(process.env as Record<string, string>), NEAR_NETWORK: "mainnet" } })))
+  )
+  const o = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    return yield* (yield* Admin).overview
+  })).pipe(Effect.provide(guestLayer)))
+  assert.equal(o.checkout.guest, true)
+  assert.equal(o.credit.balance, 65_000_000, "the USDC in the Base Wallet")
+  assert.equal(o.credit.free, 65_000_000)
+})
