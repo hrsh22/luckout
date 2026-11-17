@@ -60,7 +60,7 @@ export const buySummary = (p: Pending) =>
   // A card only works in its own country: said on the button's line, every time.
   ` Works in ${worksIn(p.country)}.` +
   // Where Bitrefill sends the receipt: a changed address is in plain sight before every purchase.
-  (p.receiptTo ? ` Receipt to ${p.receiptTo}.` : "")
+  (p.receiptTo ? ` Also emailed to ${p.receiptTo}.` : "")
 
 /** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
 export const addLinkCode = (accountId: string, code: string, expiresAt: Date) =>

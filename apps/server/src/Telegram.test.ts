@@ -64,8 +64,8 @@ test("each Telegram user gets so many messages a minute and a day; a sweep keeps
   assert.equal(limits.check(1, t + 86_400_000), undefined, "a new UTC day")
 })
 
-test("the Buy line says where the receipt goes, when the card needs an email", () => {
+test("the Buy line says where the card is emailed, when it needs an email", () => {
   const p = { voucherId: "v", voucherName: "Swiggy", value: "500", currency: "INR", country: "IN", mode: "normal" as const, maxPrice: 5_530_000, referencePrice: 5_530_000, luckyAmount: 0 }
   assert.equal(buySummary(p), "Swiggy, 500 INR: $5.53. Works in India only.")
-  assert.equal(buySummary({ ...p, receiptTo: "me@example.com" }), "Swiggy, 500 INR: $5.53. Works in India only. Receipt to me@example.com.")
+  assert.equal(buySummary({ ...p, receiptTo: "me@example.com" }), "Swiggy, 500 INR: $5.53. Works in India only. Also emailed to me@example.com.")
 })
