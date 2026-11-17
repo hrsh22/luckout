@@ -170,6 +170,12 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   createdAt: Schema.String
 }) {}
 
+/** One page of a customer's purchases, newest first. `next` is the `before` of the following page; absent on the last. */
+export class PurchasePage extends Schema.Class<PurchasePage>("PurchasePage")({
+  items: Schema.Array(Purchase),
+  next: Schema.optional(Schema.String)
+}) {}
+
 export class NewPurchase extends Schema.Class<NewPurchase>("NewPurchase")({
   voucherId: Schema.String,
   value: Schema.String,
@@ -293,7 +299,11 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
     success: Purchase,
     error: [BitrefillUnavailable, PurchaseInvalid]
   }),
-  HttpApiEndpoint.get("list", "/purchases", { success: Schema.Array(Purchase) }),
+  /** Newest first, a page at a time. `before` is the `next` of the page before: the id of its last purchase. */
+  HttpApiEndpoint.get("list", "/purchases", {
+    query: { before: Schema.optional(Schema.String.check(Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i))) },
+    success: PurchasePage
+  }),
   HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound }),
   /** Cancels a purchase still waiting for credit; nothing was charged. */
   HttpApiEndpoint.post("cancel", "/purchases/:id/cancel", { params: { id: Schema.String }, success: Purchase, error: [NotFound, PurchaseInvalid] }),

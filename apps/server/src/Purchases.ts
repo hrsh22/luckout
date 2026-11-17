@@ -1,4 +1,4 @@
-import { BitrefillUnavailable, CheckoutEmail, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, Quote } from "@luckout/api"
+import { BitrefillUnavailable, CheckoutEmail, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, PurchasePage, Quote } from "@luckout/api"
 import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac } from "node:crypto"
@@ -135,7 +135,8 @@ interface ContractAccount {
 export class Purchases extends Context.Service<Purchases, {
   quote(voucherId: string, value: string, game: number | undefined): Effect.Effect<Quote, BitrefillUnavailable | PurchaseInvalid>
   create(accountId: string, input: NewPurchase): Effect.Effect<Purchase, BitrefillUnavailable | PurchaseInvalid>
-  list(accountId: string): Effect.Effect<ReadonlyArray<Purchase>>
+  /** Newest first. `before`: the id of the last purchase already seen; `limit`: the page size (100 unless given). */
+  list(accountId: string, page?: { readonly before?: string | undefined; readonly limit?: number | undefined }): Effect.Effect<PurchasePage>
   get(accountId: string, id: string): Effect.Effect<Purchase, NotFound>
   /** The customer cancels a purchase still waiting for credit: nothing was charged. */
   cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
@@ -721,11 +722,22 @@ export class Purchases extends Context.Service<Purchases, {
         return view(yield* load(id))
       })
 
-      const list = (accountId: string) =>
-        sql<Row>`SELECT * FROM purchases WHERE account_id = ${accountId} ORDER BY created_at DESC LIMIT 100`.pipe(
-          Effect.map((rows) => rows.map(view)),
+      // Newest first, a page at a time. The cursor is the last purchase's id: its (created_at, id) is looked up
+      // in the same query, so paging keeps full timestamp precision, two purchases made at the same instant
+      // are both returned once, and an id from another account matches nothing.
+      const list = (accountId: string, page: { readonly before?: string | undefined; readonly limit?: number | undefined } = {}) => {
+        const limit = page.limit ?? 100
+        // One more than the page, to know whether another page follows.
+        const rows = page.before
+          ? sql<Row>`SELECT * FROM purchases WHERE account_id = ${accountId}
+                       AND (created_at, id) < (SELECT created_at, id FROM purchases WHERE id = ${page.before} AND account_id = ${accountId})
+                     ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`
+          : sql<Row>`SELECT * FROM purchases WHERE account_id = ${accountId} ORDER BY created_at DESC, id DESC LIMIT ${limit + 1}`
+        return rows.pipe(
+          Effect.map((r) => new PurchasePage({ items: r.slice(0, limit).map(view), ...(r.length > limit ? { next: r[limit - 1]!.id } : {}) })),
           Effect.orDie
         )
+      }
 
       const get = (accountId: string, id: string) =>
         sql<Row>`SELECT * FROM purchases WHERE id = ${id} AND account_id = ${accountId}`.pipe(

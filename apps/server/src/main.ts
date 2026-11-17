@@ -94,7 +94,7 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
     const connect = yield* Connect
     return handlers.handleAll({
       create: ({ payload }) => CurrentAccount.use((a) => purchases.create(a.accountId, payload)),
-      list: () => CurrentAccount.use((a) => purchases.list(a.accountId)),
+      list: ({ query }) => CurrentAccount.use((a) => purchases.list(a.accountId, { before: query.before })),
       get: ({ params }) =>
         UUID.test(params.id)
           ? CurrentAccount.use((a) => purchases.get(a.accountId, params.id))
