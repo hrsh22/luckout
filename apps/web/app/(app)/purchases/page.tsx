@@ -14,9 +14,12 @@ export default function Purchases() {
   const { accountId, token, ready } = useSession()
   const list = usePurchases(token)
   const [open, setOpen] = useState<string>()
-  const delivered = list.data?.filter((p) => p.status === "delivered") ?? []
+  const purchases = list.data?.pages.flatMap((p) => p.items)
+  const delivered = purchases?.filter((p) => p.status === "delivered") ?? []
   const cashback = delivered.reduce((s, p) => s + (p.draw?.cashback ?? 0), 0)
   const free = delivered.filter((p) => p.draw?.finalPrice === 0).length
+  // Older purchases not loaded yet aren't in these totals: say so with a "+".
+  const more = list.hasNextPage ? "+" : ""
 
   return (
     <div className="flex flex-col gap-8">
@@ -27,9 +30,9 @@ export default function Purchases() {
         </div>
         {delivered.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            <span className="pill !bg-white !px-4 !py-2 !text-sm">{delivered.length} delivered</span>
-            {cashback > 0 && <span className="pill !bg-gold !px-4 !py-2 !text-sm !text-gold-ink">{usd(cashback)} cashback</span>}
-            {free > 0 && <span className="pill !bg-gold-soft !px-4 !py-2 !text-sm !text-gold-ink">{free} at 100% off</span>}
+            <span className="pill !bg-white !px-4 !py-2 !text-sm">{delivered.length}{more} delivered</span>
+            {cashback > 0 && <span className="pill !bg-gold !px-4 !py-2 !text-sm !text-gold-ink">{usd(cashback)}{more} cashback</span>}
+            {free > 0 && <span className="pill !bg-gold-soft !px-4 !py-2 !text-sm !text-gold-ink">{free}{more} at 100% off</span>}
           </div>
         )}
       </div>
@@ -39,17 +42,29 @@ export default function Purchases() {
       {token && list.isPending && (
         <ul className="flex flex-col gap-3">{[0, 1, 2].map((i) => <li key={i} className="skeleton h-[84px] rounded-[1.75rem]" />)}</ul>
       )}
-      {list.data?.length === 0 && (
+      {purchases?.length === 0 && (
         <div className="card flex flex-col items-start gap-4 p-8 sm:p-10">
           <p className="font-display text-3xl font-extrabold">No purchases yet</p>
           <p className="max-w-md text-ink-soft">Your cards and their codes will show up here the moment they're delivered.</p>
           <Link href="/shop" className={buttonVariants({ size: "lg" })}>Find a card</Link>
         </div>
       )}
-      {list.data && list.data.length > 0 && (
+      {purchases && purchases.length > 0 && (
         <ul className="flex flex-col gap-3">
-          {list.data.map((p) => <PurchaseRow key={p.id} p={p} open={open === p.id} onToggle={() => setOpen(open === p.id ? undefined : p.id)} />)}
+          {purchases.map((p) => <PurchaseRow key={p.id} p={p} open={open === p.id} onToggle={() => setOpen(open === p.id ? undefined : p.id)} />)}
         </ul>
+      )}
+      {list.hasNextPage && (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            onClick={() => void list.fetchNextPage()}
+            disabled={list.isFetchingNextPage}
+            className="h-11 rounded-full bg-white/80 px-6 text-sm font-semibold text-ink-soft shadow-card hover:text-ink disabled:opacity-60"
+          >
+            {list.isFetchingNextPage ? "Loading older purchases…" : "Show older purchases"}
+          </button>
+        </div>
       )}
     </div>
   )

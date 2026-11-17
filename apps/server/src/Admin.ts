@@ -1,4 +1,4 @@
-import { AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, type CreditChange, CreditSettings, PurchaseInvalid, type RefillView, type RelayChange, RelaySettings, type ShopStatus } from "@luckout/api"
+import { ADMIN_LIST_LIMIT, AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, type CreditChange, CreditSettings, PurchaseInvalid, type RefillView, type RelayChange, RelaySettings, type ShopStatus } from "@luckout/api"
 import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
@@ -19,6 +19,10 @@ import { Sales } from "./Sales.ts"
 const BITREFILL_DAILY_CAP = 15
 /** A purchase that gave up at a step NEAR can safely repeat: confirm and fail are idempotent onchain. */
 const GAVE_UP_AT = /^Gave up after \d+ attempts at (confirm|fail):/
+/** Customers on the users list: each costs one contract view per load. */
+const USERS_SHOWN = ADMIN_LIST_LIMIT
+/** Purchases the overview lists as needing attention; the count of all of them comes with it. */
+const ATTENTION_SHOWN = 20
 
 interface Row {
   id: string
@@ -37,7 +41,8 @@ const retryStep = (r: Pick<Row, "step" | "error">) =>
 export class Admin extends Context.Service<Admin, {
   isAdmin(accountId: string): boolean
   readonly overview: Effect.Effect<AdminOverview>
-  purchases(accountId?: string): Effect.Effect<ReadonlyArray<AdminPurchase>>
+  /** The latest purchases, or one account's; with `id`, only that purchase, however old. */
+  purchases(accountId?: string, id?: string): Effect.Effect<ReadonlyArray<AdminPurchase>>
   readonly users: Effect.Effect<ReadonlyArray<AdminUser>>
   /** Changes only the fields in `change`; the rest stay as they are now. */
   configureRelay(change: RelayChange, by: string): Effect.Effect<RelaySettings>
@@ -93,10 +98,12 @@ export class Admin extends Context.Service<Admin, {
                    count(*) FILTER (WHERE step = 'settled')::int AS delivered,
                    count(*) FILTER (WHERE invoice_id IS NOT NULL)::int AS ordered
             FROM purchases WHERE created_at > now() - interval '1 day'`,
-          sql<Row>`
-            SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at FROM purchases
+          // Oldest first: they are the closest to the customer's Reclaim at 24 hours. `total` counts them all,
+          // before the limit, so the panel can say how many it isn't showing.
+          sql<Row & { total: number }>`
+            SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, count(*) OVER ()::int AS total FROM purchases
             WHERE step IN ('stuck', 'waiting', 'restock') OR (step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')
-            ORDER BY created_at DESC LIMIT 20`,
+            ORDER BY created_at LIMIT ${ATTENTION_SHOWN}`,
           credit.view,
           refills.status,
           sales.status,
@@ -163,7 +170,8 @@ export class Admin extends Context.Service<Admin, {
                 createdAt: new Date(r.created_at).toISOString(),
                 retryable: retryStep(r) !== undefined
               })
-            )
+            ),
+            attentionTotal: attention[0]?.total ?? 0
           },
           credit: {
             settings: c.settings,
@@ -200,7 +208,7 @@ export class Admin extends Context.Service<Admin, {
         })
       }).pipe(Effect.orDie)
 
-      const purchaseList = (accountId?: string) =>
+      const purchaseList = (accountId?: string, id?: string) =>
         sql<Row & {
           requested_mode: AdminPurchase["mode"] | null
           admitted: { mode: AdminPurchase["mode"]; max_price: string } | null
@@ -215,8 +223,8 @@ export class Admin extends Context.Service<Admin, {
         }>`
           SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, updated_at,
                  requested_mode, admitted, reference_price, draw, invoice_id, pay_tx, pay_amount, admit_tx, settle_tx
-          FROM purchases ${accountId ? sql`WHERE account_id = ${accountId}` : sql``}
-          ORDER BY created_at DESC LIMIT 300`.pipe(
+          FROM purchases ${id ? sql`WHERE id = ${id}` : accountId ? sql`WHERE account_id = ${accountId}` : sql``}
+          ORDER BY created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`.pipe(
           Effect.map((rows) =>
             rows.map((r) => {
               const mode = r.admitted?.mode ?? r.requested_mode
@@ -248,7 +256,7 @@ export class Admin extends Context.Service<Admin, {
           Effect.orDie
         )
 
-      // ponytail: one get_account view per known account on every load; page or cache it past a few hundred customers.
+      // ponytail: the 300 most recent customers, one get_account view each on every load; page it when there are more.
       const users = Effect.gen(function*() {
         const rows = yield* sql<{
           account_id: string
@@ -275,8 +283,11 @@ export class Admin extends Context.Service<Admin, {
           LEFT JOIN telegram_links t ON t.account_id = k.account_id
           LEFT JOIN checkout_emails e ON e.account_id = k.account_id
           LEFT JOIN bitrefill_connections b ON b.account_id = k.account_id
-          GROUP BY k.account_id, k.first_seen, t.telegram_name, e.account_id, b.account_id
-          ORDER BY max(p.created_at) DESC NULLS LAST, k.first_seen DESC`.pipe(Effect.orDie)
+          GROUP BY k.account_id, k.first_seen, k.onchain, t.telegram_name, e.account_id, b.account_id
+          -- Buyers first, then accounts the contract knows, then the newest sign-ups: signing in is free, so
+          -- sign-ups that never deposited can't crowd the rest out.
+          ORDER BY max(p.created_at) DESC NULLS LAST, k.onchain DESC, k.first_seen DESC
+          LIMIT ${USERS_SHOWN}`.pipe(Effect.orDie)
         const accounts = yield* Effect.forEach(rows, (r) =>
           near.view<{ balance: string; per_purchase_limit: string; daily_limit: string } | null>("get_account", { account_id: r.account_id }).pipe(
             Effect.orElseSucceed(() => undefined)

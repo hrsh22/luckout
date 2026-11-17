@@ -23,6 +23,8 @@ export const GAS_ALERT = {
 const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
 /** The Base wallet's ETH (wei): about 150 Bitrefill payments' worth of gas. */
 export const BASE_GAS_ALERT = 100_000_000_000_000n // 0.0001 ETH
+/** Accounts the contract isn't known to hold money for that the solvency check asks about each round, in turn. */
+const UNSEEN_PER_ROUND = 50
 
 /** NEAR an account can spend: its balance minus what its storage locks. */
 export const spendable = (near: Near["Service"], id: string) =>
@@ -93,16 +95,27 @@ export const Monitor = Layer.effectDiscard(
     // below it, customers' money is gone (a bug or an attack). Balances aren't summed onchain, so this sums
     // every account we know of (Db: known_accounts). Missing ones only make the debt look smaller, never a
     // false alarm. (A Draw in flight holds its premium in no bucket for a block: also never a false alarm.)
-    // ponytail: one view per known account every 10 minutes; batch or add an onchain total when there are thousands.
+    // ponytail: one view per account the contract knows every 10 minutes; batch or add an onchain total when there are thousands.
     const solvency = Effect.gen(function*() {
       const [held, owed, known] = yield* Effect.all([
         near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
         near.view<{ free: string; locked: string; proceeds: string }>("get_reserve"),
-        sql<{ account_id: string }>`SELECT account_id FROM known_accounts`.pipe(Effect.orDie)
+        // Signing in is free, so not every account that ever did is read every round: those the contract has been
+        // seen to know, or that bought or were relayed, always are; the rest take turns, a few a round.
+        sql<{ account_id: string; onchain: boolean }>`
+          UPDATE known_accounts SET checked_at = now()
+          WHERE onchain
+             OR account_id IN (SELECT account_id FROM purchases UNION SELECT account_id FROM relays)
+             OR account_id IN (SELECT account_id FROM known_accounts WHERE NOT onchain ORDER BY coalesce(checked_at, first_seen) LIMIT ${UNSEEN_PER_ROUND})
+          RETURNING account_id, onchain`.pipe(Effect.orDie)
       ])
       const house = BigInt(owed.free) + BigInt(owed.locked) + BigInt(owed.proceeds)
-      const each = yield* Effect.forEach(known, ({ account_id }) =>
-        near.view<{ balance: string } | null>("get_account", { account_id }).pipe(Effect.map((a) => BigInt(a?.balance ?? 0))), { concurrency: 4 })
+      const each = yield* Effect.forEach(known, ({ account_id, onchain }) =>
+        near.view<{ balance: string } | null>("get_account", { account_id }).pipe(
+          // The contract knows it: from now on it's read every round.
+          Effect.tap((a) => (a !== null && !onchain ? sql`UPDATE known_accounts SET onchain = true WHERE account_id = ${account_id}`.pipe(Effect.orDie) : Effect.void)),
+          Effect.map((a) => BigInt(a?.balance ?? 0))
+        ), { concurrency: 4 })
       const balances = each.reduce((sum, b) => sum + b, 0n)
       if (BigInt(held) < house + balances) {
         yield* alerts.admin(

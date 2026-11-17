@@ -1,14 +1,16 @@
 "use client"
 
 import { NoPage } from "@/components/admin/panel"
-import { AdminTabs, ago, basescan, stepLabel, TONE } from "@/components/admin/shared"
+import { AdminTabs, ago, basescan, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
+import { Button } from "@/components/ui/button"
+import { heldByAll, purchaseIdIn } from "@/lib/admin-lists"
 import { api, errorMessage } from "@/lib/api"
 import { explorer, explorerAccount } from "@/lib/chain"
 import { dollars, limitsText, usd } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { useSession } from "@/lib/session"
-import type { AdminPurchase, AdminUser } from "@luckout/api"
+import { ADMIN_LIST_LIMIT, type AdminPurchase, type AdminUser } from "@luckout/api"
 import { useQuery } from "@tanstack/react-query"
 import { ArrowUpRight } from "lucide-react"
 import Link from "next/link"
@@ -18,9 +20,16 @@ import { type ReactNode, useState } from "react"
 // The admin's read-only Purchases and Users pages: a glance at who bought what and who holds what.
 // Same gate as the Control room: the server answers admins only, everyone else sees "No page here".
 
-function useAdminList<A>(key: ReadonlyArray<unknown>, f: (token: string) => Promise<A>) {
+/** `poll`: read again every 30 seconds. The users list doesn't: each load reads every listed customer's balance from NEAR. */
+function useAdminList<A>(key: ReadonlyArray<unknown>, f: (token: string) => Promise<A>, poll: boolean) {
   const { accountId, token, ready } = useSession()
-  const q = useQuery({ queryKey: ["admin", ...key, token], queryFn: () => f(token!), enabled: !!token, refetchInterval: 30_000, retry: false })
+  const q = useQuery({
+    queryKey: ["admin", ...key, token],
+    queryFn: () => f(token!),
+    enabled: !!token,
+    refetchInterval: poll ? 30_000 : false,
+    retry: false
+  })
   const gate = ready && !accountId
     ? <SignInCard title="Sign in to continue" body="Sign in with your NEAR wallet." />
     : (q.error as { _tag?: string } | null)?._tag === "NotFound"
@@ -28,7 +37,9 @@ function useAdminList<A>(key: ReadonlyArray<unknown>, f: (token: string) => Prom
     : !q.data
     ? q.error ? <p role="alert" className="font-medium text-bad">{errorMessage(q.error)}</p> : <div className="skeleton h-96 rounded-[1.75rem]" aria-busy="true" />
     : undefined
-  return { data: q.data, gate, error: q.error }
+  // A failed refresh leaves the last rows on screen, and says so.
+  const stale = q.data && q.error ? <LastFigures error={q.error} /> : undefined
+  return { data: q.data, gate, stale, refresh: () => void q.refetch(), refreshing: q.isFetching }
 }
 
 function Page({ title, body, children }: { title: string; body: ReactNode; children: ReactNode }) {
@@ -78,17 +89,24 @@ const matches = (q: string, ...fields: ReadonlyArray<string | undefined>) => fie
 
 export function AdminPurchases() {
   const account = useSearchParams().get("account") ?? undefined
-  const { data, gate } = useAdminList(["purchases", account], (token) =>
-    api((c) => c.admin.purchases({ query: account ? { account } : {} }), token))
   const [q, setQ] = useState("")
+  // A whole purchase id is asked of the server, so one older than the loaded list is still found.
+  const id = purchaseIdIn(q)
+  const { data, gate, stale } = useAdminList(["purchases", account, id], (token) =>
+    api((c) => c.admin.purchases({ query: { ...(account ? { account } : {}), ...(id ? { id } : {}) } }), token), true)
   const shown = data?.filter((p) => matches(q, p.accountId, p.voucherName, stepLabel(p.step), p.id)) ?? []
+  // A full page may not be everything: say "latest", never "everything".
+  const full = (data?.length ?? 0) >= ADMIN_LIST_LIMIT
   return (
     <Page
       title="Purchases"
-      body={account ? <>Everything <b className="text-ink">{account}</b> bought. <Link href="/admin/purchases" className="underline">Show everyone's</Link></> : "The latest 300, newest first. Open one for its details."}
+      body={account
+        ? <>{full ? `The latest ${ADMIN_LIST_LIMIT} purchases of` : "Everything"} <b className="text-ink">{account}</b>{full ? "" : " bought"}. <Link href="/admin/purchases" className="underline">Show everyone's</Link></>
+        : `The latest ${ADMIN_LIST_LIMIT}, newest first. Open one for its details; paste a purchase id to find an older one.`}
     >
       {gate ?? (
         <>
+          {stale}
           <Filter value={q} onChange={setQ} placeholder="Filter by account, card, step or id" />
           <ul className="flex flex-col gap-2">
             {shown.map((p) => <PurchaseRow key={p.id} p={p} />)}
@@ -139,18 +157,32 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
 }
 
 export function AdminUsers() {
-  const { data, gate } = useAdminList(["users"], (token) => api((c) => c.admin.users(), token))
+  // Loaded on open and on Refresh only: each load reads every listed customer's balance from NEAR, through the
+  // same RPC providers that admit and confirm purchases.
+  const { data, gate, stale, refresh, refreshing } = useAdminList(["users"], (token) => api((c) => c.admin.users(), token), false)
   const [q, setQ] = useState("")
   const shown = data?.filter((u) => matches(q, u.accountId, u.telegram)) ?? []
-  const held = data?.reduce((s, u) => s + (u.balance ?? 0), 0) ?? 0
+  const held = heldByAll(data ?? [])
   return (
     <Page
       title="Users"
-      body={data ? <>{data.length} accounts, holding <b className="text-ink">{usd(held)}</b> in all. Most recent buyers first.</> : "Every account that signed in, bought, relayed or linked Telegram."}
+      body={data
+        ? (
+          <>
+            {data.length >= ADMIN_LIST_LIMIT ? `The ${ADMIN_LIST_LIMIT} most recent accounts` : `${data.length} accounts`}, holding{" "}
+            {held.partial ? "at least " : ""}<b className="text-ink">{usd(held.micro)}</b> in all{held.partial ? " (NEAR didn't answer for some)" : ""}. Most recent
+            buyers first.
+          </>
+        )
+        : "Every account that signed in, bought, relayed or linked Telegram."}
     >
       {gate ?? (
         <>
-          <Filter value={q} onChange={setQ} placeholder="Filter by account or Telegram name" />
+          {stale}
+          <div className="flex flex-wrap items-center gap-2">
+            <Filter value={q} onChange={setQ} placeholder="Filter by account or Telegram name" />
+            <Button variant="soft" loading={refreshing} onClick={refresh}>Refresh</Button>
+          </div>
           <ul className="flex flex-col gap-2">
             {shown.map((u) => <UserRow key={u.accountId} u={u} />)}
             {shown.length === 0 && <li className="text-muted">No users{q ? " match" : " yet"}.</li>}
