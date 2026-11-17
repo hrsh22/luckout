@@ -5,7 +5,7 @@ import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Base } from "./Base.ts"
 import { DbMemory } from "./Db.ts"
-import { Monitor } from "./Monitor.ts"
+import { Monitor, secretWarning } from "./Monitor.ts"
 import { Near, NearUnavailable } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 import { fakeBase, fakeNear } from "./testing.ts"
@@ -69,4 +69,16 @@ test("the reconciler's index covers every open step", async () => {
     )
   )
   for (const step of OPEN_STEPS) assert.ok(def.includes(`'${step}'`), `${step} missing from: ${def}`)
+})
+
+// Once the Bitrefill client secret lapses no card can be bought, so the admin hears ahead of time.
+
+test("the Bitrefill client secret is flagged from two weeks before it expires, and after", () => {
+  const expires = 1_802_528_701 // 13 Feb 2027, as Bitrefill's registration reply gives it
+  const day = 86_400_000
+  assert.equal(secretWarning(expires, expires * 1000 - 15 * day), undefined, "more than two weeks away")
+  assert.match(secretWarning(expires, expires * 1000 - 14 * day)!, /expires on 2027-02-13, in 14 day/)
+  assert.match(secretWarning(expires, expires * 1000 - 13 * day)!, /expires on 2027-02-13, in 13 day/)
+  assert.match(secretWarning(expires, expires * 1000 + 1)!, /expired on 2027-02-13/)
+  assert.equal(secretWarning(0, Date.now()), undefined, "0 means the secret never expires")
 })

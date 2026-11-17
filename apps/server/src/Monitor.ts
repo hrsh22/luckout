@@ -1,4 +1,4 @@
-import { Effect, Layer, Schedule } from "effect"
+import { Config, Effect, Layer, Option, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Base } from "./Base.ts"
@@ -27,6 +27,24 @@ export const BASE_GAS_ALERT = 100_000_000_000_000n // 0.0001 ETH
 /** NEAR an account can spend: its balance minus what its storage locks. */
 export const spendable = (near: Near["Service"], id: string) =>
   near.account(id).pipe(Effect.map((a) => a.amount - BigInt(a.storageUsage) * PER_BYTE))
+
+/** How long before the Bitrefill client secret lapses the admin starts hearing about it. */
+const SECRET_WARNING_MS = 14 * 24 * 60 * 60_000
+
+/**
+ * What to tell the admin about our Bitrefill client's secret, if anything. `expiresAt` is the
+ * `client_secret_expires_at` Bitrefill returned when the client was registered: seconds since 1970,
+ * or 0 for a secret that never expires. Once it lapses no guest login works, so no card can be bought.
+ */
+export const secretWarning = (expiresAt: number, now: number) => {
+  if (expiresAt === 0) return undefined
+  const left = expiresAt * 1000 - now
+  if (left > SECRET_WARNING_MS) return undefined
+  const day = new Date(expiresAt * 1000).toISOString().slice(0, 10)
+  return left <= 0
+    ? `the Bitrefill client secret expired on ${day}: guest checkout and Connect Bitrefill are down until a new client is registered (deploy/README.md)`
+    : `the Bitrefill client secret expires on ${day}, in ${Math.ceil(left / 86_400_000)} day(s): register a new client before then (deploy/README.md), or cards stop being sold`
+}
 
 /**
  * Every 10 minutes, the things that quietly stop purchases if nobody notices. Bitrefill's USD credit
@@ -105,6 +123,19 @@ export const Monitor = Layer.effectDiscard(
 
     const check = Effect.all([section("purchases", purchases), section("gas", gas), section("solvency", solvency), section("Base gas", baseGas)], { discard: true })
 
+    // A registered Bitrefill client's secret lasts 90 days. Said once a day (and at each start) from two
+    // weeks out: by the time a guest login fails, cards have already stopped.
+    const secretExpiry = yield* Config.option(Config.Number("BITREFILL_CLIENT_SECRET_EXPIRES_AT"))
+    const hasClient = Option.isSome(yield* Config.option(Config.String("BITREFILL_CLIENT_ID")))
+    if (Option.isSome(secretExpiry)) {
+      yield* Effect.suspend(() => {
+        const warning = secretWarning(secretExpiry.value, Date.now())
+        return warning ? alerts.admin(warning) : Effect.void
+      }).pipe(Effect.repeat(Schedule.spaced("1 day")), Effect.forkScoped)
+    } else if (hasClient) {
+      // Forked, so a slow Telegram never delays the server's start.
+      yield* alerts.admin("BITREFILL_CLIENT_SECRET_EXPIRES_AT isn't set, so nothing will warn before the Bitrefill client secret expires (deploy/README.md)").pipe(Effect.forkScoped)
+    }
     yield* check.pipe(Effect.repeat(Schedule.spaced("10 minutes")), Effect.forkScoped)
   })
 )
