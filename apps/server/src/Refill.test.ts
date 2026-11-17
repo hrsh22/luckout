@@ -11,7 +11,7 @@ import { Bitrefill, type DepositState } from "./Bitrefill.ts"
 import { Credit, CREDIT_DEFAULTS, levels, MIN_REFILL } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
-import { OneClick, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
+import { OneClick, OneClickUnavailable, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
 import { BASE_USDC_ASSET, floatTopUp, fundable, quoteProblem, Refill } from "./Refill.ts"
 import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
 import { NEAR_USDC_ASSET } from "./TopUp.ts"
@@ -61,6 +61,10 @@ const world = (o: {
   swapLands?: boolean
   /** Guest checkout (ADR-0012): cards are paid from the Base Float, so every refill ends in the Base Wallet. */
   guest?: boolean
+  /** 1Click refuses every quote ("down"), or the quote call hits a bug ("dies"). */
+  quoteFails?: "down" | "dies"
+  /** 1Click's status endpoint doesn't answer. */
+  statusDown?: boolean
 } = {}) => {
   const s = { usdc: o.treasuryUsdc ?? 0, proceeds: o.proceeds ?? 236_000_000, swept: 0 }
   const made = { invoices: 0, quotes: 0, signs: 0 }
@@ -172,9 +176,14 @@ const world = (o: {
   })
   const oneClick = OneClick.of({
     tokens: Effect.succeed([]),
-    quote: (r) => Effect.sync(() => (made.quotes++, quotes.push(r), swapOut = Number(r.amount), events.push("quote"), (o.quote ?? honest)(r))),
+    quote: (r) =>
+      o.quoteFails === "down"
+        ? Effect.fail(new OneClickUnavailable({ message: "1Click: 400 Bad Request" }))
+        : o.quoteFails === "dies"
+        ? Effect.die("boom")
+        : Effect.sync(() => (made.quotes++, quotes.push(r), swapOut = Number(r.amount), events.push("quote"), (o.quote ?? honest)(r))),
     status: () =>
-      Effect.sync(() => {
+      o.statusDown ? Effect.fail(new OneClickUnavailable({ message: "1Click unavailable: TimeoutError" })) : Effect.sync(() => {
         const st = swap.shift() ?? "SUCCESS"
         // A finished swap lands in our wallet, once.
         if (st === "SUCCESS" && swapOut && o.swapLands !== false) (wallet.usdc += swapOut, swapOut = 0, events.push("swapped"))
@@ -896,4 +905,78 @@ test("with guest checkout, a refill the treasury can't fund in full is cut to wh
   assert.equal(w.wallet.usdc, 109_200_000, "the $30 already there plus the swap")
   assert.ok(w.alerts.some((a) => /cut from \$170\.00 to \$79\.20/.test(a)), w.alerts.join("\n"))
   assert.equal(w.made.invoices, 0)
+})
+
+// ---------- a refill that can't get on says so ----------
+
+test("a refill that keeps failing at one step tells the admin after five tries in a row, and keeps trying", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, quoteFails: "down" })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id) // first failed try
+    const failing = () => w.alerts.filter((a) => a.includes("keeps failing at quote"))
+    const quiet: Array<number> = []
+    for (let i = 0; i < 3; i++) {
+      yield* due
+      yield* refill.process // tries 2, 3 and 4
+      quiet.push(failing().length)
+    }
+    yield* due
+    yield* refill.process // the fifth
+    return { quiet, loud: failing(), row: yield* settle(v.id) }
+  }))
+  assert.deepEqual(r.quiet, [0, 0, 0], "a few failed tries are normal: nobody is told yet")
+  assert.equal(r.loud.length, 1)
+  assert.match(r.loud[0]!, /^Refill \w{8} \(\$30\.00\) keeps failing at quote: 1Click: 400 Bad Request\. It retries by itself, and no other refill starts meanwhile\.$/)
+  assert.equal(r.row.step, "quote", "nothing was sent, and it keeps trying")
+  assert.deepEqual(w.txs, [])
+})
+
+test("a bug in a refill step backs off like a network error instead of retrying every pass", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, quoteFails: "dies" })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet"))
+    yield* settle(v.id)
+    const [row] = yield* sql<{ step: string; error: string | null; attempts: number; waits: boolean }>`
+      SELECT step, error, attempts, next_attempt_at > now() + interval '20 seconds' AS waits FROM refills WHERE id = ${v.id}`
+    return row!
+  }))
+  assert.deepEqual([r.step, r.error, r.attempts, r.waits], ["quote", "unexpected error; see the server log", 1, true])
+})
+
+test("a swap long past its deadline is called stuck even when 1Click's status can't be read", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, statusDown: true })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    const waiting = yield* settle(v.id)
+    yield* sql`UPDATE refills SET swap = jsonb_set(swap, '{deadline}', '"2020-01-01T00:00:00.000Z"') WHERE id = ${v.id}`
+    yield* due
+    yield* refill.process
+    return { waiting, stuck: yield* settle(v.id) }
+  }))
+  assert.equal(r.waiting.step, "swapping", "inside its deadline, an unreadable status only waits")
+  assert.equal(r.stuck.step, "stuck")
+  assert.match(r.stuck.error ?? "", /1Click isn't answering and the swap is long past its deadline/)
+  const alert = w.alerts.find((a) => a.includes("needs a look")) ?? ""
+  assert.match(alert, new RegExp(`explorer\\.near-intents\\.org/transactions/${DEPOSIT_ADDRESS}`), "with what support needs")
+  assert.deepEqual(methods(w.txs), ["storage_deposit+ft_transfer"], "nothing more was sent")
+})
+
+test("customers waiting while no refill can start is said out loud, with the reason", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, swap: ["FAILED"] })
+  await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id) // stuck: 1Click reports the swap FAILED
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+  }))
+  assert.ok(w.alerts.some((a) => /^1 purchase\(s\) worth \$120\.00 are waiting for credit, and no refill can start: Refill \w{8} is stuck; resolve it in Admin first\.$/.test(a)), w.alerts.join("\n"))
 })

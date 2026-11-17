@@ -68,6 +68,8 @@ const CREDIT_TIMEOUT_MS = 60 * 60_000
 const UNUSUAL_FLOOR = 100_000_000
 /** How often a stuck swap is checked for a late refund or completion. */
 const STUCK_WATCH = "5 minutes"
+/** Failed tries in a row at one step before an admin is told: about 15 minutes of backoff (30 s, 1, 2, 4, 8 min). */
+const ALERT_AFTER_ATTEMPTS = 5
 /** The treasury needs a little NEAR to sign refills. */
 const TREASURY_MIN_GAS = 50_000_000_000_000_000_000_000n // 0.05 NEAR
 /** The Base wallet needs a little ETH to pay (a USDC transfer costs well under a cent on Base). */
@@ -512,7 +514,12 @@ export class Refill extends Context.Service<Refill, {
               return "next"
             }
             case "swapping": {
-              const status = yield* oneClick.status(row.swap!.depositAddress)
+              const overdue = Date.now() > time(row.swap!.deadline) + SWAP_GRACE_MS
+              // 1Click not answering must never hide a swap that's long overdue: our money is in flight.
+              const status = yield* oneClick.status(row.swap!.depositAddress).pipe(
+                Effect.catchTag("OneClickUnavailable", (e) => (overdue ? Effect.succeed(undefined) : Effect.fail(e)))
+              )
+              if (status === undefined) return yield* stop(row, "1Click isn't answering and the swap is long past its deadline")
               // A check that answered clears any earlier network error, so the panel shows only what's current.
               yield* save(row.id, { swap_status: status, error: null })
               if (status === "SUCCESS") {
@@ -527,7 +534,7 @@ export class Refill extends Context.Service<Refill, {
                 return "wait"
               }
               if (status === "FAILED" || status === "INCOMPLETE_DEPOSIT") return yield* stop(row, `1Click reports the swap ${status}`)
-              if (Date.now() > time(row.swap!.deadline) + SWAP_GRACE_MS) return yield* stop(row, `the swap is still ${status} long after its deadline`)
+              if (overdue) return yield* stop(row, `the swap is still ${status} long after its deadline`)
               return "wait"
             }
             case "invoice": {
@@ -605,6 +612,20 @@ export class Refill extends Context.Service<Refill, {
       /** How long a step waits before it's tried again when it couldn't move on. */
       const pause = (s: string) => (["swapping", "invoice", "pay"].includes(s) ? "10 seconds" : s === "crediting" ? "20 seconds" : s === "fund" ? "1 minute" : "30 seconds")
 
+      /** A step couldn't run: back off, and once it has failed several times in a row, tell an admin. */
+      const paused = (id: string, message: string) =>
+        Effect.gen(function*() {
+          // Unknown outcome (network): back off and try the same step again; never guess.
+          const [row] = yield* sql<Row>`UPDATE refills SET attempts = attempts + 1, error = ${message},
+            next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, attempts)) WHERE id = ${id} RETURNING *`.pipe(Effect.orDie)
+          // An open refill holds up every other one, so one that keeps failing says so (the same text at most hourly).
+          if (row && row.attempts >= ALERT_AFTER_ATTEMPTS) {
+            yield* alerts.admin(
+              `Refill ${id.slice(0, 8)} (${usd(Number(row.amount))}) keeps failing at ${row.step}: ${message}. It retries by itself, and no other refill starts meanwhile.${support(row)}`
+            )
+          }
+        })
+
       const advance = (id: string) =>
         Effect.suspend(() => {
           // Another run has this refill: leave it, and leave its guard alone. Only the run that set the guard
@@ -617,20 +638,20 @@ export class Refill extends Context.Service<Refill, {
               if (!row || !OPEN_REFILL_STEPS.includes(row.step)) return
               const next = yield* step(row)
               if (next === "wait") {
-                yield* sql`UPDATE refills SET next_attempt_at = now() + ${pause(row.step)}::interval WHERE id = ${id}`.pipe(Effect.orDie)
+                // The step ran cleanly, so the count of failed tries starts over.
+                yield* sql`UPDATE refills SET attempts = 0, next_attempt_at = now() + ${pause(row.step)}::interval WHERE id = ${id}`.pipe(Effect.orDie)
                 return
               }
             }
           }).pipe(
-            Effect.catch((e: Unknown) =>
-              Effect.gen(function*() {
-                // Unknown outcome (network): back off and try the same step again; never guess.
-                yield* Effect.logWarning(`refill ${id} paused: ${e.message}`)
-                yield* sql`UPDATE refills SET attempts = attempts + 1, error = ${e.message},
-                  next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, attempts)) WHERE id = ${id}`.pipe(Effect.orDie)
-              })
+            Effect.catch((e: Unknown) => Effect.andThen(Effect.logWarning(`refill ${id} paused: ${e.message}`), paused(id, e.message))),
+            // A defect (a bug, the database) backs off and alerts the same way; if even that fails, the next pass tries again.
+            Effect.catchCause((cause) =>
+              Effect.logError(`refill ${id} paused`, cause).pipe(
+                Effect.andThen(paused(id, "unexpected error; see the server log")),
+                Effect.catchCause(() => Effect.void)
+              )
             ),
-            Effect.catchCause((cause) => Effect.logError(`refill ${id} paused`, cause)),
             Effect.ensuring(Effect.sync(() => running.delete(id)))
           )
         }).pipe(
@@ -741,7 +762,17 @@ export class Refill extends Context.Service<Refill, {
           const due = yield* size(undefined)
           if (due.amount > 0) yield* alerts.admin(`${bitrefill.guest ? "The Base Float" : "Bitrefill credit"} is low and automatic refills are off: a ${usd(due.amount)} refill is due (${section}).`)
         }
-        if (why) return
+        if (why) {
+          // Held up by something only an admin can clear (a stuck refill, two failures, a missing key) while customers
+          // wait: say so. A refill still running says so itself if it keeps failing (paused, above).
+          if (why !== AUTO_OFF && !why.endsWith("is still running.")) {
+            const c = yield* credit.view
+            if (c.waiting.count > 0) {
+              yield* alerts.admin(`${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for ${bitrefill.guest ? "the Base Float" : "credit"}, and no refill can start: ${why}`)
+            }
+          }
+          return
+        }
         const s = yield* size(undefined)
         if (s.amount === 0) {
           // Customers are waiting and nothing can be refilled: say why, so nobody has to watch.
