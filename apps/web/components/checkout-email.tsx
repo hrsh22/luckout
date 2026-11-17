@@ -2,8 +2,10 @@
 
 import { Button } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
+import { usd } from "@/lib/format"
 import { useCheckoutEmail, useSaveCheckoutEmail } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { BITREFILL_ACCOUNT_LIMITS, GUEST_LIMITS } from "@luckout/api/limits"
 import { useQueryClient } from "@tanstack/react-query"
 import { KeyRound } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
@@ -120,6 +122,85 @@ export function BitrefillAccount() {
       {connected
         ? <Button variant="light" loading={busy} onClick={disconnect}>Disconnect</Button>
         : <Button loading={busy} onClick={connect}>Connect Bitrefill</Button>}
+    </div>
+  )
+}
+
+const LIMITS_ARTICLE = "https://help.bitrefill.com/hc/en-us/articles/360019385360-Is-there-a-purchasing-top-up-limit"
+const whole = (micro: number) => usd(micro).replace(/\.00$/, "")
+
+function Meter({ label, used, of, text }: { label: string; used: number; of: number; text: string }) {
+  const full = used >= of
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-[15px] text-ink-soft">{label}</span>
+        <span className={`text-[15px] font-semibold tabular-nums ${full ? "text-bad" : ""}`}>{text}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-soft" role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={of} aria-valuenow={Math.min(used, of)} aria-valuetext={text}>
+        <div className={`h-full rounded-full transition-[width] duration-500 ${full ? "bg-bad" : "bg-ink"}`} style={{ width: `${Math.min(100, (used / of) * 100)}%` }} />
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Bitrefill's own purchase limits (ADR-0012). A guest's count per Checkout Email, and the server refuses a card that
+ * would pass them, so the same counts are shown here. A connected account has Bitrefill's account limits instead;
+ * Bitrefill has no API for an account's level, so both levels are shown.
+ */
+export function BitrefillLimits() {
+  const { token } = useSession()
+  const checkout = useCheckoutEmail(token).data
+  const used = checkout?.used
+  if (used) {
+    return (
+      <div className="card flex flex-col gap-5 p-6">
+        <div>
+          <p className="font-display text-xl font-extrabold">Bitrefill's limits for your email</p>
+          <p className="text-[15px] text-ink-soft">Bitrefill limits what one email can buy as a guest. A card that would go over is refused before you pay.</p>
+        </div>
+        <div className="grid gap-5 sm:grid-cols-3">
+          <Meter label="Cards, last 24 hours" used={used.orders} of={GUEST_LIMITS.orders} text={`${used.orders} of ${GUEST_LIMITS.orders}`} />
+          <Meter label="Spent, last 24 hours" used={used.day} of={GUEST_LIMITS.daily} text={`${usd(used.day)} of ${whole(GUEST_LIMITS.daily)}`} />
+          <Meter label="Spent, last 30 days" used={used.month} of={GUEST_LIMITS.monthly} text={`${usd(used.month)} of ${whole(GUEST_LIMITS.monthly)}`} />
+        </div>
+        <p className="text-sm text-muted">
+          Counted from your Luckout purchases. Cards bought on Bitrefill itself with this email count toward{" "}
+          <a className="underline underline-offset-2" href={LIMITS_ARTICLE} target="_blank" rel="noreferrer">Bitrefill's limits</a> too.
+        </p>
+      </div>
+    )
+  }
+  if (!checkout?.bitrefill) return null
+  const levels = [
+    { name: "Basic account", note: "Until you verify your identity", ...BITREFILL_ACCOUNT_LIMITS.basic },
+    { name: "Verified account", note: "After Bitrefill checks your ID", ...BITREFILL_ACCOUNT_LIMITS.verified }
+  ]
+  return (
+    <div className="card flex flex-col gap-5 p-6">
+      <div>
+        <p className="font-display text-xl font-extrabold">Your Bitrefill account's limits</p>
+        <p className="text-[15px] text-ink-soft">Your cards are bought under your account's limits. Bitrefill doesn't tell us your account's level, so both are here.</p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {levels.map((l) => (
+          <div key={l.name} className="rounded-2xl bg-soft p-4">
+            <p className="font-semibold">{l.name}</p>
+            <p className="text-sm text-muted">{l.note}</p>
+            <dl className="mt-3 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1 text-[15px] tabular-nums">
+              <dt className="text-ink-soft">Cards a day</dt><dd className="text-right font-semibold">{l.orders}</dd>
+              <dt className="text-ink-soft">One card</dt><dd className="text-right font-semibold">{whole(l.perCard)}</dd>
+              <dt className="text-ink-soft">A day</dt><dd className="text-right font-semibold">{whole(l.daily)}</dd>
+              <dt className="text-ink-soft">A month</dt><dd className="text-right font-semibold">{whole(l.monthly)}</dd>
+            </dl>
+          </div>
+        ))}
+      </div>
+      <p className="text-sm text-muted">
+        From <a className="underline underline-offset-2" href={LIMITS_ARTICLE} target="_blank" rel="noreferrer">Bitrefill's limits</a>.{" "}
+        <a className="underline underline-offset-2" href="https://www.bitrefill.com/account/verification" target="_blank" rel="noreferrer">Verify your account</a> on Bitrefill to move up.
+      </p>
     </div>
   )
 }

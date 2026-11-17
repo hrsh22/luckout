@@ -1,4 +1,4 @@
-import { BitrefillUnavailable, CheckoutEmail, Draw, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, PurchasePage, Quote } from "@luckout/api"
+import { BitrefillUnavailable, CheckoutEmail, Draw, GUEST_LIMITS, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, PurchasePage, Quote } from "@luckout/api"
 import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac } from "node:crypto"
@@ -84,7 +84,6 @@ type Unknown = NearUnavailable | BitrefillUnavailable | BaseUnavailable
 
 export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "fail"]
 /** Bitrefill's limits for one Checkout Email (its Terms §8, guests): orders a day, and USD a day and a month. */
-export const GUEST_LIMITS = { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 } as const
 /** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
 const INVOICE_TTL_MS = 40 * 60_000
 /** This long after its invoice, a Base payment is never sent or signed again: the invoice expires at 60 minutes. Base is only asked where it is. */
@@ -180,11 +179,12 @@ export class Purchases extends Context.Service<Purchases, {
         )
       // A customer who connected their own Bitrefill account needs no email: their cards are bought on it.
       const checkoutEmail = (accountId: string) =>
-        Effect.all([Option.isNone(key) ? Effect.succeed(undefined) : emailOf(accountId), connect.connected(accountId)]).pipe(
-          Effect.map(([e, connected]) =>
-            new CheckoutEmail({ needed: bitrefill.guest && !connected, ...(e ? { email: e.email } : {}), ...(connect.offered ? { bitrefill: connected } : {}) })
-          )
-        )
+        Effect.gen(function*() {
+          const [e, connected] = yield* Effect.all([Option.isNone(key) ? Effect.succeed(undefined) : emailOf(accountId), connect.connected(accountId)])
+          const needed = bitrefill.guest && !connected
+          const used = needed && e ? yield* guestUse(e.key) : undefined
+          return new CheckoutEmail({ needed, ...(e ? { email: e.email } : {}), ...(connect.offered ? { bitrefill: connected } : {}), ...(used ? { used } : {}) })
+        })
       const setCheckoutEmail = (accountId: string, input: string) =>
         Effect.gen(function*() {
           if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
@@ -195,8 +195,8 @@ export class Purchases extends Context.Service<Purchases, {
           return yield* checkoutEmail(accountId)
         })
 
-      /** Why Bitrefill would refuse one more card of `price` for this email now, if it would (GUEST_LIMITS). */
-      const overGuestLimit = (emailKeyValue: string, price: number) =>
+      /** What an email has used of a guest's limits: every card ordered for it through Luckout, on any account. */
+      const guestUse = (emailKeyValue: string) =>
         sql<{ orders: number; day: string; month: string }>`
           SELECT count(*) FILTER (WHERE created_at > now() - interval '1 day')::int AS orders,
                  COALESCE(sum(reference_price) FILTER (WHERE created_at > now() - interval '1 day'), 0)::text AS day,
@@ -205,12 +205,17 @@ export class Purchases extends Context.Service<Purchases, {
           WHERE email_key = ${emailKeyValue} AND created_at > now() - interval '30 days'
             AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`.pipe(
           Effect.orDie,
-          Effect.map(([u]) =>
-            (u?.orders ?? 0) >= GUEST_LIMITS.orders
-              ? `Bitrefill allows ${GUEST_LIMITS.orders} cards a day per email, and yours has had ${u?.orders} in the last 24 hours. Try again later.`
-              : Number(u?.day ?? 0) + price > GUEST_LIMITS.daily
+          Effect.map(([u]) => ({ orders: u?.orders ?? 0, day: Number(u?.day ?? 0), month: Number(u?.month ?? 0) }))
+        )
+      /** Why Bitrefill would refuse one more card of `price` for this email now, if it would (GUEST_LIMITS). */
+      const overGuestLimit = (emailKeyValue: string, price: number) =>
+        guestUse(emailKeyValue).pipe(
+          Effect.map((u) =>
+            u.orders >= GUEST_LIMITS.orders
+              ? `Bitrefill allows ${GUEST_LIMITS.orders} cards a day per email, and yours has had ${u.orders} in the last 24 hours. Try again later.`
+              : u.day + price > GUEST_LIMITS.daily
               ? `Bitrefill allows ${usd(GUEST_LIMITS.daily)} of cards a day per email; this one would go over it. Try a smaller card or wait a day.`
-              : Number(u?.month ?? 0) + price > GUEST_LIMITS.monthly
+              : u.month + price > GUEST_LIMITS.monthly
               ? `Bitrefill allows ${usd(GUEST_LIMITS.monthly)} of cards a month per email; this one would go over it.`
               : undefined
           )

@@ -95,6 +95,8 @@ function Voucher() {
     onSettled: () => {
       refresh().catch(() => {})
       qc.invalidateQueries({ queryKey: ["purchases"] })
+      // What this email has used of Bitrefill's limits just moved.
+      qc.invalidateQueries({ queryKey: ["checkout-email"] })
       // The reserve may have moved (or been the reason for a refusal): confirming again needs a fresh quote.
       qc.invalidateQueries({ queryKey: ["quote", id] })
     }

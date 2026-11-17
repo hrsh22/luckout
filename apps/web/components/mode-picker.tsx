@@ -15,7 +15,8 @@ import { motion } from "motion/react"
  * Free Reserve is read, lucky tiles show no amounts: the reserve could change them.
  */
 export function ModePicker({ value, onChange, price, savedDefault, saving, compact = false, label = "How do you want to pay?" }: {
-  value: Mode
+  /** undefined while the account is still loading: nothing is marked as chosen yet. */
+  value: Mode | undefined
   onChange: (m: Mode) => void
   /** Reference Price in micro-USDC, when a card and amount are chosen. */
   price?: number | undefined
@@ -31,7 +32,7 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
   return (
     <div role="radiogroup" aria-label={label} className="grid gap-3 sm:grid-cols-2">
       {MODES.map((m) => {
-        const selected = sameMode(value, m.mode)
+        const selected = value !== undefined && sameMode(value, m.mode)
         const p = modePalette(m.mode)
         const example = price ?? 20_000_000
         const quote = m.premiumBps === 0 || reserve !== undefined ? simpleQuote(m, example, reserve) : undefined

@@ -1,4 +1,4 @@
-import { type Mode, noLimit } from "@luckout/api"
+import { BITREFILL_ACCOUNT_LIMITS, GUEST_LIMITS, type Mode, noLimit } from "@luckout/api"
 import { Effect } from "effect"
 import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
@@ -61,7 +61,7 @@ const mode = { type: "string", enum: ["normal", "lite", "classic", "jackpot"], d
 export const TOOLS = [
   tool("search_vouchers", "Find gift cards by brand. Each result says where it works.", { query: { type: "string" } }, ["query"]),
   tool("get_voucher", "The amounts on sale for one voucher, with today's USD price for each.", { voucher_id: { type: "string" } }, ["voucher_id"]),
-  tool("get_balance", "The customer's balance, Spending Limits, Default Mode and Running Total."),
+  tool("get_balance", "The customer's balance, Spending Limits, Default Mode, Running Total, and what they have used of Bitrefill's purchase limits."),
   tool("quote", "The exact quote for one amount in one mode, and whether their balance covers it.", {
     voucher_id: { type: "string" },
     value: { type: "string", description: "The amount exactly as get_voucher lists it" },
@@ -233,7 +233,23 @@ export const makeAgent = (deps: {
           }
           : { balance: "$0.00", note: `No deposit yet. Add funds at ${deps.web}/wallet` }),
         ...(e.needed ? { card_email: e.email ?? "not set yet" } : {}),
-        ...(e.bitrefill ? { cards_bought_on: "their own Bitrefill account" } : {})
+        // Bitrefill's limits, so "what are my limits?" gets the real figures (it has no API for an account's level).
+        ...(e.used
+          ? {
+            bitrefill_guest_limits_for_this_email: {
+              cards_last_24h: `${e.used.orders} of ${GUEST_LIMITS.orders}`,
+              spent_last_24h: `${usd(e.used.day)} of ${usd(GUEST_LIMITS.daily)}`,
+              spent_last_30_days: `${usd(e.used.month)} of ${usd(GUEST_LIMITS.monthly)}`,
+              raise_them: `Connect a Bitrefill account at ${deps.web}/wallet`
+            }
+          }
+          : {}),
+        ...(e.bitrefill
+          ? {
+            cards_bought_on: "their own Bitrefill account",
+            bitrefill_account_limits: `Basic account: ${BITREFILL_ACCOUNT_LIMITS.basic.orders} cards a day, ${usd(BITREFILL_ACCOUNT_LIMITS.basic.daily)} a day, ${usd(BITREFILL_ACCOUNT_LIMITS.basic.monthly)} a month. Verified with Bitrefill: ${BITREFILL_ACCOUNT_LIMITS.verified.orders} cards a day, ${usd(BITREFILL_ACCOUNT_LIMITS.verified.daily)} a day, ${usd(BITREFILL_ACCOUNT_LIMITS.verified.monthly)} a month. Bitrefill doesn't tell us which they are.`
+          }
+          : {})
       })))),
     quote: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
       run(Effect.gen(function*() {
