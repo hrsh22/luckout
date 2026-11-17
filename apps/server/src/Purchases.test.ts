@@ -55,6 +55,8 @@ const world = (opts: {
   requestWait?: number
   /** Bitrefill has no such card: every price lookup fails. */
   noCard?: boolean
+  /** Bitrefill's lookups are used up for this minute: every price lookup is turned away. */
+  pricesBusy?: boolean
   /** Signing a Base payment takes this long (ms): the wait for the wallet and for Chain Signatures. */
   payDelay?: number
   /** Base can't be reached when a payment is about to be signed: nothing is signed or saved. */
@@ -131,6 +133,7 @@ const world = (opts: {
     voucher: () =>
       Effect.suspend(() => {
         lookups++
+        if (opts.pricesBusy) return Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
         return opts.noCard
           ? Effect.fail(new BitrefillUnavailable({ message: "No such voucher" }))
           : Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] }))
@@ -980,4 +983,34 @@ test("a float read while a payment is on its way, or before we've seen it land, 
   assert.deepEqual(r.ended, ["settled", "settled"])
   assert.ok(!r.explained.some((a) => /dropped/.test(a)), r.explained.join(" | "))
   assert.match(w.alerts.join(" | "), /The Base Float dropped \$5\.00 more than our payments explain/)
+})
+
+test("a Base payment signed after its invoice neared expiry is neither saved nor sent: a fresh invoice is paid once", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payDelay: 300 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const buying = yield* Effect.forkChild(w.buy())
+    yield* stepIs("pay")
+    // The invoice passes 50 minutes while the payment is still being signed (the wallet's lock, Chain Signatures).
+    yield* sql`UPDATE purchases SET invoice_at = now() - interval '51 minutes'`
+    const p = yield* Fiber.join(buying)
+    const [row] = yield* sql<{ step: string; saved: boolean }>`SELECT step, pay_tx IS NOT NULL AS saved FROM purchases`
+    const during = { status: p.status, paid: w.paid.length, ...row! }
+    yield* reconcilePass
+    return { during, after: yield* settled(p.id) }
+  }))
+  assert.deepEqual(r.during, { status: "pending", paid: 0, step: "pay", saved: false }, "the late payment was neither saved nor sent")
+  assert.equal(r.after, "settled")
+  assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 2, "a fresh invoice was asked for")
+  assert.deepEqual(w.paid.map((x) => x.resent), [false], "and paid once")
+})
+
+test("a busy minute at Bitrefill isn't counted against the account as cards it couldn't find", async () => {
+  const w = world({ pricesBusy: true })
+  const e = await w.run(Effect.gen(function*() {
+    for (let i = 0; i < 3; i++) yield* w.buy().pipe(Effect.flip)
+    return yield* w.buy().pipe(Effect.flip)
+  }))
+  assert.match(e.message, /Prices are busy/)
 })

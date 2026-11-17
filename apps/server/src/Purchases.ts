@@ -334,13 +334,24 @@ export class Purchases extends Context.Service<Purchases, {
               }
               // Saved only over the payment this run was handed (none, or the lost one it replaces). A run that
               // loaded the row before another saved its payment stops here, before sending a second one.
+              // Saved only while the invoice is fresh, too (PAY_SEND_LIMIT_MS): signing can wait on the wallet's lock
+              // or on Chain Signatures past the check below, and a payment that isn't saved is never sent. With
+              // nothing saved, the next pass asks for a fresh invoice.
               const savePayment = (p: SignedPayment) =>
                 sql<{ id: string }>`
                   UPDATE purchases SET pay_tx = ${JSON.stringify(p)}::jsonb, updated_at = now()
                   WHERE id = ${row.id} AND step = 'pay' AND pay_tx->>'hash' IS NOT DISTINCT FROM ${row.pay_tx?.hash ?? null}
+                    AND invoice_at > now() - interval '50 minutes'
                   RETURNING id`.pipe(
                   Effect.orDie,
-                  Effect.flatMap((saved) => (saved.length === 1 ? Effect.void : Effect.die(`purchase ${row.id}: another run saved a Base payment first; not sending a second`)))
+                  Effect.flatMap((saved) =>
+                    saved.length === 1 ? Effect.void : Effect.flatMap(load(row.id), (current) =>
+                      Effect.die(
+                        current.step === "pay" && current.invoice_at && Date.now() - time(current.invoice_at) > PAY_SEND_LIMIT_MS
+                          ? `purchase ${row.id}: its Base payment was signed after invoice ${current.invoice_id} neared expiry; neither saved nor sent`
+                          : `purchase ${row.id}: another run saved a Base payment first; not sending a second`
+                      ))
+                  )
                 )
               // Once the invoice is about to expire nothing is sent, not even again, and nothing new is signed for
               // it: Base is only asked where the saved payment is. Paying an expired invoice would leave our USDC
@@ -640,7 +651,8 @@ export class Purchases extends Context.Service<Purchases, {
           return yield* new PurchaseInvalid({ message: "We couldn't find several cards you asked for; try again in a minute" })
         }
         const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true).pipe(
-          Effect.tapError((e) => (e._tag === "BitrefillUnavailable" ? missed(accountId) : Effect.void))
+          // A busy minute spent no lookup and says nothing about the card, so it isn't counted as a miss.
+          Effect.tapError((e) => (e._tag === "BitrefillUnavailable" && !e.message.startsWith("Prices are busy") ? missed(accountId) : Effect.void))
         )
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
