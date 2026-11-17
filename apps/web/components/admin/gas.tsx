@@ -5,8 +5,9 @@ import { Bar, basescan, eth, type Tx } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { toYocto, typedAmount } from "@/lib/format"
-import { explorerAccount, network, sendNear } from "@/lib/near"
+import { contractId, explorerAccount, network, sendNear } from "@/lib/near"
 import { useSession } from "@/lib/session"
+import { ourAccounts } from "@/lib/treasury"
 import type { AdminOverview } from "@luckout/api"
 import { Fuel, Plus } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -103,7 +104,10 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
   }, [target])
   const yocto = toYocto(amount)
   const inWallet = BigInt(walletNear ?? 0)
-  const ok = yocto !== undefined && yocto > 0n && yocto < inWallet
+  // NEAR goes only to the account this site was built for in that role, never to one the server names.
+  const to = target ? ourAccounts(contractId)?.[target.role] : undefined
+  const differs = target !== undefined && to !== target.accountId
+  const ok = yocto !== undefined && yocto > 0n && yocto < inWallet && !differs
   return (
     <Sheet
       open={target !== undefined}
@@ -128,9 +132,15 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
         <p className="text-sm text-muted">
           Your wallet has {nearAmount(inWallet)} NEAR{network === "testnet" ? " (testnet NEAR is free from the faucet)" : ""}.
         </p>
-        <Button size="lg" disabled={!ok || !target} onClick={async () => {
-          if (!target || yocto === undefined) return
-          if (await tx(`Sending ${amount} NEAR`, `${amount} NEAR sent to ${shortAccount(target.accountId)}`, (id) => sendNear(id, target.accountId, String(yocto)))) onClose()
+        {target && differs && (
+          <p role="alert" className="text-sm font-medium text-bad">
+            The server reports {target.accountId} as the {GAS_COPY[target.role].label.toLowerCase()}, but this site is built for {to ?? "an account it can't tell"}.
+            Nothing is sent until they match: check the server's environment.
+          </p>
+        )}
+        <Button size="lg" disabled={!ok || !target || !to} onClick={async () => {
+          if (!target || !to || yocto === undefined) return
+          if (await tx(`Sending ${amount} NEAR`, `${amount} NEAR sent to ${shortAccount(to)}`, (id) => sendNear(id, to, String(yocto)))) onClose()
         }}>
           {yocto !== undefined && yocto >= inWallet ? "More than your wallet holds" : `Send ${ok ? amount : ""} NEAR`}
         </Button>
