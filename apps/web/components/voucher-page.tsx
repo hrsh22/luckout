@@ -214,8 +214,15 @@ function Voucher() {
                       ? errorMessage(quote.error)
                       : voucher.data && !value
                       ? "There's no amount of this card to buy right now."
+                      // The shop's summary drew the card, but with no amount in the link there's nothing to price.
+                      : voucher.error && !value
+                      ? errorMessage(voucher.error)
                       : undefined}
-                    retry={value ? { run: () => void quote.refetch(), busy: quote.isFetching } : undefined}
+                    retry={value
+                      ? { run: () => void quote.refetch(), busy: quote.isFetching }
+                      : voucher.error
+                      ? { run: () => void voucher.refetch(), busy: voucher.isFetching }
+                      : undefined}
                   >
                     {shown && look && look.countryCode !== WORLDWIDE && (
                       <p className="text-sm text-ink-soft">
