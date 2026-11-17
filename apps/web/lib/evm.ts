@@ -105,8 +105,19 @@ export async function signText(expected: string, message: string) {
   return core.signMessage(config, { account, message })
 }
 
-/** Sends `amount` (base units) of a token, or the chain's own coin without `contract`, from the wallet; gas on the wallet. */
-export async function sendFromWallet(expected: string, o: { chain: string; contract?: string | undefined; to: string; amount: string }) {
+/** The wallet's transfer was mined and reverted: nothing left the wallet, so sending it again is safe. */
+export class TransferReverted extends Error {
+  constructor() {
+    super("Your wallet's transfer failed on its chain. Nothing reached Luckout.")
+  }
+}
+
+/**
+ * Sends `amount` (base units) of a token, or the chain's own coin without `contract`, from the wallet; gas on the
+ * wallet. `onSent` runs once the wallet has sent it, before its chain confirms: from then on it may land, so the
+ * caller must not offer to send it again unless this throws TransferReverted.
+ */
+export async function sendFromWallet(expected: string, o: { chain: string; contract?: string | undefined; to: string; amount: string }, onSent?: () => void) {
   const { config, core, account } = await walletOn(expected)
   const chainId = EVM_CHAIN_IDS[o.chain]
   if (!chainId) throw new Error(`Luckout can't send from ${o.chain} with this wallet.`)
@@ -121,8 +132,9 @@ export async function sendFromWallet(expected: string, o: { chain: string; contr
       args: [o.to as `0x${string}`, BigInt(o.amount)]
     })
     : await core.sendTransaction(config, { account, chainId, to: o.to as `0x${string}`, value: BigInt(o.amount) })
+  onSent?.()
   const receipt = await core.waitForTransactionReceipt(config, { hash, chainId })
-  if (receipt.status !== "success") throw new Error("Your wallet's transfer failed on its chain. Nothing reached Luckout.")
+  if (receipt.status !== "success") throw new TransferReverted()
   return hash
 }
 
