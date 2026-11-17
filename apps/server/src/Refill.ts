@@ -568,7 +568,9 @@ export class Refill extends Context.Service<Refill, {
               // in the float is done, and only now may the next one be planned.
               const w = yield* unseen(row)
               if (w.missing > 0) {
-                if (row.error) yield* save(row.id, { error: null })
+                // Cleared without touching updated_at: the wait is timed from it, and a failed Base read in between
+                // must not start the ten minutes over, or a refill that never lands would never stop and say so.
+                if (row.error) yield* sql`UPDATE refills SET error = NULL WHERE id = ${row.id}`.pipe(Effect.orDie)
                 // 1Click reported success; the transfer can take a few blocks to show.
                 if (Date.now() - time(row.updated_at) > WALLET_WAIT_MS) {
                   return yield* stop(
@@ -880,12 +882,16 @@ export class Refill extends Context.Service<Refill, {
        * A stuck refill can still settle: 1Click may refund or finish a swap late, a Base payment may be
        * mined, Bitrefill may credit late. A clean outcome carries the refill on or closes it, as the
        * pipeline would have; anything else is reported and left for a human. Nothing is ever sent from here.
-       * Only a signed Base payment or a swap that got stuck while swapping is watched: a refill stuck for
-       * any other reason (say, the wallet came up short at the invoice) waits for an admin.
+       * Only a signed Base payment, a swap that got stuck while swapping, or a refill into the Base Float whose
+       * USDC hadn't shown in the wallet in time is watched: once that USDC shows, closing it moves no money. A
+       * refill stuck for any other reason waits for an admin, including one that would go on to pay Bitrefill
+       * (the admin may have topped up by hand meanwhile).
        */
       const watchStuck = sql<Row>`
-        SELECT * FROM refills WHERE step = 'stuck' AND (pay_tx->>'hash' IS NOT NULL OR stuck_at = 'swapping') AND next_attempt_at <= now()`.pipe(
+        SELECT * FROM refills WHERE step = 'stuck'
+          AND (pay_tx->>'hash' IS NOT NULL OR stuck_at = 'swapping' OR (stuck_at = 'invoice' AND swap IS NOT NULL)) AND next_attempt_at <= now()`.pipe(
         Effect.orDie,
+        Effect.map((rows) => rows.filter((r) => r.stuck_at !== "invoice" || endsInFloat(r))),
         Effect.flatMap((rows) =>
           Effect.forEach(rows, (row) =>
             Effect.gen(function*() {

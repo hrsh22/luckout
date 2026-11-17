@@ -943,15 +943,27 @@ test("with guest checkout, a refill 1Click reports finished ends only once the B
     yield* Effect.sleep("100 millis")
     const [row] = yield* sql<{ id: string }>`SELECT id FROM refills`
     yield* drive(row!.id)
-    yield* sql`UPDATE refills SET updated_at = now() - interval '11 minutes' WHERE id = ${row!.id}`
+    // Nine minutes in, a Base read fails; the clean pass that follows must not start the ten minutes over.
+    yield* sql`UPDATE refills SET updated_at = now() - interval '9 minutes', error = 'Base read failed' WHERE id = ${row!.id}`
     yield* due
     yield* refill.process
-    return { stuck: yield* settle(row!.id), paused: (yield* refill.status).paused }
+    // Two minutes later it is past ten.
+    yield* sql`UPDATE refills SET updated_at = updated_at - interval '2 minutes' WHERE id = ${row!.id}`
+    yield* due
+    yield* refill.process
+    const stuck = yield* settle(row!.id)
+    const paused = (yield* refill.status).paused
+    // The USDC shows up after all: the stuck-refill watch closes it, no admin needed.
+    never.wallet.usdc += 70_000_000
+    yield* sql`UPDATE refills SET next_attempt_at = now() WHERE id = ${row!.id}`
+    yield* refill.process
+    return { stuck, paused, late: yield* settle(row!.id) }
   }))
   assert.equal(s.stuck.step, "stuck")
   assert.match(s.stuck.error ?? "", /the Base wallet holds \$30\.00, \$70\.00 short of the \$70\.00 1Click reports it delivered/)
   assert.match(s.paused ?? "", /is stuck/)
   assert.ok(never.alerts.some((a) => a.includes("needs a look")), never.alerts.join("\n"))
+  assert.equal(s.late.step, "done", s.late.error ?? "")
 })
 
 // ---------- a refill that can't get on says so ----------
