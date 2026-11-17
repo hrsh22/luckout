@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deploys the server on the VM, as the site user. Runs from the CI deploy key's forced command in
 # ~/.ssh/authorized_keys (which fixes the branch per site, so CI can't choose it), or by hand:
-#   bash deploy/remote-deploy.sh testnet     # luckout-testnet-api.gamified.trade
-#   bash deploy/remote-deploy.sh main        # luckout-api.gamified.trade (mainnet)
+#   bash deploy/remote-deploy.sh testnet     # testnet-api.luckout.wtf
+#   bash deploy/remote-deploy.sh main        # api.luckout.wtf (mainnet)
 #   bash deploy/remote-deploy.sh staging     # staging-api.luckout.wtf (mainnet, its own contract)
 # CI sends the commit it tested as the SSH command, which the forced command leaves in
 # SSH_ORIGINAL_COMMAND; then the branch must still point at it. By hand, there's no such check.

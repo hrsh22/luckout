@@ -5,8 +5,8 @@
 | | Testnet | Staging | Production (mainnet) |
 |---|---|---|---|
 | Branch | `testnet` | `staging` (PRs from feature branches, with CI passing) | `main` (changes only by PR from `staging`, with CI passing) |
-| Web (Vercel) | Preview env vars, domain `testnet.luckout.wtf` on branch `testnet` (the old `testnet.luckout.gamified.trade` still works) | Preview env vars for branch `staging`, domain `staging.luckout.wtf` on branch `staging` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it; the old `luckout.gamified.trade` still works) |
-| API | `testnet-api.luckout.wtf` (also `luckout-testnet-api.gamified.trade`), VM user `luckout-testnet-api`, port 8789 | `staging-api.luckout.wtf`, VM user `luckout-staging-api`, port 8791 | `api.luckout.wtf` (also `luckout-api.gamified.trade`, same vhost and certificate), VM user `luckout-api`, port 8788 |
+| Web (Vercel) | Preview env vars, domain `testnet.luckout.wtf` on branch `testnet` | Preview env vars for branch `staging`, domain `staging.luckout.wtf` on branch `staging` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it) |
+| API | `testnet-api.luckout.wtf` (its certificate is still issued under the old `luckout-testnet-api.gamified.trade`, so that DNS record stays until the certificate is reissued for `testnet-api.luckout.wtf` alone), VM user `luckout-testnet-api`, port 8789 | `staging-api.luckout.wtf`, VM user `luckout-staging-api`, port 8791 | `api.luckout.wtf`, VM user `luckout-api`, port 8788 |
 | NEAR accounts | `*.luckout.testnet` | `*.staging.luckout.near` (`ROOT=staging.luckout.near`, smaller amounts: see `contract/deploy-mainnet.sh`) | `*.luckout.near` |
 | Database | `luckout_testnet` (role `luckout_testnet`) | `luckout_staging` (role `luckout_staging`) | `luckout_mainnet` (role `luckout_mainnet`) |
 | Telegram | the testnet bot | the staging bot | the mainnet bot |
@@ -27,7 +27,7 @@ The steps below set up one site; repeat them per environment with its own user, 
 1. **Money in place.** `luckout.near` (the owner's wallet unless `OWNER` names another) with about 5.7 NEAR and about $75 of USDC on NEAR, and a full-access key for it in `~/.near-credentials/mainnet` on the machine that deploys.
 2. **Accounts and contract.** `./contract/deploy-mainnet.sh` shows every step; run it again with `GO=1`. It creates `app.`, `server.`, `relayer.` and `treasury.luckout.near`, deploys the contract owned by `OWNER`, registers the contract and the treasury on USDC, and limits the server's key to the purchase methods. Afterwards, remove the deploying machine's key from `luckout.near`.
 3. **Database.** As the Postgres admin: `CREATE ROLE luckout_mainnet LOGIN PASSWORD '…'; CREATE DATABASE luckout_mainnet OWNER luckout_mainnet;` The server records the database's network on first start.
-4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key (it only reads the catalog), a Bitrefill guest client for orders (`BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`; registered as under "Switching production to guest checkout" below), `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf,https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
+4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key (it only reads the catalog), a Bitrefill guest client for orders (`BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`; registered as under "Switching production to guest checkout" below), `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf`. It refuses to start with any of these missing or pointing at testnet.
 5. **CI.** Add a forced-command key for `main` to that user's `authorized_keys`, the `MAINNET_DEPLOY_KEY` secret and `MAINNET_SSH_TARGET` variable, then set `DEPLOY_MAINNET=on`.
 6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://api.luckout.wtf`. The testnet server then drops the mainnet site from `CORS_ORIGINS`.
 7. **Merge** the PR from `testnet` into `main`: the web and the API go live.
@@ -38,7 +38,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
 
 ## Once
 
-1. **Site.** In CloudPanel: Add Site → Create a Node.js Site. Domain `luckout-api.gamified.trade`, site user `luckout-api`, app port `8788`. Point the domain's `A` record at the VM, then issue a Let's Encrypt certificate under SSL/TLS. Mainnet also answers on `api.luckout.wtf`: it is on the `server_name` line in the Vhost tab, and the certificate covers both names (`clpctl lets-encrypt:install:certificate --domainName=luckout-api.gamified.trade --subjectAlternativeName=api.luckout.wtf`).
+1. **Site.** In CloudPanel: Add Site → Create a Node.js Site, site user `luckout-api`, app port `8788`. The site was created under the retired domain `luckout-api.gamified.trade`, which is why its folder is `~/htdocs/luckout-api.gamified.trade`; it answers on `api.luckout.wtf`, which is on the `server_name` line in the Vhost tab. Point that name's `A` record at the VM (proxied by Cloudflare), then issue a Let's Encrypt certificate for it under SSL/TLS.
 2. **Timeout, body size and client address.** A purchase request waits up to a minute for the card (`PURCHASE_REQUEST_WAIT_MS`, 60 s), then answers "pending" and the page follows it, which keeps it under Cloudflare's 100 s. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block, and add these two lines under `server_name`:
    ```nginx
    client_max_body_size 64k;
@@ -72,7 +72,7 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    pm2 start deploy/ecosystem.config.cjs
    pm2 save
    ```
-   `https://luckout-api.gamified.trade/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://api.luckout.wtf`.
+   `https://api.luckout.wtf/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://api.luckout.wtf`.
 7. **Reboots and backups.** Put the password in `~/.pgpass` (`127.0.0.1:5432:luckout:luckout:<password>`, then `chmod 600`). Run `mkdir -p ~/backups`, then add to `crontab -e`. The `@reboot` line brings pm2 back without root, so `pm2 startup` isn't needed:
    ```cron
    # pm2 and pnpm are installed system-wide in /usr/local/bin, which cron's own PATH lacks; Node comes from nvm
@@ -136,7 +136,7 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 ## EVM wallets (ADR-0011)
 
 - **Nothing to configure on the server:** the NEAR Intents account is fixed per network (`intents.near`, `intents.luckout.testnet`), as in the contract, and EVM customers' intents go through the existing relayer, so it needs gas money on both networks. One relayed intent burns about 17 Tgas (about 0.002 NEAR).
-- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `luckout.gamified.trade`, `testnet.luckout.wtf`, `testnet.luckout.gamified.trade` and `localhost`, or WalletConnect refuses to connect there.
+- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `staging.luckout.wtf`, `testnet.luckout.wtf` and `localhost`, or WalletConnect refuses to connect there.
 - **Testnet NEAR Intents** at `intents.luckout.testnet` is the exact wasm `intents.near` runs, deployed with `new({config:{wnear_id:"wrap.testnet",fees:{fee:0,fee_collector:"luckout.testnet"},roles:{super_admins:["luckout.testnet"]}}})` and registered on test USDC. To redeploy it after `intents.near` upgrades: fetch the code with the RPC's `view_code`, check its hash, and deploy it without an init call.
 
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
