@@ -147,6 +147,9 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
     step("send", async () => {
       // Checked before anything is signed: a quote and a token that don't belong together are never sent.
       const transfer = transferFor(a, q)
+      // Checked here too, not only by hiding the button: with the approval declined nothing polls, so the page may not
+      // have re-rendered since the deadline passed, and a transfer to an expired deposit address isn't swapped as quoted.
+      if (Date.now() > Date.parse(q.deadline)) throw new Error("This price has expired. Nothing was sent: top up again for a new one.")
       await signMoveIn(q)
       try {
         const txHash = await sendFromWallet(accountId, transfer, () => setSent(true))
@@ -238,6 +241,8 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   }
 
   const moved = status?.move === "moved"
+  // A quote past its deadline is never sent to: the way on is a new one.
+  const expired = Date.now() > Date.parse(quote.deadline)
   return (
     <div className="flex flex-col gap-3 rounded-[1.5rem] bg-soft p-5 text-sm">
       {moved
@@ -276,7 +281,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                     Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get <b>{usd(quote.usdcOut)}</b> in
                     Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
                   </p>
-                  {!sent && (
+                  {!sent && !expired && (
                     <>
                       <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quoted)}>
                         Send from your wallet
@@ -302,7 +307,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
             )}
           </>
         )}
-      {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "")) && (
+      {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "") || (!manual && !sent && expired)) && (
         <Button variant="light" size="sm" className="self-start" onClick={() => (setQuoted(undefined), setSigned(false), setSent(false), setManual(false), setStatus(undefined), (reported.current = false))}>
           Top up again
         </Button>
