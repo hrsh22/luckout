@@ -68,6 +68,29 @@ jobs:
           path: contract/target/near/luckout.wasm
           if-no-files-found: error
 
+  # The paths that move USDC, run as real wasm in a local NEAR sandbox (contract/sandbox): gas, the
+  # 1 yoctoNEAR on transfers, #[private], and real USDC callbacks, which the unit tests can't see. Its
+  # build script downloads the nearcore sandbox binary (about 80 MB) into the cached target folder.
+  contract-sandbox:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            contract/sandbox/target
+          key: sandbox-${{ hashFiles('contract/sandbox/Cargo.lock', 'contract/rust-toolchain.toml') }}
+      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh | sh
+      - run: cargo near build non-reproducible-wasm --locked
+      - run: cargo near build non-reproducible-wasm --locked
+        working-directory: contract/test-usdc
+      - run: cargo test --locked
+        working-directory: contract/sandbox
+
   # Deploys the server after both jobs pass: the testnet branch to the testnet site, staging to the
   # staging site, main to the mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
   # fixes the branch per site, so this key can't deploy anything else (deploy/remote-deploy.sh).

@@ -110,11 +110,17 @@ Once the old server has been stopped, a failed deploy prints the command to go b
 
 ## Upgrading the contract
 
-Upgrades happen in place: same account, same state, new code, so balances never move. The new code must read the old state as it is (no change to the stored types).
+Upgrades happen in place: same account, same state, new code, so balances never move. The new code must read the old state as it is (no change to the stored types). A release goes to staging's contract (`app.staging.luckout.near`) first, and to production's (`app.luckout.near`) only after staging has sold with it. `contract/upgrade.sh` takes the contract by name, `testnet`, `staging` or `production`, so production is never reached by accident, and it sends nothing without `GO=1`.
 
-1. Merge the release into `main`. CI's `contract-wasm` job builds the contract reproducibly and uploads it as `luckout-wasm-<commit>`; its summary shows the code hash.
-2. `gh run download <run id> -n luckout-wasm-<commit>`.
-3. `./contract/upgrade.sh mainnet luckout.wasm` shows the current and new code hashes and the reserve; `GO=1` deploys, then checks the chain reports the new hash and still reads the state. Keep the previous wasm to roll back with the same script. Testnet first: `./contract/upgrade.sh testnet <wasm>`.
+1. **The build.** When the release merges into `staging`, CI's `contract-wasm` job builds the contract reproducibly and uploads it as `luckout-wasm-<commit>`; its summary shows the code hash. `gh run download <run id> -n luckout-wasm-<commit>`.
+2. **What to check against.** Pick an account with a Balance on that contract and a settled purchase there, a Lucky Buy if you have one. Your own test account and one of its purchases are best: nothing else changes them during the upgrade.
+3. **Dry run.** `CHECK_ACCOUNT=<account> CHECK_PURCHASE=<id> ./contract/upgrade.sh staging luckout.wasm` shows both code hashes, the reserve, the account, the purchase and the Game Versions, and saves the code on chain now to `~/luckout-wasm/staging-<code hash>.wasm`.
+4. **Admin → Stop sales first**, on that environment's site, so no purchase is admitted while the code changes. Confirmations, failures, withdrawals and Reclaims keep working.
+5. **Deploy:** the same command with `GO=1` in front. It checks the chain reports the new hash, then reads the account, the purchase and the Game Versions again and fails if any can't be read or reads differently. **Start sales again after the checks** pass (Admin → Restart sales).
+6. **If it fails,** it prints the command to roll back, which deploys the saved code directly: `near contract deploy app.staging.luckout.near use-file ~/luckout-wasm/staging-<hash>.wasm without-init-call network-config mainnet sign-with-legacy-keychain send` (not the script itself: it would first try to read the records with the failing code). Then it prints the check: a dry run on the saved file, `CHECK_ACCOUNT=… CHECK_PURCHASE=… ./contract/upgrade.sh staging ~/luckout-wasm/staging-<hash>.wasm`, which should end "Already deployed.". Restart sales once it does, and find out why before trying again.
+7. **Production,** once the release has merged into `main` and staging has sold with it: steps 2 to 6 with `production` in place of `staging` and the wasm from the `main` run (its code hash is staging's: the build is reproducible).
+
+`./contract/upgrade.sh testnet <wasm>` upgrades the local testnet contract; it says nothing about mainnet's stored records.
 
 ## EVM wallets (ADR-0011)
 
