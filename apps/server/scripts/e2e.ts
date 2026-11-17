@@ -1,15 +1,15 @@
 // End-to-end check against a running server on testnet. Signs in with full-access keys
 // from ~/.near-credentials (NEP-413) and buys the free Bitrefill test card.
-// Usage: node scripts/e2e.ts [customer.testnet] [other.testnet]
-import { Account, JsonRpcProvider, type KeyPairString } from "near-api-js"
+// Usage: node scripts/e2e.ts [--contract app.luckout.testnet] [customer.testnet] [other.testnet]
+import { Account, JsonRpcProvider } from "near-api-js"
 import { signMessage } from "near-api-js/nep413"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { args, contract as APP, keyOf, rpcUrl, testnetOnly } from "./net.ts"
 
-const [customer = "alice.luckout.testnet", other = "luckout.testnet"] = process.argv.slice(2)
+testnetOnly("it buys Bitrefill's free test card")
+const [customer = "alice.luckout.testnet", other = "luckout.testnet"] = args
 const api = process.env.API_URL ?? "http://localhost:8787"
-const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
+const rpc = new JsonRpcProvider({ url: rpcUrl })
 
 const req = async (method: string, path: string, body?: unknown, session?: string) => {
   const r = await fetch(api + path, {
@@ -22,8 +22,6 @@ const req = async (method: string, path: string, body?: unknown, session?: strin
   return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
-const APP = "app.luckout.testnet"
-const keyOf = (accountId: string) => JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${accountId}.json`, "utf8")).private_key as KeyPairString
 
 const signed = async (accountId: string) => {
   const key = keyOf(accountId)

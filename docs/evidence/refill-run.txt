@@ -1,0 +1,75 @@
+Bitrefill credit refill on mainnet, end to end: treasury → NEAR Intents 1Click → our keyless Base wallet → Bitrefill
+Run: refill cf436643-681f-4473-a06a-afd2bc6cfe52, 2026-11-10, $10 of Bitrefill credit.
+Written up 2026-11-17. Every hash below is re-checked by apps/server/scripts/verify-mainnet.ts
+(latest output: docs/evidence/verify-mainnet.txt).
+
+Code that ran (deployed by CI to the mainnet server):
+  17:30 quote and payment: 88e7b40 (deployed 17:27:42 UTC, https://github.com/hrsh22/luckout/actions/runs/42864695709)
+  18:03 invoice and Base payment: 03ff82c (deployed 17:49:57 UTC, https://github.com/hrsh22/luckout/actions/runs/42868465321)
+  Both run apps/server/src/Refill.ts (the refill steps), OneClick.ts (1Click), Base.ts (the Base wallet and Chain
+  Signatures) and Bitrefill.ts (the invoice).
+
+Accounts:
+  Treasury             treasury.luckout.near
+  Base wallet          0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA  (no private key: its address is derived from
+                       treasury.luckout.near by NEAR Chain Signatures, path "evm"; every transaction it sends is
+                       signed by v1.signer at the treasury's request)
+  USDC on NEAR         17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+  USDC on Base         0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+
+Timeline (UTC, 2026-11-10)
+
+17:30:19  The owner asked for a $10 refill in /admin; the server ran every step after this by itself.
+
+17:30:22  1. 1Click quote
+          correlation id 68da4df0-6b3e-4443-b5f5-7120a544fe4d, EXACT_OUTPUT: exactly 10.000000 USDC on Base
+          to the Base wallet, for at most 10.054596 USDC on NEAR (minimum 10.004323), refund deadline 17:45:21.
+          Deposit address d0946aab010bf2e3c81bcf336b94ed4a5fa54551b5b49893017df144866ea803
+
+17:30:24  2. The treasury pays 1Click (NEAR)
+          storage_deposit + ft_transfer of 10.054596 USDC to the deposit address, memo "Luckout refill cf436643-…"
+          https://nearblocks.io/txns/66aQaS47Ze7V7ij9LB1TAMRQcb7FWcaXEnoZAiR6797F
+
+18:03:05  3. 1Click settles into the Base wallet: status SUCCESS
+          10.000000 USDC arrived in 0xBfE4…12eA:
+          https://basescan.org/tx/0x902ba50466bb05d231d1b65cba2ba4e54c89704facfbccbb3f6bf330a8bdfd24
+          1Click's NEAR side: https://nearblocks.io/txns/GXA9ZT3wKNaZpTiQhxvZCSh2f3rmB1EnJjBhsp2zWvwM
+          0.050273 USDC unused came back to the treasury, so the $10 cost 10.004323 USDC.
+          Swap record: https://explorer.near-intents.org/transactions/d0946aab010bf2e3c81bcf336b94ed4a5fa54551b5b49893017df144866ea803
+          or: curl "https://1click.chaindefuser.com/v0/status?depositAddress=d0946aab010bf2e3c81bcf336b94ed4a5fa54551b5b49893017df144866ea803"
+
+18:03:13  4. Bitrefill invoice 375ccda4-2ab5-4ef4-8803-c393af841493
+          a $10 credit deposit, method usdc_base, pay 10.00 USDC to 0xccf5163003Ef7B938Da3C7b2192eeA5F4A2c0Ec5.
+
+18:03:15  5. Chain Signatures: the treasury asks v1.signer to sign the Base payment
+          payload 0x68e756245496324aca664d09e1684492face08a6a1c3ad935a38658abeb28d37, which is the hash of the
+          unsigned Base transaction in step 6 (verify-mainnet.ts recomputes it from Base and compares)
+          https://nearblocks.io/txns/GX7aESo11GQnh9GZrPEY9uAmm8WjYfhBtksFDeXajJSn
+
+18:03:22  6. The Base wallet pays the invoice
+          10.00 USDC from 0xBfE4…12eA to 0xccf5…0Ec5 (the wallet's first transaction, nonce 0)
+          https://basescan.org/tx/0x65c8920dacb6951e63a0a8585a9c3c7852e51435665ac3f38a2e9ea913a20e5a
+
+18:03:37  7. Bitrefill: invoice 375ccda4… status all_delivered, payment complete (read from Bitrefill's
+          GET /v2/invoices/375ccda4-2ab5-4ef4-8803-c393af841493 with our API key; Bitrefill has no public explorer).
+          Our Bitrefill USD credit went from $10 to $20.
+
+18:03:43  Refill marked done.
+
+Every refill on mainnet so far (all done; from the mainnet database, 2026-11-17)
+After this run, the path was split in two halves. "float" moves USDC from the treasury through 1Click into the
+Base wallet ahead of time. "invoice" pays a Bitrefill invoice straight from the Base wallet, so a card doesn't wait
+half an hour for a swap.
+
+  refill    date        kind      amount    proof
+  7d52e4bc  2026-11-10  direct    $10.00    https://nearblocks.io/txns/DXdvKYCUjBiE34dJdEYocokf7k6tnpJcjvYFAneZqVC
+            (first design: 1Click paid Bitrefill directly; see docs/incidents/2026-11-10-stuck-refill.md)
+  cf436643  2026-11-10  full path $10.00    this file (above)
+  775dfa58  2026-11-12  float     $48.01    https://nearblocks.io/txns/GEPQyaVL6RQvU8e3Uy7tteVfE1B4kNyqkcDoW1p8Hprq
+  28397672  2026-11-12  float     $250.00   https://nearblocks.io/txns/5NUDMKTduerBsTsVToTTPndeYVdyVDzfV178yUCDKh1K
+  87b244a5  2026-11-13  invoice   $186.60   https://basescan.org/tx/0x6ce60b499569eebb93a4f4c6ea4e0f65b30ab73be85b85dfb45a7986b1af22e8
+  40ffe101  2026-11-13  float     $136.60   https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv
+  3c1d9e94  2026-11-13  invoice   $109.43   https://basescan.org/tx/0xdfc21faa755c135f0b4561c341fc7894eda5746683ad56b0aafce61719e098f2
+  01729ea2  2026-11-13  invoice   $100.00   https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b
+  86c0a4ce  2026-11-13  float     $209.43   https://nearblocks.io/txns/D3qWd1fQUEtbrz1LaMCMaUGFt29MhaEE7CrdeTaQ1y3B
+  eae5b207  2026-11-15  invoice   $722.08   https://basescan.org/tx/0xe0354eb211aaa317bf97bbe613dbb9f23fe1bfc06687020ee80bbc458392647d

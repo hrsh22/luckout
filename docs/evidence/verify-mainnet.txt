@@ -1,0 +1,35 @@
+Luckout mainnet evidence, checked 2026-11-17T10:00:05.833Z
+contract app.luckout.near, operator server.luckout.near, USDC 17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1
+
+Settled buys (18): purchase → confirm_delivery, then get_purchase now
+✔ #0  $0.55 "normal" cashback $0.00  https://nearblocks.io/txns/JBwbNciCec1mMWdrHdMAHZUk4z6TnkUTaJs1b8hvc8ym  https://nearblocks.io/txns/3WvDfkSNAFbPvnqnBmyvR4MXEH84TVdvY9R9RU7k2cTS
+✔ #1  $0.55 "normal" cashback $0.00  https://nearblocks.io/txns/FSqfweUUdrSp6KRSqvAThfdp93uXnmtwGqY3nBsh2wVt  https://nearblocks.io/txns/EPuPvJ7UvCrRY51jrtEbrh1XCNFkNG76Y2qzhVFYHV1H
+✔ #2  $0.55 {"lucky":0} cashback $0.06  https://nearblocks.io/txns/K2fVB54fPsfK2kwjuvbQ8ETt8SpcYbkh2E5U2EiJzEz  https://nearblocks.io/txns/2kKSaaij9ZATKZQqyS5cv5sSChes6gt8DaKR4MGi37kz
+✔ #3  $0.55 {"lucky":2} cashback $0.41  https://nearblocks.io/txns/Hohe32jtDRCngbVJjiB9Se6hGkGAaiwxDkCjpjW9CHiC  https://nearblocks.io/txns/3D2dqjG6pcE7SjWaNUuhHFW7cpqZfyDvhKZXMYJn48Wb
+✔ #4  $0.55 "normal" cashback $0.00  https://nearblocks.io/txns/5Jor8xi1veT9KKFoXr2JDHtR9njE6XAjPy236D8na5Hh  https://nearblocks.io/txns/HzXjAtwVxqC9xioUpQML6FNwxt2YATNGupioWTzy7XL9
+✔ #5  $0.55 {"lucky":1} cashback $0.00  https://nearblocks.io/txns/HTBKJStgT7wA3kHXamyxer2wifBsY4gecNdUxw7yWyU3  https://nearblocks.io/txns/7GYeg2sXwtPtp6RESoXR9n2u5JAswUkhTJmTGq5Gafid
+✔ #6  $0.55 {"lucky":1} cashback $0.13  https://nearblocks.io/txns/6hFtYDjXX38ojQ6jZ7C32quo66W2BMUh1i2tApsWE4k8  https://nearblocks.io/txns/6onakwjdAvKMg4TbVbguuciY8SXEREV8GKWeyTEyhrA5
+✔ #7  $0.55 "normal" cashback $0.00  https://nearblocks.io/txns/BtEkCZYRFZqw6Ac7FrQWouZW916VsDGVT786cJv259t6  https://nearblocks.io/txns/2vYtdtQX6f8BFuMnhYhcd4TycPizbPii4gi9QpHuDunR
+✔ #8  $0.55 {"lucky":0} cashback $0.00  https://nearblocks.io/txns/8WZmuMTboRTVSfqEnbDweUGNFs8upqvNkPFe83ernzAL  https://nearblocks.io/txns/DtwoEi4R57vtxDSUqGDeWHprcrMdyNEWJWZnfaYRZ2pA
+✔ #9  $0.55 {"lucky":2} cashback $0.00  https://nearblocks.io/txns/EHEm6cJUocfaRFn96JfeanpkDci69dtWyhYiWbNJz6cA  https://nearblocks.io/txns/2LarhWQjFAis8ZLDWU1m8iSijc2FBKeLMkCUfmRwsXBi
+✔ #10 $0.55 {"lucky":1} cashback $0.66  https://nearblocks.io/txns/AJcDyH2vXQTYYnCnkp98NWqZMmWkW3F8DMgSQdcFp39B  https://nearblocks.io/txns/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62
+✔ #11 $0.55 {"lucky":1} cashback $0.00  https://nearblocks.io/txns/4wt8X2yxVwVZZL4n6UgA4LXAQuSJXN3TtVtgXWWzzF8g  https://nearblocks.io/txns/5jaeDoXTLFeHU6FCXsKqtY824CNfyzaPpwXwXXuvKghF
+✔ #12 $109.42 {"lucky":2} cashback $23.99  https://nearblocks.io/txns/GHxxBRCpexbgBL537gmCSSyZJFVuuyHcgfLxZwxjLNoM  https://nearblocks.io/txns/EDTuBkKHAceQJCvSWapdaphaePxpGfLvccKjnqqkHByS
+✔ #13 $11.03 {"lucky":2} cashback $8.27  https://nearblocks.io/txns/HWsUnmjf8ZWKm8mHHsh49ytvvM2LkAJ7rXenQ18qrc2h  https://nearblocks.io/txns/CyiYfQGS1HXFZk7CzRDj79picMQckQjPPd71q5B7ww3p
+✔ #14 $5.51 {"lucky":1} cashback $0.00  https://nearblocks.io/txns/2baxB513K1PYwrQQfKkLvkHvLG4et1swWvZ7w6wRGdqn  https://nearblocks.io/txns/75Lkg4KdVJ4JB5xiCM4qi5eZSq7FPJiu6ZPGogGMah3Y
+✔ #15 $5.51 {"lucky":1} cashback $1.32  https://nearblocks.io/txns/CcF51pEjfF1jnVL9fzRyBQRUuKP87U3oiM4jNmuXTtib  https://nearblocks.io/txns/31wPeKpBXeJvA1n5pL4wKj7tPjm1BDBC26hgfS3sthXh
+✔ #16 $0.55 {"lucky":2} cashback $0.33  https://nearblocks.io/txns/2F4yq98Tc2BL1BiUWF2JMKnNj5npEM9vCyE7p9c4oLJZ  https://nearblocks.io/txns/5pSTJjQqUVp29NHoqypaqGAXvsJto6wH9Tsdm4BeEzT8
+✔ #17 $5.53 {"lucky":1} cashback $0.00  https://nearblocks.io/txns/FQhPMj4SwpMpcvgregMEdRYoUCZScmmHGD5CM2L9sSZN  https://nearblocks.io/txns/9V5h4VAuP4yEsawxYg2N4QLUjVCzZq5nK6D7p3B8dh2Z
+18/18 buys verified on app.luckout.near
+
+USDC deposit (NEP-141 ft_transfer_call, relayed as a NEP-366 meta transaction)
+✔ $1.50 by b2d207003ed74cf0dce6e1662b7bef978f6f141e14f5a6dcd4e39d9d7b6c9622, gas paid by relayer.luckout.near  https://nearblocks.io/txns/93UnFZ5nKsuAm3vnK9T1RaW3kMH6pWJdqeg4ztQDaoF
+
+Bitrefill credit refill cf436643-681f-4473-a06a-afd2bc6cfe52: treasury → 1Click → Base wallet → Bitrefill invoice
+✔ 1. treasury.luckout.near paid $10.05 USDC to 1Click deposit address d0946aab…  https://nearblocks.io/txns/66aQaS47Ze7V7ij9LB1TAMRQcb7FWcaXEnoZAiR6797F
+✔ 2. 1Click settled: SUCCESS, $10.00 USDC to our Base wallet 0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA  https://explorer.near-intents.org/transactions/d0946aab010bf2e3c81bcf336b94ed4a5fa54551b5b49893017df144866ea803
+✔ 3. $10.00 USDC arrived in the Base wallet  https://basescan.org/tx/0x902ba50466bb05d231d1b65cba2ba4e54c89704facfbccbb3f6bf330a8bdfd24
+✔ 4. treasury.luckout.near signed the Base payment through Chain Signatures (v1.signer; payload = its hash 0x68e75624…)  https://nearblocks.io/txns/GX7aESo11GQnh9GZrPEY9uAmm8WjYfhBtksFDeXajJSn
+✔ 5. The Base wallet paid $10.00 USDC to Bitrefill invoice 375ccda4-2ab5-4ef4-8803-c393af841493 (address 0xccf5163003Ef7B938Da3C7b2192eeA5F4A2c0Ec5)  https://basescan.org/tx/0x65c8920dacb6951e63a0a8585a9c3c7852e51435665ac3f38a2e9ea913a20e5a
+
+All checks passed.
