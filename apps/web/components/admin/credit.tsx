@@ -8,7 +8,7 @@ import { Money } from "@/components/money"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
-import { dollars, toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { useSession } from "@/lib/session"
 import { type AdminOverview, CreditSettings } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
@@ -258,7 +258,7 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
             <span className="text-sm font-semibold">{x.label}</span>
             <span className="relative">
               {x.dollars && <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>}
-              <input className={`field ${x.dollars ? "pl-8!" : ""}`} inputMode="decimal" value={f[x.key]} onChange={(e) => setF({ ...f, [x.key]: e.target.value.replace(/[^\d.]/g, "") })} />
+              <input className={`field ${x.dollars ? "pl-8!" : ""}`} inputMode="decimal" value={f[x.key]} onChange={(e) => setF({ ...f, [x.key]: typedAmount(e.target.value) })} />
             </span>
             <span className="text-xs text-muted">{x.hint}</span>
           </label>

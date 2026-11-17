@@ -22,6 +22,21 @@ export const toMicro = (usdc: string) => {
   const v = m ? Number(m[1]) * 1e6 + Number((m[2] ?? "").padEnd(6, "0")) : NaN
   return Number.isSafeInteger(v) ? v : NaN
 }
+/**
+ * What an amount field keeps of what was typed: digits and the decimal point. Phones set to a region that writes
+ * "12,5" show only "," on the decimal keypad, so a lone comma is the decimal point. A comma with any other separator
+ * is left as typed for toMicro to refuse: a wrong guess at thousands separators changes an amount a thousandfold.
+ */
+export const typedAmount = (typed: string) => {
+  const kept = typed.replace(/[^\d.,]/g, "")
+  return /^[^.,]*,[^.,]*$/.test(kept) ? kept.replace(",", ".") : kept
+}
+const YOCTO = 10n ** 24n
+/** "1.5" NEAR → yoctoNEAR, without floating point; undefined if it isn't an amount. */
+export const toYocto = (near: string) => {
+  const m = /^(\d+)(?:\.(\d{0,24}))?$/.exec(near.trim())
+  return m ? BigInt(m[1]!) * YOCTO + BigInt((m[2] ?? "").padEnd(24, "0")) : undefined
+}
 /** micro-USDC → "5.555555" for an amount field: exact, trailing zeros trimmed, so toMicro(dollars(m)) === m. */
 export const dollars = (micro: number) => {
   const s = String(micro).padStart(7, "0")

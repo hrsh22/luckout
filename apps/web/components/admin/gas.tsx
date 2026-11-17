@@ -4,6 +4,7 @@ import { shortAccount } from "@/components/avatar"
 import { Bar, basescan, eth, type Tx } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
+import { toYocto, typedAmount } from "@/lib/format"
 import { explorerAccount, network, sendNear } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import type { AdminOverview } from "@luckout/api"
@@ -11,16 +12,10 @@ import { Fuel, Plus } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-const YOCTO = 10n ** 24n
 /** yoctoNEAR → "1.25" */
 const nearAmount = (yocto: string | bigint) => {
   const n = Number(BigInt(yocto) / 10n ** 18n) / 1e6
   return n.toLocaleString("en-US", { maximumFractionDigits: n < 10 ? 3 : 2 })
-}
-/** "1.5" NEAR → yoctoNEAR, without floating point. */
-const toYocto = (s: string) => {
-  const m = /^(\d+)(?:\.(\d{0,24}))?$/.exec(s.trim())
-  return m ? BigInt(m[1]!) * YOCTO + BigInt((m[2] ?? "").padEnd(24, "0")) : undefined
 }
 
 const GAS_COPY = {
@@ -119,7 +114,7 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
       <div className="flex flex-col gap-5">
         <label className="relative block">
           <span className="sr-only">NEAR to send</span>
-          <input className="field font-display h-16! rounded-[1.25rem]! pr-20! text-3xl! font-extrabold!" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))} />
+          <input className="field font-display h-16! rounded-[1.25rem]! pr-20! text-3xl! font-extrabold!" inputMode="decimal" value={amount} onChange={(e) => setAmount(typedAmount(e.target.value))} />
           <span className="font-display pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 text-xl font-extrabold text-muted">NEAR</span>
         </label>
         <div className="flex flex-wrap gap-2">

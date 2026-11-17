@@ -6,7 +6,7 @@ import { Money } from "@/components/money"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { contractId } from "@/lib/chain"
-import { dollars, toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { type Call, explorerAccount, send } from "@/lib/near"
 import type { AdminOverview } from "@luckout/api"
 import { CircleAlert, Landmark } from "lucide-react"
@@ -141,7 +141,7 @@ function TreasuryModeSheet({ open, onClose, o, tx }: { open: boolean; onClose: (
             <span className="text-sm font-semibold">Most it may pull in a day</span>
             <span className="relative">
               <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>
-              <input className="field pl-8!" inputMode="decimal" value={cap} onChange={(e) => setCap(e.target.value.replace(/[^\d.]/g, ""))} />
+              <input className="field pl-8!" inputMode="decimal" value={cap} onChange={(e) => setCap(typedAmount(e.target.value))} />
             </span>
             <span className="text-xs text-muted">If the server were ever compromised, this is the most proceeds it could take in a day.</span>
           </label>
