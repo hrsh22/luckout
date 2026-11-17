@@ -18,7 +18,8 @@
 # misreads the stored records.
 #
 # Before deploying, the code on chain is saved to $SAVE_DIR (default ~/luckout-wasm), named by target
-# and code hash. Rolling back is deploying that file with this script.
+# and code hash. Rolling back is deploying that file with `near contract deploy`, whose exact command is
+# printed when a check fails; not with this script, which first reads the records with the code on chain.
 #
 # On staging and production, deploy the reproducible build CI made for the commit being released, so
 # the code hash onchain is one anyone can rebuild (README "Upgrades"):
@@ -92,21 +93,31 @@ mkdir -p "$SAVE_DIR"
 saved="$SAVE_DIR/$TARGET-$before.wasm"
 rpc view_code | python3 -c 'import base64,json,sys; open(sys.argv[1], "wb").write(base64.b64decode(json.load(sys.stdin)["result"]["code_base64"]))' "$saved"
 [ "$(hash_of "$saved")" = "$before" ] || { echo "The saved code's hash isn't $before; nothing was sent." >&2; exit 1; }
-echo "  saved:        $saved   (to roll back: GO=1 $0 $TARGET $saved)"
+echo "  saved:        $saved   (the code to roll back to)"
 if [ "${GO:-}" != 1 ]; then echo "Dry run: nothing sent. Stop sales in Admin, then re-run with GO=1 to deploy."; exit 0; fi
 
+# The way back: deploy the saved code directly, then let a dry run on it prove the records read again.
+way_back() {
+  echo "Roll back now: near contract deploy $APP use-file \"$saved\" without-init-call network-config $NETWORK sign-with-legacy-keychain send" >&2
+  echo "Then check it: CHECK_ACCOUNT=$CHECK_ACCOUNT CHECK_PURCHASE=$CHECK_PURCHASE $0 $TARGET \"$saved\" (a dry run; it should end \"Already deployed.\")" >&2
+}
+
 near contract deploy "$APP" use-file "$WASM" without-init-call network-config "$NETWORK" sign-with-legacy-keychain send
-sleep 3
-after=$(code_hash)
-[ "$after" = "$want" ] || { echo "Onchain code hash is $after, expected $want" >&2; exit 1; }
+# The new hash shows only once the deploy is final, a few seconds after it lands.
+for _ in 1 2 3 4 5; do
+  sleep 3
+  after=$(code_hash) || after="unreadable"
+  [ "$after" = "$want" ] && break
+done
+[ "$after" = "$want" ] || { echo "Onchain code hash is still $after, expected $want. If the new code is running anyway:" >&2; way_back; exit 1; }
 echo "  deployed:     $after"
-back="roll back now: GO=1 $0 $TARGET $saved"
-new=$(records) || { echo "The new code can't read the stored records: $back" >&2; exit 1; }
+new=$(records) || { echo "The new code can't read the stored records." >&2; way_back; exit 1; }
 if [ "$new" != "$old" ]; then
   diff <(echo "$old") <(echo "$new") >&2 || true
-  echo "The records read differently after the upgrade. Unless they changed on chain in the meantime, $back" >&2
+  echo "The records read differently after the upgrade. Unless they changed on chain in the meantime:" >&2
+  way_back
   exit 1
 fi
-reserve=$(view get_reserve '{}') || { echo "The new code can't read the contract's state: $back" >&2; exit 1; }
+reserve=$(view get_reserve '{}') || { echo "The new code can't read the contract's state." >&2; way_back; exit 1; }
 echo "  reserve now:  $reserve"
 echo "The account, the purchase and the Game Versions read the same as before. Restart sales in Admin."
