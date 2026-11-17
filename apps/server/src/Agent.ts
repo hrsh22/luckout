@@ -279,7 +279,7 @@ export const makeAgent = (deps: {
         ? run(deps.purchases.setCheckoutEmail(accountId, email).pipe(Effect.map((e) => ({ saved: e.email }))))
         : Promise.resolve({ error: "Not saved: that address isn't in the customer's latest message. Ask them to type their email, then save exactly what they typed." }),
     recent_purchases: () =>
-      run(deps.purchases.list(accountId).pipe(Effect.map((ps) => ps.slice(0, 5).map((p) => ({
+      run(deps.purchases.list(accountId, { limit: 5 }).pipe(Effect.map((page) => page.items.map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,
         status: p.status,
         price: usd(p.referencePrice),

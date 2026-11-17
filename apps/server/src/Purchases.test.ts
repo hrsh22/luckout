@@ -1014,3 +1014,39 @@ test("a busy minute at Bitrefill isn't counted against the account as cards it c
   }))
   assert.match(e.message, /Prices are busy/)
 })
+
+test("the purchase list pages newest first, every purchase exactly once, and only the caller's own", async () => {
+  const w = world()
+  await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // Saved straight to the table, at whole minutes, so two can share one instant.
+    const add = (who: string, minutesAgo: number) =>
+      sql<{ id: string }>`
+        INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step, created_at)
+        VALUES (${who}, ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', '"normal"', 10000000, 10000000, 'failed',
+                date_trunc('minute', now()) - make_interval(mins => ${minutesAgo}))
+        RETURNING id`.pipe(Effect.map((r) => r[0]!.id))
+    const mine = [yield* add("alice.test", 1), yield* add("alice.test", 2), yield* add("alice.test", 2), yield* add("alice.test", 3), yield* add("alice.test", 4)]
+    const bobs = yield* add("bob.test", 0)
+    const p = yield* Purchases
+    const seen: Array<string> = []
+    let before: string | undefined
+    for (let i = 0; i < 5; i++) {
+      const page = yield* p.list("alice.test", { limit: 2, before })
+      assert.ok(page.items.length <= 2)
+      seen.push(...page.items.map((x) => x.id))
+      before = page.next
+      if (!before) break
+    }
+    assert.equal(seen.length, 5, "three pages of two, two and one")
+    assert.deepEqual([...seen].sort(), [...mine].sort(), "each of alice's once, none of bob's")
+    assert.equal(seen[0], mine[0], "newest first")
+    assert.equal(seen[4], mine[4], "oldest last")
+    // Someone else's purchase is no cursor into alice's list.
+    assert.deepEqual((yield* p.list("alice.test", { before: bobs })).items, [])
+    // Without a limit, a page holds up to 100 and says nothing follows.
+    const all = yield* p.list("alice.test")
+    assert.equal(all.items.length, 5)
+    assert.equal(all.next, undefined)
+  }))
+})
