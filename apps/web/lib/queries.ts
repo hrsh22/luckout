@@ -1,10 +1,11 @@
 "use client"
 
-import { type Category, type Mode, type Purchase, type TransferPhase, VoucherSummary } from "@luckout/api"
-import { keepPreviousData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { type Category, type Mode, type Purchase, type PurchasePage, type TransferPhase, VoucherSummary } from "@luckout/api"
+import { type InfiniteData, keepPreviousData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
 import { modeSlug, type ReserveView } from "./modes"
+import { withNewest } from "./purchase-poll"
 
 // Every server read goes through here, so the catalog, a card and its history share one cache:
 // going back to results is instant, and hovering a card has already fetched it.
@@ -75,12 +76,13 @@ export const rememberSummary = (qc: QueryClient, v: VoucherSummary) => qc.setQue
 export const useSummary = (id: string) =>
   useQuery<VoucherSummary | null>({ queryKey: ["summary", id], queryFn: () => null, staleTime: Infinity })
 
-export const useQuote = (voucherId: string, value: string | undefined, mode: Mode) =>
+export const useQuote = (voucherId: string, value: string | undefined, mode: Mode, active = true) =>
   useQuery({
     queryKey: ["quote", voucherId, value, modeSlug(mode)],
     queryFn: () =>
       api((c) => c.catalog.quote({ query: { voucherId, value: value!, ...(mode === "normal" ? {} : { game: mode.lucky }) } })),
-    enabled: !!value,
+    // Off, it keeps its last quote and isn't polled; turned on again, a stale one is read at once.
+    enabled: !!value && active,
     // The reserve and Bitrefill's price move: while the page is in sight the quote is renewed as it goes stale, and
     // at once on coming back to the tab, so Buy sends the terms on screen, not ones from minutes ago.
     // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s (the server caches Bitrefill's
@@ -102,21 +104,34 @@ const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting
 const fresh = (p: Purchase) => Date.now() - new Date(p.createdAt).getTime() < 15 * 60_000
 
 /**
- * The customer's purchases, newest first, a page of 100 at a time. Every 4 s while a purchase is in progress;
- * once the only open ones are over 15 minutes old (stuck), every minute.
+ * The customer's purchases, newest first, a page of 100 at a time. While one on the first page is in progress, the
+ * newest page alone is read again: every 4 s, or every minute once the only open ones are over 15 minutes old
+ * (stuck). Older pages are history; re-reading every loaded page each time would pass the 120-a-minute limit.
  */
-export const usePurchases = (token: string | undefined) =>
-  useInfiniteQuery({
+export const usePurchases = (token: string | undefined) => {
+  const qc = useQueryClient()
+  const list = useInfiniteQuery({
     queryKey: ["purchases", token],
     queryFn: ({ pageParam }) => api((c) => c.purchases.list({ query: pageParam ? { before: pageParam } : {} }), token),
     initialPageParam: "",
     getNextPageParam: (last) => last.next,
-    enabled: !!token,
-    refetchInterval: (q) => {
-      const open = q.state.data?.pages.flatMap((p) => p.items).filter(pending) ?? []
-      return open.length === 0 ? false : open.some(fresh) ? 4000 : 60_000
-    }
+    enabled: !!token
   })
+  const open = list.data?.pages[0]?.items.filter(pending) ?? []
+  const every = open.length === 0 ? false : open.some(fresh) ? 4000 : 60_000
+  // Not under "purchases": what re-reads the whole list after a buy or a cancel needn't read this page twice.
+  useQuery({
+    queryKey: ["purchases-newest", token],
+    queryFn: async () => {
+      const newest = await api((c) => c.purchases.list({ query: {} }), token)
+      qc.setQueryData<InfiniteData<PurchasePage, string>>(["purchases", token], (d) => d && { ...d, pages: withNewest(d.pages, newest) })
+      return newest
+    },
+    enabled: every !== false,
+    refetchInterval: every
+  })
+  return list
+}
 
 /**
  * The Checkout Email Bitrefill gets with each card (ADR-0012). `needed` is false where buying takes none (testnet,
