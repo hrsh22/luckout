@@ -224,3 +224,33 @@ test("Stop sales and the shop's status need only the database: they work while N
   assert.equal(r.seen.reason, "stopped", "what the panel shows when the overview can't load")
   assert.equal(r.restarted.open, true, "an unreadable pause counts as not paused")
 })
+
+test("saving the relayer's caps leaves its switch as it is now, and flipping the switch leaves the caps", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const relay = yield* Relay
+    // One admin turns the relayer off during an incident...
+    yield* admin.configureRelay({ enabled: false }, "boss.testnet")
+    // ...and another, whose panel still shows it on, saves new caps.
+    const saved = yield* admin.configureRelay({ perAccountDaily: 7, allDaily: 70 }, "luckout.testnet")
+    assert.deepEqual({ ...saved }, { enabled: false, perAccountDaily: 7, allDaily: 70 })
+    assert.match(alerts.at(-1) ?? "", /luckout\.testnet set the relayer off: 7 free per account, 70 in all per day/)
+    yield* admin.configureRelay({ enabled: true }, "boss.testnet")
+    assert.deepEqual({ ...(yield* relay.settings) }, { enabled: true, perAccountDaily: 7, allDaily: 70 })
+  })))
+
+test("saving the credit numbers leaves automatic refills as they are now, and the merged settings must still hang together", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const credit = yield* Credit
+    const before = yield* credit.settings
+    yield* admin.configureCredit({ autoRefill: false }, "boss.testnet")
+    const saved = yield* admin.configureCredit({ ceiling: 800_000_000, waitMinutes: 60 }, "luckout.testnet")
+    assert.deepEqual([saved.autoRefill, saved.ceiling, saved.waitMinutes, saved.floor], [false, 800_000_000, 60, before.floor])
+    assert.match(alerts.at(-1) ?? "", /luckout\.testnet set .*: auto-refill off/)
+    // The check runs on what would be saved, not only on the fields sent.
+    const bad = yield* admin.configureCredit({ floor: 800_000_001 }, "boss.testnet").pipe(Effect.flip)
+    assert.equal(bad._tag, "AdminInvalid")
+    yield* admin.configureCredit({ autoRefill: true }, "boss.testnet")
+    assert.deepEqual([(yield* credit.settings).autoRefill, (yield* credit.settings).ceiling], [true, 800_000_000])
+  })))

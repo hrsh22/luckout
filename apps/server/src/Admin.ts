@@ -1,5 +1,5 @@
-import { AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, type CreditSettings, PurchaseInvalid, type RefillView, type RelaySettings, type ShopStatus } from "@luckout/api"
-import { Config, Context, Effect, Layer } from "effect"
+import { AdminInvalid, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, type CreditChange, CreditSettings, PurchaseInvalid, type RefillView, type RelayChange, RelaySettings, type ShopStatus } from "@luckout/api"
+import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
@@ -39,8 +39,10 @@ export class Admin extends Context.Service<Admin, {
   readonly overview: Effect.Effect<AdminOverview>
   purchases(accountId?: string): Effect.Effect<ReadonlyArray<AdminPurchase>>
   readonly users: Effect.Effect<ReadonlyArray<AdminUser>>
-  configureRelay(settings: RelaySettings, by: string): Effect.Effect<RelaySettings>
-  configureCredit(settings: CreditSettings, by: string): Effect.Effect<CreditSettings, AdminInvalid>
+  /** Changes only the fields in `change`; the rest stay as they are now. */
+  configureRelay(change: RelayChange, by: string): Effect.Effect<RelaySettings>
+  /** Changes only the fields in `change`, if the result hangs together; the rest stay as they are now. */
+  configureCredit(change: CreditChange, by: string): Effect.Effect<CreditSettings, AdminInvalid>
   refill(amount: number | undefined, by: string): Effect.Effect<RefillView, AdminInvalid>
   resolveRefill(id: string, note: string, by: string): Effect.Effect<void, AdminInvalid>
   /** Stops or restarts new purchases on the server (no wallet needed). */
@@ -298,11 +300,19 @@ export class Admin extends Context.Service<Admin, {
         })
       })
 
-      const configureRelay = (settings: RelaySettings, by: string) =>
-        relay.configure(settings, by).pipe(
-          Effect.tap((s) =>
-            alerts.admin(
-              `${by} set the relayer ${s.enabled ? "on" : "off"}: ${s.perAccountDaily} free per account, ${s.allDaily} in all per day`
+      // ponytail: one lock in memory, one process (ADR-0006). A save reads the current settings and writes them
+      // back with its own fields changed; two saves at once must not both start from the same old copy.
+      const saving = yield* Semaphore.make(1)
+
+      // Only the fields this admin changed are applied to what is saved now: a panel opened before another
+      // admin turned the relayer off must not turn it back on by saving its caps.
+      const configureRelay = (change: RelayChange, by: string) =>
+        saving.withPermits(1)(
+          Effect.flatMap(relay.settings, (now) => relay.configure(new RelaySettings({ ...now, ...change }), by)).pipe(
+            Effect.tap((s) =>
+              alerts.admin(
+                `${by} set the relayer ${s.enabled ? "on" : "off"}: ${s.perAccountDaily} free per account, ${s.allDaily} in all per day`
+              )
             )
           )
         )
@@ -320,8 +330,10 @@ export class Admin extends Context.Service<Admin, {
         }).pipe(Effect.catchTag("SqlError", Effect.die))
 
       const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
-      const configureCredit = (next: CreditSettings, by: string) =>
-        Effect.gen(function*() {
+      // As for the relayer: only the fields sent change, and the check runs on what would be saved.
+      const configureCredit = (change: CreditChange, by: string) =>
+        saving.withPermits(1)(Effect.gen(function*() {
+          const next = new CreditSettings({ ...(yield* credit.settings), ...change })
           const problem = settingsProblem(next)
           if (problem) return yield* new AdminInvalid({ message: problem })
           const saved = yield* credit.configure(next, by)
@@ -331,7 +343,7 @@ export class Admin extends Context.Service<Admin, {
               `refill at most ${usd(next.dailyRefill)} a day, wait up to ${next.waitMinutes} min`
           )
           return saved
-        })
+        }))
 
       return Admin.of({
         isAdmin: (a) => admins.has(a),
