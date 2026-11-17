@@ -8,7 +8,7 @@ import { BaseGasTile, GasTile, SendNearSheet } from "@/components/admin/gas"
 import { PurchasesCard } from "@/components/admin/purchases"
 import { RelayerCard } from "@/components/admin/relayer"
 import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
-import { AdminTabs, type Tx } from "@/components/admin/shared"
+import { AdminTabs, LastFigures, type Tx } from "@/components/admin/shared"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -53,7 +53,7 @@ export function AdminPanel() {
   // A failed poll keeps the last figures (and any open sheet) on screen; the next poll tries again.
   return (
     <>
-      {q.error && <p role="status" className="mb-4 text-sm text-warn">Couldn't refresh just now, so these are the last figures. {errorMessage(q.error)}</p>}
+      {q.error && <LastFigures error={q.error} className="mb-4" />}
       <Dashboard o={q.data} />
     </>
   )

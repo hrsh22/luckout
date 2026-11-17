@@ -20,6 +20,12 @@ export function PurchasesCard({ p }: { p: AdminOverview["purchases"] }) {
         <h2 className="font-display text-3xl font-extrabold">Purchases</h2>
         <p className="mt-1 text-ink-soft">Last 24 hours: {p.today} started, {p.deliveredToday} delivered.</p>
       </div>
+      {p.attentionTotal > p.attention.length && (
+        <p className="text-sm font-medium text-warn">
+          {p.attentionTotal} need attention; these are the oldest {p.attention.length}, closest to their customer's Reclaim. The rest are in
+          Purchases.
+        </p>
+      )}
       {p.attention.length === 0
         ? (
           <p className="flex items-center gap-3 rounded-[1.5rem] bg-good-soft p-5 font-medium text-good">
