@@ -14,7 +14,7 @@ import {
   type SignedIntent
 } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
-import { createContext, useCallback, useContext, useEffect, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
 import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
 import { connectEvm, disconnectEvm, evmAddress, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
@@ -121,12 +121,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
+  // Who is signed in right now, for work that finishes later: a balance read started for one account must
+  // never be shown to the next.
+  const current = useRef<string | undefined>(undefined)
+  current.current = accountId
   const evm = !!accountId && isEvmAccount(accountId)
   const qc = useQueryClient()
 
   // Signed out, switched or expired: nothing read for the last account (purchases and their codes
   // included) may outlive it.
   const clear = useCallback(() => {
+    current.current = undefined
     forget()
     setSession(undefined)
     setAccount(undefined)
@@ -142,12 +147,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (!accountId || !token) return
     try {
       const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token, evm)])
+      // Signed out or switched while this was on its way: it's someone else's balance now.
+      if (current.current !== accountId) return
       setAccount(a)
       setWalletUsdc(w)
       setWalletNear(n)
       setGasFree(free)
       setAccountError(undefined)
     } catch (e) {
+      if (current.current !== accountId) return
       setAccountError(errorMessage(e))
       throw e
     }
@@ -240,8 +248,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         readAccount(s.accountId).catch((e: unknown) => new Error(errorMessage(e))),
         relayable(s.token, isEvmAccount(s.accountId))
       ])
-      if (read instanceof Error) setAccountError(read.message)
-      else {
+      if (read instanceof Error) {
+        // Whatever was held before isn't this account's: show "couldn't read", never another balance.
+        setAccount(undefined)
+        setWalletUsdc(undefined)
+        setWalletNear(undefined)
+        setAccountError(read.message)
+      } else {
         setAccount(read[0])
         setWalletUsdc(read[1])
         setWalletNear(read[2])

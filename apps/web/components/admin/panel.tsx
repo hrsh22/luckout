@@ -19,6 +19,7 @@ import { usd } from "@/lib/format"
 import { type Call, contractId, explorer, liveAverage, send, usdcId } from "@/lib/near"
 import { useIsAdmin, useShopStatus } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { oneAtATime } from "@/lib/utils"
 import type { AdminOverview, ShopStatus } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, Pause, Plus, ShieldCheck } from "lucide-react"
@@ -122,22 +123,24 @@ function Loading() {
 function useAdminTx(): Tx {
   const { accountId, refresh } = useSession()
   const qc = useQueryClient()
-  return async (pending: string, done: string, f: (accountId: string) => Promise<unknown>) => {
-    if (!accountId) return false
-    const id = toast.loading(pending, { description: "Approve it in your wallet." })
-    try {
-      const result = await f(accountId)
-      const last = (Array.isArray(result) ? result.at(-1) : result) as { transaction?: { hash?: string } } | undefined
-      const hash = last?.transaction?.hash
-      toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank", "noopener") } } : {}) })
-      await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), refresh().catch(() => {})])
-      return true
-    } catch (e) {
-      if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
-      else toast.error(errorMessage(e), { id, description: undefined })
-      return false
-    }
-  }
+  return (pending: string, done: string, f: (accountId: string) => Promise<unknown>) =>
+    // One wallet request at a time, shared with the customer's own wallet actions (lib/utils.ts).
+    oneAtATime(async () => {
+      if (!accountId) return false
+      const id = toast.loading(pending, { description: "Approve it in your wallet." })
+      try {
+        const result = await f(accountId)
+        const last = (Array.isArray(result) ? result.at(-1) : result) as { transaction?: { hash?: string } } | undefined
+        const hash = last?.transaction?.hash
+        toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank", "noopener") } } : {}) })
+        await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), refresh().catch(() => {})])
+        return true
+      } catch (e) {
+        if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
+        else toast.error(errorMessage(e), { id, description: undefined })
+        return false
+      }
+    })
 }
 
 type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | "cap" | { gas: AdminOverview["gas"][number] }
