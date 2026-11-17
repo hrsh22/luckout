@@ -131,6 +131,8 @@ export class Purchases extends Context.Service<Purchases, {
   cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
   /** One pass over purchases waiting for credit (also runs every 10 seconds by itself). */
   readonly promoteWaiting: Effect.Effect<void>
+  /** One reconciler pass (also runs every 30 seconds by itself). */
+  readonly reconcileNow: Effect.Effect<void>
   /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
   checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
   setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
@@ -314,8 +316,18 @@ export class Purchases extends Context.Service<Purchases, {
               if (!row.pay_tx && Date.now() - time(row.invoice_at!) > INVOICE_TTL_MS) {
                 return yield* move(row, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null })
               }
+              // Saved only over the payment this run was handed (none, or the lost one it replaces). A run that
+              // loaded the row before another saved its payment stops here, before sending a second one.
               // `ordered_at` marks the money leaving the Base Float (Credit counts it from then).
-              const status = yield* base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, (p) => save(row.id, { pay_tx: p, ordered_at: new Date().toISOString() })).pipe(
+              const savePayment = (p: SignedPayment) =>
+                sql<{ id: string }>`
+                  UPDATE purchases SET pay_tx = ${JSON.stringify(p)}::jsonb, ordered_at = ${new Date().toISOString()}, updated_at = now()
+                  WHERE id = ${row.id} AND step = 'pay' AND pay_tx->>'hash' IS NOT DISTINCT FROM ${row.pay_tx?.hash ?? null}
+                  RETURNING id`.pipe(
+                  Effect.orDie,
+                  Effect.flatMap((saved) => (saved.length === 1 ? Effect.void : Effect.die(`purchase ${row.id}: another run saved a Base payment first; not sending a second`)))
+                )
+              const status = yield* base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment).pipe(
                 Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
               )
               if (status === "pending") return false
@@ -405,17 +417,22 @@ export class Purchases extends Context.Service<Purchases, {
       }
 
       const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>
-        Effect.gen(function*() {
-          if (running.has(id)) return
+        Effect.suspend(() => {
+          // Another run has this purchase: leave it, and leave its guard alone. Only the run that set the
+          // guard clears it; a caller turned away here once cleared it, and the next one started a second run.
+          if (running.has(id)) return Effect.void
           running.add(id)
-          let first = true
-          while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
-          if (notifyAfter) yield* Effect.flatMap(load(id), notify)
+          return Effect.gen(function*() {
+            let first = true
+            while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
+            if (notifyAfter) yield* Effect.flatMap(load(id), notify)
+          }).pipe(
+            Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
+            // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
+            Effect.catchCause((cause) => Effect.logError(`purchase ${id} paused`, cause)),
+            Effect.ensuring(Effect.sync(() => running.delete(id)))
+          )
         }).pipe(
-          Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
-          // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
-          Effect.catchCause((cause) => Effect.logError(`purchase ${id} paused`, cause)),
-          Effect.ensuring(Effect.sync(() => running.delete(id))),
           // A deploy or shutdown waits for the run to finish: stopping between a side effect and
           // saving its result would leave the purchase for a human (pm2 kill_timeout allows for it).
           Effect.uninterruptible
@@ -732,7 +749,7 @@ export class Purchases extends Context.Service<Purchases, {
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
       yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, checkoutEmail, setCheckoutEmail })
+      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, reconcileNow: reconcile, checkoutEmail, setCheckoutEmail })
     })
   )
 }

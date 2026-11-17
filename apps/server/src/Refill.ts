@@ -599,29 +599,34 @@ export class Refill extends Context.Service<Refill, {
       const pause = (s: string) => (["swapping", "invoice", "pay"].includes(s) ? "10 seconds" : s === "crediting" ? "20 seconds" : s === "fund" ? "1 minute" : "30 seconds")
 
       const advance = (id: string) =>
-        Effect.gen(function*() {
-          if (running.has(id)) return
+        Effect.suspend(() => {
+          // Another run has this refill: leave it, and leave its guard alone. Only the run that set the guard
+          // clears it; a caller turned away here once cleared it, and the next pass started a second run.
+          if (running.has(id)) return Effect.void
           running.add(id)
-          for (;;) {
-            const row = yield* load(id)
-            if (!row || !OPEN_REFILL_STEPS.includes(row.step)) return
-            const next = yield* step(row)
-            if (next === "wait") {
-              yield* sql`UPDATE refills SET next_attempt_at = now() + ${pause(row.step)}::interval WHERE id = ${id}`.pipe(Effect.orDie)
-              return
+          return Effect.gen(function*() {
+            for (;;) {
+              const row = yield* load(id)
+              if (!row || !OPEN_REFILL_STEPS.includes(row.step)) return
+              const next = yield* step(row)
+              if (next === "wait") {
+                yield* sql`UPDATE refills SET next_attempt_at = now() + ${pause(row.step)}::interval WHERE id = ${id}`.pipe(Effect.orDie)
+                return
+              }
             }
-          }
+          }).pipe(
+            Effect.catch((e: Unknown) =>
+              Effect.gen(function*() {
+                // Unknown outcome (network): back off and try the same step again; never guess.
+                yield* Effect.logWarning(`refill ${id} paused: ${e.message}`)
+                yield* sql`UPDATE refills SET attempts = attempts + 1, error = ${e.message},
+                  next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, attempts)) WHERE id = ${id}`.pipe(Effect.orDie)
+              })
+            ),
+            Effect.catchCause((cause) => Effect.logError(`refill ${id} paused`, cause)),
+            Effect.ensuring(Effect.sync(() => running.delete(id)))
+          )
         }).pipe(
-          Effect.catch((e: Unknown) =>
-            Effect.gen(function*() {
-              // Unknown outcome (network): back off and try the same step again; never guess.
-              yield* Effect.logWarning(`refill ${id} paused: ${e.message}`)
-              yield* sql`UPDATE refills SET attempts = attempts + 1, error = ${e.message},
-                next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, attempts)) WHERE id = ${id}`.pipe(Effect.orDie)
-            })
-          ),
-          Effect.catchCause((cause) => Effect.logError(`refill ${id} paused`, cause)),
-          Effect.ensuring(Effect.sync(() => running.delete(id))),
           // A shutdown waits for the step in progress: stopping between a payment and saving it
           // would leave the refill for a human.
           Effect.uninterruptible

@@ -53,6 +53,8 @@ const world = (opts: {
   deliveryDelay?: number
   /** How long a buy request waits (ms) before answering "pending". */
   requestWait?: number
+  /** Signing a Base payment takes this long (ms): the wait for the wallet and for Chain Signatures. */
+  payDelay?: number
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
@@ -76,6 +78,7 @@ const world = (opts: {
     balances: Effect.suspend(() => Effect.succeed({ usdc: creditBalance, eth: 10n ** 15n })),
     pay: (to, amount, saved, save) =>
       Effect.gen(function*() {
+        if (!saved) yield* Effect.sleep(opts.payDelay ?? 0)
         const p = saved ?? ({ to, amount: String(amount), nonce: paid.length, maxFeePerGas: "1", maxPriorityFeePerGas: "1", raw: "0x01", hash: `0x${paid.length}` } as SignedPayment)
         if (!saved) yield* save(p)
         paid.push({ to, amount, resent: !!saved })
@@ -735,4 +738,71 @@ test("a login Bitrefill stops taking (401) is renewed once and the card ordered 
   const refused = await limited.run(Effect.andThen(connectAs(), limited.buy()))
   assert.equal(refused.status, "failed")
   assert.match(refused.error ?? "", /^Your Bitrefill account's limit was reached/)
+})
+
+/** Makes every open purchase due, as 30 seconds of waiting would, then runs one reconciler pass. */
+const reconcilePass = Effect.gen(function*() {
+  const sql = yield* SqlClient.SqlClient
+  yield* sql`UPDATE purchases SET updated_at = now() - interval '1 minute', next_attempt_at = now()`
+  yield* Purchases.use((s) => s.reconcileNow)
+})
+const stepIs = (want: string) =>
+  Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    for (let i = 0; i < 200; i++) {
+      if ((yield* sql<{ step: string }>`SELECT step FROM purchases`)[0]?.step === want) return
+      yield* Effect.sleep("10 millis")
+    }
+    return yield* Effect.die(`never reached ${want}`)
+  })
+
+test("the reconciler coming by a purchase that is still running never starts a second run", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveryDelay: 400 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const buying = yield* Effect.forkChild(w.buy())
+    yield* stepIs("delivery")
+    yield* reconcilePass
+    yield* reconcilePass
+    const p = yield* Fiber.join(buying)
+    return yield* settled(p.id)
+  }))
+  assert.equal(r, "settled")
+  assert.equal(w.calls.filter((c) => c.startsWith("delivery:")).length, 1, "one run asked Bitrefill for the card")
+  assert.equal(w.calls.filter((c) => c === "confirm_delivery").length, 1)
+})
+
+test("two reconciler passes during a slow Base payment never pay the invoice twice", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payDelay: 400 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const buying = yield* Effect.forkChild(w.buy())
+    yield* stepIs("pay")
+    yield* reconcilePass
+    yield* reconcilePass
+    const p = yield* Fiber.join(buying)
+    return yield* settled(p.id)
+  }))
+  assert.equal(r, "settled")
+  assert.equal(w.paid.length, 1, "paid once")
+})
+
+test("a Base payment is never saved over one another run already saved: the saved one is sent instead", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payDelay: 300 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const buying = yield* Effect.forkChild(w.buy())
+    yield* stepIs("pay")
+    // Another run's payment lands in the row while this one is still signing its own.
+    const other = { to: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: "10000000", nonce: 9, maxFeePerGas: "1", maxPriorityFeePerGas: "1", raw: "0x02", hash: "0xother" }
+    yield* sql`UPDATE purchases SET pay_tx = ${JSON.stringify(other)}::jsonb`
+    const p = yield* Fiber.join(buying)
+    const during = { status: p.status, paid: w.paid.length, hash: (yield* sql<{ hash: string }>`SELECT pay_tx->>'hash' AS hash FROM purchases`)[0]!.hash }
+    yield* reconcilePass
+    return { during, after: yield* settled(p.id) }
+  }))
+  assert.deepEqual(r.during, { status: "pending", paid: 0, hash: "0xother" }, "its own payment was neither saved nor sent")
+  assert.equal(r.after, "settled")
+  assert.deepEqual(w.paid.map((x) => x.resent), [true], "the saved payment was sent, once")
 })
