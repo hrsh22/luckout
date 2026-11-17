@@ -59,6 +59,8 @@ const world = (o: {
   sweepFails?: boolean
   /** False: 1Click reports SUCCESS, but the USDC doesn't show in our wallet. */
   swapLands?: boolean
+  /** Guest checkout (ADR-0012): cards are paid from the Base Float, so every refill ends in the Base Wallet. */
+  guest?: boolean
 } = {}) => {
   const s = { usdc: o.treasuryUsdc ?? 0, proceeds: o.proceeds ?? 236_000_000, swept: 0 }
   const made = { invoices: 0, quotes: 0, signs: 0 }
@@ -137,6 +139,7 @@ const world = (o: {
   /** Our Bitrefill credit; a test may lower it to make a refill due. */
   const bitrefillCredit = { balance: o.credit ?? 450_000_000 }
   const bitrefill = fakeBitrefill({
+    guest: o.guest ?? false,
     credit: Effect.sync(() => ({ balance: bitrefillCredit.balance, room: 1_500_000_000 })),
     deposit: (amount) => Effect.sync(() => (made.invoices++, events.push("invoice"), { invoiceId: `inv-${made.invoices}`, address: BITREFILL_ADDRESS, price: amount })),
     depositState: () => Effect.succeed({ state: deposit.shift() ?? "credited", status: "x" })
@@ -844,4 +847,53 @@ test("the resume pass coming by a refill that is still running never starts a se
   }))
   assert.equal(r.step, "done", r.error ?? "")
   assert.deepEqual(methods(w.txs), ["sweep_proceeds", "storage_deposit+ft_transfer"], "one pull and one payment to 1Click")
+})
+
+// ---------- guest checkout (ADR-0012): every refill ends in the Base Float ----------
+
+test("with guest checkout, a refill swaps its whole amount into the Base Wallet and ends there: Bitrefill is never asked for anything", async () => {
+  // An empty Base Float, and a cap and proceeds that cover the whole refill.
+  const w = world({ guest: true, walletUsdc: 0, treasuryUsdc: 0, cap: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* Effect.flatMap(Refill, (r) => r.kick)
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ id: string; amount: string }>`SELECT id, amount::text AS amount FROM refills WHERE reason = 'target'`
+    const done = yield* drive(row!.id)
+    const view = yield* Effect.flatMap(Credit, (c) => c.view)
+    return { done, amount: Number(row!.amount), balance: view.snapshot?.balance }
+  }))
+  assert.equal(r.done.step, "done", r.done.error ?? "")
+  assert.equal(r.amount, 100_000_000, "up to the $100 target, from an empty float")
+  assert.deepEqual(methods(w.txs), ["sweep_proceeds", "storage_deposit+ft_transfer"])
+  assert.equal(w.quotes[0]!.amount, "100000000", "the whole amount is swapped in")
+  assert.equal(w.quotes[0]!.recipient, WALLET)
+  assert.deepEqual(w.events, ["quote", "swapped"], "it ends when the USDC lands: no invoice, no payment")
+  assert.deepEqual([w.made.invoices, w.made.signs, w.payments.length], [0, 0, 0])
+  assert.equal(w.wallet.usdc, 100_000_000)
+  assert.equal(r.balance, 100_000_000, "the float is read again as it lands, so waiting purchases see it at once")
+  assert.ok(w.alerts.some((a) => a.includes("Base Float refilled: +$100.00")), w.alerts.join("\n"))
+})
+
+test("with guest checkout, a refill the treasury can't fund in full is cut to what a swap can bring: USDC already in the Base Wallet isn't counted twice", async () => {
+  // $30 in the Base Float, a $100 card waiting, and only $80 of proceeds.
+  const w = world({ guest: true, walletUsdc: 30_000_000, treasuryUsdc: 0, proceeds: 80_000_000, cap: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '100', 100000000, 100000000, 'waiting')`
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Refill, (r) => r.kick)
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ id: string }>`SELECT id FROM refills WHERE reason = 'waiting'`
+    const done = yield* drive(row!.id)
+    const [after] = yield* sql<{ amount: string }>`SELECT amount::text AS amount FROM refills WHERE id = ${row!.id}`
+    return { done, amount: Number(after!.amount) }
+  }))
+  assert.equal(r.done.step, "done", r.done.error ?? "")
+  assert.equal(r.amount, 79_200_000, "what $80 of proceeds can swap in: enough for the $70 the card still needs")
+  assert.equal(w.quotes[0]!.amount, "79200000")
+  assert.equal(w.wallet.usdc, 109_200_000, "the $30 already there plus the swap")
+  assert.ok(w.alerts.some((a) => /cut from \$170\.00 to \$79\.20/.test(a)), w.alerts.join("\n"))
+  assert.equal(w.made.invoices, 0)
 })

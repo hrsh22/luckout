@@ -1,5 +1,5 @@
 import { Api, CreditSettings } from "@luckout/api"
-import { Effect, Exit, Layer } from "effect"
+import { ConfigProvider, Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
@@ -254,3 +254,27 @@ test("saving the credit numbers leaves automatic refills as they are now, and th
     yield* admin.configureCredit({ autoRefill: true }, "boss.testnet")
     assert.deepEqual([(yield* credit.settings).autoRefill, (yield* credit.settings).ceiling], [true, 800_000_000])
   })))
+
+test("with guest checkout the overview's credit figures are the Base Float, read from the Base Wallet, never from Bitrefill", async () => {
+  const guestLayer = Admin.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
+    Layer.provide(Layer.mergeAll(
+      Layer.succeed(Near, near),
+      // No `credit` here: the fake dies if Bitrefill's credit is read, which guest checkout must never do.
+      Layer.succeed(Bitrefill, fakeBitrefill({ guest: true })),
+      Layer.succeed(Base, fakeBase({ balances: Effect.succeed({ usdc: 65_000_000, eth: 10n ** 15n }) })),
+      Layer.succeed(Refill, refill),
+      Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
+    )),
+    Layer.provideMerge(DbMemory),
+    // The Base Float is only tracked on mainnet.
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { ...(process.env as Record<string, string>), NEAR_NETWORK: "mainnet" } })))
+  )
+  const o = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    return yield* (yield* Admin).overview
+  })).pipe(Effect.provide(guestLayer)))
+  assert.equal(o.checkout.guest, true)
+  assert.equal(o.credit.balance, 65_000_000, "the USDC in the Base Wallet")
+  assert.equal(o.credit.free, 65_000_000)
+})

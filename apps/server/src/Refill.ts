@@ -271,11 +271,17 @@ export class Refill extends Context.Service<Refill, {
           `since it pays our own Base wallet, and the refill carries on by itself. Meanwhile you can top up the credit on bitrefill.com by hand.`
       }
 
-      /** A float top-up's USDC is in our wallet: it's done (it never pays Bitrefill). */
+      /** A refill that ends in the Base Wallet has landed there: it's done (it never pays Bitrefill). */
       const floatLanded = (row: Row, note: string) =>
         Effect.gen(function*() {
           if (yield* move(row, { step: "done", swap_status: "SUCCESS", finished_at: new Date().toISOString(), error: note || null })) {
-            yield* alerts.admin(`The Base float was topped up by ${usd(Number(row.amount))}: refills pay Bitrefill from it in about a minute.`)
+            if (bitrefill.guest) {
+              // The Base Float pays the cards: read it again now, so purchases waiting for it go ahead at once.
+              yield* credit.refresh
+              yield* alerts.admin(`Base Float refilled: +${usd(Number(row.amount))} (refill ${row.id.slice(0, 8)}).`)
+            } else {
+              yield* alerts.admin(`The Base float was topped up by ${usd(Number(row.amount))}: refills pay Bitrefill from it in about a minute.`)
+            }
           }
           return "wait" as Next
         })
@@ -376,7 +382,8 @@ export class Refill extends Context.Service<Refill, {
               if (row.reason === "waiting" || row.reason === "target") {
                 const pullable = t.dailyCap > 0 ? Math.max(0, Math.min(t.dailyCap - t.sweptToday, t.proceeds)) : 0
                 const c = yield* credit.view
-                const cut = fundable({ amount, walletUsdc: w.usdc, available: t.usdc + pullable, waitingNeed: c.waiting.total - Math.max(0, c.free) })
+                // A refill that ends in the float swaps its whole amount in, so what the wallet holds pays none of it.
+                const cut = fundable({ amount, walletUsdc: endsInFloat(row) ? 0 : w.usdc, available: t.usdc + pullable, waitingNeed: c.waiting.total - Math.max(0, c.free) })
                 if (cut !== undefined) {
                   yield* save(row.id, { amount: cut })
                   yield* alerts.admin(
