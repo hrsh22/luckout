@@ -11,3 +11,7 @@ auditConfig:
     # library uses it (@reown/appkit's embedded wallet checks the messages from Reown's own iframe with zod 3),
     # so the worst case is one customer's browser tab. Zod 3 has no fixed version (fixed in 4.6.6).
     - GHSA-mrhx-c7xc-m3w5
+    # picomatch, "ReDoS through a crafted glob": it reaches us only through the web's wallet library
+    # (@reown/appkit > WalletConnect > unstorage > anymatch), in unstorage's file-watching driver, which a browser
+    # never runs, and no glob there comes from a visitor. No fixed version is published yet (needs >= 4.0.8).
+    - GHSA-fc5q-39xc-vjpf
