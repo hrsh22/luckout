@@ -45,6 +45,8 @@ const world = (o: {
   sendLost?: boolean
   /** The network is down when the transfer is about to be signed: nothing is signed or sent. */
   sendDownOnce?: boolean
+  /** Signing a treasury transaction takes this long (ms), like a slow NEAR RPC. */
+  signDelay?: number
   /** USDC (base units) and ETH (wei) already in our Base wallet. */
   walletUsdc?: number
   walletEth?: bigint
@@ -110,6 +112,7 @@ const world = (o: {
     treasurySend: (receiver, actions, persist) =>
       Effect.gen(function*() {
         const tx = { receiver, calls: actions.map(decode) }
+        yield* Effect.sleep(o.signDelay ?? 0)
         if (down && tx.calls.some((c) => c.method === "ft_transfer")) {
           down = false
           return yield* new NearUnavailable({ message: "access key: RPC unreachable" })
@@ -822,4 +825,23 @@ test("an automatic refill waiting on money funds the purchase waiting for credit
   assert.equal(r.done.step, "done", r.done.error ?? "")
   assert.equal(r.amount, 99_000_000, "what $100 of proceeds can fund, enough for the $70 the card needs")
   assert.ok(w.alerts.some((a) => /cut from \$\d+\.\d\d to \$99\.00: the treasury can't fund all of it now, and purchases waiting for credit come first/.test(a)), w.alerts.join("\n"))
+})
+
+test("the resume pass coming by a refill that is still running never starts a second run: one pull, one payment", async () => {
+  const w = world({ cap: 100_000_000, treasuryUsdc: 0, signDelay: 300 })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    // Two resume passes while its own run is still signing the pull (a new refill is always due).
+    yield* Effect.sleep("50 millis")
+    yield* due
+    yield* refill.process
+    yield* due
+    yield* refill.process
+    // Its own run is still signing (settle() would take the slow signature for standing still).
+    yield* Effect.sleep("1 second")
+    return yield* drive(v.id)
+  }))
+  assert.equal(r.step, "done", r.error ?? "")
+  assert.deepEqual(methods(w.txs), ["sweep_proceeds", "storage_deposit+ft_transfer"], "one pull and one payment to 1Click")
 })

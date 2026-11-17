@@ -5,7 +5,7 @@ import { createHmac } from "node:crypto"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type SignedPayment } from "./Base.ts"
-import { Bitrefill, ORDER_LIMIT } from "./Bitrefill.ts"
+import { Bitrefill, MIN_PRICE, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
@@ -87,6 +87,8 @@ export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "f
 export const GUEST_LIMITS = { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 } as const
 /** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
 const INVOICE_TTL_MS = 40 * 60_000
+/** This long after its invoice, a Base payment is never sent or signed again: the invoice expires at 60 minutes. Base is only asked where it is. */
+const PAY_SEND_LIMIT_MS = 50 * 60_000
 /** Why a card couldn't be ordered: their Bitrefill login lapsed, and there's no Checkout Email to fall back on. */
 const LOGIN_LAPSED = "Your Bitrefill login expired. Connect again or add an email in Wallet."
 /** The email shape Bitrefill's buy-products accepts. */
@@ -95,6 +97,10 @@ const EMAIL = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][
 const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */
 const MAX_OPEN_PER_ACCOUNT = 3
+/** Admissions the contract refused that one account may cause in ten minutes: each one cost the operator a fee. */
+const MAX_RECENT_REFUSALS = 3
+/** Price lookups that found nothing, per account per minute: each one spent one of Bitrefill's lookups. */
+const MAX_PRICE_MISSES = 3
 const DAY_MS = 24 * 60 * 60 * 1000
 /** A charged purchase still waiting for credit is refunded this long before the customer could Reclaim it. */
 const RECLAIM_MARGIN_MS = 60 * 60 * 1000
@@ -103,6 +109,9 @@ const REPRICE_AFTER_MS = 10 * 60 * 1000
 const time = (v: Date | string) => new Date(v).getTime()
 /** When the contract admitted (and so charged) it; the row's creation for rows saved without it. */
 const admittedAt = (row: Row) => (row.admitted?.created_at ? Number(row.admitted.created_at) / 1e6 : time(row.created_at))
+/** A charged purchase that is refunded rather than tried again: it has waited `waitMinutes`, or the customer could soon Reclaim it. */
+const overdue = (row: Row, waitMinutes: number) =>
+  Date.now() - time(row.created_at) > waitMinutes * 60_000 || Date.now() > admittedAt(row) + DAY_MS - RECLAIM_MARGIN_MS
 
 /**
  * A Lucky Buy delivered onchain whose draw event we never saw (say, the customer re-ran the Draw):
@@ -120,6 +129,7 @@ interface ContractAccount {
   daily_limit: string
   day: number
   spent_today: string
+  default_mode: Mode
 }
 
 export class Purchases extends Context.Service<Purchases, {
@@ -131,6 +141,8 @@ export class Purchases extends Context.Service<Purchases, {
   cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
   /** One pass over purchases waiting for credit (also runs every 10 seconds by itself). */
   readonly promoteWaiting: Effect.Effect<void>
+  /** One reconciler pass (also runs every 30 seconds by itself). */
+  readonly reconcileNow: Effect.Effect<void>
   /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
   checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
   setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
@@ -260,6 +272,12 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "ordering": {
               if (bitrefill.guest) {
+                // Charged long ago and still not paid for (Base or Bitrefill kept failing): nothing was signed, so
+                // refund it now rather than order again, and a late card never races a Reclaim.
+                if (!row.pay_tx && overdue(row, (yield* credit.settings).waitMinutes)) {
+                  yield* alerts.admin(`purchase ${row.id} couldn't be ordered and paid for in time; refunding it in full`)
+                  return yield* move(row, { step: "fail", error: "We couldn't order and pay for this card in time" })
+                }
                 // On the customer's own Bitrefill account if they connected it (a login Bitrefill stops taking is
                 // renewed once); without one, or once it lapsed, as a guest with their Checkout Email.
                 const place = (renew: boolean) =>
@@ -314,11 +332,42 @@ export class Purchases extends Context.Service<Purchases, {
               if (!row.pay_tx && Date.now() - time(row.invoice_at!) > INVOICE_TTL_MS) {
                 return yield* move(row, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null })
               }
-              // `ordered_at` marks the money leaving the Base Float (Credit counts it from then).
-              const status = yield* base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, (p) => save(row.id, { pay_tx: p, ordered_at: new Date().toISOString() })).pipe(
-                Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
-              )
-              if (status === "pending") return false
+              // Saved only over the payment this run was handed (none, or the lost one it replaces). A run that
+              // loaded the row before another saved its payment stops here, before sending a second one.
+              // Saved only while the invoice is fresh, too (PAY_SEND_LIMIT_MS): signing can wait on the wallet's lock
+              // or on Chain Signatures past the check below, and a payment that isn't saved is never sent. With
+              // nothing saved, the next pass asks for a fresh invoice.
+              const savePayment = (p: SignedPayment) =>
+                sql<{ id: string }>`
+                  UPDATE purchases SET pay_tx = ${JSON.stringify(p)}::jsonb, updated_at = now()
+                  WHERE id = ${row.id} AND step = 'pay' AND pay_tx->>'hash' IS NOT DISTINCT FROM ${row.pay_tx?.hash ?? null}
+                    AND invoice_at > now() - interval '50 minutes'
+                  RETURNING id`.pipe(
+                  Effect.orDie,
+                  Effect.flatMap((saved) =>
+                    saved.length === 1 ? Effect.void : Effect.flatMap(load(row.id), (current) =>
+                      Effect.die(
+                        current.step === "pay" && current.invoice_at && Date.now() - time(current.invoice_at) > PAY_SEND_LIMIT_MS
+                          ? `purchase ${row.id}: its Base payment was signed after invoice ${current.invoice_id} neared expiry; neither saved nor sent`
+                          : `purchase ${row.id}: another run saved a Base payment first; not sending a second`
+                      ))
+                  )
+                )
+              // Once the invoice is about to expire nothing is sent, not even again, and nothing new is signed for
+              // it: Base is only asked where the saved payment is. Paying an expired invoice would leave our USDC
+              // at Bitrefill with no card.
+              const late = row.pay_tx !== null && Date.now() - time(row.invoice_at!) > PAY_SEND_LIMIT_MS
+              const status = yield* (late
+                ? base.status(row.pay_tx!.hash)
+                : base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment).pipe(
+                  Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
+                ))
+              if (status === "pending") {
+                if (late && !row.error) {
+                  yield* save(row.id, { error: `Base payment ${row.pay_tx!.hash} wasn't mined before invoice ${row.invoice_id} neared expiry, so it isn't sent again` })
+                }
+                return false
+              }
               if (status === "reverted") {
                 // Nothing moved (say, the float ran short): wait for money like any other, then order afresh.
                 yield* move(row, { step: "restock", error: "The Base payment reverted; nothing was paid", pay_tx: null, invoice_id: null, invoice_token: null, invoice_at: null, ordered_at: null })
@@ -326,7 +375,10 @@ export class Purchases extends Context.Service<Purchases, {
                 yield* Effect.all([credit.refresh, refill.kick], { discard: true })
                 return false
               }
-              return yield* move(row, { step: "delivery" })
+              // `ordered_at` marks the money leaving the Base Float, which is when the payment is mined, not when it's
+              // signed: Credit counts the card as held until then and as spent from then, so a float read while the
+              // payment was still on its way never looks like money gone missing.
+              return yield* move(row, { step: "delivery", ordered_at: new Date().toISOString() })
             }
             case "delivery": {
               const d = yield* bitrefill.delivery(row.invoice_id!, row.invoice_token ? String(unseal(`invoice:${row.id}`, row.invoice_token)) : undefined)
@@ -405,17 +457,22 @@ export class Purchases extends Context.Service<Purchases, {
       }
 
       const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>
-        Effect.gen(function*() {
-          if (running.has(id)) return
+        Effect.suspend(() => {
+          // Another run has this purchase: leave it, and leave its guard alone. Only the run that set the
+          // guard clears it; a caller turned away here once cleared it, and the next one started a second run.
+          if (running.has(id)) return Effect.void
           running.add(id)
-          let first = true
-          while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
-          if (notifyAfter) yield* Effect.flatMap(load(id), notify)
+          return Effect.gen(function*() {
+            let first = true
+            while (yield* Effect.flatMap(load(id), (row) => step(row, resumed && first))) first = false
+            if (notifyAfter) yield* Effect.flatMap(load(id), notify)
+          }).pipe(
+            Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
+            // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
+            Effect.catchCause((cause) => Effect.logError(`purchase ${id} paused`, cause)),
+            Effect.ensuring(Effect.sync(() => running.delete(id)))
+          )
         }).pipe(
-          Effect.catch((e: Unknown) => Effect.logWarning(`purchase ${id} paused: ${e.message}`)),
-          // Anything unexpected (database, decryption) pauses this purchase only; the reconciler retries it.
-          Effect.catchCause((cause) => Effect.logError(`purchase ${id} paused`, cause)),
-          Effect.ensuring(Effect.sync(() => running.delete(id))),
           // A deploy or shutdown waits for the run to finish: stopping between a side effect and
           // saving its result would leave the purchase for a human (pm2 kill_timeout allows for it).
           Effect.uninterruptible
@@ -524,23 +581,56 @@ export class Purchases extends Context.Service<Purchases, {
         })
       })
 
-      // Checked before signing anything, so an empty or capped account can't make the operator pay
-      // gas for purchases the contract would refuse. The contract still checks all of it.
-      const preflight = Effect.fn("Purchases.preflight")(function*(accountId: string, referencePrice: number, maxPrice: number) {
+      // Checked before a price is looked up or anything is signed, so an empty or capped account can neither use up
+      // Bitrefill's price lookups nor make the operator pay gas for purchases the contract would refuse.
+      const preflightAccount = Effect.fn("Purchases.preflightAccount")(function*(accountId: string) {
         const invalid = (message: string) => new PurchaseInvalid({ message })
-        const [open] = yield* sql<{ n: number }>`
-          SELECT count(*)::int AS n FROM purchases WHERE account_id = ${accountId} AND step IN ${sql.in([...OPEN_STEPS, ...WAITING_STEPS])}`.pipe(Effect.orDie)
-        if ((open?.n ?? 0) >= MAX_OPEN_PER_ACCOUNT) return yield* invalid("You have purchases still in progress; try again when they finish")
-        if (maxPrice < referencePrice) return yield* invalid("Price changed since you confirmed; please confirm again")
+        const [n] = yield* sql<{ open: number; refused: number }>`
+          SELECT count(*) FILTER (WHERE step IN ${sql.in([...OPEN_STEPS, ...WAITING_STEPS])})::int AS open,
+                 count(*) FILTER (WHERE step = 'rejected' AND admit_tx IS NOT NULL AND created_at > now() - interval '10 minutes')::int AS refused
+          FROM purchases WHERE account_id = ${accountId}`.pipe(Effect.orDie)
+        if ((n?.open ?? 0) >= MAX_OPEN_PER_ACCOUNT) return yield* invalid("You have purchases still in progress; try again when they finish")
+        // Each admission the contract refuses costs the operator a fee and the customer nothing.
+        if ((n?.refused ?? 0) >= MAX_RECENT_REFUSALS) return yield* invalid("Several of your purchases were just refused; wait a few minutes and try again")
         const a = yield* near.view<ContractAccount | null>("get_account", { account_id: accountId }).pipe(
           Effect.mapError(() => invalid("Couldn't read your balance from NEAR; try again in a moment"))
         )
         if (!a) return yield* invalid("No balance yet; add funds first")
-        if (Number(a.balance) < referencePrice) return yield* invalid("Insufficient balance; add funds first")
-        if (Number(a.per_purchase_limit) < referencePrice) return yield* invalid("Over the per-purchase spending limit")
-        const spent = a.day === Math.floor(Date.now() / DAY_MS) ? Number(a.spent_today) : 0
-        if (spent + referencePrice > Number(a.daily_limit)) return yield* invalid("Over the daily spending limit")
+        if (Number(a.balance) < MIN_PRICE) return yield* invalid("Insufficient balance; add funds first")
+        return a
       })
+
+      // The contract's own admission checks, made here first against what it will debit: the Reference Price in
+      // Normal, the quote's maximum in a Lucky Buy. The contract still checks all of it.
+      const preflightPrice = Effect.fn("Purchases.preflightPrice")(function*(a: ContractAccount, referencePrice: number, input: NewPurchase) {
+        const invalid = (message: string) => new PurchaseInvalid({ message })
+        const mode = input.mode ?? a.default_mode
+        let debit = referencePrice
+        if (typeof mode === "object") {
+          const q = yield* contractQuote(referencePrice, mode)
+          // A Lucky Amount the reserve no longer covers is refused onchain; say so before signing.
+          if (input.luckyAmount !== undefined && input.luckyAmount > Number(q.lucky_amount)) return yield* invalid("That quote is out of date; please confirm again.")
+          // The exact price is known for the Lucky Amount the contract quotes now. A smaller one (the reserve grew
+          // since the customer's quote) costs less; the contract prices it, and MAX_RECENT_REFUSALS bounds misuse.
+          if (input.luckyAmount === undefined || input.luckyAmount === Number(q.lucky_amount)) debit = Number(q.max_price)
+        }
+        if (input.maxPrice < debit) return yield* invalid("Price changed since you confirmed; please confirm again")
+        if (Number(a.balance) < debit) return yield* invalid("Insufficient balance; add funds first")
+        if (Number(a.per_purchase_limit) < debit) return yield* invalid("Over the per-purchase spending limit")
+        const spent = a.day === Math.floor(Date.now() / DAY_MS) ? Number(a.spent_today) : 0
+        if (spent + debit > Number(a.daily_limit)) return yield* invalid("Over the daily spending limit")
+      })
+
+      // ponytail: in memory, one process; a restart forgets it. A lookup that finds no card still spends one of
+      // Bitrefill's 20 a minute, so an account gets only a few misses a minute.
+      const misses = new Map<string, { n: number; until: number }>()
+      const missed = (accountId: string) =>
+        Effect.sync(() => {
+          const now = Date.now()
+          if (misses.size > 1_000) for (const [k, m] of misses) if (m.until < now) misses.delete(k)
+          const m = misses.get(accountId)
+          misses.set(accountId, m && m.until > now ? { n: m.n + 1, until: m.until } : { n: 1, until: now + 60_000 })
+        })
 
       const create = Effect.fn("Purchases.create")(function*(accountId: string, input: NewPurchase) {
         if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
@@ -555,7 +645,15 @@ export class Purchases extends Context.Service<Purchases, {
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
         if (!shop.open) return yield* new PurchaseInvalid({ message: closedMessage(shop) })
-        const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true)
+        const account = yield* preflightAccount(accountId)
+        const miss = misses.get(accountId)
+        if (miss && miss.until > Date.now() && miss.n >= MAX_PRICE_MISSES) {
+          return yield* new PurchaseInvalid({ message: "We couldn't find several cards you asked for; try again in a minute" })
+        }
+        const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true).pipe(
+          // A busy minute spent no lookup and says nothing about the card, so it isn't counted as a miss.
+          Effect.tapError((e) => (e._tag === "BitrefillUnavailable" && !e.message.startsWith("Prices are busy") ? missed(accountId) : Effect.void))
+        )
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
         // No card is refused for its size: one our credit can't cover waits, uncharged, for a refill
@@ -578,7 +676,7 @@ export class Purchases extends Context.Service<Purchases, {
           const over = yield* overGuestLimit(email.key, referencePrice)
           if (over) return yield* new PurchaseInvalid({ message: over })
         }
-        yield* preflight(accountId, referencePrice, input.maxPrice)
+        yield* preflightPrice(account, referencePrice, input)
         // A Lucky Buy is admitted at the Lucky Amount it's accepted under, or refused: it may wait a day for
         // credit while the reserve moves. (Default Mode isn't known here; those admit as before.)
         // The quote the customer saw carries it; without one (an older client), the contract's quote now.
@@ -649,6 +747,13 @@ export class Purchases extends Context.Service<Purchases, {
       const giveUp = (id: string) =>
         Effect.gen(function*() {
           const row = yield* load(id)
+          // A guest order that never got as far as a payment cost us nothing (an unpaid invoice just expires):
+          // the customer is refunded in full now, rather than left "stuck" for a human until they can Reclaim.
+          if (bitrefill.guest && row.step === "ordering" && !row.pay_tx) {
+            if (!(yield* move(row, { step: "fail", error: "We couldn't order this card from Bitrefill" }))) return
+            yield* alerts.admin(`purchase ${id} couldn't be ordered from Bitrefill in ${MAX_ATTEMPTS} attempts (nothing was paid); refunding it in full`)
+            return yield* advance(id, true)
+          }
           if (!(yield* move(row, { step: "stuck", error: `Gave up after ${MAX_ATTEMPTS} attempts at ${row.step}: ${row.error ?? ""}` }))) return
           yield* alerts.admin(`purchase ${id} stuck after ${MAX_ATTEMPTS} attempts at ${row.step}`)
           yield* notify(yield* load(id))
@@ -732,7 +837,7 @@ export class Purchases extends Context.Service<Purchases, {
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
       yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, checkoutEmail, setCheckoutEmail })
+      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, reconcileNow: reconcile, checkoutEmail, setCheckoutEmail })
     })
   )
 }
