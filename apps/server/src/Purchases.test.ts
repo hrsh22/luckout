@@ -1,4 +1,4 @@
-import { CreditSettings, type Mode, NewPurchase, ShopStatus, Voucher } from "@luckout/api"
+import { BitrefillUnavailable, CreditSettings, type Mode, NewPurchase, ShopStatus, Voucher } from "@luckout/api"
 import { ConfigProvider, Effect, Fiber, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
@@ -20,7 +20,7 @@ import { fakeBase, fakeBitrefill, fakeBitrefillOAuth, fakeNear } from "./testing
 process.env.NEAR_NETWORK = "testnet"
 process.env.REDEMPTION_KEY = "11".repeat(32)
 
-const account = { balance: "500000000", per_purchase_limit: "500000000", daily_limit: "500000000", day: 0, spent_today: "0" }
+const account = { balance: "500000000", per_purchase_limit: "500000000", daily_limit: "500000000", day: 0, spent_today: "0", default_mode: "normal" as Mode }
 
 const world = (opts: {
   account?: typeof account | null
@@ -53,6 +53,8 @@ const world = (opts: {
   deliveryDelay?: number
   /** How long a buy request waits (ms) before answering "pending". */
   requestWait?: number
+  /** Bitrefill has no such card: every price lookup fails. */
+  noCard?: boolean
   /** Signing a Base payment takes this long (ms): the wait for the wallet and for Chain Signatures. */
   payDelay?: number
   /** Base can't be reached when a payment is about to be signed: nothing is signed or saved. */
@@ -70,6 +72,8 @@ const world = (opts: {
   let creditDelay = 0
   const orders = [...(opts.orders ?? [])]
   let kicks = 0
+  /** Price lookups made at Bitrefill. */
+  let lookups = 0
   let shop = new ShopStatus({ open: true })
   const price = opts.price ?? 10_000_000
   const mode = opts.mode ?? "normal"
@@ -123,7 +127,12 @@ const world = (opts: {
   const bitrefill = fakeBitrefill({
     guest: opts.guest ?? false,
     voucher: () =>
-      Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] })),
+      Effect.suspend(() => {
+        lookups++
+        return opts.noCard
+          ? Effect.fail(new BitrefillUnavailable({ message: "No such voucher" }))
+          : Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] }))
+      }),
     order: (_id, _value, buyer) =>
       Effect.sync((): Order => {
         calls.push(!opts.guest ? "order" : buyer && "token" in buyer ? `order:token:${buyer.token}` : `order:${buyer?.email}`)
@@ -186,6 +195,7 @@ const world = (opts: {
     buy,
     run,
     kicks: () => kicks,
+    lookups: () => lookups,
     setCredit: (micro: number) => void (creditBalance = micro),
     setCreditDelay: (ms: number) => void (creditDelay = ms),
     setShop: (s: ShopStatus) => void (shop = s)
@@ -856,4 +866,45 @@ test("a charged purchase that can't be paid for in time is refunded in full, wit
   assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 1, "no second invoice")
   assert.ok(w.calls.includes("fail_purchase"))
   assert.match(w.alerts.join(" "), /in time/)
+})
+
+test("a Lucky Buy is checked against what the contract will debit before anything is signed", async () => {
+  // The Lucky price is $11.20 (the world's quote); the balance covers the card but not that.
+  const poor = world({ mode: { lucky: 0 }, account: { ...account, balance: "10600000" } })
+  const short = await poor.run(poor.buy().pipe(Effect.flip))
+  assert.match(short.message, /Insufficient balance/)
+  assert.deepEqual(poor.calls, [], "nothing signed")
+  // A maximum under the Lucky price: the contract would refuse it, after the operator paid to ask.
+  const w = world({ mode: { lucky: 0 } })
+  const low = await w.run(Purchases.use((p) =>
+    p.create("alice.test", new NewPurchase({ voucherId: "test-card", value: "10", mode: { lucky: 0 }, maxPrice: 10_000_000, luckyAmount: 6_000_000, idempotencyKey: crypto.randomUUID() }))
+  ).pipe(Effect.flip))
+  assert.match(low.message, /Price changed/)
+  assert.deepEqual(w.calls, [], "nothing signed")
+  // The quote the customer saw, as the contract gives it now, goes through.
+  const ok = world({ mode: { lucky: 0 } })
+  assert.equal((await ok.run(ok.buy())).status, "delivered")
+})
+
+test("after three admissions the contract refused, the account waits before the operator signs another", async () => {
+  const w = world({ admitRefused: "Price changed since you confirmed; please confirm again" })
+  const e = await w.run(Effect.gen(function*() {
+    for (let i = 0; i < 3; i++) assert.equal((yield* w.buy()).status, "rejected")
+    return yield* w.buy().pipe(Effect.flip)
+  }))
+  assert.match(e.message, /just refused/)
+  assert.equal(w.calls.filter((c) => c === "purchase").length, 3, "the fourth was never signed")
+})
+
+test("an account with no money, or one that keeps asking for cards we can't find, stops spending price lookups", async () => {
+  const empty = world({ account: null })
+  await empty.run(empty.buy().pipe(Effect.flip))
+  assert.equal(empty.lookups(), 0, "no balance: refused before the lookup")
+  const w = world({ noCard: true })
+  const e = await w.run(Effect.gen(function*() {
+    for (let i = 0; i < 3; i++) yield* w.buy().pipe(Effect.flip)
+    return yield* w.buy().pipe(Effect.flip)
+  }))
+  assert.match(e.message, /couldn't find several cards/)
+  assert.equal(w.lookups(), 3, "the fourth asked Bitrefill nothing")
 })

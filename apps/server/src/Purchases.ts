@@ -5,7 +5,7 @@ import { createHmac } from "node:crypto"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type SignedPayment } from "./Base.ts"
-import { Bitrefill, ORDER_LIMIT } from "./Bitrefill.ts"
+import { Bitrefill, MIN_PRICE, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
 import { Refill } from "./Refill.ts"
@@ -97,6 +97,10 @@ const EMAIL = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][
 const MAX_ATTEMPTS = 12
 /** Unfinished purchases one account may have at once. */
 const MAX_OPEN_PER_ACCOUNT = 3
+/** Admissions the contract refused that one account may cause in ten minutes: each one cost the operator a fee. */
+const MAX_RECENT_REFUSALS = 3
+/** Price lookups that found nothing, per account per minute: each one spent one of Bitrefill's lookups. */
+const MAX_PRICE_MISSES = 3
 const DAY_MS = 24 * 60 * 60 * 1000
 /** A charged purchase still waiting for credit is refunded this long before the customer could Reclaim it. */
 const RECLAIM_MARGIN_MS = 60 * 60 * 1000
@@ -125,6 +129,7 @@ interface ContractAccount {
   daily_limit: string
   day: number
   spent_today: string
+  default_mode: Mode
 }
 
 export class Purchases extends Context.Service<Purchases, {
@@ -563,23 +568,56 @@ export class Purchases extends Context.Service<Purchases, {
         })
       })
 
-      // Checked before signing anything, so an empty or capped account can't make the operator pay
-      // gas for purchases the contract would refuse. The contract still checks all of it.
-      const preflight = Effect.fn("Purchases.preflight")(function*(accountId: string, referencePrice: number, maxPrice: number) {
+      // Checked before a price is looked up or anything is signed, so an empty or capped account can neither use up
+      // Bitrefill's price lookups nor make the operator pay gas for purchases the contract would refuse.
+      const preflightAccount = Effect.fn("Purchases.preflightAccount")(function*(accountId: string) {
         const invalid = (message: string) => new PurchaseInvalid({ message })
-        const [open] = yield* sql<{ n: number }>`
-          SELECT count(*)::int AS n FROM purchases WHERE account_id = ${accountId} AND step IN ${sql.in([...OPEN_STEPS, ...WAITING_STEPS])}`.pipe(Effect.orDie)
-        if ((open?.n ?? 0) >= MAX_OPEN_PER_ACCOUNT) return yield* invalid("You have purchases still in progress; try again when they finish")
-        if (maxPrice < referencePrice) return yield* invalid("Price changed since you confirmed; please confirm again")
+        const [n] = yield* sql<{ open: number; refused: number }>`
+          SELECT count(*) FILTER (WHERE step IN ${sql.in([...OPEN_STEPS, ...WAITING_STEPS])})::int AS open,
+                 count(*) FILTER (WHERE step = 'rejected' AND admit_tx IS NOT NULL AND created_at > now() - interval '10 minutes')::int AS refused
+          FROM purchases WHERE account_id = ${accountId}`.pipe(Effect.orDie)
+        if ((n?.open ?? 0) >= MAX_OPEN_PER_ACCOUNT) return yield* invalid("You have purchases still in progress; try again when they finish")
+        // Each admission the contract refuses costs the operator a fee and the customer nothing.
+        if ((n?.refused ?? 0) >= MAX_RECENT_REFUSALS) return yield* invalid("Several of your purchases were just refused; wait a few minutes and try again")
         const a = yield* near.view<ContractAccount | null>("get_account", { account_id: accountId }).pipe(
           Effect.mapError(() => invalid("Couldn't read your balance from NEAR; try again in a moment"))
         )
         if (!a) return yield* invalid("No balance yet; add funds first")
-        if (Number(a.balance) < referencePrice) return yield* invalid("Insufficient balance; add funds first")
-        if (Number(a.per_purchase_limit) < referencePrice) return yield* invalid("Over the per-purchase spending limit")
-        const spent = a.day === Math.floor(Date.now() / DAY_MS) ? Number(a.spent_today) : 0
-        if (spent + referencePrice > Number(a.daily_limit)) return yield* invalid("Over the daily spending limit")
+        if (Number(a.balance) < MIN_PRICE) return yield* invalid("Insufficient balance; add funds first")
+        return a
       })
+
+      // The contract's own admission checks, made here first against what it will debit: the Reference Price in
+      // Normal, the quote's maximum in a Lucky Buy. The contract still checks all of it.
+      const preflightPrice = Effect.fn("Purchases.preflightPrice")(function*(a: ContractAccount, referencePrice: number, input: NewPurchase) {
+        const invalid = (message: string) => new PurchaseInvalid({ message })
+        const mode = input.mode ?? a.default_mode
+        let debit = referencePrice
+        if (typeof mode === "object") {
+          const q = yield* contractQuote(referencePrice, mode)
+          // A Lucky Amount the reserve no longer covers is refused onchain; say so before signing.
+          if (input.luckyAmount !== undefined && input.luckyAmount > Number(q.lucky_amount)) return yield* invalid("That quote is out of date; please confirm again.")
+          // The exact price is known for the Lucky Amount the contract quotes now. A smaller one (the reserve grew
+          // since the customer's quote) costs less; the contract prices it, and MAX_RECENT_REFUSALS bounds misuse.
+          if (input.luckyAmount === undefined || input.luckyAmount === Number(q.lucky_amount)) debit = Number(q.max_price)
+        }
+        if (input.maxPrice < debit) return yield* invalid("Price changed since you confirmed; please confirm again")
+        if (Number(a.balance) < debit) return yield* invalid("Insufficient balance; add funds first")
+        if (Number(a.per_purchase_limit) < debit) return yield* invalid("Over the per-purchase spending limit")
+        const spent = a.day === Math.floor(Date.now() / DAY_MS) ? Number(a.spent_today) : 0
+        if (spent + debit > Number(a.daily_limit)) return yield* invalid("Over the daily spending limit")
+      })
+
+      // ponytail: in memory, one process; a restart forgets it. A lookup that finds no card still spends one of
+      // Bitrefill's 20 a minute, so an account gets only a few misses a minute.
+      const misses = new Map<string, { n: number; until: number }>()
+      const missed = (accountId: string) =>
+        Effect.sync(() => {
+          const now = Date.now()
+          if (misses.size > 1_000) for (const [k, m] of misses) if (m.until < now) misses.delete(k)
+          const m = misses.get(accountId)
+          misses.set(accountId, m && m.until > now ? { n: m.n + 1, until: m.until } : { n: 1, until: now + 60_000 })
+        })
 
       const create = Effect.fn("Purchases.create")(function*(accountId: string, input: NewPurchase) {
         if (Option.isNone(key)) return yield* new PurchaseInvalid({ message: "Purchases are disabled: REDEMPTION_KEY is not set" })
@@ -594,7 +632,14 @@ export class Purchases extends Context.Service<Purchases, {
           .pipe(Effect.orDie)
         if (existing[0]) return view(yield* load(existing[0].id))
         if (!shop.open) return yield* new PurchaseInvalid({ message: closedMessage(shop) })
-        const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true)
+        const account = yield* preflightAccount(accountId)
+        const miss = misses.get(accountId)
+        if (miss && miss.until > Date.now() && miss.n >= MAX_PRICE_MISSES) {
+          return yield* new PurchaseInvalid({ message: "We couldn't find several cards you asked for; try again in a minute" })
+        }
+        const { voucher, referencePrice } = yield* price(input.voucherId, input.value, true).pipe(
+          Effect.tapError((e) => (e._tag === "BitrefillUnavailable" ? missed(accountId) : Effect.void))
+        )
         // Test cards are free on Bitrefill; real ones are paid from our credit (ADR-0009).
         const real = !voucher.id.startsWith("test-")
         // No card is refused for its size: one our credit can't cover waits, uncharged, for a refill
@@ -617,7 +662,7 @@ export class Purchases extends Context.Service<Purchases, {
           const over = yield* overGuestLimit(email.key, referencePrice)
           if (over) return yield* new PurchaseInvalid({ message: over })
         }
-        yield* preflight(accountId, referencePrice, input.maxPrice)
+        yield* preflightPrice(account, referencePrice, input)
         // A Lucky Buy is admitted at the Lucky Amount it's accepted under, or refused: it may wait a day for
         // credit while the reserve moves. (Default Mode isn't known here; those admit as before.)
         // The quote the customer saw carries it; without one (an older client), the contract's quote now.
