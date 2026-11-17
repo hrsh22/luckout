@@ -1968,3 +1968,416 @@ fn the_fixed_limit_is_above_zero() {
     let mut c = setup(0, USDC);
     set_cap(&mut c, Some(0), Some(2_000));
 }
+
+// ---------- stored layout ----------
+//
+// Upgrades happen in place (deploy/README.md, "Upgrading the contract"): new code reads the bytes the old
+// code wrote. Each test below fixes the Borsh bytes of one stored type. A failure here means the code
+// can no longer read what mainnet already holds: put the type back as it was, or ship the change with a
+// migration (see `mod migrate` in lib.rs). Never just update the expected bytes.
+
+fn stored<T: near_sdk::borsh::BorshSerialize>(value: &T) -> String {
+    hex(&near_sdk::borsh::to_vec(value).unwrap())
+}
+
+#[test]
+fn an_account_keeps_its_stored_layout() {
+    let a = Account {
+        balance: U128(1),
+        per_purchase_limit: U128(2),
+        daily_limit: U128(3),
+        default_mode: Mode::Lucky(4),
+        day: 5,
+        spent_today: U128(6),
+        premiums_paid: U128(7),
+        cashback_received: U128(8),
+    };
+    assert_eq!(
+        stored(&a),
+        concat!(
+            "01000000000000000000000000000000", // balance
+            "02000000000000000000000000000000", // per_purchase_limit
+            "03000000000000000000000000000000", // daily_limit
+            "0104000000",                       // default_mode: Lucky(4)
+            "0500000000000000",                 // day
+            "06000000000000000000000000000000", // spent_today
+            "07000000000000000000000000000000", // premiums_paid
+            "08000000000000000000000000000000", // cashback_received
+        )
+    );
+    assert_eq!(stored(&Mode::Normal), "00");
+}
+
+#[test]
+fn a_purchase_keeps_its_stored_layout() {
+    let p = Purchase {
+        customer: alice(),
+        mode: Mode::Lucky(2),
+        reference_price: U128(1),
+        lucky_amount: U128(2),
+        max_price: U128(3),
+        locked: U128(4),
+        created_at: 5,
+        status: Status::Drawing,
+        cashback: U128(6),
+    };
+    assert_eq!(
+        stored(&p),
+        concat!(
+            "0a000000616c6963652e6e656172",     // customer: "alice.near"
+            "0102000000",                       // mode: Lucky(2)
+            "01000000000000000000000000000000", // reference_price
+            "02000000000000000000000000000000", // lucky_amount
+            "03000000000000000000000000000000", // max_price
+            "04000000000000000000000000000000", // locked
+            "0500000000000000",                 // created_at
+            "04",                               // status: Drawing
+            "06000000000000000000000000000000", // cashback
+        )
+    );
+    // A status is stored as its position in the enum, so new ones go last.
+    let tags = [
+        Status::Pending,
+        Status::Delivered,
+        Status::Failed,
+        Status::Reclaimed,
+        Status::Drawing,
+    ]
+    .map(|s| stored(&s));
+    assert_eq!(tags, ["00", "01", "02", "03", "04"]);
+}
+
+#[test]
+fn a_game_version_keeps_its_stored_layout() {
+    let v = table("Lite", 1_000, &[(0, 400), (11_000, 9_600)]);
+    assert_eq!(
+        stored(&v),
+        concat!(
+            "040000004c697465", // name: "Lite"
+            "e8030000",         // premium_bps
+            "02000000",         // two outcomes, each final_bps then chance_bps
+            "0000000090010000",
+            "f82a000080250000",
+        )
+    );
+}
+
+#[test]
+fn the_cashback_cap_keeps_its_stored_layout() {
+    assert_eq!(
+        stored(&DEFAULT_CASHBACK_CAP),
+        concat!(
+            "0180f0fa02000000000000000000000000", // fixed: 50 USDC
+            "01d0070000",                         // reserve_bps: 20%
+        )
+    );
+    let share_only = CashbackCap {
+        fixed: None,
+        reserve_bps: Some(3_000),
+    };
+    assert_eq!(stored(&share_only), "0001b80b0000");
+}
+
+#[test]
+fn the_contract_root_keeps_its_stored_layout() {
+    as_(owner());
+    let mut c = Contract::new(owner(), operator(), usdc());
+    c.paused = true;
+    c.next_purchase_id = 1;
+    c.free_reserve = 2;
+    c.locked_reserve = 3;
+    c.proceeds = 4;
+    c.lucky_settled = 5;
+    c.lucky_amount_total = 6;
+    c.lucky_paid_total = 7;
+    c.treasury = Some(treasury());
+    c.sweep_daily_cap = 8;
+    c.sweep_day = 9;
+    c.swept_today = 10;
+    c.pending_owner = Some(heir());
+    assert_eq!(
+        stored(&c),
+        concat!(
+            "0a0000006f776e65722e6e656172",         // owner: "owner.near"
+            "0b0000007365727665722e6e656172",       // operator: "server.near"
+            "09000000757364632e6e656172",           // usdc: "usdc.near"
+            "01",                                   // paused
+            "0100000000",                           // accounts: storage prefix 0
+            "030000000100000001",                   // versions: 3 of them, storage prefix 1
+            "0100000002",                           // purchases: storage prefix 2
+            "0100000000000000",                     // next_purchase_id
+            "02000000000000000000000000000000",     // free_reserve
+            "03000000000000000000000000000000",     // locked_reserve
+            "04000000000000000000000000000000",     // proceeds
+            "0500000000000000",                     // lucky_settled
+            "06000000000000000000000000000000",     // lucky_amount_total
+            "07000000000000000000000000000000",     // lucky_paid_total
+            "0100000003",                           // orders: storage prefix 3
+            "010d00000074726561737572792e6e656172", // treasury: "treasury.near"
+            "08000000000000000000000000000000",     // sweep_daily_cap
+            "0900000000000000",                     // sweep_day
+            "0a000000000000000000000000000000",     // swept_today
+            "0109000000686569722e6e656172",         // pending_owner: "heir.near"
+        )
+    );
+}
+
+#[test]
+fn records_live_under_the_storage_keys_mainnet_already_uses() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(1), "o-keys");
+    set_cap(&mut c, Some(40 * USDC), Some(2_000));
+    c.accounts.flush();
+    c.versions.flush();
+    c.purchases.flush();
+    c.orders.flush();
+    let at = |key: &[u8]| env::storage_read(key).map(|bytes| hex(&bytes));
+    // An entry's key is its collection's prefix (the `Key` enum, in order) followed by the Borsh of its own key.
+    let key = |prefix: u8, k: &[u8]| [&[prefix][..], k].concat();
+    let borsh = |s: &str| near_sdk::borsh::to_vec(s).unwrap();
+    assert_eq!(
+        at(&key(0, &borsh("alice.near"))),
+        Some(stored(&c.get_account(alice()).unwrap()))
+    );
+    assert_eq!(
+        at(&key(1, &1u32.to_le_bytes())),
+        Some(stored(&default_game_versions()[1]))
+    );
+    assert_eq!(
+        at(&key(2, &pid.to_le_bytes())),
+        Some(stored(&c.get_purchase(pid).unwrap()))
+    );
+    assert_eq!(at(&key(3, &borsh("o-keys"))), Some(stored(&pid)));
+    assert_eq!(
+        at(&[4]),
+        Some(stored(&CashbackCap {
+            fixed: Some(U128(40 * USDC)),
+            reserve_bps: Some(2_000)
+        }))
+    );
+}
+
+// ---------- Game Versions the owner adds ----------
+
+/// A Game Version from (final_bps, chance_bps) pairs.
+fn table(name: &str, premium_bps: u32, outcomes: &[(u32, u32)]) -> GameVersion {
+    GameVersion {
+        name: name.into(),
+        premium_bps,
+        outcomes: outcomes
+            .iter()
+            .map(|&(final_bps, chance_bps)| Outcome {
+                final_bps,
+                chance_bps,
+            })
+            .collect(),
+    }
+}
+
+/// +10% up front, free 4% of the time: 4% × 0 + 96% × 110% = 105.6%.
+fn all_or_nothing() -> GameVersion {
+    table("All or nothing", 1_000, &[(0, 400), (11_000, 9_600)])
+}
+
+#[test]
+fn the_owner_adds_a_fourth_game_version_and_a_customer_plays_it() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    call(owner(), DAY, [0; 32], 1);
+    assert_eq!(c.add_game_version(all_or_nothing()), 3);
+    assert!(get_logs().iter().any(|l| l.contains("game_version_added")));
+    let names: Vec<String> = c.get_game_versions().into_iter().map(|v| v.name).collect();
+    assert_eq!(names, ["Lite", "Classic", "Jackpot", "All or nothing"]);
+
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(3), "o-fourth");
+    let p = c.get_purchase(pid).unwrap();
+    // The whole 10 USDC plays: 11 up front, and the free result's 10 USDC discount is locked.
+    assert_eq!(
+        (p.lucky_amount.0, p.max_price.0, p.locked.0),
+        (10 * USDC, 11 * USDC, 10 * USDC)
+    );
+    let seed = [6u8; 32];
+    let p = deliver(&mut c, pid, seed);
+    let f = final_bps_for_roll(
+        &all_or_nothing().outcomes,
+        roll_from_random(&draw_random(&seed, pid)),
+    );
+    assert_eq!(p.status, Status::Delivered);
+    assert_eq!(p.cashback.0, if f == 0 { 11 * USDC } else { 0 });
+    assert_eq!(balance(&c), 89 * USDC + p.cashback.0);
+    assert_eq!(c.locked_reserve, 0);
+}
+
+#[test]
+#[should_panic(expected = "Only the owner")]
+fn only_the_owner_adds_a_game_version() {
+    let mut c = setup(0, USDC);
+    call(operator(), DAY, [0; 32], 1);
+    c.add_game_version(all_or_nothing());
+}
+
+#[test]
+#[should_panic(expected = "Empty game version")]
+fn a_game_version_needs_a_name() {
+    validate_game_version(&table("", 1_000, &[(0, 400), (11_000, 9_600)]));
+}
+
+#[test]
+#[should_panic(expected = "Empty game version")]
+fn a_game_version_needs_outcomes() {
+    validate_game_version(&table("Empty", 1_000, &[]));
+}
+
+#[test]
+#[should_panic(expected = "Premium must be positive")]
+fn a_game_version_charges_a_premium() {
+    validate_game_version(&table("Free ride", 0, &[(10_000, 10_000)]));
+}
+
+#[test]
+#[should_panic(expected = "Zero-chance outcome")]
+fn rejects_an_outcome_that_can_never_happen() {
+    validate_game_version(&table("Bait", 1_000, &[(0, 0), (0, 400), (11_000, 9_600)]));
+}
+
+#[test]
+#[should_panic(expected = "Chances must sum to 100%")]
+fn rejects_chances_that_dont_sum_to_100_percent() {
+    validate_game_version(&table("Short", 1_000, &[(0, 400), (11_000, 9_500)]));
+}
+
+#[test]
+#[should_panic(expected = "Needs at least one discount")]
+fn rejects_a_flat_fee_with_no_discount() {
+    // Everyone pays 105.6%: the average is right, but nobody ever pays less than normal.
+    validate_game_version(&table("Fee", 560, &[(10_560, 10_000)]));
+}
+
+#[test]
+#[should_panic(expected = "Unknown game version")]
+fn a_purchase_cannot_name_a_game_version_that_doesnt_exist() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    buy(&mut c, 10 * USDC, Mode::Lucky(3), "o-unknown");
+}
+
+#[test]
+#[should_panic(expected = "Unknown game version")]
+fn the_default_mode_cannot_be_a_game_version_that_doesnt_exist() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    c.set_default_mode(Mode::Lucky(3));
+}
+
+// ---------- refusals no other test reaches ----------
+
+#[test]
+#[should_panic(expected = "No balance; deposit first")]
+fn an_account_that_never_deposited_cannot_buy() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    c.purchase(
+        id("bob.near"),
+        U128(10 * USDC),
+        Some(Mode::Normal),
+        "o-nobody".into(),
+        U128(u128::MAX),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Invalid order id")]
+fn a_purchase_needs_an_order_id() {
+    let mut c = setup(0, 100 * USDC);
+    buy(&mut c, 10 * USDC, Mode::Normal, "");
+}
+
+#[test]
+#[should_panic(expected = "Invalid order id")]
+fn an_order_id_is_at_most_64_characters() {
+    let mut c = setup(0, 100 * USDC);
+    buy(&mut c, 10 * USDC, Mode::Normal, &"x".repeat(64));
+    assert_eq!(balance(&c), 90 * USDC, "64 characters are accepted");
+    buy(&mut c, 10 * USDC, Mode::Normal, &"y".repeat(65));
+}
+
+#[test]
+#[should_panic(expected = "Unknown purchase")]
+fn a_purchase_that_doesnt_exist_cannot_be_confirmed() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    let _ = c.confirm_delivery(7);
+}
+
+#[test]
+#[should_panic(expected = "Nothing to withdraw")]
+fn the_owner_cannot_withdraw_zero_proceeds() {
+    let mut c = with_proceeds(1);
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_proceeds(U128(0), None);
+}
+
+#[test]
+#[should_panic(expected = "No treasury is set")]
+fn proceeds_cannot_go_to_a_treasury_that_isnt_set() {
+    let mut c = with_proceeds(1);
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_proceeds(U128(10 * USDC), Some(true));
+}
+
+#[test]
+#[should_panic(expected = "No treasury is set")]
+fn once_the_treasury_is_removed_it_can_no_longer_pull() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 30 * USDC);
+    call(owner(), DAY, [0; 32], 1);
+    c.set_treasury(None, U128(0));
+    assert!(c.get_config()["treasury"].is_null());
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(USDC));
+}
+
+#[test]
+#[should_panic(expected = "A daily cap needs a treasury")]
+fn a_daily_cap_needs_a_treasury() {
+    let mut c = with_proceeds(0);
+    call(owner(), DAY, [0; 32], 1);
+    c.set_treasury(None, U128(USDC));
+}
+
+#[test]
+#[should_panic(expected = "Nothing to sweep")]
+fn the_treasury_cannot_pull_zero() {
+    let mut c = with_proceeds(1);
+    set_treasury(&mut c, 30 * USDC);
+    call(treasury(), DAY, [0; 32], 1);
+    let _ = c.sweep_proceeds(U128(0));
+}
+
+#[test]
+#[should_panic(expected = "Already the owner")]
+fn the_owner_cannot_propose_itself() {
+    let mut c = with_proceeds(0);
+    propose(&mut c, Some(owner()));
+}
+
+#[test]
+#[should_panic(expected = "No Draw to retry")]
+fn a_purchase_not_yet_delivered_has_no_draw_to_retry() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(0), "o-early");
+    as_(alice());
+    let _ = c.retry_draw(pid);
+}
+
+#[test]
+fn the_operator_can_retry_a_draw_too() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    let pid = buy(&mut c, 10 * USDC, Mode::Lucky(0), "o-op-retry");
+    let _ = c.confirm_delivery(pid);
+    as_(operator());
+    let _ = c.retry_draw(pid);
+    assert_eq!(
+        sent(),
+        [(contract(), "on_draw".into(), json!({ "purchase_id": pid }))]
+    );
+}
