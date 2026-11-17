@@ -1,19 +1,15 @@
 import { Api } from "@luckout/api"
 import { Duration, Effect } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http"
+import { FetchHttpClient } from "effect/http"
 import { HttpApiClient } from "effect/http-api"
 
 export const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8787"
 
-const client = (token?: string) =>
-  HttpApiClient.make(Api, {
-    baseUrl: apiUrl,
-    transformClient: (c) => (token ? c.pipe(HttpClient.mapRequest(HttpClientRequest.bearerToken(token))) : c)
-  })
+const client = HttpApiClient.make(Api, { baseUrl: apiUrl })
 
-type Client = Effect.Success<ReturnType<typeof client>>
+type Client = Effect.Success<typeof client>
 
-/** Fired when the server rejects the session token; the session provider signs the customer out. */
+/** Fired when the server rejects the session; the session provider signs the customer out. */
 export const UNAUTHORIZED = "luckout:unauthorized"
 
 export class TimedOut extends Error {
@@ -23,15 +19,18 @@ export class TimedOut extends Error {
 }
 
 /**
- * One typed server call: `api((c) => c.catalog.search({ query: { q } }))`, with the session token
- * when given. Calls time out after 30 seconds unless told otherwise.
+ * One typed server call: `api((c) => c.catalog.search({ query: { q } }))`. Every call carries the session cookie,
+ * which the server set as HttpOnly: the page can send it but never read it. `token` is the session's name
+ * (useSession), given for calls made signed in: a refusal of one of those ends the session here too. Calls time
+ * out after 30 seconds unless told otherwise.
  */
 export const api = <A, E>(f: (c: Client) => Effect.Effect<A, E>, token?: string, timeout: Duration.Input = "30 seconds") =>
   Effect.runPromise(
-    client(token).pipe(
+    client.pipe(
       Effect.flatMap(f),
       Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(new TimedOut()) }),
-      Effect.provide(FetchHttpClient.layer)
+      Effect.provide(FetchHttpClient.layer),
+      Effect.provideService(FetchHttpClient.RequestInit, { credentials: "include" })
     )
   ).catch((e: unknown) => {
     if (token && (e as { _tag?: string })?._tag === "Unauthorized") window.dispatchEvent(new Event(UNAUTHORIZED))

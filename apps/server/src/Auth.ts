@@ -1,5 +1,7 @@
-import { Challenge, evmSignInMessage, Session, type SignedChallenge, type SignedEvmChallenge, Unauthorized } from "@luckout/api"
+import { Authorization, Challenge, CurrentAccount, evmSignInMessage, Session, sessionCookie, type SignedChallenge, type SignedEvmChallenge, Unauthorized } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
+import { HttpServerRequest } from "effect/http"
+import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { getAddress, verifyMessage } from "viem"
@@ -8,11 +10,18 @@ import { Near, Network } from "./Near.ts"
 const NONCE_TTL_MINUTES = 5
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+/** A new session: its token goes into the cookie (startSession), never into an answer's body. */
+export interface SignedIn {
+  readonly accountId: string
+  readonly token: string
+  readonly expiresAt: number
+}
+
 export class Auth extends Context.Service<Auth, {
   readonly challenge: Effect.Effect<Challenge>
-  verify(signed: SignedChallenge): Effect.Effect<Session, Unauthorized>
+  verify(signed: SignedChallenge): Effect.Effect<SignedIn, Unauthorized>
   /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage`, made on one of our own sites, by a regular EVM account (EOA). */
-  verifyEvm(signed: SignedEvmChallenge): Effect.Effect<Session, Unauthorized>
+  verifyEvm(signed: SignedEvmChallenge): Effect.Effect<SignedIn, Unauthorized>
   /** The account a session token belongs to. */
   authenticate(token: string): Effect.Effect<string, Unauthorized>
   /** Ends the one session `token` is, so a copy of it kept elsewhere stops working. */
@@ -95,7 +104,7 @@ export class Auth extends Context.Service<Auth, {
           const issuedAt = Date.now()
           const expiresAt = issuedAt + SESSION_TTL_MS
           const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, i: issuedAt })).toString("base64url")
-          return new Session({ accountId, token: `${payload}.${mac(payload)}`, expiresAt })
+          return { accountId, token: `${payload}.${mac(payload)}`, expiresAt } satisfies SignedIn
         })
 
       const authenticate = (token: string) =>
@@ -139,3 +148,35 @@ export class Auth extends Context.Service<Auth, {
     })
   )
 }
+
+// The session cookie (ADR-0006, amended 2026-11-17): HttpOnly and Secure (securitySetCookie's defaults), so only
+// the browser holds it and only over HTTPS (or http://localhost); SameSite=Lax, so other sites' requests go
+// without it. Edge.ts refuses changes from our sibling sites, which SameSite counts as the same site.
+const COOKIE = { sameSite: "lax", path: "/" } as const
+
+/** Answers a sign-in: the token is set as the session cookie, lasting as long as the token, and the body says who and until when. */
+export const startSession = <E, R>(signedIn: Effect.Effect<SignedIn, E, R>) =>
+  Effect.flatMap(signedIn, (s) =>
+    Effect.as(
+      HttpApiBuilder.securitySetCookie(sessionCookie, s.token, { ...COOKIE, expires: new Date(s.expiresAt) }),
+      new Session({ accountId: s.accountId, expiresAt: s.expiresAt })
+    ))
+
+/** The session token the request came with, "" without one. */
+export const sessionToken = Effect.map(HttpServerRequest.HttpServerRequest, (r) => r.cookies[sessionCookie.key] ?? "")
+
+/** Tells the browser to drop the session cookie. */
+export const dropCookie = HttpApiBuilder.securitySetCookie(sessionCookie, "", { ...COOKIE, maxAge: 0 })
+
+/** Signs in every call to an endpoint behind `Authorization`, by the session cookie it carries. */
+export const AuthorizationLive = Layer.effect(
+  Authorization,
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return Authorization.of({
+      cookie: (httpEffect, { credential }) =>
+        Effect.flatMap(auth.authenticate(Redacted.value(credential)), (accountId) =>
+          Effect.provideService(httpEffect, CurrentAccount, { accountId }))
+    })
+  })
+)

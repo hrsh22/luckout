@@ -17,13 +17,15 @@ const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
 const secret = JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${customer}.json`, "utf8")).private_key as KeyPairString
 const key = KeyPair.fromString(secret)
 
-const req = async (method: string, path: string, body?: unknown, token?: string) => {
+const req = async (method: string, path: string, body?: unknown, session?: string) => {
   const r = await fetch(api + path, {
     method,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { "content-type": "application/json", ...(session ? { cookie: session } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
-  return { status: r.status, json: await r.json().catch(() => null) }
+  // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
 const { json: c } = await req("POST", "/auth/challenge", {})
@@ -31,13 +33,13 @@ const s = await signMessage({
   signerAccount: new Account(customer, rpc, secret),
   payload: { message: c.message, recipient: c.recipient, nonce: Buffer.from(c.nonce, "base64") }
 })
-const { json: session } = await req("POST", "/auth/verify", {
+const { session } = await req("POST", "/auth/verify", {
   accountId: customer,
   publicKey: s.publicKey.toString(),
   signature: Buffer.from(s.signature).toString("base64"),
   nonce: c.nonce
 })
-const token = session.token as string
+const token = session!
 
 const near = async () => BigInt((await rpc.viewAccount({ accountId: customer, blockQuery: { finality: "optimistic" } })).amount)
 const balance = async () => BigInt((await rpc.callFunction({ contractId: app, method: "get_account", args: { account_id: customer } }) as { balance: string }).balance)

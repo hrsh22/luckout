@@ -1,12 +1,18 @@
-import { evmSignInMessage, SignedChallenge, SignedEvmChallenge } from "@luckout/api"
+import { NodeHttpServer } from "@effect/platform-node"
+import { AuthApi, CurrentAccount, evmSignInMessage, SessionApi, SignedChallenge, SignedEvmChallenge } from "@luckout/api"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { createSiweMessage } from "viem/siwe"
 import { Effect, Layer } from "effect"
+import { HttpRouter } from "effect/http"
+import { HttpApi, HttpApiBuilder } from "effect/http-api"
 import assert from "node:assert/strict"
 import { createHmac } from "node:crypto"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
 import { test } from "node:test"
-import { Auth } from "./Auth.ts"
+import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
 import { DbMemory } from "./Db.ts"
+import { edge } from "./Edge.ts"
 import { Near } from "./Near.ts"
 import { fakeNear } from "./testing.ts"
 
@@ -140,3 +146,79 @@ test("signing out ends that session only, at once; the same account's other sess
     yield* auth.signOut("not-a-token")
     yield* auth.signOut("")
   })))
+
+// The session as a browser holds it: an HttpOnly cookie that sign-in sets, every call carries, and sign-out
+// removes. Served on a real HTTP server behind the same edge as main.ts, with the handlers wired as main.ts
+// wires them.
+
+const SessionTestApi = HttpApi.make("session-test").add(AuthApi).add(SessionApi)
+const AuthGroup = HttpApiBuilder.group(SessionTestApi, "auth", (handlers) =>
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return handlers.handleAll({
+      challenge: () => auth.challenge,
+      verify: ({ payload }) => startSession(auth.verify(payload)),
+      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload))
+    })
+  }))
+const SessionGroup = HttpApiBuilder.group(SessionTestApi, "session", (handlers) =>
+  Effect.gen(function*() {
+    const auth = yield* Auth
+    return handlers.handleAll({
+      signOut: () => Effect.flatMap(sessionToken, auth.signOut).pipe(Effect.andThen(dropCookie)),
+      signOutEverywhere: () => CurrentAccount.use((a) => auth.signOutEverywhere(a.accountId)).pipe(Effect.andThen(dropCookie))
+    })
+  }))
+const SITES = ["https://luckout.test", "https://www.luckout.test"]
+
+const served = <A>(body: (url: string) => Promise<A>) => {
+  const node = createServer()
+  const app = HttpApiBuilder.layer(SessionTestApi).pipe(Layer.provide([AuthGroup, SessionGroup]), Layer.provide(AuthorizationLive))
+  return Effect.runPromise(
+    Effect.promise(() => body(`http://127.0.0.1:${(node.address() as AddressInfo).port}`)).pipe(
+      Effect.provide(HttpRouter.serve(Layer.mergeAll(app, edge(SITES)), { disableLogger: true, disableListenLog: true }).pipe(
+        Layer.provide(NodeHttpServer.layer(() => node, { port: 0, host: "127.0.0.1" })),
+        Layer.provide(layer)
+      ))
+    )
+  )
+}
+
+test("the session token reaches the browser only as an HttpOnly cookie, which every call carries and sign-out removes", () =>
+  served(async (url) => {
+    const post = (path: string, headers: Record<string, string> = {}, body?: object) =>
+      fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: SITES[0]!, ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) })
+    const c = await (await post("/auth/challenge")).json()
+    const signedIn = await post("/auth/verify", {}, { accountId: "dave.testnet", publicKey: "ed25519:x", signature: "", nonce: c.nonce })
+    assert.equal(signedIn.status, 200)
+    const body = await signedIn.json()
+    assert.deepEqual(Object.keys(body).sort(), ["accountId", "expiresAt"], "no token in the body")
+    const setCookie = signedIn.headers.get("set-cookie") ?? ""
+    assert.match(setCookie, /^luckout_session=[\w-]+\.[\w-]+;/)
+    for (const part of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/", `Expires=${new Date(body.expiresAt).toUTCString()}`]) assert.ok(setCookie.includes(part), `${part} in ${setCookie}`)
+    const cookie = setCookie.split(";")[0]!
+    const token = cookie.slice("luckout_session=".length)
+    assert.equal(await run(Effect.gen(function*() {
+      return yield* (yield* Auth).authenticate(token)
+    })), "dave.testnet")
+
+    // Our site's own calls may carry it, with credentials; another site's may not even ask.
+    const preflight = (origin: string) => fetch(`${url}/session/sign-out`, { method: "OPTIONS", headers: { origin, "access-control-request-method": "POST" } })
+    const ours = await preflight(SITES[1]!)
+    assert.equal(ours.headers.get("access-control-allow-origin"), SITES[1])
+    assert.equal(ours.headers.get("access-control-allow-credentials"), "true")
+    assert.equal((await preflight("https://evil.test")).headers.get("access-control-allow-origin"), null)
+
+    // Only the cookie signs a call in; the token as a bearer header no longer does.
+    assert.equal((await post("/session/sign-out")).status, 401)
+    assert.equal((await post("/session/sign-out", { authorization: `Bearer ${token}` })).status, 401)
+    // A page on a sibling site (same registrable domain, so the browser would attach the cookie) can't use it.
+    const sibling = await post("/session/sign-out", { cookie, origin: "https://testnet.luckout.test" })
+    assert.equal(sibling.status, 403)
+
+    // Signing out ends the session on the server and tells the browser to drop the cookie.
+    const out = await post("/session/sign-out", { cookie })
+    assert.equal(out.status, 204)
+    assert.match(out.headers.get("set-cookie") ?? "", /^luckout_session=; Max-Age=0;/)
+    assert.equal((await post("/session/sign-out", { cookie })).status, 401, "the old cookie is worth nothing")
+  }))

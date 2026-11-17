@@ -42,8 +42,12 @@ export interface SignInProblem {
 }
 
 interface Session {
-  /** The signed-in account; set only together with a valid token. */
+  /** The signed-in account; set only together with `token`. */
   accountId: string | undefined
+  /**
+   * This sign-in's name (account and expiry), not a secret: it keys what was read for it and marks a call as
+   * made signed in (`api(f, token)`). The session token itself is an HttpOnly cookie no script can read.
+   */
   token: string | undefined
   /** False until the saved session has been checked against the wallet. */
   ready: boolean
@@ -96,8 +100,13 @@ const asIntent = (account: string, c: Call) => {
 }
 const SessionContext = createContext<Session | null>(null)
 
-// ponytail: the token sits in localStorage; move to an HttpOnly cookie if XSS risk grows (needs the API on a luckout.wtf subdomain first).
-const load = (): { accountId: string; token: string; expiresAt: number } | undefined => {
+/** What is saved of a session: who and until when. The token never reaches the page (an HttpOnly cookie). */
+interface Saved {
+  accountId: string
+  expiresAt: number
+}
+const nameOf = (s: Saved) => `${s.accountId}:${s.expiresAt}`
+const load = (): Saved | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")
     return s && s.expiresAt > Date.now() ? s : undefined
@@ -131,9 +140,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   // Signed out, switched or expired: nothing read for the last account (purchases and their codes
   // included) may outlive it.
-  const clear = useCallback(() => {
+  const reset = useCallback(() => {
     current.current = undefined
-    forget()
     setSession(undefined)
     setAccount(undefined)
     setAccountError(undefined)
@@ -142,6 +150,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setGasFree(undefined)
     qc.clear()
   }, [qc])
+  const clear = useCallback(() => {
+    forget()
+    reset()
+  }, [reset])
 
   const token = session?.token
   const refresh = useCallback(async () => {
@@ -169,10 +181,20 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       ? evmAddress()
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
     connected.then((id) => {
-      if (saved && saved.accountId === id) setSession(saved)
+      if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved) })
       else forget()
     }, forget).finally(() => setReady(true))
   }, [])
+
+  // One cookie serves every tab. Another tab signed in as someone else, or signed out: this tab's calls no
+  // longer carry its own session, so it ends here too (leaving the saved session, which is the other tab's).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE && accountId && load()?.accountId !== accountId) reset()
+    }
+    window.addEventListener("storage", onStorage)
+    return () => window.removeEventListener("storage", onStorage)
+  }, [accountId, reset])
 
   // An EVM wallet that switched address or disconnected no longer matches this session.
   useEffect(() => {
@@ -249,7 +271,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
       const [read, free] = await Promise.all([
         readAccount(s.accountId).catch((e: unknown) => new Error(errorMessage(e))),
-        relayable(s.token, isEvmAccount(s.accountId))
+        relayable(nameOf(s), isEvmAccount(s.accountId))
       ])
       if (read instanceof Error) {
         // Whatever was held before isn't this account's: show "couldn't read", never another balance.
@@ -264,7 +286,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         setAccountError(undefined)
       }
       setGasFree(free)
-      setSession({ accountId: s.accountId, token: s.token })
+      setSession({ accountId: s.accountId, token: nameOf(s) })
       return undefined
     } catch (e) {
       const problem = {
@@ -333,7 +355,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = async () => {
-    // Ends the session on the server too, so a copy of its token is worth nothing. Signing out never fails on
+    // Ends the session on the server, which also drops the cookie in this browser. Signing out never fails on
     // it: a server that doesn't answer in 5 seconds, or says the session is already over, is left behind.
     if (token) await api((c) => c.session.signOut(), token, "5 seconds").catch(() => {})
     clear()

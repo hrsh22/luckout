@@ -72,9 +72,16 @@ export class Unauthorized extends Schema.TaggedError<Unauthorized>()(
   { httpApiStatus: 401 }
 ) {}
 
+/**
+ * The session token travels only in this cookie, set by the server as HttpOnly, so no script on the page can
+ * read it. The API is on a subdomain of the Web App's own domain (api.luckout.wtf next to www.luckout.wtf),
+ * which makes the cookie first-party.
+ */
+export const sessionCookie = HttpApiSecurity.apiKey({ key: "luckout_session", in: "cookie" })
+
 export class Authorization extends HttpApiMiddleware.Service<Authorization, { provides: CurrentAccount; requires: never }>()(
   "luckout/Authorization",
-  { security: { bearer: HttpApiSecurity.bearer }, error: Unauthorized }
+  { security: { cookie: sessionCookie }, error: Unauthorized }
 ) {}
 
 /** NEP-413 sign-in: the wallet signs `message` for `recipient` with this single-use `nonce`. */
@@ -128,9 +135,9 @@ export const SignedIntent = Schema.Struct({
 })
 export type SignedIntent = typeof SignedIntent.Type
 
+/** Who signed in and until when. The token itself is only ever in the `sessionCookie`. */
 export class Session extends Schema.Class<Session>("Session")({
   accountId: Schema.String,
-  token: Schema.String,
   expiresAt: Schema.Number
 }) {}
 

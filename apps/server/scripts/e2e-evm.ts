@@ -28,13 +28,15 @@ const INTENTS = "intents.luckout.testnet"
 const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
 const view = async <A>(contractId: string, method: string, args: Record<string, unknown>) => (await rpc.callFunction({ contractId, method, args })) as A
 
-const req = async (method: string, path: string, body?: unknown, token?: string) => {
+const req = async (method: string, path: string, body?: unknown, session?: string) => {
   const r = await fetch(api + path, {
     method,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { "content-type": "application/json", ...(session ? { cookie: session } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
-  return { status: r.status, json: await r.json().catch(() => null) }
+  // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
 const wallet = privateKeyToAccount(generatePrivateKey())
@@ -72,7 +74,7 @@ const session = await req("POST", "/auth/verify-evm", mine)
 assert.equal(session.status, 200, JSON.stringify(session.json))
 assert.equal(session.json.accountId, ME)
 assert.equal((await req("POST", "/auth/verify-evm", mine)).status, 401, "once")
-const token = session.json.token as string
+const token = session.session!
 console.log(`✔ ${ME} signs in; another key and a replay are refused`)
 
 // Test USDC into its NEAR Intents account, as 1Click would deliver it on mainnet.
