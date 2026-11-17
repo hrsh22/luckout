@@ -11,7 +11,7 @@ import { OPEN_STEPS } from "./Purchases.ts"
 import { fakeBase, fakeNear } from "./testing.ts"
 
 // The Monitor's first round runs as soon as its layer is built: seed the database, build it, read the alerts.
-const round = (near: Near["Service"], seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>) => {
+const round = (near: Near["Service"], seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>, env: Record<string, string> = {}) => {
   const alerts: Array<string> = []
   const deps = Layer.mergeAll(
     Layer.succeed(Near, near),
@@ -27,7 +27,7 @@ const round = (near: Near["Service"], seed: Effect.Effect<unknown, unknown, SqlC
     }).pipe(
       Effect.scoped,
       Effect.provide(DbMemory),
-      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } })))
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet", ...env } })))
     )
   )
 }
@@ -81,4 +81,9 @@ test("the Bitrefill client secret is flagged from two weeks before it expires, a
   assert.match(secretWarning(expires, expires * 1000 - 13 * day)!, /expires on 2027-02-13, in 13 day/)
   assert.match(secretWarning(expires, expires * 1000 + 1)!, /expired on 2027-02-13/)
   assert.equal(secretWarning(0, Date.now()), undefined, "0 means the secret never expires")
+})
+
+test("an expiry in milliseconds, or not a finite number, stops the server at start instead of never warning", async () => {
+  await assert.rejects(round(healthy, Effect.void, { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "1802528701000" }), /not milliseconds/)
+  await assert.rejects(round(healthy, Effect.void, { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "NaN" }), /finite number/)
 })

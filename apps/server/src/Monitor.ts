@@ -1,4 +1,4 @@
-import { Config, Effect, Layer, Option, Schedule } from "effect"
+import { Config, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Base } from "./Base.ts"
@@ -125,7 +125,12 @@ export const Monitor = Layer.effectDiscard(
 
     // A registered Bitrefill client's secret lasts 90 days. Said once a day (and at each start) from two
     // weeks out: by the time a guest login fails, cards have already stopped.
-    const secretExpiry = yield* Config.option(Config.Number("BITREFILL_CLIENT_SECRET_EXPIRES_AT"))
+    // Seconds since 1970, as Bitrefill gives it. Milliseconds, NaN or Infinity would never warn, so they stop the
+    // server at start like any other value that isn't one.
+    const secretExpiry = yield* Config.option(Config.schema(
+      Schema.Finite.check(Schema.isLessThanOrEqualTo(1e11, { message: "seconds since 1970, not milliseconds" })),
+      "BITREFILL_CLIENT_SECRET_EXPIRES_AT"
+    ))
     const hasClient = Option.isSome(yield* Config.option(Config.String("BITREFILL_CLIENT_ID")))
     if (Option.isSome(secretExpiry)) {
       yield* Effect.suspend(() => {
