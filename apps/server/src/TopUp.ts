@@ -18,7 +18,7 @@ import { SqlClient } from "effect/sql"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
 import { Alerts } from "./Alerts.ts"
 import { Near, Network } from "./Near.ts"
-import { OneClick, type SwapDetails } from "./OneClick.ts"
+import { echoProblem, OneClick, type QuoteRequest, type SwapDetails } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
 
 // Top-ups (ADR-0001): a NEAR Intents 1Click swap from any supported chain that lands native
@@ -248,7 +248,7 @@ export class TopUp extends Context.Service<TopUp, {
         const evm = isEvmAccount(accountId)
         const home = refundsToWallet({ direction: "in", account_id: accountId, chain: asset.chain })
         const deadline = refundsBegin()
-        const { quote: q, quoteRequest: echo } = yield* oneClick.quote({
+        const asked: QuoteRequest = {
           dry,
           swapType: "EXACT_OUTPUT",
           slippageTolerance: 100,
@@ -263,11 +263,12 @@ export class TopUp extends Context.Service<TopUp, {
           refundTo: accountId,
           refundType: home ? "ORIGIN_CHAIN" : "INTENTS",
           deadline: deadline.toISOString()
-        }).pipe(Effect.mapError(unavailable))
-        if (!dry && !q.depositAddress) return yield* fail("1Click returned no deposit address")
-        if (echo && (echo.refundTo.toLowerCase() !== accountId || (evm && (echo.recipient !== accountId || echo.recipientType !== "INTENTS")))) {
-          return yield* fail("1Click quoted a different recipient. Try again.")
         }
+        const { quote: q, quoteRequest: echo } = yield* oneClick.quote(asked).pipe(Effect.mapError(unavailable))
+        if (!dry && !q.depositAddress) return yield* fail("1Click returned no deposit address")
+        // A price check (dry) creates nothing to pay into, so it's only checked when 1Click echoes it.
+        const problem = echo || !dry ? echoProblem(echo, asked) : undefined
+        if (problem) return yield* fail(`${problem}. Try again.`)
         // Every Top-Up is recorded, so the customer can always see where their money is, even after leaving.
         if (!dry) {
           yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
@@ -341,7 +342,7 @@ export class TopUp extends Context.Service<TopUp, {
         const asset = (yield* assets).find((t) => t.assetId === destinationAsset && EVM_CHAINS.has(t.chain))
         if (!asset) return yield* fail("That token can't be withdrawn to an EVM wallet")
         const deadline = refundsBegin()
-        const { quote: q, quoteRequest: echo } = yield* oneClick.quote({
+        const asked: QuoteRequest = {
           dry: false,
           swapType: "EXACT_INPUT",
           slippageTolerance: 100,
@@ -355,11 +356,11 @@ export class TopUp extends Context.Service<TopUp, {
           refundTo: accountId,
           refundType: "INTENTS",
           deadline: deadline.toISOString()
-        }).pipe(Effect.mapError(unavailable))
-        if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
-        if (echo && (echo.recipient.toLowerCase() !== accountId || echo.depositType !== "INTENTS")) {
-          return yield* fail("1Click quoted a different recipient. Try again.")
         }
+        const { quote: q, quoteRequest: echo } = yield* oneClick.quote(asked).pipe(Effect.mapError(unavailable))
+        if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
+        const problem = echoProblem(echo, asked)
+        if (problem) return yield* fail(`${problem}. Try again.`)
         yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_out, deadline, time_estimate)
                    VALUES (${q.depositAddress}, ${accountId}, 'out', ${usdc}, ${asset.symbol}, ${asset.chain}, ${q.amountOutFormatted ?? null},
                            ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
@@ -563,7 +564,7 @@ export class TopUp extends Context.Service<TopUp, {
         const evm = isEvmAccount(accountId)
         const to = evm ? { asset: assetId, symbol: h.symbol, chain: h.chain } : { asset: `nep141:${near.usdcId}`, symbol: "USDC", chain: "near" }
         const deadline = refundsBegin()
-        const { quote: q, quoteRequest: echo } = yield* oneClick.quote({
+        const asked: QuoteRequest = {
           dry: false,
           swapType: "EXACT_INPUT",
           slippageTolerance: 100,
@@ -577,11 +578,11 @@ export class TopUp extends Context.Service<TopUp, {
           refundTo: accountId,
           refundType: "INTENTS",
           deadline: deadline.toISOString()
-        }).pipe(Effect.mapError(unavailable))
-        if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
-        if (echo && (echo.recipient.toLowerCase() !== accountId || echo.depositType !== "INTENTS" || echo.amount !== String(h.raw))) {
-          return yield* fail("1Click quoted something else. Try again.")
         }
+        const { quote: q, quoteRequest: echo } = yield* oneClick.quote(asked).pipe(Effect.mapError(unavailable))
+        if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
+        const problem = echoProblem(echo, asked)
+        if (problem) return yield* fail(`${problem}. Try again.`)
         yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, amount_out, origin_asset, origin_amount, deadline, time_estimate)
                    VALUES (${q.depositAddress}, ${accountId}, 'back', 0, ${to.symbol}, ${to.chain}, ${h.amount}, ${q.amountOutFormatted ?? null},
                            ${assetId}, ${String(h.raw)}, ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
