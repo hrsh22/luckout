@@ -164,7 +164,9 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
     return handlers.handleAll({
       me: () => Effect.asVoid(signedInAdmin),
       overview: () => Effect.andThen(signedInAdmin, admin.overview),
-      purchases: ({ query }) => Effect.andThen(signedInAdmin, admin.purchases(query.account)),
+      // An id that isn't a UUID matches nothing (Postgres would refuse to compare it).
+      purchases: ({ query }) =>
+        Effect.andThen(signedInAdmin, query.id !== undefined && !UUID.test(query.id) ? Effect.succeed([]) : admin.purchases(query.account, query.id)),
       users: () => Effect.andThen(signedInAdmin, admin.users),
       relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
       sales: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.setSales(payload.open, by)),

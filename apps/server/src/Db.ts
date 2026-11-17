@@ -282,6 +282,14 @@ const migrations = Migrator.fromRecord({
     const sql = yield* SqlClient.SqlClient
     yield* sql`DROP INDEX purchases_open`
     yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'confirm', 'fail')`
+  }),
+  // Signing in is free, and the solvency check reads a balance per known account: only accounts the contract has
+  // been seen to know are read every round, and the rest take turns (Monitor.ts). Everyone known so far counts
+  // as seen, so nothing is left out the day this ships.
+  "0021_known_accounts_onchain": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE known_accounts ADD COLUMN onchain BOOLEAN NOT NULL DEFAULT false, ADD COLUMN checked_at TIMESTAMPTZ`
+    yield* sql`UPDATE known_accounts SET onchain = true`
   })
 })
 

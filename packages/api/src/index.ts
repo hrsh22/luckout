@@ -614,6 +614,9 @@ export class AdminInvalid extends Schema.TaggedError<AdminInvalid>()(
   { httpApiStatus: 400 }
 ) {}
 
+/** Rows the admin's Purchases and Users pages get at most, newest first. */
+export const ADMIN_LIST_LIMIT = 300
+
 /** A purchase that needs a look: stuck for a human, or open longer than it should be. */
 export class AttentionPurchase extends Schema.Class<AttentionPurchase>("AttentionPurchase")({
   id: Schema.String,
@@ -674,7 +677,10 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     /** Bitrefill orders placed in the last 24 hours, against the account's daily cap. */
     bitrefillOrders: Schema.Int,
     bitrefillCap: Schema.Int,
-    attention: Schema.Array(AttentionPurchase)
+    /** The oldest purchases that need a look (closest to the customer's Reclaim), at most 20 of them... */
+    attention: Schema.Array(AttentionPurchase),
+    /** ...and how many need one in all. */
+    attentionTotal: Schema.Int
   }),
   credit: Schema.Struct({
     settings: CreditSettings,
@@ -784,9 +790,9 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   /** 204 for an admin, NotFound for everyone else: decides whether the menu shows the Admin link. */
   HttpApiEndpoint.get("me", "/admin/me", { success: HttpApiSchema.NoContent, error: NotFound }),
   HttpApiEndpoint.get("overview", "/admin", { success: AdminOverview, error: NotFound }),
-  /** The latest 300 purchases, or one account's. */
+  /** The latest 300 purchases (ADMIN_LIST_LIMIT), or one account's latest 300; with `id`, only that purchase, however old. */
   HttpApiEndpoint.get("purchases", "/admin/purchases", {
-    query: { account: Schema.optional(Schema.String) },
+    query: { account: Schema.optional(Schema.String), id: Schema.optional(Schema.String) },
     success: Schema.Array(AdminPurchase),
     error: NotFound
   }),

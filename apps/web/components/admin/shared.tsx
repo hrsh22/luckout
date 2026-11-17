@@ -1,5 +1,6 @@
 "use client"
 
+import { errorMessage } from "@/lib/api"
 import { network } from "@/lib/chain"
 import { motion } from "motion/react"
 import Link from "next/link"
@@ -39,6 +40,11 @@ export function Toggle({ on, onChange, label, busy }: { on: boolean; onChange: (
       <motion.span layout transition={{ type: "spring", stiffness: 600, damping: 35 }} className={`absolute top-1 size-6 rounded-full bg-white shadow ${on ? "right-1" : "left-1"}`} />
     </button>
   )
+}
+
+/** A refresh failed: what is on screen is what last loaded, and the next refresh tries again. */
+export function LastFigures({ error, className = "" }: { error: unknown; className?: string }) {
+  return <p role="status" className={`text-sm text-warn ${className}`}>Couldn't refresh just now, so these are the last figures. {errorMessage(error)}</p>
 }
 
 export const TONE = {
