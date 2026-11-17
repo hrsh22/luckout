@@ -76,13 +76,15 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
 
 Staging has run it since 2026-11-16. Mainnet won't start without a guest client, so the `.env` comes first, and the release from `staging` switches production over the moment it deploys.
 
-1. **A Bitrefill client for production.** Register it at `https://api.bitrefill.com/oauth/mcp/register`: client name `Luckout`, `redirect_uris: ["https://api.luckout.wtf/bitrefill/callback"]`, `grant_types: ["client_credentials", "authorization_code", "refresh_token"]`, `token_endpoint_auth_method: "client_secret_post"`. Keep the reply private: it holds the secret.
-2. **Server `.env`** on `luckout-api`, before merging: `BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`, `BITREFILL_REDIRECT_URI=https://api.luckout.wtf/bitrefill/callback`. Keep `BITREFILL_API_KEY`: it now only reads the catalog. The running server ignores the new lines until it restarts.
+1. **A Bitrefill client for production.** Register it at `https://api.bitrefill.com/oauth/mcp/register`: client name `Luckout`, `redirect_uris: ["https://api.luckout.wtf/bitrefill/callback"]`, `grant_types: ["client_credentials", "authorization_code", "refresh_token"]`, `token_endpoint_auth_method: "client_secret_post"`. Keep the reply private: it holds the secret. The reply's `client_secret_expires_at` (seconds since 1970) says when the secret stops working, 90 days on: note it for the next step.
+2. **Server `.env`** on `luckout-api`, before merging: `BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`, `BITREFILL_CLIENT_SECRET_EXPIRES_AT` (that number of seconds exactly as Bitrefill returns it, e.g. `1802528701`, not an ISO date), `BITREFILL_REDIRECT_URI=https://api.luckout.wtf/bitrefill/callback`. Keep `BITREFILL_API_KEY`: it now only reads the catalog. The running server ignores the new lines until it restarts.
 3. **Bitrefill credit.** Nothing spends it after the switch. About a day before, turn automatic refills off in Admin, so sales spend it down. Whatever is left stays on the account, so keep the key private as before.
 4. **No refill in flight.** Merge only while Admin → Refills shows none running, because a refill started in credit mode would end in the Base Float.
 5. **Merge** the release PR from `staging` into `main`. Migrations 0018 and 0019 run at start.
 6. **Base Float.** Every card is now paid from the Base wallet's USDC. Refills fill it to about a day of sales from the treasury, so the treasury needs proceeds (Automatic) or a manual top-up. Keep about $1 of ETH there for gas.
 7. **Prove it:** a ₹50 card on the site (with a Checkout Email), one through the Telegram bot, and Connect Bitrefill from Wallet. Then check Admin → Base Float, Checkout and the purchase's Base payment.
+
+**When the client secret is about to expire.** Each deployment's Bitrefill client secret lasts 90 days, and the server alerts daily from two weeks before (`BITREFILL_CLIENT_SECRET_EXPIRES_AT`). Register a new client the same way as in step 1 (staging uses `https://staging-api.luckout.wtf/bitrefill/callback` and the name `Luckout (staging)`), replace `BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET` and `BITREFILL_CLIENT_SECRET_EXPIRES_AT` in that deployment's `.env`, and restart the server. A customer's Bitrefill Connection belongs to the client it was made with, so after the change their cards go back to guest checkout with their Checkout Email until they connect again.
 
 ## Updating
 

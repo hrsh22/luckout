@@ -275,6 +275,13 @@ const migrations = Migrator.fromRecord({
       refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       created_at TIMESTAMPTZ NOT NULL DEFAULT now())`
     yield* sql`ALTER TABLE purchases ADD COLUMN buyer TEXT CHECK (buyer IN ('guest', 'account'))`
+  }),
+  // The reconciler's index (0004) predates the `pay` step (0018), so its query, which includes `pay`, couldn't
+  // use it. Recreated with every open step (Purchases.ts: OPEN_STEPS).
+  "0020_purchases_open_with_pay": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`DROP INDEX purchases_open`
+    yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'confirm', 'fail')`
   })
 })
 
