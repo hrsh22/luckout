@@ -66,6 +66,23 @@ export interface QuoteRequest {
   readonly recipientType?: "DESTINATION_CHAIN" | "INTENTS"
 }
 
+/**
+ * Why a quote must not be used, or undefined when 1Click's echo says it does exactly what was asked: pays that
+ * recipient, refunds to that address, swaps those tokens and that amount, each in the way asked. A customer pays
+ * into the deposit address on our word, so none of it is taken on trust (refills check theirs the same way:
+ * Refill.ts, quoteProblem). Addresses compare without case: an EVM address may come back checksummed.
+ */
+export const echoProblem = (echo: QuoteResponse["quoteRequest"], asked: QuoteRequest): string | undefined => {
+  if (!echo) return "1Click didn't confirm what it quoted"
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+  if (!same(echo.recipient, asked.recipient) || echo.recipientType !== (asked.recipientType ?? "DESTINATION_CHAIN")) return "1Click quoted a different recipient"
+  if (!same(echo.refundTo, asked.refundTo) || echo.refundType !== asked.refundType) return "1Click quoted a different refund address"
+  if (echo.originAsset !== asked.originAsset || echo.destinationAsset !== asked.destinationAsset) return "1Click quoted different tokens"
+  if (echo.depositType !== (asked.depositType ?? "ORIGIN_CHAIN")) return "1Click quoted a different way to pay"
+  if (echo.swapType !== asked.swapType || echo.amount !== asked.amount) return "1Click quoted a different amount"
+  return undefined
+}
+
 /** Where a swap is: PENDING_DEPOSIT, KNOWN_DEPOSIT_TX, INCOMPLETE_DEPOSIT, PROCESSING, SUCCESS, REFUNDED or FAILED. */
 export type SwapStatus = string
 

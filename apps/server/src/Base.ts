@@ -1,6 +1,6 @@
 import { Config, Context, Data, Effect, Layer, Option, Redacted, Schedule, Semaphore } from "effect"
 import { actions, baseDecode, teraToGas } from "near-api-js"
-import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, type Hex, http, isAddress, keccak256, recoverAddress, serializeTransaction } from "viem"
+import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, type Hex, http, isAddress, keccak256, recoverAddress, serializeTransaction, TransactionReceiptNotFoundError } from "viem"
 import { publicKeyToAddress } from "viem/accounts"
 import { base, baseSepolia } from "viem/chains"
 import { ContractRejected, Near, NearUnavailable, Network } from "./Near.ts"
@@ -165,10 +165,12 @@ export class Base extends Context.Service<Base, {
           return { ...p, raw, hash: keccak256(raw) }
         })
 
+      // Only the node answering "no such receipt" means not mined yet. Any other failure (the RPC is down, the
+      // provider answers 404 Not Found) says nothing about the payment, and must never read as "not mined":
+      // that reading is what lets a payment be signed again.
       const status = (hash: Hex) =>
-        call("receipt", () => client!.getTransactionReceipt({ hash })).pipe(
-          Effect.map((r): PaymentStatus => (r.status === "success" ? "success" : "reverted")),
-          Effect.catchTag("BaseUnavailable", (e) => (/not be found|not found/i.test(e.message) ? Effect.succeed<PaymentStatus>("pending") : Effect.fail(e)))
+        call("receipt", () => client!.getTransactionReceipt({ hash }).catch((e) => (e instanceof TransactionReceiptNotFoundError ? null : Promise.reject(e)))).pipe(
+          Effect.map((r): PaymentStatus => (r === null ? "pending" : r.status === "success" ? "success" : "reverted"))
         )
 
       const send = (p: BasePayment & { raw: Hex; hash: Hex }) =>
@@ -189,13 +191,12 @@ export class Base extends Context.Service<Base, {
             const s = yield* send(saved)
             if (s !== "pending") return s
             // A saved payment whose nonce another transaction took (one sent after a crash, before this was
-            // resent) can never be mined, so only then is a new one safe. The receipt is read after the nonce,
-            // with a pause, so our own payment mined in between is never taken for a lost one.
+            // resent) can never be mined, so only then is a new one safe. The nonce is read first and the receipt
+            // watched for half a minute after it, so our own payment mined in between, or a node slow to show its
+            // receipt, is never taken for a lost one: signing again then would pay the invoice twice.
             const latest = yield* Effect.flatMap(address, (a) => call("nonce", () => client!.getTransactionCount({ address: a, blockTag: "latest" })))
-            yield* Effect.sleep("4 seconds")
-            const again = yield* status(saved.hash)
-            if (again !== "pending") return again
-            if (latest <= saved.nonce) return yield* mined(saved)
+            const again = yield* mined(saved)
+            if (again !== "pending" || latest <= saved.nonce) return again
             yield* Effect.logWarning(`Base payment ${saved.hash} lost its nonce ${saved.nonce} to another transaction; paying again`)
           }
           const p = yield* sign(yield* prepare(to, amount))
