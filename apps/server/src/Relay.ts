@@ -20,6 +20,11 @@ export const RELAY_DEFAULTS = {
   testnet: new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 500 })
 } as const
 const MAX_GAS = 100_000_000_000_000n // 100 Tgas, what a deposit's ft_transfer_call needs
+/**
+ * The least gas the app gives any call (30 Tgas, `apps/web/lib/near.ts`). A call signed with too little gas to run
+ * fails, and a failed call's deposit is refunded to the customer, not to us (ADR-0008).
+ */
+const MIN_GAS = 30_000_000_000_000n
 /** USDC's storage registration fee: the only deposit besides 1 yoctoNEAR. */
 export const USDC_REGISTRATION = 1_250_000_000_000_000_000_000n
 
@@ -78,6 +83,7 @@ export const refusal = (d: Delegate, a: Allowlist): string | undefined => {
   if (deposit === undefined) return "Luckout only pays the fee for its own calls: deposits, withdrawals, settings, reclaims and send-backs."
   if (BigInt(call.deposit) !== deposit) return "That call carries an unexpected deposit."
   if (BigInt(call.gas) > MAX_GAS) return "That call asks for more gas than it needs."
+  if (BigInt(call.gas) < MIN_GAS) return "That call carries too little gas to run."
   return undefined
 }
 
@@ -156,6 +162,19 @@ export class Relay extends Context.Service<Relay, {
               FROM intents_swaps WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction <> 'in'`.pipe(
               Effect.map((r) => r[0])
             )
+      /**
+       * The outcome of a relay we already sent for this hash, if it has one. A relayer transaction that expired
+       * before NEAR took it never ran and never can, so it's forgotten and the caller sends afresh: what the
+       * customer signed is still good, and its own nonce stops it running twice.
+       */
+      const earlier = (hash: string) =>
+        Effect.gen(function*() {
+          const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
+          if (!seen) return undefined
+          const outcome = yield* near.resume(seen.signed_tx).pipe(Effect.catchTag("TxExpired", () => Effect.succeed(undefined)))
+          if (!outcome) yield* sql`DELETE FROM relays WHERE delegate_hash = ${hash}`
+          return outcome
+        })
       // ponytail: one global lock around dedupe, caps, checks and send, so parallel requests can't all
       // pass the caps (or both register USDC) before either is saved. Fine while the relayer sends one
       // at a time from one process (ADR-0006); per-account locks if throughput matters.
@@ -184,8 +203,8 @@ export class Relay extends Context.Service<Relay, {
           // The same signature sent twice (a retry, a double click) gets the first result, not a second fee.
           const hash = createHash("sha256").update(bytes).digest("hex")
           const outcome = yield* lock.withPermits(1)(Effect.gen(function*() {
-            const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
-            if (seen) return yield* near.resume(seen.signed_tx)
+            const before = yield* earlier(hash)
+            if (before) return before
             if (!(yield* quotaLeft(accountId))) {
               return yield* new RelayUnavailable({ message: "Luckout isn't paying this network fee right now, so your wallet pays it." })
             }
@@ -221,7 +240,6 @@ export class Relay extends Context.Service<Relay, {
           Effect.catchTags({
             ContractRejected: (e) => Effect.fail(failed(readable(e.message))),
             NearUnavailable: () => Effect.fail(failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")),
-            TxExpired: () => Effect.fail(failed("It expired before it went through. Try again.")),
             SqlError: (e) => Effect.die(e)
           })
         )
@@ -260,8 +278,8 @@ export class Relay extends Context.Service<Relay, {
           // The payload holds its nonce, so the same payload twice is the same intent: the first result, not a second fee.
           const hash = createHash("sha256").update(signed.payload).digest("hex")
           const outcome = yield* lock.withPermits(1)(Effect.gen(function*() {
-            const [seen] = yield* sql<{ signed_tx: { hash: string; bytes: string } }>`SELECT signed_tx FROM relays WHERE delegate_hash = ${hash}`
-            if (seen) return yield* near.resume(seen.signed_tx)
+            const before = yield* earlier(hash)
+            if (before) return before
             const counted = o.counted !== false
             if (counted ? !(yield* quotaLeft(accountId)) : !(yield* settings).enabled) {
               return yield* new RelayUnavailable({ message: "You've used today's free actions. Try again tomorrow." })
@@ -281,7 +299,6 @@ export class Relay extends Context.Service<Relay, {
           Effect.catchTags({
             ContractRejected: (e) => Effect.fail(failed(readable(e.message))),
             NearUnavailable: () => Effect.fail(failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")),
-            TxExpired: () => Effect.fail(failed("It expired before it went through. Try again.")),
             SqlError: (e) => Effect.die(e)
           })
         )
