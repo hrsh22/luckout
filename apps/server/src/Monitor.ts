@@ -102,18 +102,18 @@ export const Monitor = Layer.effectDiscard(
         near.view<{ free: string; locked: string; proceeds: string }>("get_reserve"),
         // Signing in is free, so not every account that ever did is read every round: those the contract has been
         // seen to know, or that bought or were relayed, always are; the rest take turns, a few a round.
-        sql<{ account_id: string; onchain: boolean }>`
-          UPDATE known_accounts SET checked_at = now()
+        sql<{ account_id: string }>`
+          SELECT account_id FROM known_accounts
           WHERE onchain
              OR account_id IN (SELECT account_id FROM purchases UNION SELECT account_id FROM relays)
-             OR account_id IN (SELECT account_id FROM known_accounts WHERE NOT onchain ORDER BY coalesce(checked_at, first_seen) LIMIT ${UNSEEN_PER_ROUND})
-          RETURNING account_id, onchain`.pipe(Effect.orDie)
+             OR account_id IN (SELECT account_id FROM known_accounts WHERE NOT onchain ORDER BY coalesce(checked_at, first_seen) LIMIT ${UNSEEN_PER_ROUND})`
+          .pipe(Effect.orDie)
       ])
       const house = BigInt(owed.free) + BigInt(owed.locked) + BigInt(owed.proceeds)
-      const each = yield* Effect.forEach(known, ({ account_id, onchain }) =>
+      const each = yield* Effect.forEach(known, ({ account_id }) =>
         near.view<{ balance: string } | null>("get_account", { account_id }).pipe(
-          // The contract knows it: from now on it's read every round.
-          Effect.tap((a) => (a !== null && !onchain ? sql`UPDATE known_accounts SET onchain = true WHERE account_id = ${account_id}`.pipe(Effect.orDie) : Effect.void)),
+          // Checked only once read, so one whose read fails keeps its turn. The contract knows it: from now on it's read every round.
+          Effect.tap((a) => sql`UPDATE known_accounts SET checked_at = now(), onchain = onchain OR ${a !== null} WHERE account_id = ${account_id}`.pipe(Effect.orDie)),
           Effect.map((a) => BigInt(a?.balance ?? 0))
         ), { concurrency: 4 })
       const balances = each.reduce((sum, b) => sum + b, 0n)
