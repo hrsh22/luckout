@@ -1,4 +1,4 @@
-import { js_get_collateral, js_verify } from "@phala/dcap-qvl-node"
+import { type Collateral, getCollateral, verify } from "@phala/dcap-qvl"
 import { createHash, randomBytes } from "node:crypto"
 import { recoverMessageAddress } from "viem"
 
@@ -12,7 +12,7 @@ import { recoverMessageAddress } from "viem"
 const INTEL_PCCS = "https://api.trustedservices.intel.com/tdx/certification/v4"
 const NRAS = "https://nras.attestation.nvidia.com/v3/attest/gpu"
 /** Intel calls a platform below its latest advisory baseline OutOfDate; the quote itself still verifies. */
-const TDX_OK = new Set(["UpToDate", "OutOfDate"])
+export const TDX_OK = new Set(["UpToDate", "OutOfDate"])
 /** One passing check covers this long. Checks run hourly, so one failed run doesn't stop the Agent. */
 const FRESH_MS = 2 * 60 * 60_000
 
@@ -81,13 +81,27 @@ export const gpusOk = (nras: unknown, nonce: string, now: number) => {
     )
 }
 
+/**
+ * The quote's TCB status and the TD report fields we bind to (hex). The verifier throws on a quote that
+ * doesn't verify; it never goes online, so that's a failed check, not an outage.
+ */
+export const verifyTdx = (quote: Uint8Array, collateral: Collateral, nowSecs: number) => {
+  try {
+    const tdx = verify(quote, collateral, nowSecs)
+    // A TD 1.5 report extends the 1.0 one, which holds both fields.
+    const td = tdx.report.asTd10()
+    const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
+    return { status: tdx.status, td: td && { report_data: hex(td.reportData), mr_config_id: hex(td.mrConfigId) } }
+  } catch (e) {
+    console.error("TDX quote didn't verify:", e instanceof Error ? e.message : e)
+    return { status: undefined, td: undefined }
+  }
+}
+
 const enclave = async (who: string, e: Enclave, nonce: string, now: number, gpus = false): Promise<Array<Check>> => {
   const quote = Buffer.from(e.intel_quote, "hex")
-  const tdx = js_verify(quote, await js_get_collateral(INTEL_PCCS, quote), BigInt(Math.floor(now / 1000))) as {
-    status?: string
-    report?: { TD10?: { report_data: string; mr_config_id: string }; TD15?: { report_data: string; mr_config_id: string } }
-  }
-  const td = tdx.report?.TD10 ?? tdx.report?.TD15
+  const tdx = verifyTdx(quote, await getCollateral(INTEL_PCCS, quote), Math.floor(now / 1000))
+  const td = tdx.td
   const tcb = typeof e.info.tcb_info === "string" ? JSON.parse(e.info.tcb_info) as { app_compose: string } : e.info.tcb_info
   const checks = [
     { name: `${who}: answered with our fresh nonce`, ok: e.request_nonce === nonce },
