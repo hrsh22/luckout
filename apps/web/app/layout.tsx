@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next"
 import localFont from "next/font/local"
-import { Analytics } from "@vercel/analytics/next"
-import { SpeedInsights } from "@vercel/speed-insights/next"
+import { VercelInsights } from "@/components/vercel-insights"
 import { siteUrl } from "@/lib/site"
 import "./globals.css"
 
@@ -40,8 +39,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" data-scroll-behavior="smooth" className={`${general.variable} ${cabinet.variable}`}>
       <body className="min-h-dvh overflow-x-clip">
         {children}
-        <Analytics />
-        <SpeedInsights />
+        <VercelInsights />
       </body>
     </html>
   )

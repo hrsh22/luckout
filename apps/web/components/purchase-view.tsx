@@ -9,6 +9,7 @@ import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
+import { purchasePollMs } from "@/lib/purchase-poll"
 import type { Purchase } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
@@ -17,18 +18,20 @@ import Link from "next/link"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-/** Follows a pending purchase until it settles, so the page never shows a stale "in progress"; once a minute after 15 minutes (stuck). */
+/**
+ * Follows a purchase until it settles, starting from what the buy returned, so the page never shows a stale
+ * "in progress". A failed check is tried again at the next interval: one network error must not leave a
+ * charged customer on "Getting your code".
+ */
 export function usePolledPurchase(p: Purchase | undefined, token: string | undefined) {
-  const [live, setLive] = useState(p)
-  useEffect(() => setLive(p), [p])
-  useEffect(() => {
-    if (!live || (live.status !== "pending" && live.status !== "waiting") || !token) return
-    const t = setTimeout(() => {
-      api((c) => c.purchases.get({ params: { id: live.id } }), token).then(setLive, () => {})
-    }, Date.now() - new Date(live.createdAt).getTime() > 15 * 60_000 ? 60_000 : live.status === "waiting" ? 5000 : 3000)
-    return () => clearTimeout(t)
-  }, [live, token])
-  return live
+  return useQuery({
+    // Under "purchases", so whatever re-reads the list (a cancel, a reclaim, a new buy) re-reads this too.
+    queryKey: ["purchases", token, p?.id],
+    queryFn: () => api((c) => c.purchases.get({ params: { id: p!.id } }), token),
+    enabled: !!p && !!token,
+    initialData: p,
+    refetchInterval: (q) => purchasePollMs(q.state.data)
+  }).data
 }
 
 const redemption = (p: Purchase) => {

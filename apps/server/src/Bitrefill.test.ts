@@ -3,7 +3,7 @@ import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, isTestMerchant, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -228,4 +228,59 @@ test("a logo colour saved before the check existed is dropped when the server st
     )
   )
   assert.deepEqual(logo, [{ image: "logos/one" }, { image: "logos/two", background: "#0A0B0C" }])
+})
+
+// Guest checkout (ADR-0012), with Bitrefill faked: the guest login, then whatever `tool` answers each MCP call.
+const guestEnv = { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "client", BITREFILL_CLIENT_SECRET: "secret" }
+const withGuestBitrefill = async <A>(tool: (name: string, args: Record<string, unknown>) => Response, body: () => Promise<A>) => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (String(url).endsWith("/oauth/mcp/token")) return Response.json({ access_token: "guest-login", expires_in: 21_600 })
+    const sent = typeof init?.body === "string" ? init.body : new TextDecoder().decode(init?.body as Uint8Array)
+    const { name, arguments: args } = JSON.parse(sent).params
+    return tool(name, args)
+  }) as typeof fetch
+  try {
+    return await body()
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+const toolResult = (result: unknown) =>
+  new Response(`data: ${JSON.stringify({ result: { content: [{ text: JSON.stringify(result) }] } })}\n`, { status: 200, headers: { "content-type": "text/event-stream" } })
+
+test("a guest order Bitrefill rate-limits is an unknown to try again, never a refusal; a real refusal still is one", async () => {
+  let status = 429
+  const r = await withGuestBitrefill(
+    () => new Response("Too Many Requests", { status }),
+    () => run((b) =>
+      Effect.gen(function*() {
+        const limited = yield* b.order("amazon-us", "10", { email: "alice@example.com" }).pipe(Effect.flip)
+        status = 400
+        return { limited, refused: yield* b.order("amazon-us", "10", { email: "alice@example.com" }) }
+      }), guestEnv)
+  )
+  assert.equal(r.limited._tag, "BitrefillUnavailable")
+  assert.match(r.limited.message, /rate limiting/)
+  assert.equal(r.refused._tag, "Refused")
+})
+
+test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {
+  // The rule itself: never sooner than the gap after the last poll allowed, and at once when it has been quiet.
+  assert.equal(nextGuestPoll(0, 1_000_000), 1_000_000)
+  assert.equal(nextGuestPoll(1_000_000, 1_000_500), 1_000_000 + GUEST_POLL_GAP_MS)
+  assert.ok(60_000 / GUEST_POLL_GAP_MS <= 20, "at most 20 of Bitrefill's 30 calls a minute")
+  // Two cards on their way at once: the second is asked about one gap after the first.
+  const polled: Array<number> = []
+  const delivered = await withGuestBitrefill(
+    (name) => {
+      assert.equal(name, "get-invoice-by-id")
+      polled.push(Date.now())
+      return toolResult({ invoice_status: "complete", orders: [{ order_id: "o-1", status: "delivered", redemption_info: { code: "ABC-123" } }] })
+    },
+    () => run((b) => Effect.all([b.delivery("inv-1", "token-1"), b.delivery("inv-2", "token-2")], { concurrency: 2 }), guestEnv)
+  )
+  assert.deepEqual(delivered.map((d) => d._tag), ["Delivered", "Delivered"])
+  assert.equal(polled.length, 2)
+  assert.ok(polled[1]! - polled[0]! >= GUEST_POLL_GAP_MS - 100, `polled ${polled[1]! - polled[0]!} ms apart`)
 })

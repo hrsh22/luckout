@@ -15,11 +15,11 @@ import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
+import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
 import { Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
-import { rateLimit } from "./RateLimit.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Telegram } from "./Telegram.ts"
@@ -260,7 +260,7 @@ const Server = Layer.unwrap(
     const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
     // More sites that may call this server (exact origins, comma-separated), e.g. testnet's own domain.
     const more = (yield* Config.String("CORS_ORIGINS").pipe(Config.withDefault(""))).split(",").map((o) => o.trim()).filter(Boolean)
-    return HttpRouter.serve(Layer.mergeAll(Routes, HttpRouter.cors({ allowedOrigins: [webOrigin, ...more] }), HttpRouter.middleware(rateLimit, { global: true }))).pipe(
+    return HttpRouter.serve(Layer.mergeAll(Routes, edge([webOrigin, ...more]))).pipe(
       Layer.provide(NodeHttpServer.layer(createServer, { port, ...(host._tag === "Some" ? { host: host.value } : {}) }))
     )
   })

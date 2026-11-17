@@ -14,11 +14,12 @@ import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
-import { modeFromSlug, modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
 import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { openingAmount, openingMode } from "@/lib/voucher-choice"
 import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft } from "lucide-react"
@@ -56,9 +57,10 @@ function Voucher() {
   useEffect(() => void (look && rememberViewed(look)), [look])
 
   // The choice lives in the URL, so a refresh or a shared link opens the same card, amount and mode.
-  const value = params.get("value") ?? packages[Math.floor((packages.length - 1) / 2)]?.value
+  const asked = params.get("value")
+  const value = openingAmount(asked, voucher.data?.packages)
   const preferred = accountId ? account?.default_mode ?? pendingMode(accountId) : undefined
-  const mode: Mode = modeFromSlug(params.get("mode")) ?? preferred ?? "normal"
+  const { mode, unknownDefault } = openingMode(params.get("mode"), preferred)
   const choose = (next: { value?: string; mode?: Mode }) => {
     const sp = new URLSearchParams(params)
     if (next.value ?? value) sp.set("value", next.value ?? value!)
@@ -67,6 +69,7 @@ function Voucher() {
   }
 
   const pkg = packages.find((p) => p.value === value)
+  // openingMode only returns modes this build knows, so this is never undefined.
   const info = modeInfo(mode)!
   const quote = useQuote(id, value, mode)
   const reserve = useReserve()
@@ -178,12 +181,16 @@ function Voucher() {
               <p className="text-sm text-muted">Dashed amounts are under our $0.50 minimum purchase, so they can't be bought here.</p>
             )}
             {voucher.data?.packages.length === 0 && <p className="text-ink-soft">This card has no fixed amounts we can sell right now.</p>}
+            {asked !== null && value !== undefined && value !== asked && (
+              <p className="text-sm text-muted">The {asked} {voucher.data?.currency} in your link isn't sold right now, so {value} is chosen instead.</p>
+            )}
           </section>
 
           <section className="flex flex-col gap-4" aria-labelledby="mode">
             <div>
               <h2 id="mode" className="font-display text-2xl font-extrabold">How do you want to pay?</h2>
               <p className="mt-1 text-ink-soft">Lucky modes cost more up front, then pay cashback in fixed slabs. Any cashback leaves you below the price.</p>
+              {unknownDefault && <p className="mt-1 text-sm text-muted">Your default mode isn't offered on this page yet, so it opens on Normal.</p>}
             </div>
             <ModePicker value={mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
           </section>
@@ -197,7 +204,19 @@ function Voucher() {
               ? <Buying key="buying" mode={mode} name={look?.name ?? ""} value={value ?? ""} />
               : (
                 <motion.div key="receipt" exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.15 }}>
-                  <Receipt shown={shown} exact={!!quote.data} info={info} error={buy.error ? errorMessage(buy.error) : quote.error ? errorMessage(quote.error) : undefined}>
+                  <Receipt
+                    shown={shown}
+                    exact={!!quote.data}
+                    info={info}
+                    error={buy.error
+                      ? errorMessage(buy.error)
+                      : quote.error
+                      ? errorMessage(quote.error)
+                      : voucher.data && !value
+                      ? "There's no amount of this card to buy right now."
+                      : undefined}
+                    retry={value ? { run: () => void quote.refetch(), busy: quote.isFetching } : undefined}
+                  >
                     {shown && look && look.countryCode !== WORLDWIDE && (
                       <p className="text-sm text-ink-soft">
                         {flag(look.countryCode)} For {countryName(look.countryCode, look.countryName)} only: it can't be used in another country's store.
@@ -242,15 +261,27 @@ function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | nul
   )
 }
 
-function Receipt({ shown, exact, info, error, children }: {
+function Receipt({ shown, exact, info, error, retry, children }: {
   shown: Quote | undefined
   exact: boolean
   info: NonNullable<ReturnType<typeof modeInfo>>
   error?: string | undefined
+  /** Asks for the price again; absent when there's nothing to price. */
+  retry?: { run: () => void; busy: boolean } | undefined
   children?: React.ReactNode
 }) {
   const pal = modePalette(info.mode)
-  if (!shown) return <div className="skeleton h-80 rounded-[1.75rem]" />
+  if (!shown) {
+    // Still loading, or no price at all: the server's quote failed with nothing to fall back on (say, the reserve
+    // unread). Then its message is the answer, with a way to ask again, never an endless grey block.
+    if (!error) return <div className="skeleton h-80 rounded-[1.75rem]" />
+    return (
+      <div className="card flex flex-col items-start gap-3 p-6">
+        <p role="alert" className="font-medium text-bad">{error}</p>
+        {retry && <Button variant="light" loading={retry.busy} onClick={retry.run}>Try again</Button>}
+      </div>
+    )
+  }
   const lucky = shown.luckyAmount > 0
   const outcomes = pricedOutcomes(info, shown)
   const best = outcomes[outcomes.length - 1]!

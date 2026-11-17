@@ -128,7 +128,13 @@ export const topUpPicks = (need?: number) => [
 export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?: number | undefined } = {}) {
   const { accountId, token, refresh, send, gasFree } = useSession()
   const qc = useQueryClient()
-  const [registered, setRegistered] = useState<boolean>()
+  // Whether this NEAR account can hold USDC. No deposit address is offered until that's known: a swap's USDC sent
+  // to an account that isn't registered for it can't land there.
+  const usdc = useQuery({
+    queryKey: ["usdc-registered", accountId],
+    queryFn: () => view<unknown>(usdcId, "storage_balance_of", { account_id: accountId }).then((b) => b !== null),
+    enabled: !!accountId
+  })
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [asset, setAsset] = useState("")
   const [amount, setAmount] = useState(() => topUpAmount(need))
@@ -141,7 +147,6 @@ export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?:
 
   useEffect(() => {
     if (!accountId || !token) return
-    view<unknown>(usdcId, "storage_balance_of", { account_id: accountId }).then((b) => setRegistered(b !== null), fail)
     api((c) => c.topup.assets(), token).then((a) => {
       const sorted = sortAssets(a)
       setAssets(sorted)
@@ -166,11 +171,21 @@ export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?:
   }
 
   if (!token) return null
-  if (registered === false) {
+  if (usdc.data === undefined) {
+    return usdc.isError
+      ? (
+        <div className="flex flex-col items-start gap-2">
+          <p role="alert" className="text-sm font-medium text-bad">Couldn't check that your NEAR account can receive USDC. {errorMessage(usdc.error)}</p>
+          <Button variant="light" size="sm" loading={usdc.isFetching} onClick={() => void usdc.refetch()}>Try again</Button>
+        </div>
+      )
+      : <span className="skeleton h-14 rounded-[1.25rem]" />
+  }
+  if (usdc.data === false) {
     return (
       <Button variant="light" className="self-start" disabled={busy} onClick={() => step(async () => {
         await send({ receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
-        setRegistered(true)
+        qc.setQueryData(["usdc-registered", accountId], true)
       })}>
         Enable USDC on your account (once{gasFree ? ", fee on us" : ", 0.00125 NEAR"})
       </Button>

@@ -165,6 +165,10 @@ const refusal = (e: unknown) =>
 // customer's purchase or its price check.
 const LOOKUPS_PER_MINUTE = 20
 const BROWSE_LOOKUPS_PER_MINUTE = 12
+/** The least time between two delivery polls on the guest login, across all purchases: 20 a minute. */
+export const GUEST_POLL_GAP_MS = 3_000
+/** When the next guest delivery poll may go out, given when the last one was allowed to. */
+export const nextGuestPoll = (lastAt: number, now: number) => Math.max(now, lastAt + GUEST_POLL_GAP_MS)
 /** What a customer chose to filter the catalog by; nothing chosen lists everything. */
 export interface BrowseOptions {
   readonly q?: string | undefined
@@ -635,7 +639,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         if (guest) {
           if (!buyer) return { _tag: "Refused", reason: "no Checkout Email" } as Order
           return yield* invoiceOrder(id, value, buyer).pipe(
-            Effect.catchTag("Rejected", (e) => Effect.succeed<Order>({ _tag: "Refused", reason: e.reason }))
+            // A 429 is Bitrefill's rate limit, not a verdict on the order: the tool never ran and no invoice exists,
+            // so it's an unknown to try again (the reconciler does), never a refusal that refunds the customer.
+            Effect.catchTag("Rejected", (e): Effect.Effect<Order, BitrefillUnavailable> =>
+              e.reason.startsWith("HTTP 429")
+                ? Effect.fail(new BitrefillUnavailable({ message: `Bitrefill is rate limiting us; the order is tried again: ${e.reason}` }))
+                : Effect.succeed({ _tag: "Refused", reason: e.reason }))
           )
         }
         return yield* createInvoice(id, value).pipe(
@@ -649,9 +658,19 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
       })
 
+      // Every guest's delivery is polled on the one guest login, which Bitrefill allows 30 calls a minute. Polls
+      // from all deliveries are spaced GUEST_POLL_GAP_MS apart, so however many cards are on their way they use
+      // at most 20 of those calls, and the rest stay free for placing orders.
+      // ponytail: one process, in memory (ADR-0006); a shared limiter if the server ever scales out.
+      let pollAt = 0
+      const pollSlot = Effect.suspend(() => {
+        const now = Date.now()
+        pollAt = nextGuestPoll(pollAt, now)
+        return Effect.sleep(pollAt - now)
+      })
       // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.
       const guestDelivery = (invoiceId: string, accessToken: string) =>
-        asGuest("get-invoice-by-id", { invoice_id: invoiceId, invoice_access_token: accessToken }, GuestInvoice).pipe(
+        Effect.andThen(pollSlot, asGuest("get-invoice-by-id", { invoice_id: invoiceId, invoice_access_token: accessToken }, GuestInvoice)).pipe(
           Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
           retry,
           Effect.repeat({

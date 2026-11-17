@@ -141,7 +141,7 @@ The operator-funded pool in the contract that backs Lucky Buy Cashback; the port
 _Avoid_: Refund Reserve, liquidity pool, treasury
 
 **Locked Draw Liability**:
-The Free Reserve held for one accepted Lucky Buy: its largest possible Reference Discount, which is the part of its largest Cashback not already covered by its own Risk Premium. It is held until that purchase is confirmed, failed, or reclaimed.
+The Free Reserve held for one accepted Lucky Buy: its largest possible Reference Discount, which is the part of its largest Cashback not already covered by its own Risk Premium. It is taken when the contract admits the purchase and held until its Draw runs, or until the purchase is failed or reclaimed: from about a minute to most of a day (ADR-0002).
 _Avoid_: Free Reserve, operator funds
 
 **Free Reserve**:

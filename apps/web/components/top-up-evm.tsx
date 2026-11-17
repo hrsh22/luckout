@@ -7,10 +7,11 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet } from "@/lib/evm"
+import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet, TransferReverted } from "@/lib/evm"
 import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
+import { pricedAsShown, transferFor } from "@/lib/top-up-quote"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -30,8 +31,12 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [assetId, setAssetId] = useState("")
   const [amount, setAmount] = useState(() => topUpAmount(need))
-  const [quote, setQuote] = useState<TopUpQuote>()
+  /** A quote and the token it was asked for, kept together: Send transfers this pair, never what the picker shows now. */
+  const [quoted, setQuoted] = useState<{ quote: TopUpQuote; asset: TopUpAsset }>()
+  const quote = quoted?.quote
   const [signed, setSigned] = useState(false)
+  /** The wallet has sent this Top-Up's transfer: it may land, so Send is never offered again for it. */
+  const [sent, setSent] = useState(false)
   const [status, setStatus] = useState<TopUpStatus>()
   const [busy, setBusy] = useState<"quote" | "send" | "sign">()
   const [error, setError] = useState<string>()
@@ -58,14 +63,17 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
     return [...assets].sort((a, b) => rank(b) - rank(a))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assets, holdings, micro])
-  // The best token for this amount, until the customer picks one themselves.
+  // The best token for this amount, until the customer picks one themselves, or a price has been asked for:
+  // the picker never moves under a quote.
   const picked = useRef(false)
   useEffect(() => {
-    if (!picked.current && holdings && ordered?.[0]) setAssetId(ordered[0].assetId)
-  }, [ordered, holdings])
+    if (!picked.current && !busy && !quoted && holdings && ordered?.[0]) setAssetId(ordered[0].assetId)
+  }, [ordered, holdings, busy, quoted])
   const preview = useTopUpPreview(token ?? undefined, assetId, micro)
   const held = holdings?.get(assetId)
-  const p = preview.data
+  // The price of the token chosen now. While the next one loads, the last token's price is still drawn (dimmed),
+  // but nothing is decided or sent on it.
+  const p = preview.isPlaceholderData ? undefined : preview.data
   const short = !!holdings && !!p && Number(p.amountInFormatted) > (held?.amount ?? 0)
   const noGas = !!asset?.contract && !!gas && !gas.has(asset.chain)
   const nothingCovers = !!holdings && !!assets && micro >= 1_000_000 && !assets.some((a) => covers(a.assetId))
@@ -129,16 +137,29 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
 
   /** A real quote: recorded on the server, so it shows under "Money on its way" even if this sheet closes. */
   const realQuote = async () => {
-    const q = await api((c) => c.topup.quote({ payload: { originAsset: assetId, usdc: micro } }), token)
+    if (!asset) throw new Error("Choose a token to pay with.")
+    const next = { quote: await api((c) => c.topup.quote({ payload: { originAsset: asset.assetId, usdc: micro } }), token), asset }
+    setQuoted(next)
     void qc.invalidateQueries({ queryKey: ["transfers"] })
-    return q
+    return next
   }
-  const sendNow = (q: TopUpQuote) =>
+  const sendNow = ({ quote: q, asset: a }: NonNullable<typeof quoted>) =>
     step("send", async () => {
+      // Checked before anything is signed: a quote and a token that don't belong together are never sent.
+      const transfer = transferFor(a, q)
+      // Checked here too, not only by hiding the button: with the approval declined nothing polls, so the page may not
+      // have re-rendered since the deadline passed, and a transfer to an expired deposit address isn't swapped as quoted.
+      if (Date.now() > Date.parse(q.deadline)) throw new Error("This price has expired. Nothing was sent: top up again for a new one.")
       await signMoveIn(q)
-      const txHash = await sendFromWallet(accountId, { chain: q.chain, contract: asset?.contract, to: q.depositAddress, amount: q.amountIn })
-      // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
-      void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+      try {
+        const txHash = await sendFromWallet(accountId, transfer, () => setSent(true))
+        // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
+        void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+      } catch (e) {
+        // Mined and reverted: nothing left the wallet, so they may send again.
+        if (e instanceof TransferReverted) setSent(false)
+        throw e
+      }
     })
   /**
    * Asks once for the approval that moves this Top-Up into Luckout when it lands. Declining isn't an error: the
@@ -156,12 +177,10 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   const sendElsewhere = () =>
     step("quote", async () => {
       setManual(true)
-      const q = await realQuote()
-      setQuote(q)
-      await approve(q)
+      await approve((await realQuote()).quote)
     })
 
-  if (!quote) {
+  if (!quoted || !quote) {
     return (
       <div className="flex flex-col gap-4">
         <AmountField
@@ -178,7 +197,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
         </div>
         {micro >= 1_000_000 && assetId && (
           <TopUpPreview
-            q={p}
+            q={preview.data}
             stale={preview.isPlaceholderData || preview.isFetching}
             error={preview.error}
             warning={blocked}
@@ -199,10 +218,9 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                 disabled={!!busy || !p}
                 onClick={() =>
                   step("quote", async () => {
-                    const q = await realQuote()
-                    setQuote(q)
+                    const next = await realQuote()
                     // Priced as shown: send at once. If it moved, the next screen shows the new price to confirm.
-                    if (Number(q.amountInFormatted) <= Number(p!.amountInFormatted) * 1.005) await sendNow(q)
+                    if (pricedAsShown(p, next.quote)) await sendNow(next)
                   })}
               >
                 {p ? `Send ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
@@ -223,6 +241,8 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   }
 
   const moved = status?.move === "moved"
+  // A quote past its deadline is never sent to: the way on is a new one.
+  const expired = Date.now() > Date.parse(quote.deadline)
   return (
     <div className="flex flex-col gap-3 rounded-[1.5rem] bg-soft p-5 text-sm">
       {moved
@@ -261,9 +281,9 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                     Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get <b>{usd(quote.usdcOut)}</b> in
                     Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
                   </p>
-                  {!signed && (
+                  {!sent && !expired && (
                     <>
-                      <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quote)}>
+                      <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quoted)}>
                         Send from your wallet
                       </Button>
                       <button type="button" disabled={!!busy} className="self-start text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline" onClick={() => (setManual(true), approve())}>
@@ -287,8 +307,8 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
             )}
           </>
         )}
-      {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "")) && (
-        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuote(undefined), setSigned(false), setStatus(undefined), (reported.current = false))}>
+      {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "") || (!manual && !sent && expired)) && (
+        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuoted(undefined), setSigned(false), setSent(false), setManual(false), setStatus(undefined), (reported.current = false))}>
           Top up again
         </Button>
       )}

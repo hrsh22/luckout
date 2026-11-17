@@ -4,7 +4,7 @@ import { test } from "node:test"
 import { Layer } from "effect"
 import { DbMemory } from "./Db.ts"
 import { Near } from "./Near.ts"
-import { OneClick } from "./OneClick.ts"
+import { echoProblem, OneClick, type QuoteRequest } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
 import { fakeNear } from "./testing.ts"
 import { intentPayload, intentSignature, moveInIntent } from "@luckout/api"
@@ -110,7 +110,7 @@ test("a quote tells the customer, and records, when refunds begin (30 min), not 
     tokens: Effect.succeed([{ assetId: "nep141:base-usdc", blockchain: "base", symbol: "USDC", contractAddress: "0xusdc", decimals: 6 }]),
     quote: (r) => Effect.succeed({
       quote: { depositAddress: `dq-${r.swapType}`, amountIn: "1010224", amountInFormatted: "1.010224", amountOut: "1000000", amountOutFormatted: "0.99", timeEstimate: 35, deadline: threeDays },
-      quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: r.recipient, refundTo: r.refundTo, swapType: r.swapType, recipientType: r.recipientType, depositType: r.depositType ?? "ORIGIN_CHAIN" }
+      quoteRequest: { originAsset: r.originAsset, destinationAsset: r.destinationAsset, recipient: r.recipient, refundTo: r.refundTo, swapType: r.swapType, amount: r.amount, recipientType: r.recipientType, depositType: r.depositType ?? "ORIGIN_CHAIN", refundType: r.refundType }
     } as never),
     status: () => Effect.succeed("PENDING_DEPOSIT"),
     details: () => Effect.succeed({ status: "PENDING_DEPOSIT" }),
@@ -368,7 +368,11 @@ const tokens = [
   { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
 ]
 /** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
-const mainnetTopUp = (holdings: Record<string, string> = {}, o: { deliver?: () => boolean; status?: string } = {}) => {
+const mainnetTopUp = (
+  holdings: Record<string, string> = {},
+  /** `echo`: what 1Click says it will do, given what was asked (default: exactly that); undefined for no echo at all. */
+  o: { deliver?: () => boolean; status?: string; echo?: (asked: QuoteRequest) => object | undefined } = {}
+) => {
   const deliver = o.deliver ?? (() => true)
   const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
   const submitted: Array<{ txHash: string; depositAddress: string }> = []
@@ -379,7 +383,7 @@ const mainnetTopUp = (holdings: Record<string, string> = {}, o: { deliver?: () =
       asked.push(r)
       return Effect.succeed({
         quote: { depositAddress: `dq-${asked.length}`, amountIn: r.amount, amountInFormatted: "0.120132", amountOut: "117732", amountOutFormatted: "0.117732", timeEstimate: 12 },
-        quoteRequest: { ...r, depositType: r.depositType ?? "ORIGIN_CHAIN" }
+        quoteRequest: (o.echo ?? ((x: QuoteRequest) => x))({ ...r, depositType: r.depositType ?? "ORIGIN_CHAIN" })
       } as never)
     },
     status: () => Effect.succeed("PENDING_DEPOSIT"),
@@ -486,4 +490,73 @@ test("a notice Telegram didn't take is sent again on a later pass, even once the
   assert.equal(w.told.length, 2, "failed once, delivered on the next pass, then left alone")
   assert.ok(w.told.every((x) => x.includes("landed in your NEAR wallet")))
   assert.deepEqual([[...r.told], r.retell], [["landed"], false])
+})
+
+// ---------- a customer's quote is checked as strictly as our own refills' ----------
+
+test("a quote is used only when 1Click's echo matches what was asked: recipient, refund address, tokens, amount, and how each moves", () => {
+  const asked: QuoteRequest = {
+    dry: false,
+    swapType: "EXACT_OUTPUT",
+    slippageTolerance: 100,
+    originAsset: BASE,
+    destinationAsset: "nep141:usdc.near",
+    amount: "1000000",
+    recipient: NEAR,
+    recipientType: "DESTINATION_CHAIN",
+    refundTo: NEAR,
+    refundType: "INTENTS",
+    deadline: "2026-11-16T00:00:00.000Z"
+  }
+  const honest = { originAsset: BASE, destinationAsset: "nep141:usdc.near", recipient: NEAR, swapType: "EXACT_OUTPUT", amount: "1000000", refundTo: NEAR, depositType: "ORIGIN_CHAIN", recipientType: "DESTINATION_CHAIN", refundType: "INTENTS" }
+  assert.equal(echoProblem(honest, asked), undefined)
+  assert.equal(echoProblem({ ...honest, recipient: "0xAbC", refundTo: "0xAbC" }, { ...asked, recipient: "0xabc", refundTo: "0xabc" }), undefined, "an address may come back in another case")
+  assert.match(echoProblem(undefined, asked) ?? "", /didn't confirm/)
+  const bad: Array<[string, object, RegExp]> = [
+    ["someone else is paid", { recipient: "mallory.near" }, /different recipient/],
+    ["paid inside NEAR Intents instead of to the account", { recipientType: "INTENTS" }, /different recipient/],
+    ["someone else is refunded", { refundTo: "mallory.near" }, /different refund address/],
+    ["refunded on the origin chain to a NEAR account name", { refundType: "ORIGIN_CHAIN" }, /different refund address/],
+    ["another token in", { originAsset: "nep141:other" }, /different tokens/],
+    ["another token out", { destinationAsset: "nep141:other" }, /different tokens/],
+    ["paid from inside NEAR Intents", { depositType: "INTENTS" }, /different way to pay/],
+    ["an exact-input swap", { swapType: "EXACT_INPUT" }, /different amount/],
+    ["another amount", { amount: "999999" }, /different amount/],
+    ["a field left out", { refundType: undefined }, /different refund address/]
+  ]
+  for (const [name, change, why] of bad) assert.match(echoProblem({ ...honest, ...change } as never, asked) ?? "", why, name)
+})
+
+test("a Top-Up, a withdrawal or a send-back whose quote 1Click doesn't confirm, or confirms differently, is refused and never recorded", async () => {
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const attempt = (echo: (asked: QuoteRequest) => object | undefined) => {
+    const w = mainnetTopUp({ [BASE]: "120132" }, { echo })
+    return w.run((t, sql) =>
+      Effect.gen(function*() {
+        const said3 = [yield* said(t.quote(NEAR, BASE, 1_000_000)), yield* said(t.exit(EVM, BASE, 1_000_000)), yield* said(t.sendBack(EVM, BASE))]
+        const [rows] = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM intents_swaps`
+        return { said3, recorded: rows!.n }
+      })
+    )
+  }
+  assert.deepEqual(await attempt((x) => x), { said3: ["ok", "ok", "ok"], recorded: 3 }, "an honest echo goes through")
+
+  const none = await attempt(() => undefined)
+  assert.equal(none.recorded, 0)
+  for (const m of none.said3) assert.match(m, /1Click didn't confirm what it quoted\. Try again\./)
+
+  // For a NEAR wallet's Top-Up only the refund address used to be compared: another recipient went through.
+  const stranger = await attempt((x) => ({ ...x, recipient: "mallory.near" }))
+  assert.equal(stranger.recorded, 0)
+  for (const m of stranger.said3) assert.match(m, /1Click quoted a different recipient\. Try again\./)
+
+  const refund = await attempt((x) => ({ ...x, refundTo: "mallory.near" }))
+  assert.equal(refund.recorded, 0)
+  for (const m of refund.said3) assert.match(m, /different refund address/)
+})
+
+test("a price check is still shown when 1Click doesn't echo it, since nothing is paid into it", async () => {
+  const w = mainnetTopUp({}, { echo: () => undefined })
+  const q = await w.run((t) => t.quote(NEAR, BASE, 1_000_000, true))
+  assert.equal(q.depositAddress, "dq-1")
 })
