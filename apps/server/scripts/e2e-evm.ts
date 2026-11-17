@@ -3,7 +3,7 @@
 // the funder's key from ~/.near-credentials), moves it into Luckout, changes settings, buys the free
 // Bitrefill test card, and withdraws back to its Intents account, all through signed intents our
 // relayer sends. Then it checks what must be refused.
-// Usage: node scripts/e2e-evm.ts [funder.testnet]
+// Usage: node scripts/e2e-evm.ts [--contract app.luckout.testnet] [funder.testnet]
 import {
   type AuthAction,
   authCallIntent,
@@ -13,19 +13,17 @@ import {
   moveInIntent,
   type SignedIntent
 } from "@luckout/api"
-import { Account, JsonRpcProvider, type KeyPairString } from "near-api-js"
+import { Account, JsonRpcProvider } from "near-api-js"
 import assert from "node:assert/strict"
 import { randomBytes } from "node:crypto"
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
+import { args, contract as APP, intents as INTENTS, keyOf, rpcUrl, testnetOnly, usdc as USDC } from "./net.ts"
 
-const [funder = "alice.luckout.testnet"] = process.argv.slice(2)
+testnetOnly("it funds a wallet from the test-USDC faucet")
+
+const [funder = "alice.luckout.testnet"] = args
 const api = process.env.API_URL ?? "http://localhost:8787"
-const APP = "app.luckout.testnet"
-const USDC = "usdc.luckout.testnet"
-const INTENTS = "intents.luckout.testnet"
-const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
+const rpc = new JsonRpcProvider({ url: rpcUrl })
 const view = async <A>(contractId: string, method: string, args: Record<string, unknown>) => (await rpc.callFunction({ contractId, method, args })) as A
 
 const req = async (method: string, path: string, body?: unknown, session?: string) => {
@@ -78,7 +76,7 @@ const token = session.session!
 console.log(`✔ ${ME} signs in; another key and a replay are refused`)
 
 // Test USDC into its NEAR Intents account, as 1Click would deliver it on mainnet.
-const key = JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${funder}.json`, "utf8")).private_key as KeyPairString
+const key = keyOf(funder)
 const funding = new Account(funder, rpc, key)
 await funding.callFunction({ contractId: USDC, methodName: "faucet", args: {}, gas: 30_000_000_000_000n })
 await funding.callFunction({

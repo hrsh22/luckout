@@ -1,20 +1,18 @@
-// Live check of the relayer (ADR-0008) against a running server on testnet: the customer signs
+// Live check of the relayer (ADR-0008) against a running server: the customer signs
 // each call with a full-access key from ~/.near-credentials, the relayer sends it, and the
 // customer's NEAR balance doesn't move.
-// Usage: node scripts/relay.ts [customer.testnet]
-import { Account, actions, buildDelegateAction, encodeDelegateAction, encodeSignedDelegate, JsonRpcProvider, KeyPair, type KeyPairString, Signature } from "near-api-js"
+// Usage: node scripts/relay.ts [--network mainnet] [--contract app.luckout.near] [customer]
+// On mainnet the customer needs $1 of USDC already (there's no faucet); it's deposited and withdrawn again.
+import { Account, actions, buildDelegateAction, encodeDelegateAction, encodeSignedDelegate, JsonRpcProvider, KeyPair, Signature } from "near-api-js"
 import { signMessage } from "near-api-js/nep413"
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { readFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { args, contract as app, keyOf, network, rpcUrl, usdc } from "./net.ts"
 
-const [customer = "alice.luckout.testnet"] = process.argv.slice(2)
+const [customer = "alice.luckout.testnet"] = args
 const api = process.env.API_URL ?? "http://localhost:8787"
-const app = process.env.LUCKOUT_CONTRACT_ID ?? "app.luckout.testnet"
-const usdc = process.env.USDC_CONTRACT_ID ?? "usdc.luckout.testnet"
-const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
-const secret = JSON.parse(readFileSync(`${homedir()}/.near-credentials/testnet/${customer}.json`, "utf8")).private_key as KeyPairString
+const rpc = new JsonRpcProvider({ url: rpcUrl })
+const secret = keyOf(customer)
 const key = KeyPair.fromString(secret)
 
 const req = async (method: string, path: string, body?: unknown, session?: string) => {
@@ -69,13 +67,15 @@ console.log("✔ the relayer is on for this account")
 const nearBefore = await near()
 const start = await balance()
 
-const faucet = await relay(await sign(usdc, "faucet", {}, 0n))
-assert.equal(faucet.status, 200, JSON.stringify(faucet.json))
+if (network === "testnet") {
+  const faucet = await relay(await sign(usdc, "faucet", {}, 0n))
+  assert.equal(faucet.status, 200, JSON.stringify(faucet.json))
+}
 const depositSigned = await sign(usdc, "ft_transfer_call", { receiver_id: app, amount: "1000000", msg: "" }, 1n, 100n)
 const deposit = await relay(depositSigned)
 assert.equal(deposit.status, 200, JSON.stringify(deposit.json))
 assert.equal(await balance(), start + 1_000_000n)
-console.log(`✔ faucet and a $1 deposit, relayed (${deposit.json.hash})`)
+console.log(`✔ a $1 deposit, relayed (${deposit.json.hash})`)
 
 const again = await relay(depositSigned)
 assert.equal(again.json?.hash, deposit.json.hash, "the same signature returns the first result")

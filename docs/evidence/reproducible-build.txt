@@ -1,0 +1,40 @@
+Reproducible build of the mainnet contract: executed, and matched against the chain
+Checked 2026-11-17 against app.luckout.near on NEAR mainnet.
+
+Result: MATCH. app.luckout.near runs exactly the wasm that CI rebuilt reproducibly from commit ed91c93.
+
+1. The build (GitHub Actions, job contract-wasm)
+   Commit:      ed91c93cb6c2335008d6bc3c549a7a0b452ddd73 (main, 2026-11-12)
+   Run:         https://github.com/hrsh22/luckout/actions/runs/43301321259
+   Command:     cargo near build reproducible-wasm
+   Image:       sourcescan/cargo-near:0.22.0-rust-1.99.1
+                sha256:c9655eaf7436b90c87ea8b25739f91063032c5c30ba24cfeafe72c142943b5bb
+                (pinned in contract/Cargo.toml, [package.metadata.near.reproducible_build])
+   Log:         SHA-256 checksum bs58: NM61Tqbof2ncPBzVTwiAHKMfsr6g5YBTKtj2e8gqPZe
+   Artifact:    luckout-wasm-ed91c93cb6c2335008d6bc3c549a7a0b452ddd73 (kept until 2027-02-10)
+   sha256:      0577e8a014dabc4e439f8b703836c90257f21a300cb31df68a5bf2fcd741e68d
+   code hash:   NM61Tqbof2ncPBzVTwiAHKMfsr6g5YBTKtj2e8gqPZe
+
+2. The deploy
+   That artifact was deployed in place to app.luckout.near with contract/upgrade.sh:
+   https://nearblocks.io/txns/8hhWbwnMPFyZHU87AVr9HXagGJvEA6U5H2kzjSNxKFWo (2026-11-12 20:34 UTC)
+
+3. The comparison (contract/check-deployed.sh, which exits 1 if the hashes differ)
+   $ gh run download 43301321259 -n luckout-wasm-ed91c93cb6c2335008d6bc3c549a7a0b452ddd73
+   $ contract/check-deployed.sh mainnet luckout.wasm
+   built:    NM61Tqbof2ncPBzVTwiAHKMfsr6g5YBTKtj2e8gqPZe  (luckout.wasm)
+   deployed: NM61Tqbof2ncPBzVTwiAHKMfsr6g5YBTKtj2e8gqPZe  (app.luckout.near on mainnet)
+   MATCH: app.luckout.near runs exactly this wasm
+
+   The same wasm against another contract fails, as it should:
+   $ contract/check-deployed.sh testnet luckout.wasm
+   built:    NM61Tqbof2ncPBzVTwiAHKMfsr6g5YBTKtj2e8gqPZe  (luckout.wasm)
+   deployed: F82yydEGGPEBYaPmKxWFMLjYh6HRV4p9B1CLcv9JosrV  (app.luckout.testnet on testnet)
+   MISMATCH: app.luckout.testnet does not run this wasm      (exit 1)
+
+Rebuild it yourself (needs Docker), from a checkout of this repository:
+   git worktree add ../luckout-ed91c93 ed91c93
+   (cd ../luckout-ed91c93/contract && cargo near build reproducible-wasm)
+   contract/check-deployed.sh mainnet ../luckout-ed91c93/contract/target/near/luckout.wasm
+cargo-near embeds the commit in the build, so the hash matches only when it's built from ed91c93
+itself. CI rebuilds the contract this way on every run (job contract-wasm in .github/workflows/ci.yml).

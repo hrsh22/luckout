@@ -131,7 +131,8 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 
   **You see** `"all_match": true`, with each recomputed value beside the one the contract logged.
 - **`/fair`:** the Live Average from `get_stats`, the Cashback Reserve and Cashback Cap from `get_reserve`, the contract's code hash, and the latest TEE check of the agent's model.
-- **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows.
+- **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows. `contract/check-deployed.sh mainnet <wasm>` compares a build with what `app.luckout.near` runs and fails if they differ. CI's rebuild of the deployed commit matches: [docs/evidence/reproducible-build.txt](docs/evidence/reproducible-build.txt).
+- **Every mainnet claim, by script:** `node apps/server/scripts/verify-mainnet.ts` (no keys needed) reads the hashes in [docs/evidence/mainnet.json](docs/evidence/mainnet.json) and checks them against NEAR and Base: all 18 settled buys (`purchase`, then `confirm_delivery`, then `get_purchase` now), a customer's USDC deposit, and one Bitrefill refill leg by leg. **You see** `All checks passed.`, as in [docs/evidence/verify-mainnet.txt](docs/evidence/verify-mainnet.txt).
 - **The attack demo:** see [What a stolen server key can do](#what-a-stolen-server-key-can-do).
 
 ![The /fair page: the Live Average read from the contract, next to the promised 105.6%](docs/images/fair.jpg)
@@ -167,14 +168,14 @@ Where each piece is in the code, and where it runs on mainnet.
 | What | Code | On mainnet |
 |---|---|---|
 | Our contract: balances, Spending Limits, reserve locks, the Draw | [`contract/src/lib.rs`](contract/src/lib.rs): [`purchase`](contract/src/lib.rs#L437) (Spending Limits checked at [L471-L480](contract/src/lib.rs#L471-L480)), [`confirm_delivery`](contract/src/lib.rs#L519), `on_draw`, `set_limits`, `reclaim` | [`app.luckout.near`](https://nearblocks.io/address/app.luckout.near) |
-| NEP-141 native USDC: deposits via `ft_transfer_call` | [`ft_on_transfer`](contract/src/lib.rs#L321) | USDC `17208628f84f…36133a1` |
+| NEP-141 native USDC: deposits via `ft_transfer_call` | [`ft_on_transfer`](contract/src/lib.rs#L321) | USDC `17208628f84f…36133a1`; [a customer's $1.50 deposit](https://nearblocks.io/txns/93UnFZ5nKsuAm3vnK9T1RaW3kMH6pWJdqeg4ztQDaoF) |
 | Function-call access key: the server can only call `purchase`, `confirm_delivery` and `fail_purchase` | [`contract/deploy-mainnet.sh`](contract/deploy-mainnet.sh#L56), [`apps/server/src/Near.ts`](apps/server/src/Near.ts) | [`purchase` by `server.luckout.near`](https://nearblocks.io/txns/4wt8X2yxVwVZZL4n6UgA4LXAQuSJXN3TtVtgXWWzzF8g) |
 | Onchain randomness: the Draw a block after delivery, random value = `sha256(random_seed ‖ purchase_id)` | `on_draw` → [`draw_random`](contract/src/lib.rs#L1203-L1210) (`env::random_seed_array`, hashed with the purchase ID by `env::sha256_array`) | [`confirm_delivery` → Draw](https://nearblocks.io/txns/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62) |
 | NEAR Intents 1Click: Top-Ups from any chain, refills, withdrawals to EVM chains | [`apps/server/src/OneClick.ts`](apps/server/src/OneClick.ts), [`TopUp.ts`](apps/server/src/TopUp.ts), [`Refill.ts`](apps/server/src/Refill.ts) | 1Click deposits into customers' NEAR and Intents accounts |
 | NEAR Intents accounts for EVM wallets: signed intents call our contract's `on_auth` | [`on_auth`](contract/src/lib.rs#L391), [`packages/api/src/intents.ts`](packages/api/src/intents.ts), [`apps/server/src/Intents.ts`](apps/server/src/Intents.ts) | [`intents.near` → `on_auth`](https://nearblocks.io/txns/3vLDQRBfA182UF3s5Zqo8AESu2r68LmGn5wWvAnDzEyW) |
 | NEP-366 meta transactions: our relayer pays customers' gas, only for Luckout's own calls | [`apps/server/src/Relay.ts`](apps/server/src/Relay.ts#L41-L80): the allowlist (`expectedDeposit`, `refusal`) | [A relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP) by `relayer.luckout.near` |
 | Chain Signatures: our Base wallet has no private key; the treasury signs through `v1.signer` | [`apps/server/src/Base.ts`](apps/server/src/Base.ts#L131): `sign`, which checks the signature recovers to our wallet | [`sign` by `treasury.luckout.near`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ), wallet [`0xBfE4…12eA`](https://basescan.org/address/0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA) |
-| Automatic Base Float refills: treasury → 1Click → our Base wallet, which pays each card's Bitrefill invoice | [`Refill.ts`](apps/server/src/Refill.ts#L919-L920): the server plans a refill every minute and resumes open ones every 10 seconds; nobody has to start it | [treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv), [Base wallet → Bitrefill invoice](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b) |
+| Automatic Base Float refills: treasury → 1Click → our Base wallet, which pays each card's Bitrefill invoice | [`Refill.ts`](apps/server/src/Refill.ts#L919-L920): the server plans a refill every minute and resumes open ones every 10 seconds; nobody has to start it | [treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv), [Base wallet → Bitrefill invoice](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b); a full run with every hash: [docs/evidence/refill-run.txt](docs/evidence/refill-run.txt) |
 | NEAR AI Cloud: the agent's model, in a TEE we verify (attestation and per-reply signatures) | [`apps/server/src/Agent.ts`](apps/server/src/Agent.ts), [`Attestation.ts`](apps/server/src/Attestation.ts#L106-L146): `attest` and `replySigned` | `deepseek-ai/DeepSeek-V4.1-Flash-1017`; the check result is on `/fair` |
 | NEP-413 signed messages: sign-in, accepted only from a full-access key | [`apps/server/src/Auth.ts`](apps/server/src/Auth.ts) | |
 | NEAR Connect (HOT and other wallets) | [`apps/web/lib/near.ts`](apps/web/lib/near.ts) | |
@@ -197,7 +198,7 @@ A stablecoin checkout a normal shop could use tomorrow, on both sides of the cou
 
 - **Customers pay in stablecoins from any chain.** Normal mode is a plain checkout: pay the card's price in USDC and get the code. Top-Ups swap any token on any chain into native USDC on NEAR through 1Click (`TopUp.ts`), and the contract holds balances in NEP-141 USDC (`ft_on_transfer`).
 - **No gas and no NEAR.** With NEP-366 meta transactions, the relayer pays only for calls to our own contract, with the exact deposit each one needs (`Relay.ts`, [a relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP)).
-- **The merchant pays its supplier in USDC, by itself.** Every card's Bitrefill invoice is paid in USDC on Base from our Base wallet ([Base payment](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b)), signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)). When that wallet's float runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to top it up. No one starts it: the server checks every minute whether a refill is due ([`Refill.ts`](apps/server/src/Refill.ts#L919-L920)). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
+- **The merchant pays its supplier in USDC, by itself.** Every card's Bitrefill invoice is paid in USDC on Base from our Base wallet ([Base payment](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b)), signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/AKqUvX4CgYG4hCTfTwtQHYnHnSkzgqc8HsAMjevmw9Ei)). When that wallet's float runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to top it up. One run, every leg with its hash: [docs/evidence/refill-run.txt](docs/evidence/refill-run.txt). No one starts it: the server checks every minute whether a refill is due ([`Refill.ts`](apps/server/src/Refill.ts#L919-L920)). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
 
 ### AI Security & Defense
 
@@ -384,7 +385,7 @@ apps/server     Effect server: HTTP API, purchase workflow and reconciler, Teleg
 packages/api    shared HttpApi definition and schemas (typed client for the web app)
 contract/       Rust NEAR contract, plus a testnet-only test-USDC token with a faucet
 deploy/         pm2 config, VM setup and the runbook for the server
-docs/           plan, decisions (ADRs), research, README images
+docs/           plan, decisions (ADRs), research, mainnet evidence, README images
 CONTEXT.md      domain glossary
 ```
 
@@ -394,6 +395,7 @@ CONTEXT.md      domain glossary
 - [Decisions](docs/adr/): why it works the way it does.
 - [Glossary](CONTEXT.md): Balance, Lucky Buy, Game Version, Draw, Cashback, and so on.
 - [Bitrefill funding research](docs/research/bitrefill-funding.md): how Bitrefill can be paid without holding BTC.
+- [Mainnet evidence](docs/evidence/): every settled buy, a full refill run and the reproducible build, each with its hashes and the script that re-checks them.
 
 ## Hackathon notes
 
