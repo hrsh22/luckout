@@ -86,12 +86,25 @@ Staging has run it since 2026-11-16. Mainnet won't start without a guest client,
 
 ## Updating
 
+CI deploys each branch once its tests pass. By hand, as the site user, run the same script (or `pnpm deploy:mainnet` / `pnpm deploy:staging` / `pnpm deploy:testnet` from a machine with the SSH aliases):
+
 ```sh
 cd ~/htdocs/luckout-api.gamified.trade
-git pull && pnpm install --frozen-lockfile --filter @luckout/server... && pm2 reload luckout-api
+bash deploy/remote-deploy.sh main
 ```
 
-From a machine with the `luckout-milesvm` / `luckout-testnet-api-milesvm` SSH aliases, `pnpm deploy:mainnet` / `pnpm deploy:testnet` does the same and checks health. The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs && pm2 save`.
+The script refuses to run if a tracked file was edited on the VM (`git status` shows it: bring the change in through a PR, or drop it with `git checkout -- .`). It installs the new dependencies before restarting anything; if that fails, nothing is restarted and the old source is put back. Then it reloads the server, and passes only if `/health` answers and pm2 runs one steady process that it started after checking out the new code. Node reads the code when it starts, so that process runs the new commit. The last line says so, with the commit it replaced: `mainnet main 1a2b3c4 (was 9f8e7d6): health 204, served by pid 12345, started by this deploy`. Any failure exits non-zero, so CI's deploy job goes red.
+
+The server runs database migrations on start. Keep it at one instance: never use pm2 cluster mode or `-i` (a second process against the same database refuses to start). A reload waits for purchases in progress to finish, up to pm2's `kill_timeout` of 3 minutes. A server that dies while starting is started again after 1 s, then a little longer each time, up to every 15 s (`exp_backoff_restart_delay`); `pm2 list` shows it as `waiting restart` in between. After changing `deploy/ecosystem.config.cjs`, apply it with `pm2 startOrReload deploy/ecosystem.config.cjs` and then `pm2 save` (the next deploy does the same).
+
+**The CI key.** Each site's line for CI in `~/.ssh/authorized_keys` is exactly `restrict,command="bash ~/htdocs/<site>/deploy/remote-deploy.sh <branch>" ssh-ed25519 …`. `restrict` turns off port and agent forwarding and the terminal; the forced command fixes the branch, and CI's own command (the commit it tested) reaches the script only as `SSH_ORIGINAL_COMMAND`. So the key can run this deploy and nothing else, and can't go back.
+
+### Going back
+
+Once the old server has been stopped, a failed deploy prints the command to go back, for example `to go back: bash deploy/remote-deploy.sh main 9f8e7d6…`. Run it as the site user. It checks out that earlier commit of the same branch, installs its dependencies, reloads and checks it the same way. It is never automatic, because of migrations:
+
+- **Migrations stay.** One the new code ran isn't undone, and the old code then runs on the newer tables (it runs no migration itself). Check `git diff <earlier commit> <failed commit> -- apps/server/src/Db.ts` first: a new table, or a new column that is nullable or has a default, doesn't bother the old code; a renamed or dropped column, or a new `NOT NULL` one without a default, does, and then fix forward instead.
+- **Until the next deploy.** CI deploys the branch again on its next push, so revert or fix the bad commit on the branch through a PR.
 
 ## Upgrading the contract
 
@@ -109,4 +122,15 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
-Logs: `pm2 logs luckout-api`.
+## Logs
+
+`pm2 logs luckout-api` (add `--lines 200` for more). pm2 writes them to `~/.pm2/logs/`, on the disk Postgres uses, and doesn't rotate them by itself. Once per site user:
+
+```sh
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 20M
+pm2 set pm2-logrotate:retain 14
+pm2 set pm2-logrotate:compress true
+```
+
+Each log is then rotated daily, or at 20 MB if sooner, and 14 compressed old files are kept. `pm2 list` shows `pm2-logrotate` as a module.
