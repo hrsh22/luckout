@@ -58,12 +58,13 @@ failed() {
   [ "$previous" = "$commit" ] || echo "to go back: bash deploy/remote-deploy.sh $branch $previous   (deploy/README.md, \"Going back\")" >&2
   exit 1
 }
-before=$(pm2 pid luckout-api)
+# "pm2 pid" can print notices first (its daemon starting, a version mismatch); the pid is its last line.
+before=$(pm2 pid luckout-api | tail -n 1)
 # Never "a && b" here: under "set -e" a failing "a" in such a list doesn't stop the script, and the old
 # process went on answering /health while the deploy reported success.
 pm2 startOrReload deploy/ecosystem.config.cjs --update-env >/dev/null || failed "pm2 could not reload the server for $commit"
 pm2 save >/dev/null || failed "pm2 save failed, so after a reboot pm2 would bring back its old process list"
-started=$(pm2 pid luckout-api)
+started=$(pm2 pid luckout-api | tail -n 1)
 sleep 5
 # The port opens a few seconds before the server answers, and a request in that gap is never answered:
 # without a timeout this waited forever and held up every later deploy. Up to about two minutes in all.
@@ -71,6 +72,6 @@ health=$(curl -fsS -m 10 --retry 10 --retry-delay 3 --retry-all-errors -o /dev/n
   || failed "the server at $commit did not answer /health (pm2 logs luckout-api --lines 100)"
 # /health says a server answers, not which one. Node reads the source when it starts, so the answer comes
 # from this commit only if pm2 is running a process it started after the checkout, and still the same one.
-[ -n "$started" ] && [ "$started" != 0 ] && [ "$started" != "$before" ] && [ "$(pm2 pid luckout-api)" = "$started" ] \
+[ -n "$started" ] && [ "$started" != 0 ] && [ "$started" != "$before" ] && [ "$(pm2 pid luckout-api | tail -n 1)" = "$started" ] \
   || failed "pm2 is not running one steady new process for $commit (pid before $before, after ${started:-none}): pm2 list"
 echo "$network $branch ${commit:0:7} (was ${previous:0:7}): health $health, served by pid $started, started by this deploy"

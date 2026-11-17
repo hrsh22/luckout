@@ -112,7 +112,7 @@ jobs:
             echo "::notice::No Vercel Deploy Hook secret for $GITHUB_REF_NAME, so the web was deployed by Vercel at push, not here"
             exit 0
           fi
-          # No retry on every error: a POST that reached Vercel but timed out here would build twice.
+          # --retry retries transient errors, timeouts included; a second build of the same commit is harmless.
           curl -fsS -m 30 --retry 3 -X POST -o /dev/null "$hook"
           echo "Vercel is building the web for $GITHUB_REF_NAME"
 
