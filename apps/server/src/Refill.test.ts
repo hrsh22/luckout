@@ -343,6 +343,31 @@ test("in manual mode the refill waits for the owner, says how much to move, and 
   assert.deepEqual(w.made, { invoices: 0, quotes: 0, signs: 0 }, "nothing to go stale while it waits")
 })
 
+test("a refill waiting for the owner says so once, not every pass, and again only when the reason changes", async () => {
+  const w = world({ cap: 0, proceeds: 5_000_000 })
+  const waiting = () => w.alerts.filter((a) => a.includes("is waiting"))
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    for (let i = 0; i < 3; i++) {
+      yield* settle(v.id)
+      yield* due
+      yield* refill.process
+    }
+    const first = waiting().length
+    // Sales build the proceeds up past what it needs: now moving them works, and that's worth hearing.
+    w.s.proceeds = 50_000_000
+    yield* due
+    yield* refill.process
+    return { first, row: yield* settle(v.id) }
+  }))
+  assert.equal(r.first, 1, w.alerts.join("\n"))
+  assert.match(waiting()[0]!, /more than the proceeds hold: send USDC to treasury\.test/)
+  assert.equal(waiting().length, 2, w.alerts.join("\n"))
+  assert.match(waiting()[1]!, /move \$30\.30 of proceeds/)
+  assert.equal(r.row.step, "fund")
+})
+
 test("money comes first: once the owner funds the treasury, a fresh quote is paid at once", async () => {
   const w = world({ cap: 0 })
   const r = await w.run(Effect.gen(function*() {
