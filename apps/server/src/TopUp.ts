@@ -42,8 +42,14 @@ const CHAINS = new Set(["eth", "arb", "base", "sol", "btc", "pol", "bsc", "near"
 const EVM_CHAINS = new Set(["eth", "arb", "base", "pol", "bsc"])
 /** Top-Ups whose move-in may wait at once, per account, so nobody can crowd out everyone else's. */
 const MOST_WAITING = 3
-/** Waiting move-ins checked per pass, least recently checked first. */
+/** Swaps checked per pass, least recently checked first. */
 const PER_PASS = 40
+/** Of those, how many are kept for swaps 1Click has seen money in; quotes nobody has paid into yet get the rest. */
+const SEEN_PER_PASS = 30
+/** Quotes of one account that 1Click has seen no money in and the tracking pass still follows, at once. */
+const MOST_OPEN = 10
+/** Paid Top-Ups 1Click hasn't seen that an admin hears about one by one, per two hours; past that, one line covers the rest. */
+const UNSEEN_ALERTS = 5
 /** The relayer's message when NEAR didn't answer: the intent may still have run, so it's resumed, not failed. */
 const UNANSWERED = /didn't answer in time/
 /** 1Click is done with these: the money arrived or went back. */
@@ -288,6 +294,31 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
+      // ponytail: in memory, one process (ADR-0006). One real quote at a time per account, so parallel requests
+      // can't all pass the cap below before one of them is saved.
+      const quoting = new Set<string>()
+      /**
+       * Runs `make`, which asks 1Click for a real quote and records it, unless this account already has as many
+       * unpaid quotes as we follow at once. Signing in is free and every quote is a row the tracking pass checks for
+       * hours, so without this one account could crowd out everyone's swaps.
+       */
+      const capped = <A>(accountId: string, make: Effect.Effect<A, TopUpUnavailable>): Effect.Effect<A, TopUpUnavailable> =>
+        Effect.suspend(() => {
+          if (quoting.has(accountId)) return Effect.fail(fail("One quote at a time. Try again in a moment."))
+          quoting.add(accountId)
+          return Effect.gen(function*() {
+            // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass).
+            const [{ open = 0 } = {}] = yield* sql<{ open: number }>`
+              SELECT count(*)::int AS open FROM intents_swaps
+              WHERE account_id = ${accountId} AND coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND created_at > now() - interval '3 days'
+                AND NOT (deposit_tx IS NULL
+                         AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)`.pipe(Effect.orDie)
+            if (open >= MOST_OPEN) return yield* fail("You have several quotes open already. Use one of them, or try again in a couple of hours.")
+            return yield* make
+            // Only the request that took the guard gives it back.
+          }).pipe(Effect.ensuring(Effect.sync(() => quoting.delete(accountId))))
+        })
+
       const swap = (accountId: string, depositAddress: string) =>
         sql<{ direction: string; usdc: string; move: string | null; move_in: SignedIntent | null }>`
           SELECT direction, usdc::text AS usdc, move, move_in FROM intents_swaps
@@ -326,8 +357,9 @@ export class TopUp extends Context.Service<TopUp, {
 
       const sent = Effect.fn("TopUp.sent")(function*(accountId: string, depositAddress: string, txHash: string) {
         // An EVM or Bitcoin hash (hex), or a Solana or NEAR one (base58). 1Click checks it against the chain.
-        // ponytail: a customer can name any hash for their own quote; at worst that keeps the row in sight and
-        // sends one admin alert. Check it on chain ourselves if that's ever abused.
+        // ponytail: a customer can name any hash for their own quote; at worst that keeps a few rows in sight (their
+        // unpaid quotes are capped) and sends a handful of admin alerts (capped too). Check it on chain ourselves if
+        // that's ever abused.
         if (!/^(0x)?[0-9a-fA-F]{64}$|^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(txHash)) return yield* fail("That isn't a transaction hash")
         const [row] = yield* sql`UPDATE intents_swaps SET deposit_tx = ${txHash}
                                  WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction = 'in' AND deposit_tx IS NULL
@@ -461,25 +493,42 @@ export class TopUp extends Context.Service<TopUp, {
                          WHERE deposit_address = ${r.deposit_address}`.pipe(Effect.orDie)
             }
             if (claimed && notice.key === "unseen") {
-              yield* alerts.admin(`1Click hasn't seen a paid Top-Up: deposit ${r.deposit_address}, tx ${r.deposit_tx} on ${chainName(r.chain)}, ${r.amount_in ?? "?"} ${r.symbol ?? ""}, for ${r.account_id}. Ask 1Click support.`)
+              // Anyone can name a transaction for their own quote, so these are told one by one only up to a handful:
+              // past that, one line (the same text goes out at most hourly) says where the rest are.
+              const [{ chased = 0 } = {}] = yield* sql<{ chased: number }>`
+                SELECT count(*)::int AS chased FROM intents_swaps WHERE 'unseen' = ANY(told) AND deadline > now() - interval '2 hours'`.pipe(Effect.orDie)
+              yield* alerts.admin(
+                chased <= UNSEEN_ALERTS
+                  ? `1Click hasn't seen a paid Top-Up: deposit ${r.deposit_address}, tx ${r.deposit_tx} on ${chainName(r.chain)}, ${r.amount_in ?? "?"} ${r.symbol ?? ""}, for ${r.account_id}. Ask 1Click support.`
+                  : `More than ${UNSEEN_ALERTS} paid Top-Ups in the last two hours are unseen by 1Click. Either 1Click is behind (ask its support), or someone is naming transfers they never made. They're the rows of intents_swaps with 'unseen' in told.`
+              )
             }
           }
         })
 
-      // Swaps still in motion, least recently checked first, so a pile of quotes nobody pays into can't hold up
-      // everyone else's. A quote nobody paid into stops being checked two hours past its deadline.
-      const trackPass = sql<SwapRow>`
-        UPDATE intents_swaps SET checked_at = now()
-        WHERE deposit_address IN (
-          SELECT deposit_address FROM intents_swaps
-          WHERE move = 'waiting'
+      // Swaps still in motion. A quote nobody paid into stops being checked two hours past its deadline.
+      const tracked = sql`(move = 'waiting'
              -- A notice Telegram didn't take is tried again, for a day.
              OR (retell AND coalesce(status_at, created_at) > now() - interval '1 day')
              OR (created_at > now() - interval '3 days'
                  AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
                  AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
-                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval))
-          ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
+                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)))`
+      /** 1Click has seen no money in it: a quote not paid into yet (or paid, as far as only the customer says). */
+      const unseen = sql`coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'`
+      // Least recently checked first, in two queues: swaps 1Click has seen money in are never held up by quotes
+      // nobody paid into, however many of those there are, and those always get the rest of the pass (at least
+      // PER_PASS - SEEN_PER_PASS), so a new payment is still noticed when many swaps are in flight.
+      const trackPass = sql<SwapRow>`
+        UPDATE intents_swaps SET checked_at = now()
+        WHERE deposit_address IN (
+          SELECT deposit_address FROM (
+            (SELECT deposit_address, 0 AS queue, checked_at FROM intents_swaps WHERE ${tracked} AND NOT ${unseen}
+             ORDER BY checked_at NULLS FIRST LIMIT ${SEEN_PER_PASS})
+            UNION ALL
+            (SELECT deposit_address, 1 AS queue, checked_at FROM intents_swaps WHERE ${tracked} AND ${unseen}
+             ORDER BY checked_at NULLS FIRST LIMIT ${PER_PASS})
+          ) due ORDER BY queue, checked_at NULLS FIRST LIMIT ${PER_PASS})
         RETURNING *`.pipe(
         Effect.orDie,
         Effect.flatMap((rows) => Effect.forEach(rows, track, { discard: true, concurrency: 8 })),
@@ -597,7 +646,20 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
-      return TopUp.of({ assets, quote, status, sent, move, faucet, transfers, held, sendBack, trackNow: trackPass, exit })
+      return TopUp.of({
+        assets,
+        // A price check (dry) creates nothing, so only real quotes count against the account's cap.
+        quote: (accountId, originAsset, usdc, dry = false) => (dry ? quote(accountId, originAsset, usdc, true) : capped(accountId, quote(accountId, originAsset, usdc, false))),
+        status,
+        sent,
+        move,
+        faucet,
+        transfers,
+        held,
+        sendBack: (accountId, assetId) => capped(accountId, sendBack(accountId, assetId)),
+        trackNow: trackPass,
+        exit: (accountId, destinationAsset, usdc) => capped(accountId, exit(accountId, destinationAsset, usdc))
+      })
     })
   )
 }

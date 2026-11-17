@@ -377,6 +377,8 @@ const mainnetTopUp = (
   const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
   const submitted: Array<{ txHash: string; depositAddress: string }> = []
   const told: Array<string> = []
+  /** The deposit addresses whose status 1Click was asked for, in order. */
+  const checked: Array<string> = []
   const oneClick = Layer.succeed(OneClick, OneClick.of({
     tokens: Effect.succeed(tokens),
     quote: (r) => {
@@ -387,7 +389,7 @@ const mainnetTopUp = (
       } as never)
     },
     status: () => Effect.succeed("PENDING_DEPOSIT"),
-    details: () => Effect.succeed({ status: o.status ?? "PENDING_DEPOSIT" }),
+    details: (address) => Effect.sync(() => (checked.push(address), { status: o.status ?? "PENDING_DEPOSIT" })),
     submitDeposit: (i) => Effect.sync(() => void submitted.push(i))
   }))
   const alerts = Layer.succeed(Alerts, Alerts.of({
@@ -409,7 +411,7 @@ const mainnetTopUp = (
       Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, alerts, DbMemory)),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
     ))))
-  return { asked, submitted, told, run }
+  return { asked, submitted, told, checked, run }
 }
 
 test("a Top-Up's refund, and the extra it asks for, go back to an EVM wallet on its own chain; anything else to NEAR Intents", async () => {
@@ -559,4 +561,103 @@ test("a price check is still shown when 1Click doesn't echo it, since nothing is
   const w = mainnetTopUp({}, { echo: () => undefined })
   const q = await w.run((t) => t.quote(NEAR, BASE, 1_000_000, true))
   assert.equal(q.depositAddress, "dq-1")
+})
+
+// ---------- signing in is free: what one account can make the server follow is capped ----------
+
+test("an account's unpaid quotes are capped: the eleventh is refused before 1Click is asked, until one is paid or lapses", async () => {
+  const w = mainnetTopUp({ [BASE]: "120132" })
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      for (let i = 0; i < 10; i++) yield* t.quote(EVM, BASE, 1_000_000) // dq-1 … dq-10
+      const refused = [yield* said(t.quote(EVM, BASE, 1_000_000)), yield* said(t.exit(EVM, BASE, 1_000_000)), yield* said(t.sendBack(EVM, BASE))]
+      const askedSoFar = w.asked.length
+      // A price check creates nothing, and another customer has their own ten.
+      const others = [yield* said(t.quote(EVM, BASE, 1_000_000, true)), yield* said(t.quote(NEAR, BASE, 1_000_000))]
+      // 1Click sees one paid into, and another lapses: unpaid, and past the two hours it's still watched after its deadline.
+      yield* sql`UPDATE intents_swaps SET status = 'PROCESSING' WHERE deposit_address = 'dq-1'`
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '3 hours' WHERE deposit_address = 'dq-2'`
+      const room = [yield* said(t.quote(EVM, BASE, 1_000_000)), yield* said(t.exit(EVM, BASE, 1_000_000)), yield* said(t.quote(EVM, BASE, 1_000_000))]
+      // Naming a transaction for a quote doesn't free its place: only 1Click seeing the money does.
+      yield* t.sent(EVM, "dq-3", "0x" + "cd".repeat(32))
+      const claimed = yield* said(t.quote(EVM, BASE, 1_000_000))
+      return { refused, askedSoFar, others, room, claimed }
+    })
+  )
+  assert.equal(r.refused.length, 3)
+  for (const m of r.refused) assert.match(m, /several quotes open already/, "a Top-Up, a withdrawal and a send-back all count")
+  assert.equal(r.askedSoFar, 10, "a refused quote never reaches 1Click")
+  assert.deepEqual(r.others, ["ok", "ok"])
+  assert.equal(r.room[0], "ok")
+  assert.equal(r.room[1], "ok")
+  assert.match(r.room[2]!, /several quotes open already/, "two places came free, no more")
+  assert.match(r.claimed, /several quotes open already/)
+})
+
+test("two real quotes for one account at the same moment: one goes ahead, so the cap can't be raced", async () => {
+  const w = mainnetTopUp()
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const r = await w.run((t) =>
+    Effect.gen(function*() {
+      const both = yield* Effect.all([said(t.quote(EVM, BASE, 1_000_000)), said(t.quote(EVM, BASE, 1_000_000))], { concurrency: 2 })
+      return { both, after: yield* said(t.quote(EVM, BASE, 1_000_000)) }
+    })
+  )
+  assert.deepEqual([...r.both].sort(), ["One quote at a time. Try again in a moment.", "ok"])
+  assert.equal(r.after, "ok", "the guard is given back")
+})
+
+test("a swap 1Click has seen money in is checked every pass, however many unpaid quotes are waiting; unpaid ones still get part of each pass", async () => {
+  const quotes = (sql: SqlClient.SqlClient, n: number, prefix: string, status: string | null, checkedAt: Date) =>
+    sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, status, checked_at, deadline)
+        SELECT ${prefix} || i, 'someone.near', 'in', 1000000, ${status}, ${checkedAt}, now() + interval '30 minutes' FROM generate_series(1, ${n}) i`
+  const anHourAgo = new Date(Date.now() - 3_600_000)
+  // 200 quotes nobody paid into, none checked for an hour; one swap in flight, checked a moment ago.
+  const flood = mainnetTopUp()
+  await flood.run((t, sql) =>
+    Effect.gen(function*() {
+      // The pass that runs at start-up finishes first, so it can't race the rows below.
+      yield* Effect.sleep("100 millis")
+      yield* quotes(sql, 200, "unpaid-", null, anHourAgo)
+      yield* quotes(sql, 1, "paid-", "PROCESSING", new Date())
+      yield* t.trackNow
+    })
+  )
+  assert.equal(flood.checked.length, 40)
+  assert.ok(flood.checked.includes("paid-1"), "the swap with money in it isn't behind 200 unpaid quotes")
+
+  // 50 swaps in flight and 20 unpaid quotes: the swaps don't take the whole pass.
+  const busy = mainnetTopUp()
+  await busy.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* Effect.sleep("100 millis")
+      yield* quotes(sql, 50, "paid-", "PROCESSING", anHourAgo)
+      yield* quotes(sql, 20, "unpaid-", null, new Date())
+      yield* t.trackNow
+    })
+  )
+  assert.equal(busy.checked.filter((a) => a.startsWith("paid-")).length, 30)
+  assert.equal(busy.checked.filter((a) => a.startsWith("unpaid-")).length, 10, "a payment just made is still noticed")
+})
+
+test("paid Top-Ups 1Click hasn't seen reach the admin one by one only up to a handful; past that, one line says so", async () => {
+  const w = mainnetTopUp()
+  await w.run((t, sql) =>
+    Effect.gen(function*() {
+      // The pass that runs at start-up finishes first, so it can't race the rows below.
+      yield* Effect.sleep("100 millis")
+      // Twelve Top-Ups of several accounts, each with a transaction named for it, ten minutes past their deadline.
+      yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, deposit_tx, deadline)
+                 SELECT 'named-' || i, 'someone' || i || '.near', 'in', 1000000, 'USDC', 'base', '1.01', 'tx-' || i, now() - interval '10 minutes' FROM generate_series(1, 12) i`
+      yield* t.trackNow
+    })
+  )
+  const admin = w.told.filter((x) => x.startsWith("admin: "))
+  const oneByOne = admin.filter((x) => x.includes("1Click hasn't seen a paid Top-Up: deposit named-"))
+  const summary = admin.filter((x) => x.includes("More than 5 paid Top-Ups in the last two hours are unseen by 1Click"))
+  assert.ok(oneByOne.length <= 5, `${oneByOne.length} one by one`)
+  assert.ok(summary.length >= 7 && new Set(summary).size === 1, "the rest share one text, which goes out at most hourly")
+  assert.equal(oneByOne.length + summary.length, 12, "every one of them was accounted for")
+  assert.equal(w.told.filter((x) => !x.startsWith("admin: ")).length, 12, "each customer is still told about their own")
 })

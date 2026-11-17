@@ -19,6 +19,8 @@ import { Sales } from "./Sales.ts"
 const BITREFILL_DAILY_CAP = 15
 /** A purchase that gave up at a step NEAR can safely repeat: confirm and fail are idempotent onchain. */
 const GAVE_UP_AT = /^Gave up after \d+ attempts at (confirm|fail):/
+/** Customers on the users list: each costs one contract view per load. */
+const USERS_SHOWN = 300
 
 interface Row {
   id: string
@@ -248,7 +250,7 @@ export class Admin extends Context.Service<Admin, {
           Effect.orDie
         )
 
-      // ponytail: one get_account view per known account on every load; page or cache it past a few hundred customers.
+      // ponytail: the 300 most recent customers, one get_account view each on every load; page it when there are more.
       const users = Effect.gen(function*() {
         const rows = yield* sql<{
           account_id: string
@@ -275,8 +277,11 @@ export class Admin extends Context.Service<Admin, {
           LEFT JOIN telegram_links t ON t.account_id = k.account_id
           LEFT JOIN checkout_emails e ON e.account_id = k.account_id
           LEFT JOIN bitrefill_connections b ON b.account_id = k.account_id
-          GROUP BY k.account_id, k.first_seen, t.telegram_name, e.account_id, b.account_id
-          ORDER BY max(p.created_at) DESC NULLS LAST, k.first_seen DESC`.pipe(Effect.orDie)
+          GROUP BY k.account_id, k.first_seen, k.onchain, t.telegram_name, e.account_id, b.account_id
+          -- Buyers first, then accounts the contract knows, then the newest sign-ups: signing in is free, so
+          -- sign-ups that never deposited can't crowd the rest out.
+          ORDER BY max(p.created_at) DESC NULLS LAST, k.onchain DESC, k.first_seen DESC
+          LIMIT ${USERS_SHOWN}`.pipe(Effect.orDie)
         const accounts = yield* Effect.forEach(rows, (r) =>
           near.view<{ balance: string; per_purchase_limit: string; daily_limit: string } | null>("get_account", { account_id: r.account_id }).pipe(
             Effect.orElseSucceed(() => undefined)

@@ -254,3 +254,16 @@ test("saving the credit numbers leaves automatic refills as they are now, and th
     yield* admin.configureCredit({ autoRefill: true }, "boss.testnet")
     assert.deepEqual([(yield* credit.settings).autoRefill, (yield* credit.settings).ceiling], [true, 800_000_000])
   })))
+
+test("the users list shows the 300 most recent customers, and sign-ups that never deposited can't crowd out one who did", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sql = yield* SqlClient.SqlClient
+    // alice deposited a month ago and never bought; 320 accounts have signed in since and done nothing else.
+    yield* sql`INSERT INTO known_accounts (account_id, first_seen, onchain) VALUES ('alice.testnet', now() - interval '30 days', true)`
+    yield* sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.testnet' FROM generate_series(1, 320) n`
+    const users = yield* admin.users
+    assert.equal(users.length, 300, "one contract view each, so the list is bounded")
+    assert.equal(users[0]?.accountId, "alice.testnet")
+    assert.equal(users[0]?.balance, 120_000_000)
+  })))
