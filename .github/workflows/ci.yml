@@ -95,4 +95,24 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "$TARGET" "$SHA"
+      # The web goes live only once the API it calls has: this calls the branch's Vercel Deploy Hook. A hook URL
+      # lets anyone deploy, so it's a secret. Until apps/web/vercel.json turns off Vercel's own deploys of the
+      # branch, Vercel has also deployed it at push; this second deploy of the same commit is harmless.
+      - name: Deploy the web
+        env:
+          HOOK_MAIN: ${{ secrets.VERCEL_DEPLOY_HOOK_MAIN }}
+          HOOK_STAGING: ${{ secrets.VERCEL_DEPLOY_HOOK_STAGING }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            main) hook=$HOOK_MAIN ;;
+            staging) hook=$HOOK_STAGING ;;
+            *) exit 0 ;; # testnet keeps Vercel's own deploys until it retires (ADR-0010)
+          esac
+          if [ -z "$hook" ]; then
+            echo "::notice::No Vercel Deploy Hook secret for $GITHUB_REF_NAME, so the web was deployed by Vercel at push, not here"
+            exit 0
+          fi
+          # --retry retries transient errors, timeouts included; a second build of the same commit is harmless.
+          curl -fsS -m 30 --retry 3 -X POST -o /dev/null "$hook"
+          echo "Vercel is building the web for $GITHUB_REF_NAME"
 
