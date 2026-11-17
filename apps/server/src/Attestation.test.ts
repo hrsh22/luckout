@@ -1,8 +1,10 @@
+import type { Collateral } from "@phala/dcap-qvl"
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import { privateKeyToAccount } from "viem/accounts"
-import { type Attested, bindsKeyAndNonce, composeMatches, gpusOk, makeAttestation, replySigned } from "./Attestation.ts"
+import { type Attested, bindsKeyAndNonce, composeMatches, gpusOk, makeAttestation, replySigned, TDX_OK, verifyTdx } from "./Attestation.ts"
 
 const nonce = "ab".repeat(32)
 const sha = (s: string) => createHash("sha256").update(s).digest("hex")
@@ -14,6 +16,17 @@ test("the TDX report must hold the enclave's own key and our nonce", () => {
   assert.ok(bindsKeyAndNonce(reportData, key, nonce))
   assert.ok(!bindsKeyAndNonce(reportData, "0x" + "11".repeat(20), nonce), "another key")
   assert.ok(!bindsKeyAndNonce(reportData, key, "cd".repeat(32)), "a replayed report")
+})
+
+test("a real Intel TDX quote verifies and its TD report is read; a tampered one fails", () => {
+  const f = JSON.parse(readFileSync(new URL("fixtures/tdx-quote.json", import.meta.url), "utf8")) as { now: number; quote: string; collateral: Collateral }
+  const quote = Buffer.from(f.quote, "hex")
+  const tdx = verifyTdx(quote, f.collateral, f.now)
+  assert.ok(TDX_OK.has(tdx.status ?? ""), tdx.status)
+  assert.equal(tdx.td?.report_data, "9a9d48e7f6799642d3d1b34e1e5e1742d4bb02dd6ddd551862c1211d35c304f9eca3efdbb481601c163cf52493d6e44aed55d51ec39b7e518fadb92c2b523f20")
+  assert.equal(tdx.td?.mr_config_id, "0".repeat(96))
+  quote[48 + 520]! ^= 1 // one bit of report_data, which the quote signs
+  assert.deepEqual(verifyTdx(quote, f.collateral, f.now), { status: undefined, td: undefined })
 })
 
 test("mr_config must commit to the app-compose the enclave reports", () => {

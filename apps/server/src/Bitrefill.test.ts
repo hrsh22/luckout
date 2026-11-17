@@ -27,8 +27,9 @@ test("Bitrefill's 15 orders are counted over a rolling 24 hours, and the next on
   assert.ok(ORDER_LIMIT.test(`HTTP 400 {"error_code":"purchase_limit_reached"}`) && ORDER_LIMIT.test("Purchase limit reached"))
 })
 
-// Live calls. Test products are free; real ones are only priced, never bought.
-const live = { skip: !process.env.BITREFILL_API_KEY && "BITREFILL_API_KEY not set" }
+// Live calls, only when asked for (pnpm --filter @luckout/server test:live). Test products are free; real
+// ones are only priced, never bought.
+const live = { skip: !(process.env.LIVE_TESTS && process.env.BITREFILL_API_KEY) && "set LIVE_TESTS=1 with BITREFILL_API_KEY to call Bitrefill" }
 const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>, env: Record<string, string> = {}) =>
   Effect.runPromise(Bitrefill.use(f).pipe(
     Effect.provide(Bitrefill.layer),
@@ -70,10 +71,34 @@ test("test vouchers are priced at face value", live, async () => {
   assert.equal(v.packages.find((p) => p.value === "10")?.priceMicroUsdc, 10_000_000)
 })
 
-// A package that doesn't exist is refused before any invoice, whatever the balance.
-test("a refusal from Bitrefill is a definite Refused, not an unknown", live, async () => {
-  const o = await run((b) => b.order("swiggy-money-india", "999999"))
-  assert.equal(o._tag, "Refused", JSON.stringify(o))
+// Bitrefill's answers to an order, faked: a refusal refunds the customer, so only an answer that means
+// "nothing was created" may count as one. Anything else stays unknown, for the reconciler.
+test("a refusal from Bitrefill is a definite Refused; an answer we don't recognise stays unknown", async () => {
+  const realFetch = globalThis.fetch
+  let answer: () => Response = () => new Response("", { status: 500 })
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input instanceof Request ? input.url : input)
+    // Only the MCP endpoint is under test; anything else the layer fetches gets an empty catalog page.
+    return url.endsWith("/mcp") ? answer() : Response.json({ meta: {}, data: [] })
+  }) as typeof fetch
+  const toolError = (error: string, code: string) =>
+    new Response(`data: ${JSON.stringify({ result: { isError: true, content: [{ text: JSON.stringify({ error, code }) }] } })}\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    })
+  // No guest client (an empty value counts as unset), so the order goes out with the API key.
+  const env = { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "" }
+  const order = () => run((b) => b.order("swiggy-money-india", "999999"), env)
+  try {
+    answer = () => new Response(JSON.stringify({ error: "Unknown package" }), { status: 400 })
+    assert.equal((await order())._tag, "Refused", "an HTTP 4xx: the tool never ran")
+    answer = () => toolError("Unknown package", "INVALID_INPUT")
+    assert.equal((await order())._tag, "Refused", "a tool error that means nothing was created")
+    answer = () => toolError("Could not confirm payment", "PAYMENT_UNCERTAIN")
+    await assert.rejects(order(), (e: { message?: string }) => /Bitrefill request failed/.test(e.message ?? ""), "unknown: never refunded on a guess")
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 test("junk ids spend no lookups, and browsing can never use up the ones a purchase needs", async () => {

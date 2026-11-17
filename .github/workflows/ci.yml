@@ -22,13 +22,24 @@ jobs:
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      # Tests that call Bitrefill skip themselves without BITREFILL_API_KEY.
+      # Live tests (Bitrefill, 1Click) run only with LIVE_TESTS=1, never here.
       - run: pnpm test
       - run: pnpm --filter @luckout/web build
+
+  # Known advisories in what we ship (devDependencies left out), at high or critical. Its own job, so a newly
+  # published advisory turns the commit red without holding up a deploy. Accepted ones are listed, each with
+  # its reason, under auditConfig in pnpm-workspace.yaml. It reads only the lockfile: nothing to install.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      # The registry's audit service being down isn't a finding.
+      - run: pnpm audit --prod --audit-level high --ignore-registry-errors
 
   contract:
     runs-on: ubuntu-latest
@@ -59,7 +70,12 @@ jobs:
         working-directory: contract
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh | sh
+      # Pinned by its sha256, as the actions are by commit: this job's luckout.wasm is what contract/upgrade.sh
+      # deploys to mainnet. The installer in turn checks the sha256 of the cargo-near binary it downloads.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/cargo-near-installer.sh" https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh
+          echo "76ae71bc6a99864a09cc67c1c0bf82a2b7812d8ab4c93034b680235df6d22028  $RUNNER_TEMP/cargo-near-installer.sh" | sha256sum -c -
+          sh "$RUNNER_TEMP/cargo-near-installer.sh"
       - run: cargo near build reproducible-wasm
       - run: python3 code-hash.py target/near/luckout.wasm | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -84,7 +100,11 @@ jobs:
             ~/.cargo/registry
             contract/sandbox/target
           key: sandbox-${{ hashFiles('contract/sandbox/Cargo.lock', 'contract/rust-toolchain.toml') }}
-      - run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh | sh
+      # The same installer, checked the same way as in contract-wasm.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/cargo-near-installer.sh" https://github.com/near/cargo-near/releases/download/cargo-near-v0.23.0/cargo-near-installer.sh
+          echo "76ae71bc6a99864a09cc67c1c0bf82a2b7812d8ab4c93034b680235df6d22028  $RUNNER_TEMP/cargo-near-installer.sh" | sha256sum -c -
+          sh "$RUNNER_TEMP/cargo-near-installer.sh"
       - run: cargo near build non-reproducible-wasm --locked
       - run: cargo near build non-reproducible-wasm --locked
         working-directory: contract/test-usdc

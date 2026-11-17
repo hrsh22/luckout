@@ -149,7 +149,7 @@ Needs Node 24+ and pnpm (`corepack enable`).
 pnpm install
 cp .env.example .env   # optional; everything below runs without it
 pnpm dev               # web on :3000, server on :8787
-pnpm test              # unit tests; tests that call Bitrefill or 1Click skip without keys
+pnpm test              # unit tests; nothing calls Bitrefill or 1Click (pnpm --filter @luckout/server test:live does, with keys)
 ```
 
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY`, the catalog and prices work. With the operator key and `REDEMPTION_KEY`, purchases work. All variables are in [`.env.example`](.env.example).
@@ -402,7 +402,7 @@ CONTEXT.md      domain glossary
 - **Written with AI assistance:** most of the code was written by [@hrsh22](https://github.com/hrsh22) with the assistance of Claude Code.
 - **Libraries:**
   - Contract: `near-sdk`.
-  - Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl-node` (Intel TDX quote verification), `openai` (types only).
+  - Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl` (Intel TDX quote verification), `openai` (types only).
   - Web: Next.js, React, `@hot-labs/near-connect`, Reown AppKit with wagmi, TanStack Query, motion.
   - External services: Bitrefill (gift cards), NEAR Intents 1Click, NEAR AI Cloud, NVIDIA NRAS, Telegram.
 - **License:** MIT. See [LICENSE](LICENSE).

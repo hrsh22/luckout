@@ -45,13 +45,14 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    ```
 4. **Node and code.** SSH in as `luckout-api`:
    ```sh
-   nvm install 24 && nvm alias default 24   # the server needs Node 24
-   npm i -g pnpm@11 pm2
    cd ~/htdocs/luckout-api.gamified.trade
    # the repo is private: add ~/.ssh/github_deploy.pub as a read-only deploy key
    git clone git@github.com:hrsh22/luckout.git .
+   nvm install && nvm alias default "$(cat .nvmrc)"   # the Node version in .nvmrc, the one CI tests on
+   npm i -g pnpm@11 pm2
    pnpm install --frozen-lockfile --filter @luckout/server...
    ```
+   To move to another Node version, change `.nvmrc` in a PR. Before that release deploys, on each site: `nvm install <version> --reinstall-packages-from=current && nvm alias default <version>`, then `pm2 update` at a quiet moment (it restarts the server on the new Node). The deploy script and the `@reboot` line both use nvm's `default`.
 5. **Secrets.** Copy `.env.example` to `.env` in the repo root, then `chmod 600 .env`. Fill in:
    - `PORT=8788` and `DATABASE_URL=postgres://luckout:<password>@127.0.0.1:5432/luckout`
    - `WEB_ORIGIN=` the web app's URL, for CORS
@@ -67,8 +68,8 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    `https://luckout-api.gamified.trade/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://api.luckout.wtf`.
 7. **Reboots and backups.** Put the password in `~/.pgpass` (`127.0.0.1:5432:luckout:luckout:<password>`, then `chmod 600`). Run `mkdir -p ~/backups`, then add to `crontab -e`. The `@reboot` line brings pm2 back without root, so `pm2 startup` isn't needed:
    ```cron
-   PATH=/home/luckout-api/.nvm/versions/node/v24.22.2/bin:/usr/local/bin:/usr/bin:/bin
-   @reboot cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect
+   # bash, because cron's sh can't load nvm; nvm's default Node is the one in .nvmrc (step 4)
+   @reboot bash -c '. ~/.nvm/nvm.sh && cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect'
    0 3 * * * pg_dump -h 127.0.0.1 -U luckout luckout | gzip > ~/backups/luckout-$(date +\%F).sql.gz && find ~/backups -name 'luckout-*.sql.gz' -mtime +14 -delete
    ```
 
