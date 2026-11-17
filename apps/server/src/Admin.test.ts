@@ -1,5 +1,5 @@
 import { Api, CreditSettings } from "@luckout/api"
-import { Effect, Layer } from "effect"
+import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
@@ -10,7 +10,7 @@ import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
-import { Near } from "./Near.ts"
+import { Near, NearUnavailable } from "./Near.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
@@ -192,3 +192,35 @@ test("the overview shows how near the busiest Checkout Email is to Bitrefill's l
     assert.deepEqual(o.checkout.limits, { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 })
     assert.deepEqual(o.checkout.busiest, { orders: 2, daily: 15_000_000, monthly: 35_000_000 })
   })))
+
+test("Stop sales and the shop's status need only the database: they work while NEAR doesn't answer, and the overview doesn't", async () => {
+  const down = fakeNear({
+    relayerId: "relayer.test",
+    view: () => Effect.fail(new NearUnavailable({ message: "NEAR isn't answering" })),
+    account: () => Effect.fail(new NearUnavailable({ message: "NEAR isn't answering" }))
+  })
+  const outage = Admin.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
+    Layer.provide(Layer.mergeAll(
+      Layer.succeed(Near, down),
+      Layer.succeed(Bitrefill, bitrefill),
+      Layer.succeed(Base, fakeBase()),
+      Layer.succeed(Refill, refill),
+      Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
+    )),
+    Layer.provideMerge(DbMemory)
+  )
+  const r = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sales = yield* Sales
+    const overview = yield* Effect.exit(admin.overview)
+    const stopped = yield* admin.setSales(false, "boss.testnet")
+    const seen = yield* sales.status
+    const restarted = yield* admin.setSales(true, "boss.testnet")
+    return { overview, stopped, seen, restarted }
+  })).pipe(Effect.provide(outage)))
+  assert.ok(Exit.isFailure(r.overview), "the overview reads the contract, so it fails without NEAR")
+  assert.deepEqual([r.stopped.open, r.stopped.reason], [false, "stopped"])
+  assert.equal(r.seen.reason, "stopped", "what the panel shows when the overview can't load")
+  assert.equal(r.restarted.open, true, "an unreadable pause counts as not paused")
+})
