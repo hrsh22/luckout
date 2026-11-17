@@ -23,7 +23,7 @@ const Api = HttpApi.make("edge-test").add(AuthApi)
 const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
   handlers.handleAll({
     challenge: () => Effect.die("not used in this test"),
-    verify: ({ payload }) => Effect.sync(() => (signedIn.push(payload.accountId), new Session({ accountId: payload.accountId, token: "t", expiresAt: 0 }))),
+    verify: ({ payload }) => Effect.sync(() => (signedIn.push(payload.accountId), new Session({ accountId: payload.accountId, expiresAt: 0 }))),
     verifyEvm: () => Effect.fail(new Unauthorized({ message: "not used in this test" }))
   }))
 const Routes = Layer.mergeAll(

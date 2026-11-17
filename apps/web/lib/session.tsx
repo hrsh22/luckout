@@ -14,9 +14,10 @@ import {
   type SignedIntent
 } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
-import { createContext, useCallback, useContext, useEffect, useState } from "react"
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
+import { getAddress } from "viem"
 import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
-import { connectEvm, disconnectEvm, evmAddress, signText, watchEvm } from "./evm"
+import { connectEvm, disconnectEvm, evmAddress, evmChainId, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -41,8 +42,12 @@ export interface SignInProblem {
 }
 
 interface Session {
-  /** The signed-in account; set only together with a valid token. */
+  /** The signed-in account; set only together with `token`. */
   accountId: string | undefined
+  /**
+   * This sign-in's name (account and expiry), not a secret: it keys what was read for it and marks a call as
+   * made signed in (`api(f, token)`). The session token itself is an HttpOnly cookie no script can read.
+   */
   token: string | undefined
   /** False until the saved session has been checked against the wallet. */
   ready: boolean
@@ -95,8 +100,13 @@ const asIntent = (account: string, c: Call) => {
 }
 const SessionContext = createContext<Session | null>(null)
 
-// ponytail: the token sits in localStorage; move to an HttpOnly cookie if XSS risk grows (needs the API on a luckout.wtf subdomain first).
-const load = (): { accountId: string; token: string; expiresAt: number } | undefined => {
+/** What is saved of a session: who and until when. The token never reaches the page (an HttpOnly cookie). */
+interface Saved {
+  accountId: string
+  expiresAt: number
+}
+const nameOf = (s: Saved) => `${s.accountId}:${s.expiresAt}`
+const load = (): Saved | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")
     return s && s.expiresAt > Date.now() ? s : undefined
@@ -108,6 +118,18 @@ const forget = () => {
   try {
     localStorage.removeItem(STORAGE)
   } catch {}
+}
+/**
+ * Ends `who`'s session on the server, which also drops the cookie in this browser. Sign out does it, and so does
+ * every way the wallet leaves the session behind (disconnected, or on another account): otherwise the cookie stays
+ * good for days, on what may be a shared computer. Sent without the session's name, so one already over doesn't
+ * fire UNAUTHORIZED again, and skipped once another tab has signed in as someone else, since the browser's one
+ * cookie is theirs now. It never fails: a server that doesn't answer in 5 seconds, or says the session is already
+ * over, is left behind.
+ */
+const endOnServer = (who: string | undefined) => {
+  const saved = load()
+  return who && (!saved || saved.accountId === who) ? api((c) => c.session.signOut(), undefined, "5 seconds").catch(() => {}) : Promise.resolve()
 }
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
@@ -121,13 +143,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [signing, setSigning] = useState<SignInStep>()
   const [signInError, setSignInError] = useState<SignInProblem>()
   const accountId = session?.accountId
+  // Who is signed in right now, for work that finishes later: a balance read started for one account must
+  // never be shown to the next.
+  const current = useRef<string | undefined>(undefined)
+  current.current = accountId
   const evm = !!accountId && isEvmAccount(accountId)
   const qc = useQueryClient()
 
   // Signed out, switched or expired: nothing read for the last account (purchases and their codes
   // included) may outlive it.
-  const clear = useCallback(() => {
-    forget()
+  const reset = useCallback(() => {
+    current.current = undefined
     setSession(undefined)
     setAccount(undefined)
     setAccountError(undefined)
@@ -136,18 +162,30 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setGasFree(undefined)
     qc.clear()
   }, [qc])
+  const clear = useCallback(() => {
+    forget()
+    reset()
+  }, [reset])
+  // The wallet left this session behind: end it on the server too, not only on this page.
+  const leave = useCallback(() => {
+    void endOnServer(current.current)
+    clear()
+  }, [clear])
 
   const token = session?.token
   const refresh = useCallback(async () => {
     if (!accountId || !token) return
     try {
       const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token, evm)])
+      // Signed out or switched while this was on its way: it's someone else's balance now.
+      if (current.current !== accountId) return
       setAccount(a)
       setWalletUsdc(w)
       setWalletNear(n)
       setGasFree(free)
       setAccountError(undefined)
     } catch (e) {
+      if (current.current !== accountId) return
       setAccountError(errorMessage(e))
       throw e
     }
@@ -159,30 +197,44 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const connected = saved && isEvmAccount(saved.accountId)
       ? evmAddress()
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
+    const leftBehind = () => {
+      void endOnServer(saved?.accountId)
+      forget()
+    }
     connected.then((id) => {
-      if (saved && saved.accountId === id) setSession(saved)
-      else forget()
-    }, forget).finally(() => setReady(true))
+      if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved) })
+      else leftBehind()
+    }, leftBehind).finally(() => setReady(true))
   }, [])
+
+  // One cookie serves every tab. Another tab signed in as someone else, or signed out: this tab's calls no
+  // longer carry its own session, so it ends here too (leaving the saved session, which is the other tab's).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE && accountId && load()?.accountId !== accountId) reset()
+    }
+    window.addEventListener("storage", onStorage)
+    return () => window.removeEventListener("storage", onStorage)
+  }, [accountId, reset])
 
   // An EVM wallet that switched address or disconnected no longer matches this session.
   useEffect(() => {
     if (!evm) return
     let stop: (() => void) | undefined
     let live = true
-    watchEvm((id) => id !== accountId && clear()).then((s) => (live ? (stop = s) : s()), () => {})
+    watchEvm((id) => id !== accountId && leave()).then((s) => (live ? (stop = s) : s()), () => {})
     return () => {
       live = false
       stop?.()
     }
-  }, [evm, accountId, clear])
+  }, [evm, accountId, leave])
 
   // The wallet signed out or switched accounts elsewhere: this session no longer matches it.
   useEffect(() => {
     const c = near()
-    const onSignOut = () => clear()
+    const onSignOut = () => leave()
     const onSignIn = (e: { accounts: Array<{ accountId: string }> }) => {
-      if (accountId && e.accounts[0]?.accountId !== accountId) clear()
+      if (accountId && e.accounts[0]?.accountId !== accountId) leave()
     }
     c.on("wallet:signOut", onSignOut)
     c.on("wallet:signIn", onSignIn)
@@ -192,7 +244,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       c.off("wallet:signIn", onSignIn)
       window.removeEventListener(UNAUTHORIZED, clear)
     }
-  }, [accountId, clear])
+  }, [accountId, clear, leave])
 
   // Balances can change elsewhere (Telegram, another tab): re-read when the tab comes back.
   useEffect(() => {
@@ -217,13 +269,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     )
   }
 
-  /** personal_sign with an EVM wallet (ADR-0011). */
+  /** personal_sign of a Sign-In with Ethereum message naming this site, with an EVM wallet (ADR-0011). */
   const signInEvm = async () => {
     const address = await connectEvm()
     const challenge = await api((c) => c.auth.challenge())
+    // The site as the browser sees it: the wallet compares it with the page, and the server with its own sites.
+    const site = { uri: window.location.origin, chainId: await evmChainId(), issuedAt: new Date().toISOString() }
     setSigning("message")
-    const signature = await signText(address, evmSignInMessage(challenge))
-    return api((c) => c.auth.verifyEvm({ payload: new SignedEvmChallenge({ address, signature, nonce: challenge.nonce }) }))
+    const signature = await signText(address, evmSignInMessage({ challenge, address: getAddress(address), ...site }))
+    return api((c) => c.auth.verifyEvm({ payload: new SignedEvmChallenge({ address, signature, nonce: challenge.nonce, ...site }) }))
   }
 
   const signIn = async (kind: "near" | "evm" = "near") => {
@@ -238,17 +292,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
       const [read, free] = await Promise.all([
         readAccount(s.accountId).catch((e: unknown) => new Error(errorMessage(e))),
-        relayable(s.token, isEvmAccount(s.accountId))
+        relayable(nameOf(s), isEvmAccount(s.accountId))
       ])
-      if (read instanceof Error) setAccountError(read.message)
-      else {
+      if (read instanceof Error) {
+        // Whatever was held before isn't this account's: show "couldn't read", never another balance.
+        setAccount(undefined)
+        setWalletUsdc(undefined)
+        setWalletNear(undefined)
+        setAccountError(read.message)
+      } else {
         setAccount(read[0])
         setWalletUsdc(read[1])
         setWalletNear(read[2])
         setAccountError(undefined)
       }
       setGasFree(free)
-      setSession({ accountId: s.accountId, token: s.token })
+      setSession({ accountId: s.accountId, token: nameOf(s) })
       return undefined
     } catch (e) {
       const problem = {
@@ -317,6 +376,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = async () => {
+    await endOnServer(current.current)
     clear()
     await Promise.all([near().disconnect().catch(() => {}), disconnectEvm()])
   }

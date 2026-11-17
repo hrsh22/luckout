@@ -1,16 +1,16 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, Authorization, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
 import { Refill } from "./Refill.ts"
-import { Config, Effect, Layer, Redacted } from "effect"
+import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
-import { Auth } from "./Auth.ts"
+import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
 import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
@@ -73,8 +73,9 @@ const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
     const auth = yield* Auth
     return handlers.handleAll({
       challenge: () => auth.challenge,
-      verify: ({ payload }) => auth.verify(payload),
-      verifyEvm: ({ payload }) => auth.verifyEvm(payload)
+      // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when.
+      verify: ({ payload }) => startSession(auth.verify(payload)),
+      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload))
     })
   })
 )
@@ -83,7 +84,9 @@ const SessionHandlers = HttpApiBuilder.group(Api, "session", (handlers) =>
   Effect.gen(function*() {
     const auth = yield* Auth
     return handlers.handleAll({
-      signOutEverywhere: () => CurrentAccount.use((a) => auth.signOutEverywhere(a.accountId))
+      // The session to end is the one this request came with; this browser drops its cookie either way.
+      signOut: () => Effect.flatMap(sessionToken, auth.signOut).pipe(Effect.andThen(dropCookie)),
+      signOutEverywhere: () => CurrentAccount.use((a) => auth.signOutEverywhere(a.accountId)).pipe(Effect.andThen(dropCookie))
     })
   })
 )
@@ -178,18 +181,6 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       retry: ({ params }) =>
         Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
           UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
-    })
-  })
-)
-
-const AuthorizationLive = Layer.effect(
-  Authorization,
-  Effect.gen(function*() {
-    const auth = yield* Auth
-    return Authorization.of({
-      bearer: (httpEffect, { credential }) =>
-        Effect.flatMap(auth.authenticate(Redacted.value(credential)), (accountId) =>
-          Effect.provideService(httpEffect, CurrentAccount, { accountId }))
     })
   })
 )

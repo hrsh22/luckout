@@ -72,9 +72,16 @@ export class Unauthorized extends Schema.TaggedError<Unauthorized>()(
   { httpApiStatus: 401 }
 ) {}
 
+/**
+ * The session token travels only in this cookie, set by the server as HttpOnly, so no script on the page can
+ * read it. The API is on a subdomain of the Web App's own domain (api.luckout.wtf next to www.luckout.wtf),
+ * which makes the cookie first-party.
+ */
+export const sessionCookie = HttpApiSecurity.apiKey({ key: "luckout_session", in: "cookie" })
+
 export class Authorization extends HttpApiMiddleware.Service<Authorization, { provides: CurrentAccount; requires: never }>()(
   "luckout/Authorization",
-  { security: { bearer: HttpApiSecurity.bearer }, error: Unauthorized }
+  { security: { cookie: sessionCookie }, error: Unauthorized }
 ) {}
 
 /** NEP-413 sign-in: the wallet signs `message` for `recipient` with this single-use `nonce`. */
@@ -93,16 +100,30 @@ export class SignedChallenge extends Schema.Class<SignedChallenge>("SignedChalle
   nonce: Schema.String
 }) {}
 
-/** EVM sign-in (ADR-0011): the wallet signs this text with `personal_sign`; it can't move money. */
-export const evmSignInMessage = (challenge: { message: string; nonce: string }) =>
-  `${challenge.message}\n\nThis only signs you in. It can't move money.\n\nNonce: ${challenge.nonce}`
+/**
+ * EVM sign-in (ADR-0011): the text the wallet signs with `personal_sign`, in the Sign-In with Ethereum format
+ * (EIP-4361). It names the site it was made on (`uri`), which a wallet compares with the page asking for the
+ * signature and the server checks against its own sites, so a signature made on another site signs nobody in.
+ * `address` must be in checksum case, and `issuedAt` an ISO time.
+ */
+export const evmSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; chainId: number; issuedAt: string }) =>
+  `${new URL(o.uri).host} wants you to sign in with your Ethereum account:\n${o.address}\n\n` +
+  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
+  // The format wants a nonce of letters and digits only; ours is base64.
+  `URI: ${o.uri}\nVersion: 1\nChain ID: ${o.chainId}\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
 
 export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("SignedEvmChallenge")({
   /** 0x address, any case */
   address: Schema.String,
   /** 0x hex of the 65-byte personal_sign signature */
   signature: Schema.String,
-  nonce: Schema.String
+  nonce: Schema.String,
+  /** The origin of the page that asked for the signature (`window.location.origin`), as written into the message. */
+  uri: Schema.String,
+  /** The chain the wallet was on, and when it was asked, as written into the message. */
+  chainId: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+  // An ISO time, nothing more: it is written into the text the server rebuilds, so it can't carry a line of its own.
+  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
 }) {}
 
 /** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), as `intents.near` takes it. */
@@ -115,9 +136,9 @@ export const SignedIntent = Schema.Struct({
 })
 export type SignedIntent = typeof SignedIntent.Type
 
+/** Who signed in and until when. The token itself is only ever in the `sessionCookie`. */
 export class Session extends Schema.Class<Session>("Session")({
   accountId: Schema.String,
-  token: Schema.String,
   expiresAt: Schema.Number
 }) {}
 
@@ -276,8 +297,9 @@ export class AuthApi extends HttpApiGroup.make("auth").add(
   HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized })
 ) {}
 
-/** Ends every session of the signed-in account, on every device (a lost phone, a shared computer). */
+/** Ends the session the request came with, or every session of the signed-in account, on every device (a lost phone, a shared computer). */
 export class SessionApi extends HttpApiGroup.make("session").add(
+  HttpApiEndpoint.post("signOut", "/session/sign-out", { success: HttpApiSchema.NoContent }),
   HttpApiEndpoint.post("signOutEverywhere", "/session/sign-out-everywhere", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}
 

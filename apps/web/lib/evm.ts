@@ -50,6 +50,12 @@ export async function evmAddress() {
   return core.getAccount(config).address?.toLowerCase()
 }
 
+/** The chain the wallet is on now (Ethereum's if it doesn't say): written into the sign-in message. */
+export async function evmChainId() {
+  const { config, core } = await load()
+  return core.getAccount(config).chainId ?? 1
+}
+
 /** Opens the wallet picker; resolves with the address once connected, or throws if it was closed first. */
 export async function connectEvm(): Promise<string> {
   const { modal, config, core } = await load()

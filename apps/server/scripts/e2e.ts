@@ -11,13 +11,15 @@ const [customer = "alice.luckout.testnet", other = "luckout.testnet"] = process.
 const api = process.env.API_URL ?? "http://localhost:8787"
 const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
 
-const req = async (method: string, path: string, body?: unknown, token?: string) => {
+const req = async (method: string, path: string, body?: unknown, session?: string) => {
   const r = await fetch(api + path, {
     method,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { "content-type": "application/json", ...(session ? { cookie: session } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
-  return { status: r.status, json: await r.json().catch(() => null) }
+  // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
 const APP = "app.luckout.testnet"
@@ -41,14 +43,14 @@ const signIn = async (accountId: string) => {
   const first = await req("POST", "/auth/verify", body)
   assert.equal(first.status, 200, JSON.stringify(first.json))
   assert.equal((await req("POST", "/auth/verify", body)).status, 401, "a nonce works only once")
-  return first.json.token as string
+  return first.session!
 }
 
 const token = await signIn(customer)
 console.log("✔ sign-in works; replayed nonce and foreign key refused")
 
 assert.equal((await req("GET", "/purchases")).status, 401)
-assert.equal((await req("GET", "/purchases", undefined, "forged.token")).status, 401)
+assert.equal((await req("GET", "/purchases", undefined, "luckout_session=forged.token")).status, 401)
 console.log("✔ purchases need a valid session")
 
 const buy = (body: object) => req("POST", "/purchases", body, token)

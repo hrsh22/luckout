@@ -18,7 +18,18 @@ export const edge = (allowedOrigins: ReadonlyArray<string>) =>
     // Answers carry session tokens, gift card codes and balances: no browser or proxy may keep one. Listed
     // first so it wraps the others and also marks their own answers (a 429).
     HttpRouter.middleware((app) => Effect.map(app, HttpServerResponse.setHeader("cache-control", "no-store")), { global: true }),
-    HttpRouter.cors({ allowedOrigins }),
+    // Our pages send the session cookie with their calls (credentials), so only our own origins may read answers.
+    HttpRouter.cors({ allowedOrigins, credentials: true }),
+    // SameSite=Lax keeps the session cookie off other sites' requests, but our sibling sites (testnet., staging.)
+    // count as the same site: a call that changes something must come from one of our own pages, or from no
+    // page at all (a script), never from a page elsewhere.
+    HttpRouter.middleware((app) =>
+      Effect.flatMap(HttpServerRequest.HttpServerRequest, (r) => {
+        const origin = r.headers.origin
+        return r.method === "GET" || r.method === "HEAD" || r.method === "OPTIONS" || origin === undefined || allowedOrigins.includes(origin)
+          ? app
+          : Effect.succeed(HttpServerResponse.jsonUnsafe({ _tag: "Forbidden", message: "Use Luckout from its own site." }, { status: 403 }))
+      }), { global: true }),
     HttpRouter.middleware(rateLimit, { global: true }),
     // Read past the limit and the read fails: the API answers 413, and /mcp its own parse error.
     HttpRouter.middleware(Effect.provideService(HttpServerRequest.MaxBodySize, MAX_BODY), { global: true })

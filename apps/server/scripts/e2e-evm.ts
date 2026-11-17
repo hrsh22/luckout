@@ -28,13 +28,15 @@ const INTENTS = "intents.luckout.testnet"
 const rpc = new JsonRpcProvider({ url: "https://test.rpc.fastnear.com" })
 const view = async <A>(contractId: string, method: string, args: Record<string, unknown>) => (await rpc.callFunction({ contractId, method, args })) as A
 
-const req = async (method: string, path: string, body?: unknown, token?: string) => {
+const req = async (method: string, path: string, body?: unknown, session?: string) => {
   const r = await fetch(api + path, {
     method,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    headers: { "content-type": "application/json", ...(session ? { cookie: session } : {}) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
-  return { status: r.status, json: await r.json().catch(() => null) }
+  // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
 const wallet = privateKeyToAccount(generatePrivateKey())
@@ -55,19 +57,24 @@ const auth = (action: AuthAction) => authCallIntent(APP, action)
 const intentsUsdc = async () => BigInt(await view<string>(INTENTS, "mt_balance_of", { account_id: ME, token_id: `nep141:${USDC}` }))
 const balance = async () => BigInt((await view<{ balance: string } | null>(APP, "get_account", { account_id: ME }))?.balance ?? "0")
 
-// Sign in: a personal_sign of the challenge, once, by the address's own key.
+// Sign in: a personal_sign of a Sign-In with Ethereum message naming the site, once, by the address's own key.
+// WEB_ORIGIN must be one of the sites the server under test accepts (its own WEB_ORIGIN or CORS_ORIGINS).
+const SITE = process.env.WEB_ORIGIN ?? "http://localhost:3000"
+const signedIn = async (c: { message: string; nonce: string }, by = wallet) => {
+  const site = { uri: SITE, chainId: 8453, issuedAt: new Date().toISOString() }
+  const signature = await by.signMessage({ message: evmSignInMessage({ challenge: c, address: wallet.address, ...site }) })
+  return { address: wallet.address, signature, nonce: c.nonce, ...site }
+}
 const { json: c } = await req("POST", "/auth/challenge", {})
-const signature = await wallet.signMessage({ message: evmSignInMessage(c) })
-const forged = await req("POST", "/auth/verify-evm", { address: ME, signature: await stranger.signMessage({ message: evmSignInMessage(c) }), nonce: c.nonce })
+const forged = await req("POST", "/auth/verify-evm", await signedIn(c, stranger))
 assert.equal(forged.status, 401, "another key can't sign in this address")
 const { json: c2 } = await req("POST", "/auth/challenge", {})
-const s2 = await wallet.signMessage({ message: evmSignInMessage(c2) })
-const session = await req("POST", "/auth/verify-evm", { address: wallet.address, signature: s2, nonce: c2.nonce })
+const mine = await signedIn(c2)
+const session = await req("POST", "/auth/verify-evm", mine)
 assert.equal(session.status, 200, JSON.stringify(session.json))
 assert.equal(session.json.accountId, ME)
-assert.equal((await req("POST", "/auth/verify-evm", { address: wallet.address, signature: s2, nonce: c2.nonce })).status, 401, "once")
-void signature
-const token = session.json.token as string
+assert.equal((await req("POST", "/auth/verify-evm", mine)).status, 401, "once")
+const token = session.session!
 console.log(`✔ ${ME} signs in; another key and a replay are refused`)
 
 // Test USDC into its NEAR Intents account, as 1Click would deliver it on mainnet.

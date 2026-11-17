@@ -290,6 +290,11 @@ const migrations = Migrator.fromRecord({
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE known_accounts ADD COLUMN onchain BOOLEAN NOT NULL DEFAULT false, ADD COLUMN checked_at TIMESTAMPTZ`
     yield* sql`UPDATE known_accounts SET onchain = true`
+  }),
+  "0022_ended_sessions": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // Sessions signed out before their token expired (Auth.ts): the token's signature, kept until that expiry.
+    yield* sql`CREATE TABLE ended_sessions (tag TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)`
   })
 })
 

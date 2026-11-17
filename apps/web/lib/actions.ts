@@ -9,6 +9,7 @@ import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
 import { type Call, contractId, intentsId, usdcId } from "./near"
 import { useSession } from "./session"
+import { oneAtATime } from "./utils"
 
 const ONE_YOCTO = "1"
 
@@ -30,23 +31,25 @@ export function useWalletActions() {
   const qc = useQueryClient()
 
   /** Each step may ask the wallet to approve or sign; the toast says what's happening throughout. */
-  const steps = async (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>) => {
-    if (!accountId) return false
-    const id = toast.loading(pending, { description: evm ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
-    try {
-      await f((text) => toast.loading(text, { id }))
-      toast.success(typeof done === "string" ? done : done(), { id, description: undefined })
-      return true
-    } catch (e) {
-      // Backing out of the wallet isn't a failure: say what happened, without the alarm.
-      if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
-      else toast.error(errorMessage(e), { id, description: undefined })
-      return false
-    } finally {
-      // Even a failure or a timeout may have moved money: show what the chain says now.
-      await refresh().catch(() => {})
-    }
-  }
+  const steps = (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>) =>
+    // One wallet request at a time: a second tap while this one is open answers false and asks the wallet nothing.
+    oneAtATime(async () => {
+      if (!accountId) return false
+      const id = toast.loading(pending, { description: evm ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
+      try {
+        await f((text) => toast.loading(text, { id }))
+        toast.success(typeof done === "string" ? done : done(), { id, description: undefined })
+        return true
+      } catch (e) {
+        // Backing out of the wallet isn't a failure: say what happened, without the alarm.
+        if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
+        else toast.error(errorMessage(e), { id, description: undefined })
+        return false
+      } finally {
+        // Even a failure or a timeout may have moved money: show what the chain says now.
+        await refresh().catch(() => {})
+      }
+    })
 
   const run = (pending: string, done: string, ...calls: Array<Call>) => steps(pending, done, () => send(...calls))
   const withdrawCall = (micro: number): Call => ({
