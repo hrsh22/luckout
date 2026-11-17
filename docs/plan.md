@@ -65,7 +65,7 @@ The repo is a pnpm workspace:
 
 1. The quote comes from the contract's `quote` view.
 2. `purchase` debits the Maximum Price and locks the reserve onchain. Admission is idempotent through a unique key in Postgres.
-3. The server buys on Bitrefill from the prepaid USD store credit, through Bitrefill's MCP `buy-products` with `balance_currency: "USD"`. On testnet the free test products are bought through REST instead (see `docs/research/bitrefill-funding.md`).
+3. The server buys on Bitrefill through its MCP `buy-products` tool, as a guest checkout carrying the customer's Checkout Email or on the customer's own Bitrefill account once they connect it, and pays the invoice in USDC on Base from the Base Float (ADR-0012). On testnet the free test products are bought through REST with our own account instead (see `docs/research/bitrefill-funding.md`).
 4. If delivered, the server calls `confirm_delivery`, which schedules the Draw; it credits the Cashback a block later. It then stores the code and the Draw and sends both to the customer.
 5. If Bitrefill fails, the server calls `fail_purchase`, which refunds everything with no Draw.
 6. Every minute, the reconciler finishes or fails any purchase that stopped part-way.

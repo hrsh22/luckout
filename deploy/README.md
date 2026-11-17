@@ -25,12 +25,12 @@ The steps below set up one site; repeat them per environment with its own user, 
 1. **Money in place.** `luckout.near` (the owner's wallet unless `OWNER` names another) with about 5.7 NEAR and about $75 of USDC on NEAR, and a full-access key for it in `~/.near-credentials/mainnet` on the machine that deploys.
 2. **Accounts and contract.** `./contract/deploy-mainnet.sh` shows every step; run it again with `GO=1`. It creates `app.`, `server.`, `relayer.` and `treasury.luckout.near`, deploys the contract owned by `OWNER`, registers the contract and the treasury on USDC, and limits the server's key to the purchase methods. Afterwards, remove the deploying machine's key from `luckout.near`.
 3. **Database.** As the Postgres admin: `CREATE ROLE luckout_mainnet LOGIN PASSWORD '…'; CREATE DATABASE luckout_mainnet OWNER luckout_mainnet;` The server records the database's network on first start.
-4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key, `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf,https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
+4. **Server `.env`** on the `luckout-api` user (port 8788): `NEAR_NETWORK=mainnet`, the mainnet ids and keys from step 2, a new `SESSION_SECRET` and `REDEMPTION_KEY` (back the key up), the mainnet Bitrefill key (it only reads the catalog), a Bitrefill guest client for orders (`BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`; registered as under "Switching production to guest checkout" below), `BASE_RPC_URL` (an Alchemy Base mainnet URL), the mainnet Telegram bot, `ALERT_TELEGRAM_CHAT_ID`, `ADMIN_ACCOUNTS`, `WEB_ORIGIN=https://www.luckout.wtf`, `CORS_ORIGINS=https://luckout.wtf,https://luckout.gamified.trade`. It refuses to start with any of these missing or pointing at testnet.
 5. **CI.** Add a forced-command key for `main` to that user's `authorized_keys`, the `MAINNET_DEPLOY_KEY` secret and `MAINNET_SSH_TARGET` variable, then set `DEPLOY_MAINNET=on`.
 6. **Vercel Production env:** `NEXT_PUBLIC_NEAR_NETWORK=mainnet`, `NEXT_PUBLIC_LUCKOUT_CONTRACT_ID=app.luckout.near`, `NEXT_PUBLIC_USDC_CONTRACT_ID=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1`, `NEXT_PUBLIC_API_URL=https://api.luckout.wtf`. The testnet server then drops the mainnet site from `CORS_ORIGINS`.
 7. **Merge** the PR from `testnet` into `main`: the web and the API go live.
-8. **As the owner, in the admin panel:** Treasury → Automatic (up to $40 a day), fund the reserve ($50), and send the treasury about $25 of USDC from the wallet, because proceeds start empty. Send about $1 of ETH on Base to the Base wallet the panel shows (gas for paying Bitrefill).
-9. **Prove it cheaply:** a $2–5 Normal purchase (which triggers the first refill), a small Lucky Buy, a relayed deposit and withdrawal, a $2 top-up from another chain. Raise the limits in the panel as it holds up.
+8. **As the owner, in the admin panel:** Treasury → Automatic (up to $40 a day), fund the reserve ($50), and send the treasury about $25 of USDC from the wallet, because proceeds start empty: the first refill swaps it into the Base wallet, whose USDC (the Base Float) pays every card. Send about $1 of ETH on Base to the Base wallet the panel shows (gas for those payments).
+9. **Prove it cheaply:** a $2–5 Normal purchase with a Checkout Email (it waits a few minutes for the first refill of the Base Float), a small Lucky Buy, a relayed deposit and withdrawal, a $2 top-up from another chain. Raise the limits in the panel as it holds up.
 
 The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's nginx handles HTTPS (Let's Encrypt) and proxies to the server on `127.0.0.1:8788` (8787 is taken by another site on our VM). Postgres is the VM's existing server, with its own role and database. The web app deploys to Vercel separately.
 
@@ -70,8 +70,9 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    ```cron
    # bash, because cron's sh can't load nvm; nvm's default Node is the one in .nvmrc (step 4)
    @reboot bash -c '. ~/.nvm/nvm.sh && cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect'
-   0 3 * * * pg_dump -h 127.0.0.1 -U luckout luckout | gzip > ~/backups/luckout-$(date +\%F).sql.gz && find ~/backups -name 'luckout-*.sql.gz' -mtime +14 -delete
+   0 3 * * * bash ~/htdocs/luckout-api.gamified.trade/deploy/backup.sh -h 127.0.0.1 -U luckout luckout >> ~/backups/backup.log 2>&1
    ```
+   `deploy/backup.sh` keeps a dump only if it is complete and of this site's database, deletes dumps older than 14 days only after a good one, and alerts the admin chat (`TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` from `.env`) when a night's dump fails. Restoring one is in [RUNBOOK.md](RUNBOOK.md#restoring-from-a-dump).
 
 ## Switching production to guest checkout (ADR-0012)
 
