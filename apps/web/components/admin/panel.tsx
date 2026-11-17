@@ -129,7 +129,7 @@ function useAdminTx(): Tx {
       const result = await f(accountId)
       const last = (Array.isArray(result) ? result.at(-1) : result) as { transaction?: { hash?: string } } | undefined
       const hash = last?.transaction?.hash
-      toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank") } } : {}) })
+      toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank", "noopener") } } : {}) })
       await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), refresh().catch(() => {})])
       return true
     } catch (e) {
