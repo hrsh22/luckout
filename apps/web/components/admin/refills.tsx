@@ -43,6 +43,9 @@ export function RefillsCard({ refills, guest }: { refills: ReadonlyArray<RefillV
           // (one with an invoice is from before, when it was credited).
           const step = r.step === "done" && (r.reason === "float" || (guest && !r.invoiceId))
             ? { label: guest ? "In the Base Float" : "In our Base wallet", tone: "good" as const }
+            // Such a refill waits at "invoice" only for its USDC to show in our wallet.
+            : r.step === "invoice" && (r.reason === "float" || guest)
+            ? { label: "Landing in our Base wallet", tone: "busy" as const }
             : STEP[r.step] ?? { label: r.step, tone: "muted" as const }
           return (
             <li key={r.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center">

@@ -907,6 +907,65 @@ test("with guest checkout, a refill the treasury can't fund in full is cut to wh
   assert.equal(w.made.invoices, 0)
 })
 
+test("with guest checkout, a refill 1Click reports finished ends only once the Base Wallet shows it: no second refill meanwhile, and stuck if it never shows", async () => {
+  // $30 in the Base Float: a $70 refill to the $100 target. 1Click says SUCCESS before Base's RPC shows the USDC.
+  const w = world({ guest: true, walletUsdc: 30_000_000, treasuryUsdc: 0, cap: 1_000_000_000, swapLands: false })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ id: string }>`SELECT id FROM refills`
+    const waiting = yield* drive(row!.id)
+    // The next plan still reads the old float, and must not start another refill.
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [count] = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM refills`
+    // Meanwhile a $20 card is paid from the float, then the swap shows up.
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step, pay_amount, ordered_at)
+               VALUES ('a.test', 'k1', 'amazon-us', 'Amazon', '20', 20000000, 20000000, 'delivery', 20000000, now())`
+    w.wallet.usdc += 70_000_000 - 20_000_000
+    yield* due
+    yield* refill.process
+    return { waiting, refills: count!.n, landed: yield* settle(row!.id) }
+  }))
+  assert.equal(r.waiting.step, "invoice", "1Click's SUCCESS alone doesn't finish it")
+  assert.equal(r.refills, 1, "no second refill while the first hasn't shown up")
+  assert.equal(r.landed.step, "done", r.landed.error ?? "")
+  assert.ok(w.alerts.some((a) => a.includes("Base Float refilled: +$70.00")), w.alerts.join("\n"))
+
+  // It never shows: after ten minutes it stops for an admin, and automatic refills pause.
+  const never = world({ guest: true, walletUsdc: 30_000_000, treasuryUsdc: 0, cap: 1_000_000_000, swapLands: false })
+  const s = await never.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ id: string }>`SELECT id FROM refills`
+    yield* drive(row!.id)
+    // Nine minutes in, a Base read fails; the clean pass that follows must not start the ten minutes over.
+    yield* sql`UPDATE refills SET updated_at = now() - interval '9 minutes', error = 'Base read failed' WHERE id = ${row!.id}`
+    yield* due
+    yield* refill.process
+    // Two minutes later it is past ten.
+    yield* sql`UPDATE refills SET updated_at = updated_at - interval '2 minutes' WHERE id = ${row!.id}`
+    yield* due
+    yield* refill.process
+    const stuck = yield* settle(row!.id)
+    const paused = (yield* refill.status).paused
+    // The USDC shows up after all: the stuck-refill watch closes it, no admin needed.
+    never.wallet.usdc += 70_000_000
+    yield* sql`UPDATE refills SET next_attempt_at = now() WHERE id = ${row!.id}`
+    yield* refill.process
+    return { stuck, paused, late: yield* settle(row!.id) }
+  }))
+  assert.equal(s.stuck.step, "stuck")
+  assert.match(s.stuck.error ?? "", /the Base wallet holds \$30\.00, \$70\.00 short of the \$70\.00 1Click reports it delivered/)
+  assert.match(s.paused ?? "", /is stuck/)
+  assert.ok(never.alerts.some((a) => a.includes("needs a look")), never.alerts.join("\n"))
+  assert.equal(s.late.step, "done", s.late.error ?? "")
+})
+
 // ---------- a refill that can't get on says so ----------
 
 test("a refill that keeps failing at one step tells the admin after five tries in a row, and keeps trying", async () => {

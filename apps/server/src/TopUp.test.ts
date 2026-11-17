@@ -642,6 +642,35 @@ test("a swap 1Click has seen money in is checked every pass, however many unpaid
   assert.equal(busy.checked.filter((a) => a.startsWith("unpaid-")).length, 10, "a payment just made is still noticed")
 })
 
+test("a quote 1Click calls KNOWN_DEPOSIT_TX (a hash it was told about) still holds its place in the cap and waits with the unpaid ones", async () => {
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const w = mainnetTopUp({ [BASE]: "120132" })
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      for (let i = 0; i < 10; i++) yield* t.quote(EVM, BASE, 1_000_000)
+      // A hash named for each, which 1Click now knows of.
+      yield* sql`UPDATE intents_swaps SET status = 'KNOWN_DEPOSIT_TX', deposit_tx = '0x' || repeat('cd', 32)`
+      return yield* said(t.quote(EVM, BASE, 1_000_000))
+    })
+  )
+  assert.match(r, /several quotes open already/)
+
+  // 200 of them checked an hour ago, and one swap 1Click is processing, checked a moment ago: it isn't pushed out.
+  const flood = mainnetTopUp()
+  await flood.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* Effect.sleep("100 millis")
+      yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, status, deposit_tx, checked_at, deadline)
+                 SELECT 'named-' || i, 'someone.near', 'in', 1000000, 'KNOWN_DEPOSIT_TX', 'tx-' || i, now() - interval '1 hour', now() + interval '30 minutes'
+                 FROM generate_series(1, 200) i`
+      yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, status, checked_at, deadline)
+                 VALUES ('paid-1', 'someone.near', 'in', 1000000, 'PROCESSING', now(), now() + interval '30 minutes')`
+      yield* t.trackNow
+    })
+  )
+  assert.ok(flood.checked.includes("paid-1"), "the swap with money in it isn't behind 200 named hashes")
+})
+
 test("paid Top-Ups 1Click hasn't seen reach the admin one by one only up to a handful; past that, one line says so", async () => {
   const w = mainnetTopUp()
   await w.run((t, sql) =>

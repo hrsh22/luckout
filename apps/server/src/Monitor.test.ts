@@ -90,14 +90,17 @@ test("an expiry in milliseconds, or not a finite number, stops the server at sta
 
 // ---------- signing in is free: the solvency check's work stays bounded ----------
 
-/** One Monitor round over seeded `known_accounts`; returns the alerts, the accounts whose balance was read, and which ended up marked. */
-const solvencyRound = (o: { held: string; balances: Record<string, string>; seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient> }) => {
+/**
+ * One Monitor round over seeded `known_accounts`; returns the alerts, the accounts whose balance was read, which ended up
+ * marked, and which were marked checked. `down`: every account's read fails, as when no NEAR RPC answers.
+ */
+const solvencyRound = (o: { held: string; balances: Record<string, string>; seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>; down?: boolean }) => {
   const alerts: Array<string> = []
   const read: Array<string> = []
   const near = fakeNear({
     account: () => Effect.succeed({ amount: 10n ** 26n, storageUsage: 0 }),
     view: <A>(method: string, args?: Record<string, unknown>) =>
-      Effect.sync(() => {
+      o.down && method === "get_account" ? Effect.fail(new NearUnavailable({ message: "every NEAR RPC failed" })) : Effect.sync(() => {
         if (method === "ft_balance_of") return o.held as A
         if (method === "get_reserve") return { free: "0", locked: "0", proceeds: "0" } as A
         const id = String(args?.account_id)
@@ -117,7 +120,8 @@ const solvencyRound = (o: { held: string; balances: Record<string, string>; seed
       yield* Layer.build(Monitor.pipe(Layer.provide(deps)))
       yield* Effect.sleep("300 millis")
       const marked = yield* sql<{ account_id: string }>`SELECT account_id FROM known_accounts WHERE onchain ORDER BY account_id`
-      return { alerts, read, marked: marked.map((m) => m.account_id) }
+      const checked = yield* sql<{ account_id: string }>`SELECT account_id FROM known_accounts WHERE checked_at IS NOT NULL ORDER BY account_id`
+      return { alerts, read, marked: marked.map((m) => m.account_id), checked: checked.map((c) => c.account_id) }
     }).pipe(
       Effect.scoped,
       Effect.provide(DbMemory),
@@ -161,4 +165,12 @@ test("an account that bought or was relayed is read every round, wherever it sta
   })
   assert.ok(r.read.includes("buyer.test") && r.read.includes("relayed.test"))
   assert.equal(r.read.length, 52)
+})
+
+test("an account whose balance can't be read keeps its turn in the solvency check", async () => {
+  const signups = (sql: SqlClient.SqlClient) => sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.test' FROM generate_series(1, 3) n`
+  const failed = await solvencyRound({ held: "0", balances: {}, down: true, seed: Effect.flatMap(SqlClient.SqlClient, signups) })
+  assert.deepEqual(failed.checked, [], "none was read, so none lost its place in the queue")
+  const read = await solvencyRound({ held: "0", balances: {}, seed: Effect.flatMap(SqlClient.SqlClient, signups) })
+  assert.deepEqual(read.checked, ["signup1.test", "signup2.test", "signup3.test"])
 })

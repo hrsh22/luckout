@@ -356,11 +356,12 @@ export class Purchases extends Context.Service<Purchases, {
                 )
               // Once the invoice is about to expire nothing is sent, not even again, and nothing new is signed for
               // it: Base is only asked where the saved payment is. Paying an expired invoice would leave our USDC
-              // at Bitrefill with no card.
+              // at Bitrefill with no card. `base.pay` checks the limit again under the wallet's lock, right before
+              // sending: waiting on the lock can outlast it.
               const late = row.pay_tx !== null && Date.now() - time(row.invoice_at!) > PAY_SEND_LIMIT_MS
               const status = yield* (late
                 ? base.status(row.pay_tx!.hash)
-                : base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment).pipe(
+                : base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment, time(row.invoice_at!) + PAY_SEND_LIMIT_MS).pipe(
                   Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
                 ))
               if (status === "pending") {

@@ -294,6 +294,13 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
+      /**
+       * 1Click has seen no money in it: a quote not paid into yet (or paid, as far as only the customer says).
+       * KNOWN_DEPOSIT_TX counts too: 1Click reports a deposit transaction it knows of, and its docs don't say it
+       * checks a hash it was told about (deposit/submit) on chain first. Anyone can name one for their own quote.
+       */
+      const unseen = sql`coalesce(status, 'PENDING_DEPOSIT') IN ('PENDING_DEPOSIT', 'KNOWN_DEPOSIT_TX')`
+
       // ponytail: in memory, one process (ADR-0006). One real quote at a time per account, so parallel requests
       // can't all pass the cap below before one of them is saved.
       const quoting = new Set<string>()
@@ -310,7 +317,7 @@ export class TopUp extends Context.Service<TopUp, {
             // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass).
             const [{ open = 0 } = {}] = yield* sql<{ open: number }>`
               SELECT count(*)::int AS open FROM intents_swaps
-              WHERE account_id = ${accountId} AND coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND created_at > now() - interval '3 days'
+              WHERE account_id = ${accountId} AND ${unseen} AND created_at > now() - interval '3 days'
                 AND NOT (deposit_tx IS NULL
                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)`.pipe(Effect.orDie)
             if (open >= MOST_OPEN) return yield* fail("You have several quotes open already. Use one of them, or try again in a couple of hours.")
@@ -514,8 +521,6 @@ export class TopUp extends Context.Service<TopUp, {
                  AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
                  AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
                           AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)))`
-      /** 1Click has seen no money in it: a quote not paid into yet (or paid, as far as only the customer says). */
-      const unseen = sql`coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'`
       // Least recently checked first, in two queues: swaps 1Click has seen money in are never held up by quotes
       // nobody paid into, however many of those there are, and those always get the rest of the pass (at least
       // PER_PASS - SEEN_PER_PASS), so a new payment is still noticed when many swaps are in flight.

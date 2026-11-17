@@ -38,8 +38,8 @@ import { NEAR_USDC_ASSET } from "./TopUp.ts"
 //   admin resolves it. A stuck refill is still watched, and carries on or closes when its outcome is clean.
 // - A float of USDC kept in the Base wallet (CreditSettings.baseFloat) lets a refill skip the swap and pay
 //   Bitrefill in about a minute. When no refill is due and the wallet holds under half the float, a
-//   "float" refill swaps exactly the missing amount in, through the same steps, and ends once it lands:
-//   fund → quote → send → swapping → done. It never touches Bitrefill. It waits for money quietly, and while
+//   "float" refill swaps exactly the missing amount in, through the same steps, and ends once our wallet shows
+//   it: fund → quote → send → swapping → invoice → done. It never touches Bitrefill. It waits for money quietly, and while
 //   it's still waiting at fund with nothing signed, a real refill that comes due cancels it and goes first.
 
 export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
@@ -90,6 +90,9 @@ interface Swap {
   /** Older rows lack it, which reads as stale: they re-quote. */
   readonly quotedAt?: string
   readonly correlationId?: string
+  /** What our Base wallet held just before the quote, and when it was read: a swap into the float lands on top of it. */
+  readonly walletUsdc?: number
+  readonly walletAt?: string
 }
 interface Row {
   id: string
@@ -278,7 +281,22 @@ export class Refill extends Context.Service<Refill, {
           (bitrefill.guest ? "send USDC on Base straight to our Base wallet (Admin shows its address): it is the Base Float." : "top up the credit on bitrefill.com by hand.")
       }
 
-      /** A refill that ends in the Base Wallet has landed there: it's done (it never pays Bitrefill). */
+      /**
+       * How much of a refill's USDC our Base wallet doesn't show yet (0 or less: all of it is there), and what it holds.
+       * 1Click reports success before Base's RPC may show the transfer, and a float read too early starts a second
+       * refill. A refill that pays Bitrefill needs its amount in the wallet. One that ends in the float brings its
+       * amount on top of what the wallet held when quoted, less what cards paid from it since (mined payments).
+       */
+      const unseen = (row: Row) =>
+        Effect.gen(function*() {
+          const w = yield* base.balances
+          if (!endsInFloat(row)) return { missing: Number(row.amount) - w.usdc, usdc: w.usdc }
+          const [p] = yield* sql<{ paid: string }>`
+            SELECT COALESCE(sum(pay_amount), 0)::text AS paid FROM purchases WHERE ordered_at > ${new Date(row.swap?.walletAt ?? row.created_at)}`.pipe(Effect.orDie)
+          return { missing: (row.swap?.walletUsdc ?? 0) + Number(row.amount) - Number(p?.paid ?? 0) - w.usdc, usdc: w.usdc }
+        })
+
+      /** A refill that ends in the Base Wallet has landed there (`unseen` says so): it's done (it never pays Bitrefill). */
       const floatLanded = (row: Row, note: string) =>
         Effect.gen(function*() {
           if (yield* move(row, { step: "done", swap_status: "SUCCESS", finished_at: new Date().toISOString(), error: note || null })) {
@@ -436,6 +454,7 @@ export class Refill extends Context.Service<Refill, {
               return pulled
             }
             case "quote": {
+              const walletAt = new Date().toISOString()
               const [wallet, w] = yield* Effect.all([base.address, base.balances])
               const out = endsInFloat(row) ? amount : swapFor(amount, w.usdc)
               if (out === 0) {
@@ -475,7 +494,9 @@ export class Refill extends Context.Service<Refill, {
                   // is when the deposit address dies (days later), too late to call a swap stuck.
                   deadline: deadline.toISOString(),
                   quotedAt: new Date().toISOString(),
-                  ...(r.correlationId ? { correlationId: r.correlationId } : {})
+                  ...(r.correlationId ? { correlationId: r.correlationId } : {}),
+                  walletUsdc: w.usdc,
+                  walletAt
                 }
               })
               return "next"
@@ -528,8 +549,8 @@ export class Refill extends Context.Service<Refill, {
               // A check that answered clears any earlier network error, so the panel shows only what's current.
               yield* save(row.id, { swap_status: status, error: null })
               if (status === "SUCCESS") {
-                // A float top-up is done once its USDC is in our wallet; a refill goes on to pay Bitrefill.
-                if (endsInFloat(row)) return yield* floatLanded(row, "")
+                // Every refill waits at the invoice for its USDC to show in our wallet: one that ends in the float
+                // is done there, and the rest go on to pay Bitrefill.
                 yield* move(row, { step: "invoice" })
                 return "next"
               }
@@ -543,16 +564,25 @@ export class Refill extends Context.Service<Refill, {
               return "wait"
             }
             case "invoice": {
-              // Only now, with the USDC in our wallet, does Bitrefill get asked for an invoice.
-              const w = yield* base.balances
-              if (w.usdc < amount) {
-                if (row.error) yield* save(row.id, { error: null })
+              // Only now, with the USDC in our wallet, does Bitrefill get asked for an invoice; a refill that ends
+              // in the float is done, and only now may the next one be planned.
+              const w = yield* unseen(row)
+              if (w.missing > 0) {
+                // Cleared without touching updated_at: the wait is timed from it, and a failed Base read in between
+                // must not start the ten minutes over, or a refill that never lands would never stop and say so.
+                if (row.error) yield* sql`UPDATE refills SET error = NULL WHERE id = ${row.id}`.pipe(Effect.orDie)
                 // 1Click reported success; the transfer can take a few blocks to show.
                 if (Date.now() - time(row.updated_at) > WALLET_WAIT_MS) {
-                  return yield* stop(row, `the Base wallet holds ${usd(w.usdc)}, short of the ${usd(amount)} this refill pays`)
+                  return yield* stop(
+                    row,
+                    endsInFloat(row)
+                      ? `the Base wallet holds ${usd(w.usdc)}, ${usd(w.missing)} short of the ${usd(amount)} 1Click reports it delivered`
+                      : `the Base wallet holds ${usd(w.usdc)}, short of the ${usd(amount)} this refill pays`
+                  )
                 }
                 return "wait"
               }
+              if (endsInFloat(row)) return yield* floatLanded(row, "")
               const d = yield* bitrefill.deposit(amount)
               yield* move(row, { step: "pay", invoice_id: d.invoiceId, pay_address: d.address, invoice_at: new Date().toISOString(), pay_tx: null, paid_at: null })
               return "next"
@@ -852,12 +882,16 @@ export class Refill extends Context.Service<Refill, {
        * A stuck refill can still settle: 1Click may refund or finish a swap late, a Base payment may be
        * mined, Bitrefill may credit late. A clean outcome carries the refill on or closes it, as the
        * pipeline would have; anything else is reported and left for a human. Nothing is ever sent from here.
-       * Only a signed Base payment or a swap that got stuck while swapping is watched: a refill stuck for
-       * any other reason (say, the wallet came up short at the invoice) waits for an admin.
+       * Only a signed Base payment, a swap that got stuck while swapping, or a refill into the Base Float whose
+       * USDC hadn't shown in the wallet in time is watched: once that USDC shows, closing it moves no money. A
+       * refill stuck for any other reason waits for an admin, including one that would go on to pay Bitrefill
+       * (the admin may have topped up by hand meanwhile).
        */
       const watchStuck = sql<Row>`
-        SELECT * FROM refills WHERE step = 'stuck' AND (pay_tx->>'hash' IS NOT NULL OR stuck_at = 'swapping') AND next_attempt_at <= now()`.pipe(
+        SELECT * FROM refills WHERE step = 'stuck'
+          AND (pay_tx->>'hash' IS NOT NULL OR stuck_at = 'swapping' OR (stuck_at = 'invoice' AND swap IS NOT NULL)) AND next_attempt_at <= now()`.pipe(
         Effect.orDie,
+        Effect.map((rows) => rows.filter((r) => r.stuck_at !== "invoice" || endsInFloat(r))),
         Effect.flatMap((rows) =>
           Effect.forEach(rows, (row) =>
             Effect.gen(function*() {
@@ -897,9 +931,9 @@ export class Refill extends Context.Service<Refill, {
                 return
               }
               if (status === "SUCCESS") {
+                // The USDC lands in our own wallet: once it's there, the refill is done or simply carries on to Bitrefill.
+                if ((yield* unseen(row)).missing > 0) return
                 if (endsInFloat(row)) return void (yield* floatLanded(row, `${was} | 1Click finished it late.`))
-                // The USDC lands in our own wallet: once it's there, the refill simply carries on to Bitrefill.
-                if ((yield* base.balances).usdc < Number(row.amount)) return
                 if (yield* move(row, { step: "invoice", swap_status: status, error: `${was} | 1Click finished it late; carried on.` })) {
                   yield* alerts.admin(`Stuck refill ${id}: 1Click finished the swap late, into our Base wallet. The refill carries on to Bitrefill by itself.`)
                 }
