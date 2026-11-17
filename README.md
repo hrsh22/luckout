@@ -131,7 +131,7 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 
   **You see** `"all_match": true`, with each recomputed value beside the one the contract logged.
 - **`/fair`:** the Live Average from `get_stats`, the Cashback Reserve and Cashback Cap from `get_reserve`, the contract's code hash, and the latest TEE check of the agent's model.
-- **The contract's code:** `cd contract && cargo near build reproducible-wasm` (needs Docker) produces the code hash `/fair` shows. `contract/check-deployed.sh mainnet <wasm>` compares a build with what `app.luckout.near` runs and fails if they differ. CI's rebuild of the deployed commit matches: [docs/evidence/reproducible-build.txt](docs/evidence/reproducible-build.txt).
+- Reproducible contract build in CI; the code hash is checked against the deployed mainnet contract by `contract/check-deployed.sh`, which exits non-zero on mismatch.
 - **Every mainnet claim, by script:** `node apps/server/scripts/verify-mainnet.ts` (no keys needed) reads the hashes in [docs/evidence/mainnet.json](docs/evidence/mainnet.json) and checks them against NEAR and Base: all 18 settled buys (`purchase`, then `confirm_delivery`, then `get_purchase` now), a customer's USDC deposit, and one Bitrefill refill leg by leg. **You see** `All checks passed.`, as in [docs/evidence/verify-mainnet.txt](docs/evidence/verify-mainnet.txt).
 - **The attack demo:** see [What a stolen server key can do](#what-a-stolen-server-key-can-do).
 
