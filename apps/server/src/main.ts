@@ -83,6 +83,8 @@ const SessionHandlers = HttpApiBuilder.group(Api, "session", (handlers) =>
   Effect.gen(function*() {
     const auth = yield* Auth
     return handlers.handleAll({
+      // The session to end is the one this request came with.
+      signOut: () => Effect.flatMap(HttpServerRequest.HttpServerRequest, (r) => auth.signOut((r.headers.authorization ?? "").replace(/^Bearer /i, ""))),
       signOutEverywhere: () => CurrentAccount.use((a) => auth.signOutEverywhere(a.accountId))
     })
   })

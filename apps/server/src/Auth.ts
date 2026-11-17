@@ -2,20 +2,21 @@ import { Challenge, evmSignInMessage, Session, type SignedChallenge, type Signed
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
-import { verifyMessage } from "viem"
+import { getAddress, verifyMessage } from "viem"
 import { Near, Network } from "./Near.ts"
 
-const RECIPIENT = "luckout"
 const NONCE_TTL_MINUTES = 5
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export class Auth extends Context.Service<Auth, {
   readonly challenge: Effect.Effect<Challenge>
   verify(signed: SignedChallenge): Effect.Effect<Session, Unauthorized>
-  /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage` by a regular EVM account (EOA). */
+  /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage`, made on one of our own sites, by a regular EVM account (EOA). */
   verifyEvm(signed: SignedEvmChallenge): Effect.Effect<Session, Unauthorized>
   /** The account a session token belongs to. */
   authenticate(token: string): Effect.Effect<string, Unauthorized>
+  /** Ends the one session `token` is, so a copy of it kept elsewhere stops working. */
+  signOut(token: string): Effect.Effect<void>
   /** Ends every session the account has now, on every device. */
   signOutEverywhere(accountId: string): Effect.Effect<void>
 }>()("luckout/Auth") {
@@ -27,6 +28,11 @@ export class Auth extends Context.Service<Auth, {
       // Bound to its network: the wallet shows which one, and a session from the other one is refused.
       const network = yield* Network
       const message = `Sign in to Luckout (${network})`
+      // The sites a sign-in may come from: the same ones main.ts lets call this server.
+      const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
+      const sites = new Set([webOrigin, ...(yield* Config.String("CORS_ORIGINS").pipe(Config.withDefault(""))).split(",").map((o) => o.trim()).filter(Boolean)])
+      // What a NEAR wallet shows as the message's recipient (NEP-413): our site's host.
+      const recipient = new URL(webOrigin).host
       const configured = yield* Config.option(Config.Redacted("SESSION_SECRET"))
       if (Option.isNone(configured)) yield* Effect.logWarning("SESSION_SECRET not set: sessions end when the server restarts")
       const secret = Option.match(configured, { onNone: () => randomBytes(32), onSome: (s) => Buffer.from(Redacted.value(s)) })
@@ -38,7 +44,7 @@ export class Auth extends Context.Service<Auth, {
         const nonce = randomBytes(32).toString("base64")
         yield* sql`DELETE FROM auth_nonces WHERE expires_at < now()`
         yield* sql`INSERT INTO auth_nonces (nonce, expires_at) VALUES (${nonce}, now() + make_interval(mins => ${NONCE_TTL_MINUTES}))`
-        return new Challenge({ message, recipient: RECIPIENT, nonce })
+        return new Challenge({ message, recipient, nonce })
       }).pipe(Effect.orDie)
 
       // Single use: the nonce is deleted whether or not the signature checks out.
@@ -55,7 +61,7 @@ export class Auth extends Context.Service<Auth, {
           publicKey: signed.publicKey,
           signature: Buffer.from(signed.signature, "base64"),
           message,
-          recipient: RECIPIENT,
+          recipient,
           nonce: Buffer.from(signed.nonce, "base64")
         })
         if (!ok) return yield* denied("Signature is not from a full-access key of this account")
@@ -66,15 +72,18 @@ export class Auth extends Context.Service<Auth, {
         yield* useNonce(signed.nonce)
         const address = signed.address.toLowerCase()
         if (!/^0x[0-9a-f]{40}$/.test(address) || !/^0x[0-9a-fA-F]{130}$/.test(signed.signature)) return yield* denied("That isn't an EVM signature")
+        // Only a message made on one of our own sites: the wallet showed that site's name, and warns when the
+        // page asking isn't it, so a signature phished on a look-alike site signs nobody in here.
+        if (!sites.has(signed.uri)) return yield* denied("Sign in from Luckout's own site")
         // Key recovery only: the same check NEAR Intents makes, so a smart-contract wallet can't sign in here
-        // and then find it can't sign intents either.
-        const ok = yield* Effect.promise(() =>
+        // and then find it can't sign intents either. The message is rebuilt from what we expect, never parsed.
+        const ok = yield* Effect.tryPromise(async () =>
           verifyMessage({
             address: address as `0x${string}`,
-            message: evmSignInMessage({ message, nonce: signed.nonce }),
+            message: evmSignInMessage({ challenge: { message, nonce: signed.nonce }, address: getAddress(address), uri: signed.uri, chainId: signed.chainId, issuedAt: signed.issuedAt }),
             signature: signed.signature as `0x${string}`
-          }).catch(() => false)
-        )
+          })
+        ).pipe(Effect.orElseSucceed(() => false))
         if (!ok) return yield* denied("That signature isn't from this address. Luckout works with regular EVM accounts, not smart-contract wallets.")
         return yield* issue(address)
       })
@@ -103,16 +112,30 @@ export class Auth extends Context.Service<Auth, {
             return yield* denied("Invalid session")
           }
           if (Date.now() > session.e) return yield* denied("Session expired; sign in again")
-          const [reset] = yield* sql<{ after: Date | string }>`SELECT after FROM session_resets WHERE account_id = ${session.a}`.pipe(Effect.orDie)
-          if (reset && session.i <= new Date(reset.after).getTime()) return yield* denied("Signed out everywhere; sign in again")
+          const [state] = yield* sql<{ after: Date | string | null; ended: boolean }>`
+            SELECT (SELECT after FROM session_resets WHERE account_id = ${session.a}) AS after,
+                   EXISTS (SELECT 1 FROM ended_sessions WHERE tag = ${tag}) AS ended`.pipe(Effect.orDie)
+          if (state?.ended) return yield* denied("Signed out; sign in again")
+          if (state?.after && session.i <= new Date(state.after).getTime()) return yield* denied("Signed out everywhere; sign in again")
           return session.a
         })
+
+      // A token is its own proof until it expires, so ending one early means remembering it until then
+      // (by its signature, never the token itself). Ones past their expiry are cleared as others are added.
+      const signOut = (token: string) =>
+        Effect.gen(function*() {
+          const [payload = "", tag = ""] = token.split(".")
+          const expiresAt = yield* Effect.try(() => Number((JSON.parse(Buffer.from(payload, "base64url").toString()) as { e: number }).e)).pipe(Effect.orElseSucceed(() => Number.NaN))
+          if (!tag || !Number.isFinite(expiresAt)) return
+          yield* sql`DELETE FROM ended_sessions WHERE expires_at < now()`
+          yield* sql`INSERT INTO ended_sessions (tag, expires_at) VALUES (${tag}, ${new Date(expiresAt).toISOString()}) ON CONFLICT DO NOTHING`
+        }).pipe(Effect.orDie)
 
       const signOutEverywhere = (accountId: string) =>
         sql`INSERT INTO session_resets (account_id, after) VALUES (${accountId}, now())
             ON CONFLICT (account_id) DO UPDATE SET after = now()`.pipe(Effect.asVoid, Effect.orDie)
 
-      return Auth.of({ challenge, verify, verifyEvm, authenticate, signOutEverywhere })
+      return Auth.of({ challenge, verify, verifyEvm, authenticate, signOut, signOutEverywhere })
     })
   )
 }

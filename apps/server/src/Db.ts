@@ -282,6 +282,11 @@ const migrations = Migrator.fromRecord({
     const sql = yield* SqlClient.SqlClient
     yield* sql`DROP INDEX purchases_open`
     yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'confirm', 'fail')`
+  }),
+  "0022_ended_sessions": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // Sessions signed out before their token expired (Auth.ts): the token's signature, kept until that expiry.
+    yield* sql`CREATE TABLE ended_sessions (tag TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)`
   })
 })
 

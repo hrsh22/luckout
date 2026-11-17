@@ -15,8 +15,9 @@ import {
 } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
+import { getAddress } from "viem"
 import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
-import { connectEvm, disconnectEvm, evmAddress, signText, watchEvm } from "./evm"
+import { connectEvm, disconnectEvm, evmAddress, evmChainId, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -225,13 +226,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     )
   }
 
-  /** personal_sign with an EVM wallet (ADR-0011). */
+  /** personal_sign of a Sign-In with Ethereum message naming this site, with an EVM wallet (ADR-0011). */
   const signInEvm = async () => {
     const address = await connectEvm()
     const challenge = await api((c) => c.auth.challenge())
+    // The site as the browser sees it: the wallet compares it with the page, and the server with its own sites.
+    const site = { uri: window.location.origin, chainId: await evmChainId(), issuedAt: new Date().toISOString() }
     setSigning("message")
-    const signature = await signText(address, evmSignInMessage(challenge))
-    return api((c) => c.auth.verifyEvm({ payload: new SignedEvmChallenge({ address, signature, nonce: challenge.nonce }) }))
+    const signature = await signText(address, evmSignInMessage({ challenge, address: getAddress(address), ...site }))
+    return api((c) => c.auth.verifyEvm({ payload: new SignedEvmChallenge({ address, signature, nonce: challenge.nonce, ...site }) }))
   }
 
   const signIn = async (kind: "near" | "evm" = "near") => {
@@ -330,6 +333,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = async () => {
+    // Ends the session on the server too, so a copy of its token is worth nothing. Signing out never fails on
+    // it: a server that doesn't answer in 5 seconds, or says the session is already over, is left behind.
+    if (token) await api((c) => c.session.signOut(), token, "5 seconds").catch(() => {})
     clear()
     await Promise.all([near().disconnect().catch(() => {}), disconnectEvm()])
   }
