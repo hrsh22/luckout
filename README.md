@@ -154,7 +154,7 @@ pnpm test              # unit tests; tests that call Bitrefill or 1Click skip wi
 
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY`, the catalog and prices work. With the operator key and `REDEMPTION_KEY`, purchases work. All variables are in [`.env.example`](.env.example).
 
-- **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
+- **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). The paths that move USDC also run as real wasm in a local NEAR sandbox: build both contracts (`cargo near build non-reproducible-wasm` in `contract/` and in `contract/test-usdc/`), then `cd contract/sandbox && cargo test` (the first run downloads the sandbox). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
 - **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. `node apps/server/scripts/e2e-evm.ts` does the same for a fresh EVM wallet through NEAR Intents (it needs the server's relayer) and checks what must be refused. Set `API_URL=https://testnet-api.luckout.wtf` to run them against the deployed testnet server.
 - **Deploying:** see [`deploy/README.md`](deploy/README.md) (server on a VM with pm2, web on Vercel).
 
