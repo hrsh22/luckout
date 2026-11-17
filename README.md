@@ -149,7 +149,7 @@ Needs Node 24+ and pnpm (`corepack enable`).
 pnpm install
 cp .env.example .env   # optional; everything below runs without it
 pnpm dev               # web on :3000, server on :8787
-pnpm test              # unit tests; tests that call Bitrefill or 1Click skip without keys
+pnpm test              # unit tests; nothing calls Bitrefill or 1Click (pnpm --filter @luckout/server test:live does, with keys)
 ```
 
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY`, the catalog and prices work. With the operator key and `REDEMPTION_KEY`, purchases work. All variables are in [`.env.example`](.env.example).

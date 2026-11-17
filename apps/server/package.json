@@ -6,7 +6,8 @@
     "dev": "node --env-file-if-exists=../../.env --watch src/main.ts",
     "start": "node --env-file-if-exists=../../.env src/main.ts",
     "typecheck": "tsc",
-    "test": "node --env-file-if-exists=../../.env --test"
+    "test": "node --test",
+    "test:live": "LIVE_TESTS=1 node --env-file-if-exists=../../.env --test src/Bitrefill.test.ts src/TopUp.test.ts"
   },
   "dependencies": {
     "@effect/platform-node": "4.1.2",

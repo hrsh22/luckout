@@ -26,7 +26,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      # Tests that call Bitrefill skip themselves without BITREFILL_API_KEY.
+      # Live tests (Bitrefill, 1Click) run only with LIVE_TESTS=1, never here.
       - run: pnpm test
       - run: pnpm --filter @luckout/web build
 

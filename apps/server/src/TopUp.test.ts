@@ -27,7 +27,8 @@ const noRelay = Layer.succeed(Relay, Relay.of({
 }))
 const noAlerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
 const layer = TopUp.layer.pipe(Layer.provide([OneClick.layer, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory]))
-const live = { skip: process.env.CI ? "no network calls to 1Click in CI" : false }
+// Live calls to 1Click, only when asked for (pnpm --filter @luckout/server test:live).
+const live = { skip: !process.env.LIVE_TESTS && "set LIVE_TESTS=1 to call 1Click" }
 
 test("lists supported origin tokens, never USDC on NEAR itself", live, async () => {
   const assets = await run((t) => t.assets)
