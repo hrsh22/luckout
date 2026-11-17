@@ -4,12 +4,14 @@
 # A dump is kept only if it is complete, old dumps are pruned only after a good one, and a failure alerts
 # the admin chat in Telegram, the way the server's own alerts do.
 set -uo pipefail
+# A dump is the site's whole database: only the site user may read it.
+umask 077
 cd "$(dirname "$0")/.."
 dir=~/backups
 out="$dir/luckout-$(date +%F).sql.gz"
 part="$out.partial"
-# One value from the site's .env, without surrounding quotes.
-setting() { local v; v=$(grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2-); v=${v%\"}; echo "${v#\"}"; }
+# One value from the site's .env, without surrounding quotes (double or single).
+setting() { local v; v=$(grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2-); v=${v%[\"\']}; v=${v#[\"\']}; echo "$v"; }
 fail() {
   rm -f "$part"
   local last where text token chat

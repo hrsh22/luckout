@@ -1014,3 +1014,17 @@ test("with guest checkout, what the admin is told names the Base Float, never Bi
   }))
   assert.equal(refused.message, "The Base Float is above the refill line.")
 })
+
+test("with guest checkout, a purchase waiting while the Base Float covers it raises no alert", async () => {
+  const w = world({ guest: true, walletUsdc: 450_000_000, treasuryUsdc: 50_000_000 })
+  await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ('small.test', 'k1', 'amazon-us', 'Amazon', '10', 10000000, 10000000, 'waiting')`
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Refill, (r) => r.kick)
+    yield* Effect.sleep("100 millis")
+  }))
+  // No refill is due ("The Base Float is above the refill line."), and that isn't news for the admin.
+  assert.ok(!w.alerts.some((a) => a.includes("uncharged")), w.alerts.join("\n"))
+})
