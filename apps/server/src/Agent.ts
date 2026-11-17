@@ -31,7 +31,7 @@ export interface Pending {
   readonly referencePrice: number
   /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
   readonly luckyAmount: number
-  /** The Checkout Email this card's receipt goes to, when the order needs one: shown on the Buy line. */
+  /** The Checkout Email this card and its receipt are also emailed to, when the order needs one: shown on the Buy line. */
   readonly receiptTo?: string
 }
 
@@ -73,7 +73,7 @@ export const TOOLS = [
     mode
   }, ["voucher_id", "value"]),
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included)."),
-  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards' receipts to. Only an address the customer typed in their latest message is accepted. Needed before buying when prepare_purchase says so.", {
+  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards (and its receipt) to. Only an address the customer typed in their latest message is accepted. Needed before buying when prepare_purchase says so.", {
     email: { type: "string" }
   }, ["email"])
 ]
@@ -102,7 +102,7 @@ Rules:
 - To buy, call prepare_purchase; they confirm with a button. Never say it's bought before they confirm.
 - No cashback means they paid the up-front amount; never call that a win.
 - The bot sends voucher codes itself; never ask for or repeat them.
-- If prepare_purchase says they have no email for their cards, ask for one in a line (Bitrefill sends receipts there and can help with a bad code; a throwaway one is fine), save it with set_checkout_email, then prepare again. Don't ask for it otherwise.${testnet
+- If prepare_purchase says they have no email for their cards, ask for one in a line (Bitrefill emails each card there too and can help with a bad code; a throwaway one is fine), save it with set_checkout_email, then prepare again. Don't ask for it otherwise.${testnet
   ? `\n- This is the testnet demo: only Bitrefill's test cards can be bought, with free test USDC. If they ask for a real brand, say so in one line and offer the $10 test gift card.`
   : ""}`
 

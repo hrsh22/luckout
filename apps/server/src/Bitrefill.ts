@@ -620,11 +620,17 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // A guest invoice is paid by us afterwards, so creating one moves no money: one we can't use (wrong coin,
       // a malformed address) is simply refused here and expires unpaid. On the customer's own account it's the
       // same invoice, without an email (the receipt goes to the account's); a 401 there means their login lapsed.
+      // A guest's card is also sent to their Checkout Email as a Bitrefill gift, so the code reaches them outside Luckout too.
       const invoiceOrder = (id: string, value: string, buyer: Buyer) => {
-        const args = { cart_items: [{ product_id: id, package_value: value }], payment_method: "usdc_base", return_payment_link: false }
+        const item = { product_id: id, package_value: value }
+        const args = { payment_method: "usdc_base", return_payment_link: false }
         return ("email" in buyer
-          ? asGuest("buy-products", { ...args, email: buyer.email }, GuestPurchase)
-          : mcp("buy-products", args, GuestPurchase, buyer.token)).pipe(
+          ? asGuest("buy-products", {
+            ...args,
+            cart_items: [{ ...item, gift: { recipient_email: buyer.email, recipient_name: buyer.email.split("@")[0]!.slice(0, 100), sender_name: "Luckout" } }],
+            email: buyer.email
+          }, GuestPurchase)
+          : mcp("buy-products", { ...args, cart_items: [item] }, GuestPurchase, buyer.token)).pipe(
           Effect.flatMap(({ response: r }): Effect.Effect<Order, Rejected> => {
             const pay = r.payment_info
             if (pay.contractAddress.toLowerCase() !== BASE_USDC) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Base` }))

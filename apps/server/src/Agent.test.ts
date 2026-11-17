@@ -168,7 +168,7 @@ test("on mainnet, no Buy button until they've given an email for their cards; th
   assert.match(String(model.seen[1]!.messages.at(-1)!.content), /haven't given an email/)
   assert.equal(email, "me@example.com")
   assert.equal(second.pending?.voucherId, "test-gift-card-code")
-  assert.equal(second.pending?.receiptTo, "me@example.com", "the Buy line will say where the receipt goes")
+  assert.equal(second.pending?.receiptTo, "me@example.com", "the Buy line will say where the card is emailed")
   assert.equal(bought, 0)
 })
 

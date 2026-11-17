@@ -290,6 +290,20 @@ test("a guest order Bitrefill rate-limits is an unknown to try again, never a re
   assert.equal(r.refused._tag, "Refused")
 })
 
+test("a guest's card is also emailed to their Checkout Email as a gift", async () => {
+  const sent: Array<Record<string, unknown>> = []
+  await withGuestBitrefill(
+    (_, args) => (sent.push(args), new Response("Bad Request", { status: 400 })),
+    () => run((b) => b.order("amazon-us", "10", { email: "alice+cards@example.com" }), guestEnv)
+  )
+  assert.equal(sent[0]!.email, "alice+cards@example.com")
+  assert.deepEqual(sent[0]!.cart_items, [{
+    product_id: "amazon-us",
+    package_value: "10",
+    gift: { recipient_email: "alice+cards@example.com", recipient_name: "alice+cards", sender_name: "Luckout" }
+  }])
+})
+
 test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {
   // The rule itself: never sooner than the gap after the last poll allowed, and at once when it has been quiet.
   assert.equal(nextGuestPoll(0, 1_000_000), 1_000_000)

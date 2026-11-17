@@ -46,7 +46,7 @@ export function CheckoutEmailForm({ label = "Save", onSaved }: { label?: string;
       </div>
       {save.error
         ? <p role="alert" className="text-sm font-medium text-bad">{errorMessage(save.error)}</p>
-        : <p className="text-sm text-muted">Bitrefill sends each card's receipt here, and uses it to help if a code doesn't work. A throwaway address is fine.</p>}
+        : <p className="text-sm text-muted">Bitrefill emails each card here too, with its receipt, and uses it to help if a code doesn't work. A throwaway address is fine.</p>}
     </form>
   )
 }
