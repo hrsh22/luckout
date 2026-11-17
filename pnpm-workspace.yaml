@@ -4,3 +4,10 @@ packages:
 allowBuilds:
   # Its postinstall only checks AppKit versions.
   '@reown/appkit': false
+# Advisories pnpm audit (CI's audit job) accepts, each with why. Remove an entry once its fix is installed.
+auditConfig:
+  ignoreGhsas:
+    # zod, "can exhaust memory while validating oversized constrained collections": only the web's wallet
+    # library uses it (@reown/appkit's embedded wallet checks the messages from Reown's own iframe with zod 3),
+    # so the worst case is one customer's browser tab. Zod 3 has no fixed version (fixed in 4.6.6).
+    - GHSA-mrhx-c7xc-m3w5
