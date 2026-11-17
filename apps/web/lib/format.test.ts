@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { dollars, tokenAmount, toMicro } from "./format.ts"
+import { dollars, limitsText, tokenAmount, toMicro } from "./format.ts"
 
 test("token amounts read at a sensible precision, rounded the safe way", () => {
   assert.equal(tokenAmount("1.0663783", "USDC", "up"), "1.07", "what you send: never less than leaves the wallet")
@@ -33,4 +33,12 @@ test("toMicro refuses what it can't hold exactly", () => {
   assert.ok(Number.isNaN(toMicro("99999999999999999999")))
   assert.ok(Number.isNaN(toMicro("1.2345678")))
   assert.equal(toMicro("9007199254.740991"), Number.MAX_SAFE_INTEGER)
+})
+
+test("a limit that's off is named, never shown in dollars", () => {
+  const off = "340282366920938463463374607431768211455" // u128::MAX, the contract's "no limit"
+  assert.equal(limitsText(off, off), "No limits")
+  assert.equal(limitsText(200_000_000, off), "$200.00 a purchase, no daily limit")
+  assert.equal(limitsText(off, 1_000_000_000), "No per-purchase limit, $1,000.00 a day")
+  assert.equal(limitsText(200_000_000, 1_000_000_000), "$200.00 a purchase, $1,000.00 a day")
 })

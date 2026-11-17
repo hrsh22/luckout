@@ -1,4 +1,6 @@
-import { noLimit } from "@luckout/api"
+// Only Effect-free entry points here: the landing page formats prices, and the root of @luckout/api would
+// pull the whole API schema into it.
+import { noLimit } from "@luckout/api/limits"
 
 const fmt = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" })
 /** micro-USDC → "$5.53" (display only; amounts stay integers everywhere else). */
@@ -8,7 +10,7 @@ export const usdUp = (micro: number | string) => fmt.format(Math.ceil(Number(mic
 /** A balance, rounded down to the cent: never show more than is there (prices round up, so the two add up). */
 export const usdDown = (micro: number | string) => fmt.format(Math.floor(Number(micro) / 10_000) / 100)
 
-export { tokenAmount } from "@luckout/api"
+export { tokenAmount } from "@luckout/api/intents"
 /** "$200.00 a purchase, $1,000.00 a day"; a limit that's off says so instead of an amount. */
 export const limitsText = (per: number | string, daily: number | string) =>
   noLimit(per) && noLimit(daily)
