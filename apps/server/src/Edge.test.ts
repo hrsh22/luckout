@@ -72,3 +72,22 @@ test("a request body over the limit never reaches a handler; one under it is ser
     assert.equal(mcp.status, 400)
     assert.equal((await mcp.json()).error.message, "Parse error")
   }))
+
+test("no API answer may be stored by a browser or a proxy: not a session, not a refusal, not a rate limit", () =>
+  served(async (url) => {
+    const signIn = JSON.stringify({ accountId: "bob.testnet", publicKey: "ed25519:x", signature: "", nonce: "n" })
+    const session = await post(`${url}/auth/verify`, signIn)
+    assert.equal(session.status, 200)
+    assert.equal(session.headers.get("cache-control"), "no-store", "a sign-in answer carries the session token")
+    // Every field an EVM sign-in has ever had, so the refusal comes from the handler whichever version is in.
+    const evm = { address: "0x0", signature: "0x0", nonce: "n", uri: "https://luckout.test", chainId: 1, issuedAt: "2026-01-01T00:00:00.000Z" }
+    const refused = await post(`${url}/auth/verify-evm`, JSON.stringify(evm))
+    assert.equal(refused.status, 401)
+    assert.equal(refused.headers.get("cache-control"), "no-store")
+    const mcp = await post(`${url}/mcp`, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }))
+    assert.equal(mcp.headers.get("cache-control"), "no-store")
+    let limited: Response | undefined
+    for (let i = 0; i < 25 && limited?.status !== 429; i++) limited = await post(`${url}/auth/verify`, signIn)
+    assert.equal(limited?.status, 429)
+    assert.equal(limited?.headers.get("cache-control"), "no-store")
+  }))

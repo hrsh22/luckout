@@ -1,5 +1,5 @@
 import { ByteSize, Effect, Layer } from "effect"
-import { HttpRouter, HttpServerRequest } from "effect/http"
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { rateLimit } from "./RateLimit.ts"
 
 // What every request passes through before a route sees it, whichever route that is. main.ts serves the
@@ -15,6 +15,9 @@ export const MAX_BODY = ByteSize.kibibytes(64)
 
 export const edge = (allowedOrigins: ReadonlyArray<string>) =>
   Layer.mergeAll(
+    // Answers carry session tokens, gift card codes and balances: no browser or proxy may keep one. Listed
+    // first so it wraps the others and also marks their own answers (a 429).
+    HttpRouter.middleware((app) => Effect.map(app, HttpServerResponse.setHeader("cache-control", "no-store")), { global: true }),
     HttpRouter.cors({ allowedOrigins }),
     HttpRouter.middleware(rateLimit, { global: true }),
     // Read past the limit and the read fails: the API answers 413, and /mcp its own parse error.
