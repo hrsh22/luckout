@@ -1,6 +1,6 @@
 "use client"
 
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { useTelegram } from "@/lib/queries"
 import { useSession } from "@/lib/session"
@@ -13,6 +13,9 @@ export function TelegramLink() {
   const { token } = useSession()
   // Set once the bot opens in another tab: the card follows along until the link appears.
   const [waiting, setWaiting] = useState(false)
+  // The one-time link, kept on screen while waiting: a pop-up opened after a request (Safari, in-app browsers) may be
+  // blocked without a word, and with "noopener" window.open can't tell us.
+  const [link, setLink] = useState<string>()
   const status = useTelegram(token, waiting)
   const [busy, setBusy] = useState(false)
 
@@ -33,6 +36,7 @@ export function TelegramLink() {
     setBusy(true)
     try {
       const { url } = await api((c) => c.telegram.linkCode(), token)
+      setLink(url)
       window.open(url, "_blank", "noopener")
       setWaiting(true)
     } catch (e) {
@@ -57,7 +61,7 @@ export function TelegramLink() {
           {s?.linked
             ? "The bot buys only when you tap Confirm, always within your limits."
             : waiting
-            ? "Tap Start in the Luckout bot. This updates by itself once you do."
+            ? "Tap Start in the Luckout bot. If Telegram didn't open, tap Open Telegram. This updates by itself once you do."
             : "Ask the Luckout bot for a card. Nothing is bought until you tap Confirm, and codes arrive in your private chat."}
         </p>
       </div>
@@ -69,7 +73,7 @@ export function TelegramLink() {
         ? (
           <div className="flex shrink-0 items-center gap-1">
             <Button variant="ghost" onClick={() => setWaiting(false)}>Cancel</Button>
-            <Button variant="light" loading>Waiting for Telegram</Button>
+            <a href={link} target="_blank" rel="noopener noreferrer" className={buttonVariants({ variant: "light" })}>Open Telegram</a>
           </div>
         )
         : <Button loading={busy} onClick={connect} disabled={!s.botUrl}>{s.botUrl ? "Connect Telegram" : "Bot offline"}</Button>}
