@@ -288,10 +288,14 @@ export const makeAgent = (deps: {
       })))))
   })
 
-  /** One customer turn: runs the tool loop and returns the reply plus any purchase to confirm. */
-  return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string) => {
+  /**
+   * One customer turn: runs the tool loop and returns the reply plus any purchase to confirm. `typed` is
+   * what the customer wrote themselves ("" for a forwarded message): the model reads `text`, but only
+   * `typed` can set the Checkout Email.
+   */
+  return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string, typed = text) => {
     let pending: Pending | undefined
-    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, text, (p) => (pending = p))
+    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, typed, (p) => (pending = p))
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
     // Signatures are checked alongside the tool loop and all awaited before anything reaches the customer.
     const signed: Array<Promise<boolean>> = []

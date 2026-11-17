@@ -254,7 +254,10 @@ export class Telegram extends Context.Service<Telegram, {
         // No passing TEE check on file, no chat: the model's replies couldn't be trusted.
         if (!(await tee!.ready())) return void ctx.reply(offline)
         let failure: unknown
-        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text).catch((e) => {
+        // A forwarded message, or one sent through an inline bot, was written by someone else: the model
+        // reads it, but it can't set the Checkout Email (ADR-0007).
+        const typed = ctx.message.forward_origin || ctx.message.via_bot ? "" : ctx.message.text
+        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text, typed).catch((e) => {
           failure = e
           console.error("agent error", e)
           return undefined
