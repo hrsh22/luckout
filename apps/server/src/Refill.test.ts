@@ -980,3 +980,21 @@ test("customers waiting while no refill can start is said out loud, with the rea
   }))
   assert.ok(w.alerts.some((a) => /^1 purchase\(s\) worth \$120\.00 are waiting for credit, and no refill can start: Refill \w{8} is stuck; resolve it in Admin first\.$/.test(a)), w.alerts.join("\n"))
 })
+
+test("a refill that has failed for hours still backs off and tells the admin: its wait can't overflow", async () => {
+  const w = world({ treasuryUsdc: 50_000_000, quoteFails: "down" })
+  const r = await w.run(Effect.gen(function*() {
+    const refill = yield* Refill
+    const sql = yield* SqlClient.SqlClient
+    const v = yield* refill.request(30_000_000, "boss.testnet")
+    yield* settle(v.id)
+    // Hours of failed tries in a row, as in a long 1Click outage.
+    yield* sql`UPDATE refills SET attempts = 45, next_attempt_at = now() - interval '1 second' WHERE id = ${v.id}`
+    yield* refill.process
+    const [row] = yield* sql<{ attempts: number; waits: boolean }>`
+      SELECT attempts, next_attempt_at > now() + interval '5 minutes' AS waits FROM refills WHERE id = ${v.id}`
+    return row!
+  }))
+  assert.deepEqual([r.attempts, r.waits], [46, true], "one more try counted, and the next one waits the full backoff")
+  assert.ok(w.alerts.some((a) => a.includes("keeps failing at quote")), w.alerts.join("\n"))
+})

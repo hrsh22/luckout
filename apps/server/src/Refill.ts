@@ -615,9 +615,11 @@ export class Refill extends Context.Service<Refill, {
       /** A step couldn't run: back off, and once it has failed several times in a row, tell an admin. */
       const paused = (id: string, message: string) =>
         Effect.gen(function*() {
-          // Unknown outcome (network): back off and try the same step again; never guess.
+          // Unknown outcome (network): back off and try the same step again; never guess. The exponent stops where the
+          // wait reaches its cap, so hours of tries can't overflow the interval; a finished refill is left as it is.
           const [row] = yield* sql<Row>`UPDATE refills SET attempts = attempts + 1, error = ${message},
-            next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, attempts)) WHERE id = ${id} RETURNING *`.pipe(Effect.orDie)
+            next_attempt_at = now() + LEAST(interval '10 minutes', interval '30 seconds' * power(2, LEAST(attempts, 5)))
+            WHERE id = ${id} AND step IN ${sql.in(OPEN_REFILL_STEPS)} RETURNING *`.pipe(Effect.orDie)
           // An open refill holds up every other one, so one that keeps failing says so (the same text at most hourly).
           if (row && row.attempts >= ALERT_AFTER_ATTEMPTS) {
             yield* alerts.admin(
