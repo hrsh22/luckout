@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet } from "@/lib/evm"
+import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet, TransferReverted } from "@/lib/evm"
 import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { useSession } from "@/lib/session"
@@ -32,6 +32,8 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   const [amount, setAmount] = useState(() => topUpAmount(need))
   const [quote, setQuote] = useState<TopUpQuote>()
   const [signed, setSigned] = useState(false)
+  /** The wallet has sent this Top-Up's transfer: it may land, so Send is never offered again for it. */
+  const [sent, setSent] = useState(false)
   const [status, setStatus] = useState<TopUpStatus>()
   const [busy, setBusy] = useState<"quote" | "send" | "sign">()
   const [error, setError] = useState<string>()
@@ -136,9 +138,15 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
   const sendNow = (q: TopUpQuote) =>
     step("send", async () => {
       await signMoveIn(q)
-      const txHash = await sendFromWallet(accountId, { chain: q.chain, contract: asset?.contract, to: q.depositAddress, amount: q.amountIn })
-      // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
-      void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+      try {
+        const txHash = await sendFromWallet(accountId, { chain: q.chain, contract: asset?.contract, to: q.depositAddress, amount: q.amountIn }, () => setSent(true))
+        // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
+        void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+      } catch (e) {
+        // Mined and reverted: nothing left the wallet, so they may send again.
+        if (e instanceof TransferReverted) setSent(false)
+        throw e
+      }
     })
   /**
    * Asks once for the approval that moves this Top-Up into Luckout when it lands. Declining isn't an error: the
@@ -261,7 +269,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                     Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get <b>{usd(quote.usdcOut)}</b> in
                     Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
                   </p>
-                  {!signed && (
+                  {!sent && (
                     <>
                       <Button className="self-start" loading={busy === "send"} disabled={!!busy} onClick={() => sendNow(quote)}>
                         Send from your wallet
@@ -288,7 +296,7 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
           </>
         )}
       {(moved || status?.move === "failed" || ["REFUNDED", "FAILED"].includes(status?.status ?? "")) && (
-        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuote(undefined), setSigned(false), setStatus(undefined), (reported.current = false))}>
+        <Button variant="light" size="sm" className="self-start" onClick={() => (setQuote(undefined), setSigned(false), setSent(false), setManual(false), setStatus(undefined), (reported.current = false))}>
           Top up again
         </Button>
       )}
