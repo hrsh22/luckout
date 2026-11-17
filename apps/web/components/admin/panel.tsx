@@ -2,7 +2,7 @@
 
 import { shortAccount } from "@/components/avatar"
 import { ShopControls, TransferOwnerSheet } from "@/components/admin/controls"
-import { capText, CashbackCapSheet, maxCashbackAt } from "@/components/admin/cashback-cap"
+import { CashbackCapSheet } from "@/components/admin/cashback-cap"
 import { CreditSection } from "@/components/admin/credit"
 import { BaseGasTile, GasTile, SendNearSheet } from "@/components/admin/gas"
 import { PurchasesCard } from "@/components/admin/purchases"
@@ -14,10 +14,12 @@ import { SignInCard } from "@/components/sign-in-card"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, cancelled, errorMessage } from "@/lib/api"
+import { capText, maxCashbackAt } from "@/lib/cashback-cap"
 import { usd } from "@/lib/format"
 import { type Call, contractId, explorer, liveAverage, send, usdcId } from "@/lib/near"
+import { useIsAdmin, useShopStatus } from "@/lib/queries"
 import { useSession } from "@/lib/session"
-import type { AdminOverview } from "@luckout/api"
+import type { AdminOverview, ShopStatus } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, Pause, Plus, ShieldCheck } from "lucide-react"
 import Link from "next/link"
@@ -38,12 +40,16 @@ export function AdminPanel() {
     refetchInterval: 15_000,
     retry: false
   })
+  // Read alongside the overview, not after it: the shop's status needs only our database (the contract's pause is
+  // read if NEAR answers), so Stop sales can be offered when the overview fails.
+  const shop = useShopStatus()
+  const isAdmin = useIsAdmin(token)
 
   if (ready && !accountId) {
     return <SignInCard title="Sign in to continue" body="Sign in with your NEAR wallet." />
   }
   if ((q.error as { _tag?: string } | null)?._tag === "NotFound") return <NoPage />
-  if (!q.data) return q.error ? <p role="alert" className="font-medium text-bad">{errorMessage(q.error)}</p> : <Loading />
+  if (!q.data) return q.error ? <OverviewFailed error={q.error} shop={isAdmin ? shop.data : undefined} /> : <Loading />
   // A failed poll keeps the last figures (and any open sheet) on screen; the next poll tries again.
   return (
     <>
@@ -61,6 +67,41 @@ export function NoPage() {
       <Link href="/shop" className={buttonVariants({ size: "lg", className: "self-start" })}>Go to the shop</Link>
     </div>
   )
+}
+
+/**
+ * The overview reads NEAR, Bitrefill and the database together, and fails if any of them does. Stop sales needs only
+ * the database, and it is the first step in an incident (deploy/RUNBOOK.md), so it is offered here too.
+ */
+function OverviewFailed({ error, shop }: { error: unknown; shop: ShopStatus | undefined }) {
+  const setSales = useSetSales()
+  return (
+    <div className="flex flex-col gap-6">
+      <AdminTabs />
+      <p role="alert" className="font-medium text-bad">{errorMessage(error)}</p>
+      {shop && (
+        <div className="flex flex-col items-start gap-3">
+          <p className="text-ink-soft">The control room shows again once it loads. Stopping or restarting sales works now.</p>
+          <ShopControls salesStopped={shop.reason === "stopped"} paused={shop.reason === "paused"} onSales={setSales} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Stops or restarts new purchases on the server (any admin, no wallet), then re-reads what shows it. */
+function useSetSales() {
+  const { token } = useSession()
+  const qc = useQueryClient()
+  return async (open: boolean) => {
+    try {
+      await api((c) => c.admin.sales({ payload: { open } }), token)
+      toast.success(open ? "Sales restarted" : "Sales stopped: no new purchases until you restart them")
+      await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), qc.invalidateQueries({ queryKey: ["shop-status"] })])
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+  }
 }
 
 function Loading() {
@@ -88,7 +129,7 @@ function useAdminTx(): Tx {
       const result = await f(accountId)
       const last = (Array.isArray(result) ? result.at(-1) : result) as { transaction?: { hash?: string } } | undefined
       const hash = last?.transaction?.hash
-      toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank") } } : {}) })
+      toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank", "noopener") } } : {}) })
       await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), refresh().catch(() => {})])
       return true
     } catch (e) {
@@ -102,8 +143,7 @@ function useAdminTx(): Tx {
 type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | "cap" | { gas: AdminOverview["gas"][number] }
 
 function Dashboard({ o }: { o: AdminOverview }) {
-  const { accountId, token } = useSession()
-  const qc = useQueryClient()
+  const { accountId } = useSession()
   const tx = useAdminTx()
   const [open, setOpen] = useState<Open>()
   const isOwner = accountId === o.contract.owner
@@ -119,15 +159,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
       : toast(`That needs the owner's wallet: ${o.contract.owner}`, {
         description: `You're signed in as ${shortAccount(accountId ?? "")}. Sign in with the owner's account to do this.`
       })
-  const setSales = async (openSales: boolean) => {
-    try {
-      await api((c) => c.admin.sales({ payload: { open: openSales } }), token)
-      toast.success(openSales ? "Sales restarted" : "Sales stopped: no new purchases until you restart them")
-      await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), qc.invalidateQueries({ queryKey: ["shop-status"] })])
-    } catch (e) {
-      toast.error(errorMessage(e))
-    }
-  }
+  const setSales = useSetSales()
   const contractCall = (method: string, args: object, tgas = 30): Call => ({ receiverId: contractId, method, args, deposit: "1", tgas })
   const average = liveAverage({ lucky_settled: o.stats.luckySettled, lucky_amount_total: String(o.stats.luckyAmountTotal), lucky_paid_total: String(o.stats.luckyPaidTotal) })
   const close = () => setOpen(undefined)

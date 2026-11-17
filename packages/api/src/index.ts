@@ -1,7 +1,8 @@
-import { Context, Schema } from "effect"
+import { Context, Schema, Struct } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 
 export * from "./intents.ts"
+export * from "./limits.ts"
 
 /** Whole micro-USDC (6 decimals), never floats (ADR-0004). */
 export const MicroUsdc = Schema.Int
@@ -57,13 +58,6 @@ export class BitrefillUnavailable extends Schema.TaggedError<BitrefillUnavailabl
 /** Normal is a Standard Purchase; `{ lucky: n }` is a Lucky Buy on Game Version n. */
 export const Mode = Schema.Union([Schema.Literal("normal"), Schema.Struct({ lucky: Schema.Int })])
 export type Mode = typeof Mode.Type
-
-/** New accounts' Spending Limits in micro-USDC, as the contract sets them (DEFAULT_*_LIMIT). */
-export const DEFAULT_LIMITS = { perPurchase: 200_000_000, daily: 1_000_000_000 } as const
-/** "No limit": u128::MAX, so the contract's check never binds. Sent as this string, never through a JS number. */
-export const NO_LIMIT = "340282366920938463463374607431768211455"
-/** A limit past $9 billion (u128::MAX included) is no limit at all: say so, never show it in dollars. */
-export const noLimit = (micro: string | number) => Number(micro) > Number.MAX_SAFE_INTEGER
 
 // ---------- auth ----------
 
@@ -550,6 +544,13 @@ export class RelaySettings extends Schema.Class<RelaySettings>("RelaySettings")(
   allDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100_000 }))
 }) {}
 
+/**
+ * What an admin changes in the relayer's settings: only the fields sent. The server keeps the rest as they are
+ * now, so a panel opened before another admin's change can't undo it.
+ */
+export const RelayChange = Schema.Struct(RelaySettings.fields).mapFields(Struct.map(Schema.optionalKey))
+export type RelayChange = typeof RelayChange.Type
+
 const Yocto = Schema.String
 
 const Usd = MicroUsdc.check(Schema.isBetween({ minimum: 0, maximum: 2_000_000_000 }))
@@ -582,6 +583,10 @@ export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings
    */
   refillBelow: Schema.optional(Usd)
 }) {}
+
+/** What an admin changes in the credit settings: only the fields sent, as with RelayChange. */
+export const CreditChange = Schema.Struct(CreditSettings.fields).mapFields(Struct.map(Schema.optionalKey))
+export type CreditChange = typeof CreditChange.Type
 
 /** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
 export class RefillView extends Schema.Class<RefillView>("RefillView")({
@@ -786,10 +791,12 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     error: NotFound
   }),
   HttpApiEndpoint.get("users", "/admin/users", { success: Schema.Array(AdminUser), error: NotFound }),
-  HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelaySettings, success: RelaySettings, error: NotFound }),
+  /** Changes only the fields sent; answers with the settings as saved. */
+  HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelayChange, success: RelaySettings, error: NotFound }),
   /** Stops or restarts new purchases on the server, at once, without the owner's wallet. */
   HttpApiEndpoint.post("sales", "/admin/sales", { payload: Schema.Struct({ open: Schema.Boolean }), success: ShopStatus, error: NotFound }),
-  HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditSettings, success: CreditSettings, error: [NotFound, AdminInvalid] }),
+  /** Changes only the fields sent, and refuses settings that wouldn't hang together; answers with the settings as saved. */
+  HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditChange, success: CreditSettings, error: [NotFound, AdminInvalid] }),
   /** Refill now, outside the schedule; `amount` defaults to what the target and waiting purchases need. */
   HttpApiEndpoint.post("refill", "/admin/refills", {
     payload: Schema.Struct({ amount: Schema.optional(Usd) }),

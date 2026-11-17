@@ -5,25 +5,26 @@ import { AmountField } from "@/components/funds"
 import { Money } from "@/components/money"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { contractId } from "@/lib/chain"
-import { dollars, toMicro, usd } from "@/lib/format"
+import { contractId, view } from "@/lib/chain"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { type Call, explorerAccount, send } from "@/lib/near"
+import { ourAccounts, treasuryMode } from "@/lib/treasury"
 import type { AdminOverview } from "@luckout/api"
+import { useQuery } from "@tanstack/react-query"
 import { CircleAlert, Landmark } from "lucide-react"
 import { useEffect, useState } from "react"
 
-type Treasury = AdminOverview["treasury"]
-
-/** What the treasury is set to do, from what the server signs with and what the contract allows. */
-const treasuryMode = (t: Treasury) =>
-  !t.accountId ? "none" : t.contractTreasury !== t.accountId ? "mismatch" : t.dailyCap > 0 ? "auto" : "manual"
+/** The treasury this site was built for: the only account the owner is ever asked to name with set_treasury. */
+const OUR_TREASURY = ourAccounts(contractId)?.treasury
 
 export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: AsOwner; tx: Tx }) {
   const t = o.treasury
-  const mode = treasuryMode(t)
+  const mode = treasuryMode(t, OUR_TREASURY)
   const [sheet, setSheet] = useState<"mode" | "move">()
   const pill = {
     none: { text: "Not set up", tone: TONE.muted },
+    unknown: { text: "Unknown", tone: TONE.bad },
+    "server-differs": { text: "Check the server", tone: TONE.bad },
     mismatch: { text: "Points elsewhere", tone: TONE.bad },
     auto: { text: "Automatic", tone: TONE.good },
     manual: { text: "Manual", tone: TONE.warn }
@@ -44,8 +45,12 @@ export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: As
       <p className="text-[15px] text-ink-soft">
         {mode === "none"
           ? "The server has no treasury key yet, so refills can't be paid."
+          : mode === "unknown"
+          ? `This site can't tell which treasury it is built for (its contract, ${contractId}, isn't named app.<name>), so the owner's treasury actions are off.`
+          : mode === "server-differs"
+          ? `The server signs refills as ${t.accountId}, but this site is built for ${OUR_TREASURY}: check TREASURY_ACCOUNT_ID in the server's environment. Change mode only ever names ${OUR_TREASURY}, so switching to manual still works.`
           : mode === "mismatch"
-          ? `The contract lets ${t.contractTreasury ?? "no one"} pull proceeds, but the server signs as ${t.accountId}. Point the contract at the server's treasury.`
+          ? `The contract lets ${t.contractTreasury ?? "no one"} pull proceeds, not ${OUR_TREASURY}, which the server signs as. Point the contract at it.`
           : mode === "auto"
           ? `Pulls only what each refill needs from the proceeds, up to ${usd(t.dailyCap)} a day. ${usd(t.sweptToday)} pulled today.`
           : "Refills wait for you to move proceeds in. You'll be told how much, here and in alerts."}
@@ -56,15 +61,19 @@ export function TreasuryCard({ o, asOwner, tx }: { o: AdminOverview; asOwner: As
         </p>
       )}
       <div className="mt-auto flex flex-wrap gap-2">
-        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={!t.accountId} onClick={asOwner(() => setSheet("mode"))}>
+        <Button size="sm" variant={mode === "mismatch" ? "primary" : "soft"} disabled={!OUR_TREASURY} onClick={asOwner(() => setSheet("mode"))}>
           {mode === "mismatch" ? "Fix it" : "Change mode"}
         </Button>
-        <Button size="sm" variant={t.needs ? "primary" : "soft"} disabled={mode === "none" || mode === "mismatch" || !o.reserve.proceeds} onClick={asOwner(() => setSheet("move"))}>
+        <Button size="sm" variant={t.needs ? "primary" : "soft"} disabled={(mode !== "auto" && mode !== "manual") || !o.reserve.proceeds} onClick={asOwner(() => setSheet("move"))}>
           Move proceeds here
         </Button>
       </div>
-      <TreasuryModeSheet open={sheet === "mode"} onClose={() => setSheet(undefined)} o={o} tx={tx} />
-      <MoveProceedsSheet open={sheet === "move"} onClose={() => setSheet(undefined)} o={o} tx={tx} />
+      {OUR_TREASURY && (
+        <>
+          <TreasuryModeSheet open={sheet === "mode"} onClose={() => setSheet(undefined)} treasury={OUR_TREASURY} mode={mode} tx={tx} />
+          <MoveProceedsSheet open={sheet === "move"} onClose={() => setSheet(undefined)} o={o} treasury={OUR_TREASURY} tx={tx} />
+        </>
+      )}
     </div>
   )
 }
@@ -101,24 +110,39 @@ function BaseWallet({ w, float, guest }: { w: NonNullable<AdminOverview["treasur
   )
 }
 
-function TreasuryModeSheet({ open, onClose, o, tx }: { open: boolean; onClose: () => void; o: AdminOverview; tx: Tx }) {
-  const t = o.treasury
+/** `treasury` is the one this site was built for (OUR_TREASURY), never an account the server reports. */
+function TreasuryModeSheet({ open, onClose, treasury, mode, tx }: { open: boolean; onClose: () => void; treasury: string; mode: ReturnType<typeof treasuryMode>; tx: Tx }) {
   const [auto, setAuto] = useState(true)
   const [cap, setCap] = useState("")
+  // The cap starts from what the contract allows now, read from NEAR here, not from a number the server suggests.
+  const live = useQuery({
+    queryKey: ["contract-config", contractId],
+    queryFn: () => view<{ sweep_daily_cap?: string }>(contractId, "get_config"),
+    // Only the cap: get_config's other fields change on a refetch, and that mustn't overwrite what the owner typed.
+    select: (c) => c.sweep_daily_cap ?? "0",
+    enabled: open,
+    staleTime: 0
+  })
   useEffect(() => {
     if (!open) return
-    setAuto(treasuryMode(t) !== "manual")
-    setCap(dollars(t.dailyCap || o.credit.settings.dailyRefill))
+    setAuto(mode !== "manual")
+    setCap("")
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!open || !live.data) return
+    const now = Number(live.data)
+    // Manual (0) or unread: the field starts empty and the owner types the cap.
+    setCap(now > 0 ? dollars(now) : "")
+  }, [open, live.data])
   const capMicro = toMicro(cap)
   const call = (daily: number): Call => ({
     receiverId: contractId,
     method: "set_treasury",
-    args: { treasury: t.accountId, daily_cap: String(daily) },
+    args: { treasury, daily_cap: String(daily) },
     deposit: "1"
   })
   return (
-    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Treasury mode" description={`The contract will let ${t.accountId ?? "the treasury"} pull proceeds, and nothing else.`}>
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Treasury mode" description={`The contract will let ${treasury} pull proceeds, and nothing else.`}>
       <div className="flex flex-col gap-4">
         {[
           { value: true, title: "Automatic", body: "Refills pull exactly what they need from the proceeds, up to a daily cap. No taps." },
@@ -141,7 +165,7 @@ function TreasuryModeSheet({ open, onClose, o, tx }: { open: boolean; onClose: (
             <span className="text-sm font-semibold">Most it may pull in a day</span>
             <span className="relative">
               <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>
-              <input className="field pl-8!" inputMode="decimal" value={cap} onChange={(e) => setCap(e.target.value.replace(/[^\d.]/g, ""))} />
+              <input className="field pl-8!" inputMode="decimal" value={cap} onChange={(e) => setCap(typedAmount(e.target.value))} />
             </span>
             <span className="text-xs text-muted">If the server were ever compromised, this is the most proceeds it could take in a day.</span>
           </label>
@@ -157,7 +181,7 @@ function TreasuryModeSheet({ open, onClose, o, tx }: { open: boolean; onClose: (
   )
 }
 
-function MoveProceedsSheet({ open, onClose, o, tx }: { open: boolean; onClose: () => void; o: AdminOverview; tx: Tx }) {
+function MoveProceedsSheet({ open, onClose, o, treasury, tx }: { open: boolean; onClose: () => void; o: AdminOverview; treasury: string; tx: Tx }) {
   const t = o.treasury
   const available = o.reserve.proceeds
   const suggested = Math.min(available, t.needs && t.needs > 0 ? t.needs : o.credit.target)
@@ -168,7 +192,7 @@ function MoveProceedsSheet({ open, onClose, o, tx }: { open: boolean; onClose: (
   const micro = toMicro(amount)
   const ok = micro > 0 && micro <= available
   return (
-    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Move proceeds to the treasury" description={`${usd(available)} of proceeds. The contract sends it only to ${t.accountId}.`}>
+    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Move proceeds to the treasury" description={`${usd(available)} of proceeds. The contract sends it only to its treasury, ${treasury}.`}>
       <div className="flex flex-col gap-5">
         <AmountField
           label="Amount to move in USDC"

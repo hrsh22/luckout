@@ -1,5 +1,5 @@
 import { Api, CreditSettings } from "@luckout/api"
-import { Effect, Layer } from "effect"
+import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
@@ -10,7 +10,7 @@ import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
-import { Near } from "./Near.ts"
+import { Near, NearUnavailable } from "./Near.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
@@ -191,4 +191,66 @@ test("the overview shows how near the busiest Checkout Email is to Bitrefill's l
     assert.equal(o.checkout.emails, 2)
     assert.deepEqual(o.checkout.limits, { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 })
     assert.deepEqual(o.checkout.busiest, { orders: 2, daily: 15_000_000, monthly: 35_000_000 })
+  })))
+
+test("Stop sales and the shop's status need only the database: they work while NEAR doesn't answer, and the overview doesn't", async () => {
+  const down = fakeNear({
+    relayerId: "relayer.test",
+    view: () => Effect.fail(new NearUnavailable({ message: "NEAR isn't answering" })),
+    account: () => Effect.fail(new NearUnavailable({ message: "NEAR isn't answering" }))
+  })
+  const outage = Admin.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
+    Layer.provide(Layer.mergeAll(
+      Layer.succeed(Near, down),
+      Layer.succeed(Bitrefill, bitrefill),
+      Layer.succeed(Base, fakeBase()),
+      Layer.succeed(Refill, refill),
+      Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
+    )),
+    Layer.provideMerge(DbMemory)
+  )
+  const r = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sales = yield* Sales
+    const overview = yield* Effect.exit(admin.overview)
+    const stopped = yield* admin.setSales(false, "boss.testnet")
+    const seen = yield* sales.status
+    const restarted = yield* admin.setSales(true, "boss.testnet")
+    return { overview, stopped, seen, restarted }
+  })).pipe(Effect.provide(outage)))
+  assert.ok(Exit.isFailure(r.overview), "the overview reads the contract, so it fails without NEAR")
+  assert.deepEqual([r.stopped.open, r.stopped.reason], [false, "stopped"])
+  assert.equal(r.seen.reason, "stopped", "what the panel shows when the overview can't load")
+  assert.equal(r.restarted.open, true, "an unreadable pause counts as not paused")
+})
+
+test("saving the relayer's caps leaves its switch as it is now, and flipping the switch leaves the caps", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const relay = yield* Relay
+    // One admin turns the relayer off during an incident...
+    yield* admin.configureRelay({ enabled: false }, "boss.testnet")
+    // ...and another, whose panel still shows it on, saves new caps.
+    const saved = yield* admin.configureRelay({ perAccountDaily: 7, allDaily: 70 }, "luckout.testnet")
+    assert.deepEqual({ ...saved }, { enabled: false, perAccountDaily: 7, allDaily: 70 })
+    assert.match(alerts.at(-1) ?? "", /luckout\.testnet set the relayer off: 7 free per account, 70 in all per day/)
+    yield* admin.configureRelay({ enabled: true }, "boss.testnet")
+    assert.deepEqual({ ...(yield* relay.settings) }, { enabled: true, perAccountDaily: 7, allDaily: 70 })
+  })))
+
+test("saving the credit numbers leaves automatic refills as they are now, and the merged settings must still hang together", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const credit = yield* Credit
+    const before = yield* credit.settings
+    yield* admin.configureCredit({ autoRefill: false }, "boss.testnet")
+    const saved = yield* admin.configureCredit({ ceiling: 800_000_000, waitMinutes: 60 }, "luckout.testnet")
+    assert.deepEqual([saved.autoRefill, saved.ceiling, saved.waitMinutes, saved.floor], [false, 800_000_000, 60, before.floor])
+    assert.match(alerts.at(-1) ?? "", /luckout\.testnet set .*: auto-refill off/)
+    // The check runs on what would be saved, not only on the fields sent.
+    const bad = yield* admin.configureCredit({ floor: 800_000_001 }, "boss.testnet").pipe(Effect.flip)
+    assert.equal(bad._tag, "AdminInvalid")
+    yield* admin.configureCredit({ autoRefill: true }, "boss.testnet")
+    assert.deepEqual([(yield* credit.settings).autoRefill, (yield* credit.settings).ceiling], [true, 800_000_000])
   })))

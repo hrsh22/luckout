@@ -1,6 +1,6 @@
 "use client"
 
-import { dollars, toMicro } from "@/lib/format"
+import { dollars, toMicro, typedAmount } from "@/lib/format"
 
 /** An amount field with quick picks. Everything stays in micro-USDC except what's typed. */
 export function AmountField({ value, onChange, picks, label }: {
@@ -18,7 +18,7 @@ export function AmountField({ value, onChange, picks, label }: {
           className="field font-display !h-14 !rounded-[1.25rem] !pl-11 !text-3xl !font-extrabold"
           inputMode="decimal"
           value={value}
-          onChange={(e) => onChange(e.target.value.replace(/[^\d.]/g, ""))}
+          onChange={(e) => onChange(typedAmount(e.target.value))}
           aria-invalid={value !== "" && !(toMicro(value) > 0)}
         />
       </label>

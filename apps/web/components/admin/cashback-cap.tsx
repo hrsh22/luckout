@@ -3,24 +3,13 @@
 import type { Tx } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { dollars, toMicro, usd } from "@/lib/format"
-import { percent } from "@/lib/modes"
+import { capText, maxCashbackAt } from "@/lib/cashback-cap"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { contractId, send } from "@/lib/near"
 import type { AdminOverview } from "@luckout/api"
 import { useEffect, useState } from "react"
 
 type Cap = AdminOverview["reserve"]["cashbackCap"]
-
-/** max_cashback() in the contract: the lower of the cap's limits at this Free Reserve. */
-export const maxCashbackAt = (cap: Cap, free: number) =>
-  Math.min(cap.fixed ?? Infinity, cap.reserveBps === null ? Infinity : Number((BigInt(free) * BigInt(cap.reserveBps)) / 10_000n))
-
-/** "the lower of $50.00 and 20% of free reserve" */
-export const capText = (cap: Cap) => {
-  const share = cap.reserveBps === null ? undefined : `${percent(cap.reserveBps)} of free reserve`
-  if (cap.fixed === null) return share
-  return share ? `the lower of ${usd(cap.fixed)} and ${share}` : usd(cap.fixed)
-}
 
 /** The owner sets the Cashback Cap in their wallet. An empty fixed field turns that limit off; the share is required. */
 export function CashbackCapSheet({ open, onClose, o, tx }: { open: boolean; onClose: () => void; o: AdminOverview; tx: Tx }) {
@@ -51,14 +40,14 @@ export function CashbackCapSheet({ open, onClose, o, tx }: { open: boolean; onCl
           <span className="text-sm font-semibold">Fixed limit</span>
           <span className="relative">
             <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>
-            <input className="field pl-8!" inputMode="decimal" placeholder="No fixed limit" value={fixed} onChange={(e) => setFixed(e.target.value.replace(/[^\d.]/g, ""))} />
+            <input className="field pl-8!" inputMode="decimal" placeholder="No fixed limit" value={fixed} onChange={(e) => setFixed(typedAmount(e.target.value))} />
           </span>
           <span className="text-xs text-muted">Bounds what a block producer could gain by nudging one Draw. Leave empty for none.</span>
         </label>
         <label className="flex flex-col gap-1.5">
           <span className="text-sm font-semibold">Share of free reserve</span>
           <span className="relative">
-            <input className="field pr-9!" inputMode="decimal" placeholder="20" value={share} onChange={(e) => setShare(e.target.value.replace(/[^\d.]/g, ""))} />
+            <input className="field pr-9!" inputMode="decimal" placeholder="20" value={share} onChange={(e) => setShare(typedAmount(e.target.value))} />
             <span className="pointer-events-none absolute top-1/2 right-4 -translate-y-1/2 font-semibold text-muted">%</span>
           </span>
           <span className="text-xs text-muted">Shrinks with the reserve after a run of luck, so it always lasts. Required, at most 50%: one purchase never takes most of the reserve.</span>

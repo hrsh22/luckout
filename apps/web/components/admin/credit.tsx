@@ -8,9 +8,9 @@ import { Money } from "@/components/money"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
-import { dollars, toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { useSession } from "@/lib/session"
-import { type AdminOverview, CreditSettings } from "@luckout/api"
+import type { AdminOverview, CreditChange, CreditSettings } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, Mail, RefreshCw, Settings2, Store, Wallet } from "lucide-react"
 import { motion } from "motion/react"
@@ -24,13 +24,16 @@ import { toast } from "sonner"
 /** With guest checkout, `credit` describes the Base Float: the Base Wallet's USDC. */
 type Credit = AdminOverview["credit"]
 
-/** Saves credit settings (server-side, any admin) and announces the change. */
+/**
+ * Saves credit settings (server-side, any admin) and announces the change. Sends only what the control changes:
+ * the server keeps the rest as it is now, so a panel opened before another admin's change can't undo it.
+ */
 function useSaveCredit() {
   const { token } = useSession()
   const qc = useQueryClient()
-  return async (next: CreditSettings, done: string) => {
+  return async (change: CreditChange, done: string) => {
     try {
-      await api((c) => c.admin.credit({ payload: next }), token)
+      await api((c) => c.admin.credit({ payload: change }), token)
       toast.success(done)
       await qc.invalidateQueries({ queryKey: ["admin"] })
       return true
@@ -142,7 +145,7 @@ function CreditCard({ c, guest, ordersToday, cap }: { c: Credit; guest: boolean;
             label="Refill automatically"
             onChange={async (autoRefill) => {
               setBusy(true)
-              await save(new CreditSettings({ ...s, autoRefill }), autoRefill ? "Automatic refills on" : "Automatic refills off: you'll be told when to refill")
+              await save({ autoRefill }, autoRefill ? "Automatic refills on" : "Automatic refills off: you'll be told when to refill")
               setBusy(false)
             }}
           />
@@ -258,14 +261,16 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
             <span className="text-sm font-semibold">{x.label}</span>
             <span className="relative">
               {x.dollars && <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>}
-              <input className={`field ${x.dollars ? "pl-8!" : ""}`} inputMode="decimal" value={f[x.key]} onChange={(e) => setF({ ...f, [x.key]: e.target.value.replace(/[^\d.]/g, "") })} />
+              <input className={`field ${x.dollars ? "pl-8!" : ""}`} inputMode="decimal" value={f[x.key]} onChange={(e) => setF({ ...f, [x.key]: typedAmount(e.target.value) })} />
             </span>
             <span className="text-xs text-muted">{x.hint}</span>
           </label>
         ))}
         <Button size="lg" loading={busy} disabled={!valid} onClick={async () => {
           setBusy(true)
-          if (await save(new CreditSettings({ autoRefill: s.autoRefill, ...next }), guest ? "Float settings saved" : "Credit settings saved")) onClose()
+          // The numbers this sheet shows; with guest checkout "Keep ready on Base" is hidden, so it isn't sent.
+          const { baseFloat, ...shown } = next
+          if (await save(guest ? shown : next, guest ? "Float settings saved" : "Credit settings saved")) onClose()
           setBusy(false)
         }}>
           Save settings

@@ -269,6 +269,12 @@ const sellable = (p: { id: string; name: string; country_code: string; recipient
 
 /** What a Bitrefill product id looks like; anything else is refused before spending a lookup. */
 const PRODUCT_ID = /^[a-z0-9][a-z0-9-]{0,99}$/
+/**
+ * A CSS hex colour: "#" and 3, 4, 6 or 8 hex digits. A card's `logo_background` ends up in a `background` style
+ * on every shop tile, where anything else (a `url(...)`, say) would make each visitor's browser fetch an
+ * address of someone else's choosing.
+ */
+const HEX_COLOUR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 
 /** "5.53" → 5_530_000, with no floating point (ADR-0004). */
 export const usdToMicro = (usd: string): number => {
@@ -414,7 +420,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
 
       const images = (p: { image?: string | undefined; logo_background?: string | undefined }) => ({
         ...(p.image ? { image: p.image } : {}),
-        ...(p.logo_background ? { background: p.logo_background } : {})
+        // Bitrefill's string is used only if it is a colour (HEX_COLOUR); otherwise the card goes without one.
+        ...(p.logo_background && HEX_COLOUR.test(p.logo_background) ? { background: p.logo_background } : {})
       })
 
       const summary = (p: typeof Product.Type) =>
@@ -479,7 +486,10 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       let brands: ReadonlyArray<ReadonlyArray<typeof Product.Type>> = yield* readSetting("popular_brands", Brands, [])
       /** Each card's logo, from the same copy: Bitrefill's price lookup (MCP) has none. */
       const Logos = Schema.Record(Schema.String, Schema.Struct({ image: Schema.optionalKey(Schema.String), background: Schema.optionalKey(Schema.String) }))
-      let logos = new Map<string, ReturnType<typeof images>>(Object.entries(yield* readSetting("card_logos", Logos, {})))
+      // Saved logos pass the same check as fresh ones: a colour saved before the check existed isn't trusted either.
+      let logos = new Map<string, ReturnType<typeof images>>(
+        Object.entries(yield* readSetting("card_logos", Logos, {})).map(([id, l]) => [id, images({ image: l.image, logo_background: l.background })])
+      )
       const copyCatalog = Effect.gen(function*() {
         const cards: Array<typeof Product.Type> = []
         for (let start = 0;; start += PAGE) {

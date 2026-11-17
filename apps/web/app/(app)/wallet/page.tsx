@@ -11,7 +11,7 @@ import { TelegramLink } from "@/components/telegram-link"
 import { Toggle } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { dollars, toMicro, usd } from "@/lib/format"
+import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
 import { useCheckoutEmail } from "@/lib/queries"
@@ -205,7 +205,7 @@ function Limits({ per, daily }: { per: string; daily: string }) {
                   disabled={f.off}
                   placeholder={f.off ? "No limit" : undefined}
                   value={f.off ? "" : f.value}
-                  onChange={(e) => f.set(e.target.value.replace(/[^\d.]/g, ""))}
+                  onChange={(e) => f.set(typedAmount(e.target.value))}
                   aria-invalid={!f.off && !(toMicro(f.value) >= 0)}
                 />
               </span>

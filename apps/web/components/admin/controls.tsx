@@ -13,14 +13,15 @@ const NEAR_ACCOUNT = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a
 
 /**
  * Two ways to stop new purchases: Stop sales (any admin, on the server, instant) and the contract's
- * pause (the owner's wallet, the hard stop). The pill says which, if any, is on.
+ * pause (the owner's wallet, the hard stop). The pill says which, if any, is on. Without `onPause` and
+ * `onResume` (the overview didn't load, so who owns the contract isn't known) only Stop sales is offered.
  */
 export function ShopControls({ salesStopped, paused, onSales, onPause, onResume }: {
   salesStopped: boolean
   paused: boolean
   onSales: (open: boolean) => Promise<void>
-  onPause: () => void
-  onResume: () => void
+  onPause?: (() => void) | undefined
+  onResume?: (() => void) | undefined
 }) {
   const [busy, setBusy] = useState(false)
   const state = paused
@@ -44,9 +45,11 @@ export function ShopControls({ salesStopped, paused, onSales, onPause, onResume 
           {salesStopped ? <><Play />Restart sales</> : <><Pause />Stop sales</>}
         </Button>
       </div>
-      <button type="button" className="px-2 text-sm text-muted underline-offset-4 hover:text-ink hover:underline" onClick={paused ? onResume : onPause}>
-        {paused ? "Resume the contract" : "Pause the contract"} <span className="text-xs">(owner)</span>
-      </button>
+      {onPause && onResume && (
+        <button type="button" className="px-2 text-sm text-muted underline-offset-4 hover:text-ink hover:underline" onClick={paused ? onResume : onPause}>
+          {paused ? "Resume the contract" : "Pause the contract"} <span className="text-xs">(owner)</span>
+        </button>
+      )}
     </div>
   )
 }

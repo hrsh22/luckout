@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { explorerAccount } from "@/lib/near"
 import { useSession } from "@/lib/session"
-import { type AdminOverview, RelaySettings } from "@luckout/api"
+import type { AdminOverview, RelayChange } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { Zap } from "lucide-react"
 import { useEffect, useState } from "react"
@@ -28,10 +28,11 @@ export function RelayerCard({ r }: { r: AdminOverview["relay"] }) {
   const valid = Number.isInteger(nPer) && nPer >= 0 && nPer <= 1000 && Number.isInteger(nAll) && nAll >= 0 && nAll <= 100_000 && per !== "" && all !== ""
   const changed = nPer !== r.settings.perAccountDaily || nAll !== r.settings.allDaily
 
-  const save = async (next: { enabled: boolean; perAccountDaily: number; allDaily: number }, done: string) => {
+  // Sends only what this control changes: the server keeps the rest as it is now, not as this panel last saw it.
+  const save = async (change: RelayChange, done: string) => {
     setBusy(true)
     try {
-      await api((c) => c.admin.relay({ payload: new RelaySettings(next) }), token)
+      await api((c) => c.admin.relay({ payload: change }), token)
       toast.success(done)
       await qc.invalidateQueries({ queryKey: ["admin"] })
     } catch (e) {
@@ -53,7 +54,7 @@ export function RelayerCard({ r }: { r: AdminOverview["relay"] }) {
           on={r.settings.enabled}
           busy={busy || !r.configured}
           label="Relayer on"
-          onChange={(enabled) => save({ ...r.settings, enabled }, enabled ? "Relayer on: Luckout pays customers' fees" : "Relayer off: customers' wallets pay their fees")}
+          onChange={(enabled) => save({ enabled }, enabled ? "Relayer on: Luckout pays customers' fees" : "Relayer off: customers' wallets pay their fees")}
         />
       </div>
 
@@ -75,7 +76,7 @@ export function RelayerCard({ r }: { r: AdminOverview["relay"] }) {
             <input className="field" inputMode="numeric" value={f.value} onChange={(e) => f.set(e.target.value.replace(/\D/g, ""))} />
           </label>
         ))}
-        <Button loading={busy} disabled={!changed || !valid} onClick={() => save({ enabled: r.settings.enabled, perAccountDaily: nPer, allDaily: nAll }, "Relayer caps saved")}>
+        <Button loading={busy} disabled={!changed || !valid} onClick={() => save({ perAccountDaily: nPer, allDaily: nAll }, "Relayer caps saved")}>
           Save caps
         </Button>
       </div>

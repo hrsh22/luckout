@@ -1,5 +1,6 @@
-import { ConfigProvider, Effect } from "effect"
+import { ConfigProvider, Context, Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
+import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
@@ -191,6 +192,42 @@ test("Bitrefill's own test merchants are never listed or sold; a real brand name
   assert.ok(isTestMerchant(card("affiliate-tester", "Affiliate Tester", "KN")))
   assert.ok(!isTestMerchant(card("test-kitchen-philippines", "Test Kitchen Philippines", "PH")))
   assert.ok(!isTestMerchant(card("amazon-us", "Amazon", "US")))
+})
+
+test("a card's brand colour from Bitrefill is passed on only when it is a hex colour; anything else is dropped", async () => {
+  const colours = ["#1A2B3C", "#fff", "#11223344", "url(https://tracker.example/pixel.png)", "red", "#12345", "#1A2B3C;background-image:url(//tracker.example)"]
+  const realFetch = globalThis.fetch
+  // Bitrefill's REST catalog, faked: one card per colour, each with a logo.
+  globalThis.fetch = (async () =>
+    Response.json({
+      meta: {},
+      data: colours.map((logo_background, i) => ({ id: `card-${i}`, name: `Card ${i}`, country_code: "US", currency: "USD", recipient_type: "none", in_stock: true, image: "logos/card", logo_background }))
+    })) as typeof fetch
+  try {
+    const found = await run((b) => b.search("card"), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    assert.deepEqual(found.map((v) => v.background), ["#1A2B3C", "#fff", "#11223344", undefined, undefined, undefined, undefined])
+    assert.ok(found.every((v) => v.image === "logos/card"), "the logo itself is kept")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("a logo colour saved before the check existed is dropped when the server starts", async () => {
+  const logo = await Effect.runPromise(
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      const saved = { "card-1": { image: "logos/one", background: "url(https://tracker.example/pixel.png)" }, "card-2": { image: "logos/two", background: "#0A0B0C" } }
+      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('card_logos', ${JSON.stringify(saved)}::jsonb, 'server')`
+      // Testnet never copies the catalog, so what `logo` answers is exactly what was saved.
+      const b = Context.get(yield* Layer.build(Bitrefill.layer), Bitrefill)
+      return [b.logo("card-1"), b.logo("card-2")]
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(DbMemory),
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } })))
+    )
+  )
+  assert.deepEqual(logo, [{ image: "logos/one" }, { image: "logos/two", background: "#0A0B0C" }])
 })
 
 // Guest checkout (ADR-0012), with Bitrefill faked: the guest login, then whatever `tool` answers each MCP call.

@@ -4,23 +4,19 @@ import { shortAccount } from "@/components/avatar"
 import { Bar, basescan, eth, type Tx } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { explorerAccount, network, sendNear } from "@/lib/near"
+import { toYocto, typedAmount } from "@/lib/format"
+import { contractId, explorerAccount, network, sendNear } from "@/lib/near"
 import { useSession } from "@/lib/session"
+import { ourAccounts } from "@/lib/treasury"
 import type { AdminOverview } from "@luckout/api"
 import { Fuel, Plus } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
-const YOCTO = 10n ** 24n
 /** yoctoNEAR → "1.25" */
 const nearAmount = (yocto: string | bigint) => {
   const n = Number(BigInt(yocto) / 10n ** 18n) / 1e6
   return n.toLocaleString("en-US", { maximumFractionDigits: n < 10 ? 3 : 2 })
-}
-/** "1.5" NEAR → yoctoNEAR, without floating point. */
-const toYocto = (s: string) => {
-  const m = /^(\d+)(?:\.(\d{0,24}))?$/.exec(s.trim())
-  return m ? BigInt(m[1]!) * YOCTO + BigInt((m[2] ?? "").padEnd(24, "0")) : undefined
 }
 
 const GAS_COPY = {
@@ -108,7 +104,10 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
   }, [target])
   const yocto = toYocto(amount)
   const inWallet = BigInt(walletNear ?? 0)
-  const ok = yocto !== undefined && yocto > 0n && yocto < inWallet
+  // NEAR goes only to the account this site was built for in that role, never to one the server names.
+  const to = target ? ourAccounts(contractId)?.[target.role] : undefined
+  const differs = target !== undefined && to !== target.accountId
+  const ok = yocto !== undefined && yocto > 0n && yocto < inWallet && !differs
   return (
     <Sheet
       open={target !== undefined}
@@ -119,7 +118,7 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
       <div className="flex flex-col gap-5">
         <label className="relative block">
           <span className="sr-only">NEAR to send</span>
-          <input className="field font-display h-16! rounded-[1.25rem]! pr-20! text-3xl! font-extrabold!" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))} />
+          <input className="field font-display h-16! rounded-[1.25rem]! pr-20! text-3xl! font-extrabold!" inputMode="decimal" value={amount} onChange={(e) => setAmount(typedAmount(e.target.value))} />
           <span className="font-display pointer-events-none absolute top-1/2 right-5 -translate-y-1/2 text-xl font-extrabold text-muted">NEAR</span>
         </label>
         <div className="flex flex-wrap gap-2">
@@ -133,9 +132,15 @@ export function SendNearSheet({ target, onClose, tx }: { target: AdminOverview["
         <p className="text-sm text-muted">
           Your wallet has {nearAmount(inWallet)} NEAR{network === "testnet" ? " (testnet NEAR is free from the faucet)" : ""}.
         </p>
-        <Button size="lg" disabled={!ok || !target} onClick={async () => {
-          if (!target || yocto === undefined) return
-          if (await tx(`Sending ${amount} NEAR`, `${amount} NEAR sent to ${shortAccount(target.accountId)}`, (id) => sendNear(id, target.accountId, String(yocto)))) onClose()
+        {target && differs && (
+          <p role="alert" className="text-sm font-medium text-bad">
+            The server reports {target.accountId} as the {GAS_COPY[target.role].label.toLowerCase()}, but this site is built for {to ?? "an account it can't tell"}.
+            Nothing is sent until they match: check the server's environment.
+          </p>
+        )}
+        <Button size="lg" disabled={!ok || !target || !to} onClick={async () => {
+          if (!target || !to || yocto === undefined) return
+          if (await tx(`Sending ${amount} NEAR`, `${amount} NEAR sent to ${shortAccount(to)}`, (id) => sendNear(id, to, String(yocto)))) onClose()
         }}>
           {yocto !== undefined && yocto >= inWallet ? "More than your wallet holds" : `Send ${ok ? amount : ""} NEAR`}
         </Button>
