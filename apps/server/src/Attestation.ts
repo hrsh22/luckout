@@ -11,8 +11,12 @@ import { recoverMessageAddress } from "viem"
 
 const INTEL_PCCS = "https://api.trustedservices.intel.com/tdx/certification/v4"
 const NRAS = "https://nras.attestation.nvidia.com/v3/attest/gpu"
-/** Intel calls a platform below its latest advisory baseline OutOfDate; the quote itself still verifies. */
-export const TDX_OK = new Set(["UpToDate", "OutOfDate"])
+/**
+ * Intel calls a platform below its latest advisory baseline OutOfDate; the quote itself still verifies.
+ * TDRelaunchAdvised is the new verifier's name for a TD 1.5 the old one called OutOfDate: launched
+ * OutOfDate, no longer out of date since a TD-preserving update.
+ */
+export const TDX_OK = new Set(["UpToDate", "OutOfDate", "TDRelaunchAdvised"])
 /** One passing check covers this long. Checks run hourly, so one failed run doesn't stop the Agent. */
 const FRESH_MS = 2 * 60 * 60_000
 

@@ -402,7 +402,7 @@ CONTEXT.md      domain glossary
 - **Written with AI assistance:** most of the code was written by [@hrsh22](https://github.com/hrsh22) with the assistance of Claude Code.
 - **Libraries:**
   - Contract: `near-sdk`.
-  - Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl-node` (Intel TDX quote verification), `openai` (types only).
+  - Server: Effect (with `@effect/sql-pg` and PGlite), `near-api-js`, grammY (Telegram), `viem` (EVM signatures and Base), `@phala/dcap-qvl` (Intel TDX quote verification), `openai` (types only).
   - Web: Next.js, React, `@hot-labs/near-connect`, Reown AppKit with wagmi, TanStack Query, motion.
   - External services: Bitrefill (gift cards), NEAR Intents 1Click, NEAR AI Cloud, NVIDIA NRAS, Telegram.
 - **License:** MIT. See [LICENSE](LICENSE).
