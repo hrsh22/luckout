@@ -15,15 +15,35 @@ const trustedProxies = ["127.0.0.0/8", "::1/128", ...CLOUDFLARE].map(IpNetwork.f
 
 const WINDOW_MS = 60_000
 /**
- * Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer
- * (it spends NEAR); a card or a quote asks Bitrefill and NEAR, with room for the shop's hover prefetch.
+ * The path as the router will match it. The router (effect's FindMyWay, default options) drops the query,
+ * percent-decodes, collapses repeated slashes, drops a trailing slash and ignores case; a limit chosen
+ * from the raw path could be sidestepped with "/AUTH/challenge" or "//auth/challenge".
  */
-const limitFor = (path: string) =>
-  path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay")
+const routePath = (url: string) => {
+  const raw = (url.startsWith("/") ? url : url.replace(/^https?:\/\/.*?\//, "/")).split(/[?;#]/)[0] || "/"
+  let path = raw
+  try {
+    path = decodeURI(raw)
+  } catch {
+    // Malformed encoding: the router answers 404, so the class doesn't matter.
+  }
+  path = path.replace(/\/\/+/g, "/")
+  if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1)
+  return path.toLowerCase()
+}
+
+/**
+ * Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer
+ * (it spends NEAR); a card, a search or a quote asks Bitrefill and NEAR, with room for the shop's hover prefetch.
+ */
+export const limitFor = (url: string) => {
+  const path = routePath(url)
+  return path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay")
     ? 20
-    : path.startsWith("/catalog/") || path === "/quote" || path === "/browse" || path === "/mcp"
+    : path === "/catalog" || path.startsWith("/catalog/") || path === "/quote" || path === "/browse" || path === "/mcp"
     ? 60
     : 120
+}
 
 /** Who a request counts against: an IPv6 client by its /64 (one home or phone gets a whole /64), IPv4 as is. */
 export const clientBucket = (ip: string) => {
@@ -41,8 +61,7 @@ const limit = HttpMiddleware.make((app) =>
   Effect.gen(function*() {
     const req = yield* HttpServerRequest.HttpServerRequest
     const ip = clientBucket(Option.getOrElse(req.remoteAddress, () => "unknown"))
-    const path = req.url.split("?")[0] ?? "/"
-    const max = limitFor(path)
+    const max = limitFor(req.url)
     const key = `${ip} ${max}`
     const now = Date.now()
     // Expired windows go at most once a window, not on every request.
