@@ -947,3 +947,37 @@ test("a guest order Bitrefill never took is refunded in full once the retries ru
   assert.ok(!paid.calls.includes("fail_purchase"), "never refunded while Bitrefill may still deliver")
   assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery/)
 })
+
+test("a float read while a payment is on its way, or before we've seen it land, raises no alarm; a real drop still does", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payments: ["pending", "success", "pending"] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const credit = yield* Credit
+    // First card: signed and sent, not mined yet when the float is read; then it lands and we see it.
+    const first = yield* w.buy()
+    yield* credit.refresh
+    // (The fakes answer instantly; a real float read and a payment seen mined are never in the same millisecond.)
+    yield* Effect.sleep("2 millis")
+    w.setCredit(90_000_000)
+    yield* reconcilePass
+    const a = yield* settled(first.id)
+    yield* credit.refresh
+    // Second card: it lands, and the float is read before we've looked at the payment.
+    const second = yield* w.buy()
+    w.setCredit(80_000_000)
+    yield* credit.refresh
+    yield* Effect.sleep("2 millis")
+    yield* reconcilePass
+    const b = yield* settled(second.id)
+    yield* credit.refresh
+    const explained = [...w.alerts]
+    // $5 leaves the wallet that no payment of ours explains.
+    w.setCredit(75_000_000)
+    yield* credit.refresh
+    return { sent: [first.status, second.status], ended: [a, b], explained }
+  }))
+  assert.deepEqual(r.sent, ["pending", "pending"])
+  assert.deepEqual(r.ended, ["settled", "settled"])
+  assert.ok(!r.explained.some((a) => /dropped/.test(a)), r.explained.join(" | "))
+  assert.match(w.alerts.join(" | "), /The Base Float dropped \$5\.00 more than our payments explain/)
+})

@@ -334,10 +334,9 @@ export class Purchases extends Context.Service<Purchases, {
               }
               // Saved only over the payment this run was handed (none, or the lost one it replaces). A run that
               // loaded the row before another saved its payment stops here, before sending a second one.
-              // `ordered_at` marks the money leaving the Base Float (Credit counts it from then).
               const savePayment = (p: SignedPayment) =>
                 sql<{ id: string }>`
-                  UPDATE purchases SET pay_tx = ${JSON.stringify(p)}::jsonb, ordered_at = ${new Date().toISOString()}, updated_at = now()
+                  UPDATE purchases SET pay_tx = ${JSON.stringify(p)}::jsonb, updated_at = now()
                   WHERE id = ${row.id} AND step = 'pay' AND pay_tx->>'hash' IS NOT DISTINCT FROM ${row.pay_tx?.hash ?? null}
                   RETURNING id`.pipe(
                   Effect.orDie,
@@ -365,7 +364,10 @@ export class Purchases extends Context.Service<Purchases, {
                 yield* Effect.all([credit.refresh, refill.kick], { discard: true })
                 return false
               }
-              return yield* move(row, { step: "delivery" })
+              // `ordered_at` marks the money leaving the Base Float, which is when the payment is mined, not when it's
+              // signed: Credit counts the card as held until then and as spent from then, so a float read while the
+              // payment was still on its way never looks like money gone missing.
+              return yield* move(row, { step: "delivery", ordered_at: new Date().toISOString() })
             }
             case "delivery": {
               const d = yield* bitrefill.delivery(row.invoice_id!, row.invoice_token ? String(unseal(`invoice:${row.id}`, row.invoice_token)) : undefined)
