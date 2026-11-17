@@ -87,6 +87,8 @@ export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "f
 export const GUEST_LIMITS = { orders: 15, daily: 500_000_000, monthly: 1_000_000_000 } as const
 /** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
 const INVOICE_TTL_MS = 40 * 60_000
+/** This long after its invoice, a Base payment is never sent or signed again: the invoice expires at 60 minutes. Base is only asked where it is. */
+const PAY_SEND_LIMIT_MS = 50 * 60_000
 /** Why a card couldn't be ordered: their Bitrefill login lapsed, and there's no Checkout Email to fall back on. */
 const LOGIN_LAPSED = "Your Bitrefill login expired. Connect again or add an email in Wallet."
 /** The email shape Bitrefill's buy-products accepts. */
@@ -103,6 +105,9 @@ const REPRICE_AFTER_MS = 10 * 60 * 1000
 const time = (v: Date | string) => new Date(v).getTime()
 /** When the contract admitted (and so charged) it; the row's creation for rows saved without it. */
 const admittedAt = (row: Row) => (row.admitted?.created_at ? Number(row.admitted.created_at) / 1e6 : time(row.created_at))
+/** A charged purchase that is refunded rather than tried again: it has waited `waitMinutes`, or the customer could soon Reclaim it. */
+const overdue = (row: Row, waitMinutes: number) =>
+  Date.now() - time(row.created_at) > waitMinutes * 60_000 || Date.now() > admittedAt(row) + DAY_MS - RECLAIM_MARGIN_MS
 
 /**
  * A Lucky Buy delivered onchain whose draw event we never saw (say, the customer re-ran the Draw):
@@ -262,6 +267,12 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "ordering": {
               if (bitrefill.guest) {
+                // Charged long ago and still not paid for (Base or Bitrefill kept failing): nothing was signed, so
+                // refund it now rather than order again, and a late card never races a Reclaim.
+                if (!row.pay_tx && overdue(row, (yield* credit.settings).waitMinutes)) {
+                  yield* alerts.admin(`purchase ${row.id} couldn't be ordered and paid for in time; refunding it in full`)
+                  return yield* move(row, { step: "fail", error: "We couldn't order and pay for this card in time" })
+                }
                 // On the customer's own Bitrefill account if they connected it (a login Bitrefill stops taking is
                 // renewed once); without one, or once it lapsed, as a guest with their Checkout Email.
                 const place = (renew: boolean) =>
@@ -327,10 +338,21 @@ export class Purchases extends Context.Service<Purchases, {
                   Effect.orDie,
                   Effect.flatMap((saved) => (saved.length === 1 ? Effect.void : Effect.die(`purchase ${row.id}: another run saved a Base payment first; not sending a second`)))
                 )
-              const status = yield* base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment).pipe(
-                Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
-              )
-              if (status === "pending") return false
+              // Once the invoice is about to expire nothing is sent, not even again, and nothing new is signed for
+              // it: Base is only asked where the saved payment is. Paying an expired invoice would leave our USDC
+              // at Bitrefill with no card.
+              const late = row.pay_tx !== null && Date.now() - time(row.invoice_at!) > PAY_SEND_LIMIT_MS
+              const status = yield* (late
+                ? base.status(row.pay_tx!.hash)
+                : base.pay(row.pay_to as Hex, Number(row.pay_amount), row.pay_tx, savePayment).pipe(
+                  Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
+                ))
+              if (status === "pending") {
+                if (late && !row.error) {
+                  yield* save(row.id, { error: `Base payment ${row.pay_tx!.hash} wasn't mined before invoice ${row.invoice_id} neared expiry, so it isn't sent again` })
+                }
+                return false
+              }
               if (status === "reverted") {
                 // Nothing moved (say, the float ran short): wait for money like any other, then order afresh.
                 yield* move(row, { step: "restock", error: "The Base payment reverted; nothing was paid", pay_tx: null, invoice_id: null, invoice_token: null, invoice_at: null, ordered_at: null })

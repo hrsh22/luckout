@@ -5,7 +5,7 @@ import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
-import { Base, type PaymentStatus, type SignedPayment } from "./Base.ts"
+import { Base, BaseUnavailable, type PaymentStatus, type SignedPayment } from "./Base.ts"
 import { Bitrefill, type Order } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
@@ -55,6 +55,10 @@ const world = (opts: {
   requestWait?: number
   /** Signing a Base payment takes this long (ms): the wait for the wallet and for Chain Signatures. */
   payDelay?: number
+  /** Base can't be reached when a payment is about to be signed: nothing is signed or saved. */
+  payDown?: boolean
+  /** What Base says when it is only asked where a saved payment is; "pending" unless set. */
+  statuses?: Array<PaymentStatus>
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
@@ -74,18 +78,23 @@ const world = (opts: {
   /** Base payments made: each signed once, then sent (again only as the same bytes). */
   const paid: Array<{ to: string; amount: number; resent: boolean }> = []
   const payments = [...(opts.payments ?? [])]
+  const statuses = [...(opts.statuses ?? [])]
+  /** Payments Base was only asked about, without sending anything. */
+  const asked: Array<string> = []
   const base = fakeBase({
     balances: Effect.suspend(() => Effect.succeed({ usdc: creditBalance, eth: 10n ** 15n })),
     pay: (to, amount, saved, save) =>
       Effect.gen(function*() {
         if (!saved) yield* Effect.sleep(opts.payDelay ?? 0)
+        if (opts.payDown) return yield* new BaseUnavailable({ message: "Base nonce: fetch failed" })
         const p = saved ?? ({ to, amount: String(amount), nonce: paid.length, maxFeePerGas: "1", maxPriorityFeePerGas: "1", raw: "0x01", hash: `0x${paid.length}` } as SignedPayment)
         if (!saved) yield* save(p)
         paid.push({ to, amount, resent: !!saved })
         const status = payments.shift() ?? "success"
         if (status === "success" && !saved) creditBalance -= amount
         return status
-      })
+      }),
+    status: (hash) => Effect.sync(() => (asked.push(hash), statuses.shift() ?? "pending"))
   })
   const near = fakeNear({
     view: <A>(method: string) =>
@@ -172,6 +181,7 @@ const world = (opts: {
     notices,
     admits,
     paid,
+    asked,
     layer,
     buy,
     run,
@@ -805,4 +815,45 @@ test("a Base payment is never saved over one another run already saved: the save
   assert.deepEqual(r.during, { status: "pending", paid: 0, hash: "0xother" }, "its own payment was neither saved nor sent")
   assert.equal(r.after, "settled")
   assert.deepEqual(w.paid.map((x) => x.resent), [true], "the saved payment was sent, once")
+})
+
+test("a signed Base payment is never sent again once its invoice nears expiry: Base is only asked where it is", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payments: ["pending"], statuses: ["pending", "success"] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const p = yield* w.buy()
+    // Signed and sent, not mined; then 51 minutes pass since the invoice.
+    yield* sql`UPDATE purchases SET invoice_at = now() - interval '51 minutes'`
+    yield* reconcilePass
+    const waiting = (yield* sql<{ step: string; error: string | null }>`SELECT step, error FROM purchases`)[0]!
+    yield* reconcilePass
+    return { first: p.status, waiting, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.first, "pending")
+  assert.equal(r.waiting.step, "pay")
+  assert.match(r.waiting.error ?? "", /isn't sent again/)
+  assert.equal(r.after, "settled", "mined after all: the card is fetched")
+  assert.equal(w.paid.length, 1, "sent once, when it was signed, and never again")
+  assert.equal(w.asked.length, 2)
+})
+
+test("a charged purchase that can't be paid for in time is refunded in full, with no new invoice", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, payDown: true })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const p = yield* w.buy()
+    const before = (yield* rowOf(p.id)).step
+    // Never signed: its invoice goes stale, and the purchase is now 23.5 hours old (Reclaim opens at 24).
+    yield* sql`UPDATE purchases SET invoice_at = now() - interval '41 minutes', created_at = now() - interval '1410 minutes'`
+    yield* reconcilePass
+    return { before, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.before, "pay")
+  assert.equal(r.after, "failed")
+  assert.deepEqual(w.paid, [], "nothing was ever paid")
+  assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 1, "no second invoice")
+  assert.ok(w.calls.includes("fail_purchase"))
+  assert.match(w.alerts.join(" "), /in time/)
 })
