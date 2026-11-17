@@ -81,8 +81,13 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     queryFn: () =>
       api((c) => c.catalog.quote({ query: { voucherId, value: value!, ...(mode === "normal" ? {} : { game: mode.lucky }) } })),
     enabled: !!value,
-    // The reserve and Bitrefill's price move; a quote older than this is fetched again before buying.
-    staleTime: 20_000
+    // The reserve and Bitrefill's price move: while the page is in sight the quote is renewed as it goes stale, and
+    // at once on coming back to the tab, so Buy sends the terms on screen, not ones from minutes ago.
+    // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s (the server caches Bitrefill's
+    // price for a minute); refetch on the Buy click instead if RPC load ever matters.
+    staleTime: 20_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true
   })
 
 /** The Free Reserve and the Cashback Cap, straight from the chain: they shape every Lucky Amount. Undefined until read. */
