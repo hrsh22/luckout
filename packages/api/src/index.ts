@@ -121,8 +121,9 @@ export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("Signed
   /** The origin of the page that asked for the signature (`window.location.origin`), as written into the message. */
   uri: Schema.String,
   /** The chain the wallet was on, and when it was asked, as written into the message. */
-  chainId: Schema.Number,
-  issuedAt: Schema.String
+  chainId: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+  // An ISO time, nothing more: it is written into the text the server rebuilds, so it can't carry a line of its own.
+  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
 }) {}
 
 /** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), as `intents.near` takes it. */

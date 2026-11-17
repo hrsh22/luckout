@@ -119,6 +119,18 @@ const forget = () => {
     localStorage.removeItem(STORAGE)
   } catch {}
 }
+/**
+ * Ends `who`'s session on the server, which also drops the cookie in this browser. Sign out does it, and so does
+ * every way the wallet leaves the session behind (disconnected, or on another account): otherwise the cookie stays
+ * good for days, on what may be a shared computer. Sent without the session's name, so one already over doesn't
+ * fire UNAUTHORIZED again, and skipped once another tab has signed in as someone else, since the browser's one
+ * cookie is theirs now. It never fails: a server that doesn't answer in 5 seconds, or says the session is already
+ * over, is left behind.
+ */
+const endOnServer = (who: string | undefined) => {
+  const saved = load()
+  return who && (!saved || saved.accountId === who) ? api((c) => c.session.signOut(), undefined, "5 seconds").catch(() => {}) : Promise.resolve()
+}
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<{ accountId: string; token: string }>()
@@ -154,6 +166,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     forget()
     reset()
   }, [reset])
+  // The wallet left this session behind: end it on the server too, not only on this page.
+  const leave = useCallback(() => {
+    void endOnServer(current.current)
+    clear()
+  }, [clear])
 
   const token = session?.token
   const refresh = useCallback(async () => {
@@ -180,10 +197,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const connected = saved && isEvmAccount(saved.accountId)
       ? evmAddress()
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
+    const leftBehind = () => {
+      void endOnServer(saved?.accountId)
+      forget()
+    }
     connected.then((id) => {
       if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved) })
-      else forget()
-    }, forget).finally(() => setReady(true))
+      else leftBehind()
+    }, leftBehind).finally(() => setReady(true))
   }, [])
 
   // One cookie serves every tab. Another tab signed in as someone else, or signed out: this tab's calls no
@@ -201,19 +222,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (!evm) return
     let stop: (() => void) | undefined
     let live = true
-    watchEvm((id) => id !== accountId && clear()).then((s) => (live ? (stop = s) : s()), () => {})
+    watchEvm((id) => id !== accountId && leave()).then((s) => (live ? (stop = s) : s()), () => {})
     return () => {
       live = false
       stop?.()
     }
-  }, [evm, accountId, clear])
+  }, [evm, accountId, leave])
 
   // The wallet signed out or switched accounts elsewhere: this session no longer matches it.
   useEffect(() => {
     const c = near()
-    const onSignOut = () => clear()
+    const onSignOut = () => leave()
     const onSignIn = (e: { accounts: Array<{ accountId: string }> }) => {
-      if (accountId && e.accounts[0]?.accountId !== accountId) clear()
+      if (accountId && e.accounts[0]?.accountId !== accountId) leave()
     }
     c.on("wallet:signOut", onSignOut)
     c.on("wallet:signIn", onSignIn)
@@ -223,7 +244,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       c.off("wallet:signIn", onSignIn)
       window.removeEventListener(UNAUTHORIZED, clear)
     }
-  }, [accountId, clear])
+  }, [accountId, clear, leave])
 
   // Balances can change elsewhere (Telegram, another tab): re-read when the tab comes back.
   useEffect(() => {
@@ -355,9 +376,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }
 
   const signOut = async () => {
-    // Ends the session on the server, which also drops the cookie in this browser. Signing out never fails on
-    // it: a server that doesn't answer in 5 seconds, or says the session is already over, is left behind.
-    if (token) await api((c) => c.session.signOut(), token, "5 seconds").catch(() => {})
+    await endOnServer(current.current)
     clear()
     await Promise.all([near().disconnect().catch(() => {}), disconnectEvm()])
   }

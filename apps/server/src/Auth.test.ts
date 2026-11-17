@@ -88,6 +88,9 @@ test("an EVM wallet signs in as its lowercase address, once per challenge, and o
     const someoneElse = yield* evmSignIn(c2, privateKeyToAccount(generatePrivateKey()), "https://luckout.test", wallet.address)
     const forged = yield* auth.verifyEvm(someoneElse).pipe(Effect.flip)
     assert.equal(forged._tag, "Unauthorized")
+    // 65 bytes, but a recovery byte no key makes: viem throws on it, and that is a refusal, never a server error.
+    const broken = yield* auth.verifyEvm(new SignedEvmChallenge({ ...someoneElse, signature: `0x${"11".repeat(64)}05`, nonce: (yield* auth.challenge).nonce })).pipe(Effect.flip)
+    assert.equal(broken._tag, "Unauthorized")
   })))
 
 test("the EVM sign-in text is a Sign-In with Ethereum message naming our site, and one made on another site signs nobody in", () =>
@@ -221,4 +224,19 @@ test("the session token reaches the browser only as an HttpOnly cookie, which ev
     assert.equal(out.status, 204)
     assert.match(out.headers.get("set-cookie") ?? "", /^luckout_session=; Max-Age=0;/)
     assert.equal((await post("/session/sign-out", { cookie })).status, 401, "the old cookie is worth nothing")
+  }))
+
+test("an EVM sign-in whose time or chain isn't one is refused before it reaches the sign-in check", () =>
+  served(async (url) => {
+    const signIn = (fields: object) =>
+      fetch(`${url}/auth/verify-evm`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: SITES[0]! },
+        body: JSON.stringify({ address: `0x${"ab".repeat(20)}`, signature: `0x${"11".repeat(65)}`, nonce: "n", uri: SITES[0], chainId: 8453, issuedAt: new Date().toISOString(), ...fields })
+      })
+    // A well-formed one reaches the check (and is refused there: no such challenge), so a 400 is the field's doing.
+    assert.equal((await signIn({})).status, 401)
+    // The time is written into the text the wallet signed: it can't add a line of its own.
+    assert.equal((await signIn({ issuedAt: "x\ninjected" })).status, 400)
+    assert.equal((await signIn({ chainId: 0 })).status, 400)
   }))
