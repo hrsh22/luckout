@@ -52,6 +52,16 @@ export const messageLimits = (perMinute = MESSAGES_PER_MINUTE, perDay = MESSAGES
   }
 }
 
+/** The line under the Agent's reply, written by code: exactly what the button buys, and where the receipt goes. */
+export const buySummary = (p: Pending) =>
+  (p.maxPrice === p.referencePrice
+    ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
+    : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
+  // A card only works in its own country: said on the button's line, every time.
+  ` Works in ${worksIn(p.country)}.` +
+  // Where Bitrefill sends the receipt: a changed address is in plain sight before every purchase.
+  (p.receiptTo ? ` Receipt to ${p.receiptTo}.` : "")
+
 /** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
 export const addLinkCode = (accountId: string, code: string, expiresAt: Date) =>
   Effect.gen(function*() {
@@ -262,11 +272,7 @@ export class Telegram extends Context.Service<Telegram, {
         const id = randomUUID()
         pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
         const p = turn.pending
-        const summary = (p.maxPrice === p.referencePrice
-          ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
-          : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
-          // A card only works in its own country: said on the button's line, every time.
-          ` Works in ${worksIn(p.country)}.`
+        const summary = buySummary(p)
         await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
           reply_markup: new InlineKeyboard().text(`Buy for ${usdUp(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })

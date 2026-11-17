@@ -12,6 +12,8 @@ import type { Purchases } from "./Purchases.ts"
 // - a purchase the customer can't pay for (balance, limits) is never offered as a button;
 // - on testnet the catalog itself only holds test cards (Bitrefill.ts), so the model can't offer others;
 // - Redemption Data never enters the model's context (the bot sends codes itself);
+// - the one thing the model can write is the Checkout Email, and only to an address the customer
+//   typed in the message being answered (typedByCustomer); the Buy line then shows it;
 // - every completion must be signed inside NEAR AI's attested TEE (Attestation.ts), or the turn's
 //   reply and button are withheld.
 
@@ -29,6 +31,8 @@ export interface Pending {
   readonly referencePrice: number
   /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
   readonly luckyAmount: number
+  /** The Checkout Email this card's receipt goes to, when the order needs one: shown on the Buy line. */
+  readonly receiptTo?: string
 }
 
 const regions = new Intl.DisplayNames(["en"], { type: "region" })
@@ -69,7 +73,7 @@ export const TOOLS = [
     mode
   }, ["voucher_id", "value"]),
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included)."),
-  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards' receipts to. Needed before buying when prepare_purchase says so.", {
+  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards' receipts to. Only an address the customer typed in their latest message is accepted. Needed before buying when prepare_purchase says so.", {
     email: { type: "string" }
   }, ["email"])
 ]
@@ -143,6 +147,16 @@ export const blocker = (a: Account | null, maxPrice: number, web: string, now = 
   return undefined
 }
 
+/**
+ * Whether the customer typed this address in `message`. The Checkout Email is the one thing the Agent
+ * writes, so the model's word isn't enough (ADR-0007): text it read elsewhere (a voucher name, an old
+ * paste) could ask for another address. Whole addresses only: "ob@x.com" isn't in "bob@x.com".
+ */
+export const typedByCustomer = (message: string, email: string) => {
+  const wanted = email.trim().toLowerCase()
+  return wanted !== "" && message.toLowerCase().split(/[^a-z0-9@._+'-]+/).some((word) => word.replace(/^'+|['.]+$/g, "") === wanted)
+}
+
 export const makeAgent = (deps: {
   bitrefill: Bitrefill["Service"]
   purchases: Purchases["Service"]
@@ -189,7 +203,7 @@ export const makeAgent = (deps: {
   const resolveMode = (a: Account | null, name: string | undefined) => (name && MODES[name]) || a?.default_mode || ("normal" as Mode)
   const game = (m: Mode) => (m === "normal" ? undefined : m.lucky)
 
-  const tools = (accountId: string, prepare: (p: Pending) => void) => ({
+  const tools = (accountId: string, text: string, prepare: (p: Pending) => void) => ({
     search_vouchers: ({ query }: { query: string }) =>
       run(deps.bitrefill.search(query).pipe(Effect.map((vs) => {
         const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, works_in: worksIn(v.countryCode, v.countryName) }))
@@ -254,13 +268,16 @@ export const makeAgent = (deps: {
             }`
           }
         }
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount })
+        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount, ...(email.needed && email.email ? { receiptTo: email.email } : {}) })
         return {
           shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
         }
       })),
+    // Saved only when it's in the message being answered; anything else goes back to the model as a refusal.
     set_checkout_email: ({ email }: { email: string }) =>
-      run(deps.purchases.setCheckoutEmail(accountId, email).pipe(Effect.map((e) => ({ saved: e.email })))),
+      typedByCustomer(text, String(email ?? ""))
+        ? run(deps.purchases.setCheckoutEmail(accountId, email).pipe(Effect.map((e) => ({ saved: e.email }))))
+        : Promise.resolve({ error: "Not saved: that address isn't in the customer's latest message. Ask them to type their email, then save exactly what they typed." }),
     recent_purchases: () =>
       run(deps.purchases.list(accountId).pipe(Effect.map((ps) => ps.slice(0, 5).map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,
@@ -274,7 +291,7 @@ export const makeAgent = (deps: {
   /** One customer turn: runs the tool loop and returns the reply plus any purchase to confirm. */
   return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string) => {
     let pending: Pending | undefined
-    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, (p) => (pending = p))
+    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, text, (p) => (pending = p))
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
     // Signatures are checked alongside the tool loop and all awaited before anything reaches the customer.
     const signed: Array<Promise<boolean>> = []
