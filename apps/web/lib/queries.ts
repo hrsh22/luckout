@@ -101,14 +101,19 @@ export const useReserve = () =>
 const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting"
 const fresh = (p: Purchase) => Date.now() - new Date(p.createdAt).getTime() < 15 * 60_000
 
-/** Every 4 s while a purchase is in progress; once the only open ones are over 15 minutes old (stuck), every minute. */
+/**
+ * The customer's purchases, newest first, a page of 100 at a time. Every 4 s while a purchase is in progress;
+ * once the only open ones are over 15 minutes old (stuck), every minute.
+ */
 export const usePurchases = (token: string | undefined) =>
-  useQuery({
+  useInfiniteQuery({
     queryKey: ["purchases", token],
-    queryFn: () => api((c) => c.purchases.list(), token),
+    queryFn: ({ pageParam }) => api((c) => c.purchases.list({ query: pageParam ? { before: pageParam } : {} }), token),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.next,
     enabled: !!token,
     refetchInterval: (q) => {
-      const open = q.state.data?.filter(pending) ?? []
+      const open = q.state.data?.pages.flatMap((p) => p.items).filter(pending) ?? []
       return open.length === 0 ? false : open.some(fresh) ? 4000 : 60_000
     }
   })

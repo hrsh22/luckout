@@ -255,6 +255,47 @@ test("saving the credit numbers leaves automatic refills as they are now, and th
     assert.deepEqual([(yield* credit.settings).autoRefill, (yield* credit.settings).ceiling], [true, 800_000_000])
   })))
 
+test("the users list shows the 300 most recent customers, and sign-ups that never deposited can't crowd out one who did", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sql = yield* SqlClient.SqlClient
+    // alice deposited a month ago and never bought; 320 accounts have signed in since and done nothing else.
+    yield* sql`INSERT INTO known_accounts (account_id, first_seen, onchain) VALUES ('alice.testnet', now() - interval '30 days', true)`
+    yield* sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.testnet' FROM generate_series(1, 320) n`
+    const users = yield* admin.users
+    assert.equal(users.length, 300, "one contract view each, so the list is bounded")
+    assert.equal(users[0]?.accountId, "alice.testnet")
+    assert.equal(users[0]?.balance, 120_000_000)
+  })))
+
+test("the attention list shows the oldest first, closest to the customer's Reclaim, and says how many there are in all", () =>
+  run(Effect.gen(function*() {
+    // 25 stuck purchases, a minute apart.
+    for (let i = 0; i < 25; i++) {
+      yield* purchase(`00000000-0000-4000-8000-0000000003${String(i).padStart(2, "0")}`, "stuck", "Bitrefill order outcome unknown", 60 + i)
+    }
+    const o = yield* (yield* Admin).overview
+    assert.equal(o.purchases.attentionTotal, 25)
+    assert.equal(o.purchases.attention.length, 20)
+    assert.equal(o.purchases.attention[0]?.id, "00000000-0000-4000-8000-000000000324", "the oldest first")
+  })))
+
+test("a purchase is found by its id however old, past the latest 300 an account's list holds", () =>
+  run(Effect.gen(function*() {
+    const admin = yield* Admin
+    const sql = yield* SqlClient.SqlClient
+    const old = "00000000-0000-4000-8000-000000000400"
+    yield* purchase(old, "settled", null, 60 * 24 * 40)
+    // 300 newer ones by the same customer.
+    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step)
+               SELECT 'alice.testnet', 'k' || n, 'Test Card', 'test-card', '10', 10000000, 'settled' FROM generate_series(1, 300) n`
+    const mine = yield* admin.purchases("alice.testnet")
+    assert.equal(mine.length, 300)
+    assert.ok(!mine.some((p) => p.id === old), "it is past the latest 300")
+    assert.deepEqual((yield* admin.purchases(undefined, old)).map((p) => p.id), [old])
+    assert.deepEqual(yield* admin.purchases(undefined, "00000000-0000-4000-8000-000000000999"), [], "no such purchase")
+  })))
+
 test("with guest checkout the overview's credit figures are the Base Float, read from the Base Wallet, never from Bitrefill", async () => {
   const guestLayer = Admin.layer.pipe(
     Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),

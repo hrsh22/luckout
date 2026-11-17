@@ -1,4 +1,4 @@
-import { CheckoutEmail, Purchase, Quote, Voucher } from "@luckout/api"
+import { CheckoutEmail, Purchase, PurchasePage, Quote, Voucher } from "@luckout/api"
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
@@ -47,12 +47,14 @@ const deps = {
     checkoutEmail: () => Effect.succeed(new CheckoutEmail({ needed: false })),
     setCheckoutEmail: (_: string, email: string) => Effect.succeed(new CheckoutEmail({ needed: true, email })),
     list: () =>
-      Effect.succeed([
-        new Purchase({
-          id: "p1", voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", status: "delivered",
-          referencePrice: 10_000_000, redemption: { code: "SECRET-CODE-123" }, createdAt: new Date(0).toISOString()
-        })
-      ])
+      Effect.succeed(new PurchasePage({
+        items: [
+          new Purchase({
+            id: "p1", voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", status: "delivered",
+            referencePrice: 10_000_000, redemption: { code: "SECRET-CODE-123" }, createdAt: new Date(0).toISOString()
+          })
+        ]
+      }))
   },
   near: { view: () => Effect.succeed(rich) },
   web: "https://luckout.test",
