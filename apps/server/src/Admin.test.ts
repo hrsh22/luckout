@@ -319,3 +319,24 @@ test("with guest checkout the overview's credit figures are the Base Float, read
   assert.equal(o.credit.balance, 65_000_000, "the USDC in the Base Wallet")
   assert.equal(o.credit.free, 65_000_000)
 })
+
+test("with guest checkout, a settings change is announced as the Base Float's", async () => {
+  const said: Array<string> = []
+  const guestLayer = Admin.layer.pipe(
+    Layer.provideMerge(Layer.mergeAll(Relay.layer, Credit.layer, Sales.layer)),
+    Layer.provide(Layer.mergeAll(
+      Layer.succeed(Near, near),
+      Layer.succeed(Bitrefill, fakeBitrefill({ guest: true })),
+      Layer.succeed(Base, fakeBase()),
+      Layer.succeed(Refill, refill),
+      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void said.push(t)), customer: () => Effect.succeed(true) }))
+    )),
+    Layer.provideMerge(DbMemory)
+  )
+  await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const admin = yield* Admin
+    const s = yield* (yield* Credit).settings
+    yield* admin.configureCredit(new CreditSettings({ ...s, ceiling: 800_000_000 }), "boss.testnet")
+  })).pipe(Effect.provide(guestLayer)))
+  assert.match(said.at(-1) ?? "", /^boss\.testnet set the Base Float: auto-refill /)
+})

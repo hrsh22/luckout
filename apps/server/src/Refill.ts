@@ -225,6 +225,10 @@ export class Refill extends Context.Service<Refill, {
       // What the alerts and the admin panel call the money refills top up (ADR-0012).
       const refillName = bitrefill.guest ? "Base Float refill" : "Bitrefill refill"
       const section = bitrefill.guest ? "Admin → Base Float" : "Admin → Bitrefill credit"
+      /** What refills top up, as the operator knows it. */
+      const floatName = bitrefill.guest ? "the Base Float" : "credit"
+      /** Why no refill is due. Also compared against, so it's written once. */
+      const ABOVE_LINE = bitrefill.guest ? "The Base Float is above the refill line." : "Credit is above the refill line."
       const planLock = yield* Semaphore.make(1)
       const running = new Set<string>()
       // Refills run in fibers owned by this service, so a shutdown waits for the step in progress.
@@ -270,7 +274,8 @@ export class Refill extends Context.Service<Refill, {
         const quote = row.swap.correlationId ? `, quote ${row.swap.correlationId}` : ""
         return ` Swap: ${EXPLORER}${row.swap.depositAddress} (deposit tx ${row.send_tx.hash}${quote}). Ask NEAR Intents support ` +
           `(t.me/near_intents, or the chat on near-intents.org) to finish it or refund it to ${near.treasuryId}: either is safe, ` +
-          `since it pays our own Base wallet, and the refill carries on by itself. Meanwhile you can top up the credit on bitrefill.com by hand.`
+          `since it pays our own Base wallet, and the refill carries on by itself. Meanwhile you can ` +
+          (bitrefill.guest ? "send USDC on Base straight to our Base wallet (Admin shows its address): it is the Base Float." : "top up the credit on bitrefill.com by hand.")
       }
 
       /** A refill that ends in the Base Wallet has landed there: it's done (it never pays Bitrefill). */
@@ -389,7 +394,7 @@ export class Refill extends Context.Service<Refill, {
                 if (cut !== undefined) {
                   yield* save(row.id, { amount: cut })
                   yield* alerts.admin(
-                    `Refill ${row.id.slice(0, 8)} cut from ${usd(amount)} to ${usd(cut)}: the treasury can't fund all of it now, and purchases waiting for credit come first.`
+                    `Refill ${row.id.slice(0, 8)} cut from ${usd(amount)} to ${usd(cut)}: the treasury can't fund all of it now, and purchases waiting for ${floatName} come first.`
                   )
                   return "next"
                 }
@@ -703,7 +708,7 @@ export class Refill extends Context.Service<Refill, {
           const limit = Math.min(s.ceiling + c.waiting.total - free, room, left)
           const wanted = requested ?? c.target + c.waiting.total - free
           const due = requested !== undefined || (c.waiting.total > 0 ? wanted > 0 : free < c.refillBelow)
-          if (!due || wanted <= 0) return { amount: 0, why: "Credit is above the refill line." }
+          if (!due || wanted <= 0) return { amount: 0, why: ABOVE_LINE }
           const amount = Math.floor(Math.min(cents(Math.max(wanted, MIN_REFILL)), limit) / 10_000) * 10_000
           if (amount < MIN_REFILL) {
             const why = limit === left
@@ -779,8 +784,8 @@ export class Refill extends Context.Service<Refill, {
         if (s.amount === 0) {
           // Customers are waiting and nothing can be refilled: say why, so nobody has to watch.
           const c = yield* credit.view
-          if (c.waiting.count > 0 && s.why !== "Credit is above the refill line.") {
-            yield* alerts.admin(`${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for credit, uncharged. ${s.why}`)
+          if (c.waiting.count > 0 && s.why !== ABOVE_LINE) {
+            yield* alerts.admin(`${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for ${floatName}, uncharged. ${s.why}`)
           }
           // No refill due: top the Base float back up, so the next one pays Bitrefill in a minute.
           const w = yield* base.balances.pipe(Effect.orElseSucceed(() => undefined))

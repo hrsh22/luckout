@@ -30,7 +30,7 @@ Pay the price, or add a little for a provably fair chance at cashback. Either wa
 
 ## Luckout in 30 seconds
 
-- 🎁 **Real gift cards.** Thousands of brands from Bitrefill: Amazon, Steam, Swiggy and more. The code arrives in seconds.
+- 🎁 **Real gift cards.** Thousands of brands from Bitrefill: Amazon, Steam, Swiggy and more. The code usually arrives within a minute.
 - 🎲 **Pay the price, or play for cashback.** Add 10%, 20% or 50% up front. A Draw a block later gives back nothing, part of the price or all of it. Every mode averages exactly 5.6% over the price. That margin is our only revenue.
 - 🔍 **Don't trust us, check.** Our NEAR contract runs the Draw, and every Draw has a public page that recomputes it in your browser.
 - 🌐 **Pay from any chain, no NEAR needed.** Top up with any token through NEAR Intents, sign in with MetaMask if you like, and our relayer pays the gas.
@@ -63,8 +63,8 @@ flowchart LR
 
 1. **Top up from any chain.** NEAR Intents 1Click swaps what you send into native USDC on NEAR, and one deposit moves it into your Luckout balance, which the contract holds. Our relayer pays the NEAR network fee for deposits, withdrawals and settings with NEP-366 meta transactions (ADR-0008), so you never need NEAR.
    - **With an EVM wallet** (MetaMask, Rabby and the like; ADR-0011), you don't need a NEAR account at all. Your USDC lands in your own NEAR Intents account, which your EVM key controls, and an intent you sign moves it into Luckout. Every later step is a message you sign and our relayer sends. The only fee you pay is your own chain's gas for the Top-Up transfer. Withdrawals go back to your address on Base, Ethereum, Arbitrum, Polygon or BNB Chain, gas-free.
-2. **Buy** in the web app or ask the Telegram agent. Our server submits the purchase with a key that can only call the contract's purchase methods, so you don't sign every purchase. The contract enforces the Spending Limits you set.
-3. **Draw.** When the card is delivered, the contract draws your Cashback a block later and credits it to your balance. The Draw's random value is `sha256(block random seed ‖ purchase ID)`, so two Draws in the same block come out different. The code and the result arrive together, seconds after you buy.
+2. **Buy** in the web app or ask the Telegram agent. Our server submits the purchase with a key that can only call the contract's purchase methods, so you don't sign every purchase. The contract enforces the Spending Limits you set. Before your first card you give a Checkout Email, where Bitrefill sends its receipt, or connect your own Bitrefill account to buy under its limits.
+3. **Draw.** When the card is delivered, the contract draws your Cashback a block later and credits it to your balance. The Draw's random value is `sha256(block random seed ‖ purchase ID)`, so two Draws in the same block come out different. The code and the result arrive together, usually within a minute of buying.
 4. **Check it.** Every Draw has a Draw Proof page that recomputes it in your browser from the chain. `/fair` shows the live average against the promised 105.6%.
 
 ### The odds
@@ -174,7 +174,7 @@ Where each piece is in the code, and where it runs on mainnet.
 | NEAR Intents accounts for EVM wallets: signed intents call our contract's `on_auth` | [`on_auth`](contract/src/lib.rs#L391), [`packages/api/src/intents.ts`](packages/api/src/intents.ts), [`apps/server/src/Intents.ts`](apps/server/src/Intents.ts) | [`intents.near` → `on_auth`](https://nearblocks.io/txns/3vLDQRBfA182UF3s5Zqo8AESu2r68LmGn5wWvAnDzEyW) |
 | NEP-366 meta transactions: our relayer pays customers' gas, only for Luckout's own calls | [`apps/server/src/Relay.ts`](apps/server/src/Relay.ts#L41-L80): the allowlist (`expectedDeposit`, `refusal`) | [A relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP) by `relayer.luckout.near` |
 | Chain Signatures: our Base wallet has no private key; the treasury signs through `v1.signer` | [`apps/server/src/Base.ts`](apps/server/src/Base.ts#L131): `sign`, which checks the signature recovers to our wallet | [`sign` by `treasury.luckout.near`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ), wallet [`0xBfE4…12eA`](https://basescan.org/address/0xBfE47ec6f12be45F2036A3dfD7BaceD8399A12eA) |
-| Automatic Bitrefill credit refills: treasury → 1Click → our Base wallet → Bitrefill invoice | [`Refill.ts`](apps/server/src/Refill.ts#L862-L863): the server plans a refill every minute and resumes open ones every 10 seconds; nobody has to start it | [treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv), [Base wallet → Bitrefill invoice](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b) |
+| Automatic Base Float refills: treasury → 1Click → our Base wallet, which pays each card's Bitrefill invoice | [`Refill.ts`](apps/server/src/Refill.ts#L919-L920): the server plans a refill every minute and resumes open ones every 10 seconds; nobody has to start it | [treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv), [Base wallet → Bitrefill invoice](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b) |
 | NEAR AI Cloud: the agent's model, in a TEE we verify (attestation and per-reply signatures) | [`apps/server/src/Agent.ts`](apps/server/src/Agent.ts), [`Attestation.ts`](apps/server/src/Attestation.ts#L106-L146): `attest` and `replySigned` | `deepseek-ai/DeepSeek-V4.1-Flash-1017`; the check result is on `/fair` |
 | NEP-413 signed messages: sign-in, accepted only from a full-access key | [`apps/server/src/Auth.ts`](apps/server/src/Auth.ts) | |
 | NEAR Connect (HOT and other wallets) | [`apps/web/lib/near.ts`](apps/web/lib/near.ts) | |
@@ -186,7 +186,7 @@ Where each piece is in the code, and where it runs on mainnet.
 | 💵 [Real-World Money](#real-world-money) | A stablecoin checkout for something people already buy every day, paid from any chain without gas. |
 | 🛡️ [AI Security & Defense](#ai-security--defense) | An agent that spends real money without holding any: contract limits, a three-method key and a verified TEE. |
 | 🔒 [Privacy & Private AI](#privacy--private-ai) | The shopping agent's model runs in a NEAR AI Cloud TEE that we verify with a fresh nonce every hour, and every reply must carry its signature. |
-| 🏪 [Autonomous Business](#autonomous-business) | The shop sells, buys stock, pays Cashback and refills its supplier credit by itself. Humans set the limits. |
+| 🏪 [Autonomous Business](#autonomous-business) | The shop sells, buys stock, pays Cashback and refills its float by itself. Humans set the limits. |
 | 🤝 [Agent Economy](#agent-economy) | An AI-run shop that buys stock through Bitrefill's MCP tools, serves other agents through its own MCP server, and pays in crypto through NEAR Intents and Chain Signatures. |
 | 💡 [Open Innovation](#open-innovation) | A merchant with no keys on other chains, and customers with no NEAR: Chain Signatures one way, NEAR Intents accounts the other. |
 | 🎲 [Games With Real Economies](#games-with-real-economies) | A game of chance on purchases you'd make anyway. Its economy balances itself onchain, and players never notice the chain. |
@@ -197,7 +197,7 @@ A stablecoin checkout a normal shop could use tomorrow, on both sides of the cou
 
 - **Customers pay in stablecoins from any chain.** Normal mode is a plain checkout: pay the card's price in USDC and get the code. Top-Ups swap any token on any chain into native USDC on NEAR through 1Click (`TopUp.ts`), and the contract holds balances in NEP-141 USDC (`ft_on_transfer`).
 - **No gas and no NEAR.** With NEP-366 meta transactions, the relayer pays only for calls to our own contract, with the exact deposit each one needs (`Relay.ts`, [a relayed deposit](https://nearblocks.io/txns/HN6nifTErys858btTtnKNXvQnYoTuMrWwa5EbkEiSiUP)).
-- **The merchant pays its supplier in USDC, by itself.** When our Bitrefill credit runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to our Base wallet. That wallet then pays Bitrefill's invoice ([Base payment](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b)), signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)). No one starts it: the server checks every minute whether a refill is due ([`Refill.ts`](apps/server/src/Refill.ts#L862-L863)). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
+- **The merchant pays its supplier in USDC, by itself.** Every card's Bitrefill invoice is paid in USDC on Base from our Base wallet ([Base payment](https://basescan.org/tx/0x03908dc9831e3d122f9d4635d042123ab2992f02214e9c0fa3d2e0da43eddb9b)), signed through Chain Signatures ([`sign`](https://nearblocks.io/txns/5H7cw7VtWosfdmwZLbU4pSzHjhFQBUdSDVHxqHmu86sZ)). When that wallet's float runs low, the treasury sends USDC through 1Click ([treasury → 1Click](https://nearblocks.io/txns/7kHakBfbSLgWHekxni7TCS9xzbmdgHEc38KjE8nz7kEv)) to top it up. No one starts it: the server checks every minute whether a refill is due ([`Refill.ts`](apps/server/src/Refill.ts#L919-L920)). When the treasury runs short, it pulls from sales proceeds (`sweep_proceeds`), up to the owner's daily cap.
 
 ### AI Security & Defense
 
@@ -277,9 +277,9 @@ Luckout runs a shop end to end without anyone tapping anything. Humans only set 
 | Selling, in the web app and through the Telegram agent | Each customer's Spending Limits (per purchase and per day) |
 | Buying each card from Bitrefill and confirming delivery onchain | The owner can stop sales or pause the contract |
 | Paying Cashback from the reserve | Cashback Cap: the lower of a fixed amount (optional) and a share of the free reserve (`set_cashback_cap`) |
-| Refilling Bitrefill credit: treasury → 1Click → our Chain Signatures Base wallet → Bitrefill invoice | Treasury daily cap on pulling proceeds (`set_treasury`); credit floor, ceiling and refill line |
+| Refilling the Base Float: treasury → 1Click → our Chain Signatures Base wallet, which pays each card's Bitrefill invoice | Treasury daily cap on pulling proceeds (`set_treasury`); float floor, ceiling and refill line |
 | Paying customers' gas | Relayer on or off, per-account and daily caps |
-| Finishing or refunding stuck purchases (the reconciler), and alerts on low gas or credit | Who gets the admin panel and the alert chat |
+| Finishing or refunding stuck purchases (the reconciler), and alerts on low gas or a low float | Who gets the admin panel and the alert chat |
 
 The AI only sells. Refill sizing and every money move follow fixed rules in code, by design, so a model never decides where money goes.
 
@@ -289,8 +289,8 @@ An AI-run shop that earns and spends in crypto, buying from another business's a
 
 **How the agent holds its keys: it holds none.** The model only reads and prepares; it has no wallet and no tool that moves money. The server's purchase key is a function-call key limited to three contract methods, and anything else that touches a customer's balance needs their own signature ([AI Security](#ai-security--defense)).
 
-- **It buys through MCP.** Every card is bought from Bitrefill's MCP endpoint, using its `get-product-details` and `buy-products` tools (`Bitrefill.ts`). The shop pays from store credit that it tops up by itself.
-- **It pays in crypto, across chains.** Credit refills go treasury → NEAR Intents 1Click → our Base wallet → Bitrefill invoice, and every Base transaction is signed through Chain Signatures (`Refill.ts`, `Base.ts`).
+- **It buys through MCP.** Every card is bought from Bitrefill's MCP endpoint, using its `get-product-details` and `buy-products` tools (`Bitrefill.ts`). Each order is a guest checkout carrying the customer's Checkout Email, or goes on the customer's own Bitrefill account once they connect it, and the shop pays its invoice in USDC on Base from a float that it tops up by itself.
+- **It pays in crypto, across chains.** Float refills go treasury → NEAR Intents 1Click → our Base wallet, each card's Bitrefill invoice is paid from that wallet, and every Base transaction is signed through Chain Signatures (`Refill.ts`, `Purchases.ts`, `Base.ts`).
 - **It earns and reinvests.** Card sales collect in the contract as USDC proceeds, which the treasury pulls to buy more stock. The lucky modes' 5.6% margin grows the Cashback Reserve.
 - **Its agent sells.** The Telegram agent on NEAR AI Cloud finds cards and prepares purchases, and customers pay from balances the contract holds.
 - **Other agents can shop here too.** `https://api.luckout.wtf/mcp` is a read-only MCP server (`Mcp.ts`, Streamable HTTP). Any agent can search cards, quote every mode with the exact odds from the contract, read the live fairness numbers, and recompute any Draw from its transaction. It can't spend: the agent hands its human the `buy_url`, and the human confirms. To add it to an MCP client: `claude mcp add --transport http luckout https://api.luckout.wtf/mcp`.
@@ -307,7 +307,7 @@ Chain abstraction in both directions, with a fair game on top.
 
 A game of chance played on purchases people already make, with an economy that runs itself.
 
-- **The loop:** pick a mode once (Lite, Classic or Jackpot), buy a card you'd buy anyway, see the Draw land seconds later, and spend any Cashback on the next card.
+- **The loop:** pick a mode once (Lite, Classic or Jackpot), buy a card you'd buy anyway, see the Draw land about a minute later, and spend any Cashback on the next card.
 - **The economy is onchain and balances itself.** Every Game Version averages exactly 105.6%. The extra paid on Draws without Cashback flows into the Cashback Reserve that pays the lucky ones. When the reserve runs low, the Cashback Cap shrinks with it, and each Lucky Buy plays on a smaller part of the price. Nobody patches anything.
 - **Players never notice the chain.** There's no NEAR account, no gas and no seed phrase: a MetaMask wallet is enough. Once it's linked, you can also play from a Telegram chat.
 - **The track's hints, in our code:** NEAR Intents (`packages/api/src/intents.ts`, `on_auth`, `OneClick.ts`), NEP-245 transfers between NEAR Intents accounts (`mt_transfer`), and gas-free play (`Relay.ts`).
@@ -357,8 +357,8 @@ With only the operator's key, the most a compromised server or agent can do is b
 - **The agent's model is verified, not trusted.** It runs on NEAR AI Cloud in a TEE. Every hour, with a fresh nonce, the server checks NVIDIA's GPU attestation, Intel's TDX quotes for the model node and the gateway, that each enclave's signing key and our nonce are in its TDX report, and that the attested container config matches. Every completion's signature over the exact request and response bytes must recover to an attested key, or the reply and its Buy button are withheld. Without a passing check from the last two hours, the agent stays offline, and every failure alerts the admin chat (`Attestation.ts`).
 - **EVM wallets act only through NEAR Intents (ADR-0011).** `intents.near` checks your EVM signature and then calls our contract's `on_auth`. The contract accepts that call only from `intents.near` and only for `0x…` accounts, so NEAR-wallet customers don't depend on NEAR Intents at all. An EVM customer's withdrawal goes only to their own NEAR Intents account, never to an address the server picks, and the Intents account id is fixed in the contract's code. What you trust: NEAR Intents to say who signed. Your money already passes through it on every Top-Up and withdrawal. Only regular EVM accounts work, not smart-contract wallets, because NEAR Intents checks signatures by key recovery.
 - **The relayer can only send what you signed.** It pays the fee for your deposits, withdrawals, settings, Reclaims and Draw reruns, which you still sign with your own full-access key. It can refuse or delay one (your wallet can then send it instead), but never change it. It only pays for Luckout's own calls, with the exact deposit each needs, and holds nothing but gas money.
-- **Bitrefill credit is kept small and refills itself (ADR-0009).** Only about two days of sales sit at Bitrefill, never more than a ceiling the owner sets. A purchase the credit can't cover waits uncharged while a refill runs, and two purchases can never count on the same credit. Refills pay exactly what Bitrefill's deposit asks, through a quote checked field by field, and every payment is saved signed before it's sent. The treasury that pays them can pull proceeds only to itself, and only up to the owner's daily cap.
-- **The admin panel can't move money by itself.** `/admin` answers only accounts in `ADMIN_ACCOUNTS`; everyone else gets "No page here". Funding or withdrawing the reserve, withdrawing proceeds and pausing are transactions the owner signs in their own wallet, so a stolen admin session can't take funds. It can look, stop sales, switch the relayer off or change its caps, change the Bitrefill credit settings, start refills (treasury USDC to our own Bitrefill account, within the contract's daily cap), and retry stuck purchases. Every one of these is announced in the admin alert channel.
+- **The Base Float is kept small and refills itself (ADR-0012).** About a day of sales sits in our Base wallet as USDC, never more than a ceiling the owner sets. A purchase the float can't cover waits uncharged while a refill runs, and two purchases can never count on the same money. Each card's invoice is paid by one exact transfer, checked first (Base USDC, a well-formed address, no more than the price the contract admitted) and saved before it's sent, so a retry resends the same transaction and never pays twice. Refills swap through a quote checked field by field. The treasury that pays them can pull proceeds only to itself, and only up to the owner's daily cap.
+- **The admin panel can't move money by itself.** `/admin` answers only accounts in `ADMIN_ACCOUNTS`; everyone else gets "No page here". Funding or withdrawing the reserve, withdrawing proceeds and pausing are transactions the owner signs in their own wallet, so a stolen admin session can't take funds. It can look, stop sales, switch the relayer off or change its caps, change the float settings, start refills (treasury USDC to our own Base wallet, within the contract's daily cap), and retry stuck purchases. Every one of these is announced in the admin alert channel.
 - **Admission is idempotent onchain.** Each purchase carries the server's order id, and the contract admits an order once, so no retry or resend can debit twice.
 - **No result shopping.** Confirming delivery closes the purchase for good. The Draw then runs in a separate receipt a block later, with gas the contract sets and randomness that didn't exist when the confirmation was signed. Nobody, not even a full-access key, can bundle the confirmation with a call that reverts unlucky outcomes, fail the purchase after seeing the result, or call the Draw directly. The contract refuses a Draw signed even by its own account's key (which can still replace the code: see Upgrades below). A purchase the operator neither confirms nor fails can be reclaimed in full after 24 hours.
 - **Every Cashback is covered before the purchase starts.** Each Lucky Buy locks its largest possible Cashback from the Cashback Reserve, and no purchase can get more than the Cashback Cap (20% of the free reserve on mainnet).
@@ -380,7 +380,7 @@ The contract does **not** prove these:
 ```text
 apps/web        Next.js web app: landing page, shop, wallet, purchases, Draw Proof, /fair, Win Cards, admin
 apps/server     Effect server: HTTP API, purchase workflow and reconciler, Telegram agent and its TEE checks,
-                Top-Ups, relayer, Bitrefill credit refills, read-only MCP server for other agents
+                Top-Ups, relayer, Base Float refills, read-only MCP server for other agents
 packages/api    shared HttpApi definition and schemas (typed client for the web app)
 contract/       Rust NEAR contract, plus a testnet-only test-USDC token with a faucet
 deploy/         pm2 config, VM setup and the runbook for the server
@@ -393,7 +393,7 @@ CONTEXT.md      domain glossary
 - [Build plan](docs/plan.md): scope, schedule, what's needed, risks.
 - [Decisions](docs/adr/): why it works the way it does.
 - [Glossary](CONTEXT.md): Balance, Lucky Buy, Game Version, Draw, Cashback, and so on.
-- [Bitrefill funding research](docs/research/bitrefill-funding.md): why the float is USD store credit.
+- [Bitrefill funding research](docs/research/bitrefill-funding.md): how Bitrefill can be paid without holding BTC.
 
 ## Hackathon notes
 

@@ -998,3 +998,19 @@ test("a refill that has failed for hours still backs off and tells the admin: it
   assert.deepEqual([r.attempts, r.waits], [46, true], "one more try counted, and the next one waits the full backoff")
   assert.ok(w.alerts.some((a) => a.includes("keeps failing at quote")), w.alerts.join("\n"))
 })
+
+test("with guest checkout, what the admin is told names the Base Float, never Bitrefill credit", async () => {
+  // A swap that went wrong: the way to keep selling meanwhile is USDC sent straight to the Base Wallet.
+  const stuck = world({ guest: true, treasuryUsdc: 50_000_000, swap: ["PROCESSING", "PROCESSING", "REFUNDED"] })
+  await stuck.run(stuckRefill)
+  const alert = stuck.alerts.find((a) => a.includes("needs a look")) ?? ""
+  assert.match(alert, /Meanwhile you can send USDC on Base straight to our Base wallet/)
+  assert.doesNotMatch(alert, /bitrefill\.com/)
+  // A float above its refill line: asking for a refill is refused in the float's words.
+  const full = world({ guest: true, walletUsdc: 450_000_000, treasuryUsdc: 50_000_000 })
+  const refused = await full.run(Effect.gen(function*() {
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    return yield* Effect.flatMap(Refill, (r) => r.request(undefined, "boss.testnet")).pipe(Effect.flip)
+  }))
+  assert.equal(refused.message, "The Base Float is above the refill line.")
+})
