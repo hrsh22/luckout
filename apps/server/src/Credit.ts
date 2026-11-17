@@ -32,7 +32,8 @@ export const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed
 
 /**
  * Steps after which a real card's price will soon leave the credit: it's being admitted, ordered, or (a guest
- * order, ADR-0012) paid from the Base Float. A payment counts from when it's signed (`ordered_at`).
+ * order, ADR-0012) paid from the Base Float. A payment is held until it's mined, and counts as spent from then
+ * (`ordered_at`): the float only drops when the payment lands.
  */
 const HELD_STEPS = ["admit", "ordering", "pay"]
 /** Purchases waiting for credit: before being charged, or charged and waiting to be ordered. */
@@ -134,10 +135,11 @@ export class Credit extends Context.Service<Credit, {
 
       // Real cards only: test cards are free on Bitrefill.
       const ledger = (since: Date) =>
-        sql<{ held: string; ordered_since: string; waiting: number; waiting_total: string; week: string; biggest: string; today: number }>`
+        sql<{ held: string; ordered_since: string; in_flight: string; waiting: number; waiting_total: string; week: string; biggest: string; today: number }>`
           SELECT
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(HELD_STEPS)}), 0)::text AS held,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > ${since}), 0)::text AS ordered_since,
+            COALESCE(sum(pay_amount) FILTER (WHERE step = 'pay' AND pay_tx IS NOT NULL), 0)::text AS in_flight,
             count(*) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)})::int AS waiting,
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)}), 0)::text AS waiting_total,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > now() - interval '7 days'), 0)::text AS week,
@@ -147,6 +149,8 @@ export class Credit extends Context.Service<Credit, {
           Effect.map(([r]) => ({
             held: Number(r?.held ?? 0),
             orderedSince: Number(r?.ordered_since ?? 0),
+            /** Base payments signed and not yet seen mined: each may already have left the float, or be about to. */
+            inFlight: Number(r?.in_flight ?? 0),
             waiting: { count: r?.waiting ?? 0, total: Number(r?.waiting_total ?? 0) },
             week: Number(r?.week ?? 0),
             biggest: Number(r?.biggest ?? 0),
@@ -169,8 +173,10 @@ export class Credit extends Context.Service<Credit, {
         // Credit only goes up when we refill; a drop our own orders don't explain means
         // someone else is spending it (or the API key, or the treasury's key, leaked).
         if (previous) {
-          const orderedBetween = (yield* ledger(previous.readAt)).orderedSince
-          const unexplained = previous.balance - orderedBetween - next.balance
+          // A payment still on its way explains a drop of its size too: it may have landed just before this
+          // read, before we saw it mined. (Counting it when it hasn't landed yet only makes the check more lenient.)
+          const l = yield* ledger(previous.readAt)
+          const unexplained = previous.balance - l.orderedSince - l.inFlight - next.balance
           if (unexplained > 1_000_000) {
             yield* alerts.admin(
               bitrefill.guest

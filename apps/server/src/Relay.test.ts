@@ -6,7 +6,7 @@ import { createHash } from "node:crypto"
 import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
-import { Near, type Outcome } from "./Near.ts"
+import { Near, NearUnavailable, type Outcome, TxExpired } from "./Near.ts"
 import { authCallIntent, intentPayload, intentSignature, moveInIntent, mtTransferArgs, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
@@ -90,7 +90,15 @@ test("a NEAR wallet's send-back is paid for only as quoted: that address, token 
   for (const [name, d, a] of no) assert.ok(refusal(d, a), name)
 })
 
-const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; failures?: Array<string>; held?: string } = {}) => {
+const world = (o: {
+  relayer?: boolean
+  nonce?: bigint
+  fullAccess?: boolean
+  failures?: Array<string>
+  held?: string
+  /** The relayer's first transaction is saved, never reaches NEAR, and has expired by the time it's resumed. */
+  lostOnce?: boolean
+} = {}) => {
   const relayed: Array<string> = []
   const resumed: Array<string> = []
   const outcome = (hash: string): Outcome => ({ hash, value: null, events: [], failures: o.failures ?? [] })
@@ -104,9 +112,13 @@ const world = (o: { relayer?: boolean; nonce?: bigint; fullAccess?: boolean; fai
         const hash = `tx-${relayed.length + 1}`
         relayed.push(sd.delegateAction.actions[0]!.functionCall!.methodName)
         yield* persist({ hash, bytes: "" })
+        if (o.lostOnce && relayed.length === 1) return yield* new NearUnavailable({ message: "send: timed out" })
         return outcome(hash)
       }),
-    resume: (signed) => Effect.sync(() => (resumed.push(signed.hash), outcome(signed.hash))),
+    resume: (signed) =>
+      o.lostOnce && signed.hash === "tx-1"
+        ? Effect.fail(new TxExpired({ hash: signed.hash }))
+        : Effect.sync(() => (resumed.push(signed.hash), outcome(signed.hash))),
     accessKey: (_, publicKey) =>
       Effect.succeed(publicKey === key.getPublicKey().toString() ? { nonce: o.nonce ?? 10n, fullAccess: o.fullAccess ?? true } : undefined),
     height: Effect.succeed(500n)
@@ -221,7 +233,7 @@ const signIntent = async (intent: object, nonce = randomBytes(32).toString("base
   return { standard: "erc191", payload, signature: intentSignature(await evmKey.signMessage({ message: payload })) }
 }
 
-const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string } = {}) => {
+const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string; lostOnce?: boolean } = {}) => {
   const sent: Array<{ receiver: string; method: string; args: unknown }> = []
   const near = fakeNear({
     contractId: APP,
@@ -243,9 +255,13 @@ const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: s
         const hash = `tx-${sent.length + 1}`
         sent.push({ receiver, method, args })
         yield* persist({ hash, bytes: "" })
+        if (o.lostOnce && sent.length === 1) return yield* new NearUnavailable({ message: "send: timed out" })
         return { hash, value: null, events: [], failures: [] }
       }),
-    resume: (signed) => Effect.succeed({ hash: signed.hash, value: null, events: [], failures: [] })
+    resume: (signed) =>
+      o.lostOnce && signed.hash === "tx-1"
+        ? Effect.fail(new TxExpired({ hash: signed.hash }))
+        : Effect.succeed({ hash: signed.hash, value: null, events: [], failures: [] })
   })
   const layer = Relay.layer.pipe(Layer.provide(Layer.succeed(Near, near)), Layer.provideMerge(DbMemory))
   const run = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) => Effect.runPromise(e.pipe(Effect.provide(layer)))
@@ -359,4 +375,47 @@ test("an intent that would fail for want of money is refused before we pay", asy
   const withdraw = authCallIntent(APP, { withdraw: { amount: "1000000" } })
   assert.equal((await broke.tag(broke.send(await signIntent(withdraw))))._tag, "RelayFailed")
   assert.equal(poor.sent.length + broke.sent.length, 0)
+})
+
+// ---------- a gas floor, and a relay whose own transaction expired ----------
+
+test("a call signed with too little gas to run is refused: its deposit would be refunded to the customer, not to us", () => {
+  const register = (gas: bigint) => delegate(USDC, "storage_deposit", { account_id: ALICE, registration_only: true }, USDC_REGISTRATION, { gas }).d
+  assert.match(refusal(register(29_000_000_000_000n), allow) ?? "", /too little gas/)
+  assert.match(refusal(register(1n), allow) ?? "", /too little gas/)
+  assert.match(refusal(delegate(APP, "withdraw", { amount: "5" }, 1n, { gas: 1n }).d, allow) ?? "", /too little gas/)
+  assert.equal(refusal(register(30_000_000_000_000n), allow), undefined, "30 Tgas is what the app gives it")
+})
+
+test("a relay whose own transaction expired before NEAR took it is sent afresh on the next try, and doesn't use up a free relay", async () => {
+  const w = world({ lostOnce: true })
+  const b64 = withdraw()
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // One free relay a day: the try that never ran mustn't be the one that uses it.
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet"))
+    const first = yield* Effect.flip(w.send(b64))
+    const second = yield* w.send(b64)
+    const third = yield* w.send(b64)
+    const rows = yield* sql<{ hash: string }>`SELECT signed_tx->>'hash' AS hash FROM relays`
+    return { first: first.message, second: second.hash, third: third.hash, rows: rows.map((x) => x.hash) }
+  }))
+  assert.match(r.first, /didn't answer in time/)
+  assert.equal(r.second, "tx-2", "the same signed call, in a new relayer transaction")
+  assert.equal(r.third, "tx-2", "and from then on that's its one result")
+  assert.deepEqual(w.relayed, ["withdraw", "withdraw"])
+  assert.deepEqual(r.rows, ["tx-2"], "the dead one is forgotten")
+})
+
+test("a Top-Up's move-in whose relayer transaction expired unsent is sent again on the next pass", async () => {
+  const w = intentWorld({ lostOnce: true })
+  const s = await signIntent(moveIn())
+  const r = await w.run(Effect.gen(function*() {
+    const first = yield* Effect.flip(w.send(s, false))
+    const second = yield* w.send(s, false)
+    return { first: first.message, second: second.hash }
+  }))
+  assert.match(r.first, /didn't answer in time/, "the message TopUp keeps a move-in waiting on")
+  assert.equal(r.second, "tx-2")
+  assert.equal(w.sent.length, 2)
 })

@@ -30,6 +30,8 @@ const csp = ["frame-ancestors 'none'", "base-uri 'self'", "object-src 'none'", "
 
 export default {
   transpilePackages: ["@luckout/api"],
+  // No "X-Powered-By: Next.js": it tells a stranger which framework advisories to try.
+  poweredByHeader: false,
   async headers() {
     return [{
       source: "/:path*",
