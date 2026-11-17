@@ -75,12 +75,13 @@ export const rememberSummary = (qc: QueryClient, v: VoucherSummary) => qc.setQue
 export const useSummary = (id: string) =>
   useQuery<VoucherSummary | null>({ queryKey: ["summary", id], queryFn: () => null, staleTime: Infinity })
 
-export const useQuote = (voucherId: string, value: string | undefined, mode: Mode) =>
+export const useQuote = (voucherId: string, value: string | undefined, mode: Mode, active = true) =>
   useQuery({
     queryKey: ["quote", voucherId, value, modeSlug(mode)],
     queryFn: () =>
       api((c) => c.catalog.quote({ query: { voucherId, value: value!, ...(mode === "normal" ? {} : { game: mode.lucky }) } })),
-    enabled: !!value,
+    // Off, it keeps its last quote and isn't polled; turned on again, a stale one is read at once.
+    enabled: !!value && active,
     // The reserve and Bitrefill's price move: while the page is in sight the quote is renewed as it goes stale, and
     // at once on coming back to the tab, so Buy sends the terms on screen, not ones from minutes ago.
     // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s (the server caches Bitrefill's

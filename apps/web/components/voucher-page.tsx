@@ -71,12 +71,6 @@ function Voucher() {
   const pkg = packages.find((p) => p.value === value)
   // openingMode only returns modes this build knows, so this is never undefined.
   const info = modeInfo(mode)!
-  const quote = useQuote(id, value, mode)
-  const reserve = useReserve()
-  // Shown at once from the same tables and reserve the contract uses; the server's quote replaces it in a moment.
-  const shown: Quote | undefined = quote.data ??
-    (pkg && (info.premiumBps === 0 || reserve !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) } : undefined)
-
   const [round, setRound] = useState(0)
   // A fresh key per choice: double clicks and retries return the same purchase instead of buying twice.
   const idempotencyKey = useMemo(() => crypto.randomUUID(), [id, value, modeSlug(mode), round]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -106,6 +100,12 @@ function Voucher() {
     }
   })
   const live = usePolledPurchase(buy.data, token)
+  // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
+  const quote = useQuote(id, value, mode, !live && !buy.isPending)
+  const reserve = useReserve()
+  // Shown at once from the same tables and reserve the contract uses; the server's quote replaces it in a moment.
+  const shown: Quote | undefined = quote.data ??
+    (pkg && (info.premiumBps === 0 || reserve !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) } : undefined)
   const panel = useRef<HTMLElement>(null)
 
   if (voucher.error && !look) {
@@ -321,13 +321,33 @@ function Receipt({ shown, exact, info, error, retry, children }: {
   )
 }
 
+/**
+ * The Add funds sheet stays outside BuyAction's branches, on the amount it opened with: a quote renewed every 20 s, a
+ * balance read or the shop closing mid Top-Up must not unmount it or restart its steps. It goes when the customer
+ * closes it or the Top-Up lands.
+ */
+function BuyButton(props: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
+  const [open, setOpen] = useState(false)
+  const [short, setShort] = useState(0)
+  return (
+    <>
+      <BuyAction {...props} onAdd={(n) => (setShort(n), setOpen(true))} />
+      <AddFundsSheet open={open} onOpenChange={setOpen} need={short} />
+    </>
+  )
+}
+
 /** One button that knows what's in the way: signing in, funds, limits, or the Checkout Email, and fixes it on the spot. */
-function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
+function BuyAction({ quote, need, onBuy, onAdd }: {
+  quote: Quote | undefined
+  need: number
+  onBuy: (q: Quote) => void
+  onAdd: (short: number) => void
+}) {
   const { accountId, account, accountError, refresh, evm, gasFree, token } = useSession()
   const actions = useWalletActions()
   const shop = useShopStatus().data
   const checkout = useCheckoutEmail(token).data
-  const [adding, setAdding] = useState(false)
   const [raising, setRaising] = useState(false)
   if (shop && !shop.open) {
     if (shop.reason === "limit" && shop.reopensAt !== undefined) return <ReopensAt at={shop.reopensAt} />
@@ -358,12 +378,7 @@ function BuyButton({ quote, need, onBuy }: { quote: Quote | undefined; need: num
   const daily = overDay ? raised(DEFAULT_LIMITS.daily, today + need) : account?.daily_limit
 
   if (balance < need) {
-    return (
-      <>
-        <Button size="lg" variant="gold" onClick={() => setAdding(true)}>Add {usdUp(need - balance)} to buy</Button>
-        <AddFundsSheet open={adding} onOpenChange={setAdding} need={need - balance} />
-      </>
-    )
+    return <Button size="lg" variant="gold" onClick={() => onAdd(need - balance)}>Add {usdUp(need - balance)} to buy</Button>
   }
   if ((overPer || overDay) && per && daily) {
     return (
