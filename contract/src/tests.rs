@@ -2381,3 +2381,39 @@ fn the_operator_can_retry_a_draw_too() {
         [(contract(), "on_draw".into(), json!({ "purchase_id": pid }))]
     );
 }
+
+// ---------- withdrawals of zero ----------
+
+#[test]
+#[should_panic(expected = "Nothing to withdraw")]
+fn a_customer_cannot_withdraw_zero() {
+    let mut c = setup(0, 100 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(0));
+}
+
+#[test]
+#[should_panic(expected = "Nothing to withdraw")]
+fn an_evm_customer_cannot_withdraw_zero() {
+    let mut c = setup_evm(5 * USDC);
+    let _ = auth(&mut c, evm(), json!({ "withdraw": { "amount": "0" } }));
+}
+
+#[test]
+#[should_panic(expected = "Nothing to withdraw")]
+fn the_owner_cannot_withdraw_zero_reserve() {
+    let mut c = setup(500 * USDC, USDC);
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(0));
+}
+
+#[test]
+fn the_smallest_withdrawal_is_one_base_unit() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    call(alice(), DAY, [0; 32], 1);
+    let _ = c.withdraw(U128(1));
+    assert_eq!(balance(&c), 100 * USDC - 1);
+    call(owner(), DAY, [0; 32], 1);
+    let _ = c.withdraw_reserve(U128(1));
+    assert_eq!(c.free_reserve, 500 * USDC - 1);
+}

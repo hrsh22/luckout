@@ -678,6 +678,7 @@ impl Contract {
     #[payable]
     pub fn withdraw_reserve(&mut self, amount: U128) -> Promise {
         self.assert_owner();
+        require!(amount.0 > 0, "Nothing to withdraw");
         require!(self.free_reserve >= amount.0, "Exceeds free reserve");
         self.free_reserve -= amount.0;
         emit("reserve_withdrawn", json!({ "amount": amount }));
@@ -1042,6 +1043,8 @@ impl Contract {
 
     /// `to`: "wallet" (the customer's NEAR account) or "intents" (their NEAR Intents account).
     fn debit_withdrawal(&mut self, id: &AccountId, amount: U128, to: &str) {
+        // A transfer of 0 moves nothing, yet costs gas (the relayer's, when relayed) and logs a withdrawal.
+        require!(amount.0 > 0, "Nothing to withdraw");
         let mut a = self.existing_account(id);
         require!(a.balance.0 >= amount.0, "Insufficient balance");
         a.balance.0 -= amount.0;
