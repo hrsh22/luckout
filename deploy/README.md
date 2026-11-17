@@ -37,7 +37,12 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
 ## Once
 
 1. **Site.** In CloudPanel: Add Site → Create a Node.js Site. Domain `luckout-api.gamified.trade`, site user `luckout-api`, app port `8788`. Point the domain's `A` record at the VM, then issue a Let's Encrypt certificate under SSL/TLS. Mainnet also answers on `api.luckout.wtf`: it is on the `server_name` line in the Vhost tab, and the certificate covers both names (`clpctl lets-encrypt:install:certificate --domainName=luckout-api.gamified.trade --subjectAlternativeName=api.luckout.wtf`).
-2. **Timeout.** A purchase request waits up to a minute for the card (`PURCHASE_REQUEST_WAIT_MS`, 60 s), then answers "pending" and the page follows it, which keeps it under Cloudflare's 100 s. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block.
+2. **Timeout, body size and client address.** A purchase request waits up to a minute for the card (`PURCHASE_REQUEST_WAIT_MS`, 60 s), then answers "pending" and the page follows it, which keeps it under Cloudflare's 100 s. In the site's Vhost tab, set `proxy_read_timeout 120s;` in the `location /` block, and add these two lines under `server_name`:
+   ```nginx
+   client_max_body_size 64k;
+   set_real_ip_from 127.0.0.1;
+   ```
+   The first refuses a body over 64 KiB before the server reads it (the server refuses it too). The second matters because the VM's `nginx.conf` trusts `X-Real-IP` from `0.0.0.0/0`: without it, a caller that reaches the VM directly, skipping Cloudflare, names its own address and slips past the rate limits.
 3. **Postgres.** As the Postgres admin:
    ```sql
    CREATE ROLE luckout LOGIN PASSWORD '<openssl rand -hex 24>';
@@ -68,6 +73,8 @@ The server runs on our VM as a CloudPanel Node.js site under pm2. CloudPanel's n
    `https://luckout-api.gamified.trade/health` should return 204. Set `NEXT_PUBLIC_API_URL` on Vercel to `https://api.luckout.wtf`.
 7. **Reboots and backups.** Put the password in `~/.pgpass` (`127.0.0.1:5432:luckout:luckout:<password>`, then `chmod 600`). Run `mkdir -p ~/backups`, then add to `crontab -e`. The `@reboot` line brings pm2 back without root, so `pm2 startup` isn't needed:
    ```cron
+   # pm2 and pnpm are installed system-wide in /usr/local/bin, which cron's own PATH lacks; Node comes from nvm
+   PATH=/usr/local/bin:/usr/bin:/bin
    # bash, because cron's sh can't load nvm; nvm's default Node is the one in .nvmrc (step 4)
    @reboot bash -c '. ~/.nvm/nvm.sh && cd ~/htdocs/luckout-api.gamified.trade && pm2 resurrect'
    0 3 * * * bash ~/htdocs/luckout-api.gamified.trade/deploy/backup.sh -h 127.0.0.1 -U luckout luckout >> ~/backups/backup.log 2>&1
