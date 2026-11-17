@@ -305,10 +305,19 @@ const STATUS: Record<Purchase["status"], string> = {
   rejected: "Not bought"
 }
 
+/** The mode a purchase was bought on, in that mode's colour. */
+export function ModeChip({ mode }: { mode: Purchase["mode"] }) {
+  const pal = modePalette(mode)
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold" style={{ background: pal.soft, color: pal.ink }}>
+      <span className="size-2 rounded-full" style={{ background: pal.solid }} />{modeName(mode)}
+    </span>
+  )
+}
+
 /** One line of history; open it for the code and the proof. */
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
-  const pal = modePalette(p.mode)
   return (
     <li className="card overflow-hidden">
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
@@ -316,9 +325,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
         <span className="min-w-0 flex-1">
           <span className="block truncate font-semibold">{p.voucherName}, {p.value}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
-            <span className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold" style={{ background: pal.soft, color: pal.ink }}>
-              <span className="size-2 rounded-full" style={{ background: pal.solid }} />{modeName(p.mode)}
-            </span>
+            <ModeChip mode={p.mode} />
             {new Date(p.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
           </span>
         </span>

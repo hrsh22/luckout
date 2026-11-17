@@ -1,6 +1,7 @@
 "use client"
 
 import { NoPage } from "@/components/admin/panel"
+import { ModeChip } from "@/components/purchase-view"
 import { AdminTabs, ago, basescan, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
 import { Button } from "@/components/ui/button"
@@ -94,7 +95,7 @@ export function AdminPurchases() {
   const id = purchaseIdIn(q)
   const { data, gate, stale } = useAdminList(["purchases", account, id], (token) =>
     api((c) => c.admin.purchases({ query: { ...(account ? { account } : {}), ...(id ? { id } : {}) } }), token), true)
-  const shown = data?.filter((p) => matches(q, p.accountId, p.voucherName, stepLabel(p.step), p.id)) ?? []
+  const shown = data?.filter((p) => matches(q, p.accountId, p.voucherName, stepLabel(p.step), modeName(p.mode), p.id)) ?? []
   // A full page may not be everything: say "latest", never "everything".
   const full = (data?.length ?? 0) >= ADMIN_LIST_LIMIT
   return (
@@ -107,7 +108,7 @@ export function AdminPurchases() {
       {gate ?? (
         <>
           {stale}
-          <Filter value={q} onChange={setQ} placeholder="Filter by account, card, step or id" />
+          <Filter value={q} onChange={setQ} placeholder="Filter by account, card, mode, step or id" />
           <ul className="flex flex-col gap-2">
             {shown.map((p) => <PurchaseRow key={p.id} p={p} />)}
             {shown.length === 0 && <li className="text-muted">No purchases{q ? " match" : " yet"}.</li>}
@@ -125,7 +126,7 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 p-4 [&::-webkit-details-marker]:hidden">
           <span className="min-w-0 flex-1 font-semibold">{p.voucherName} {p.value}</span>
           <span className="truncate text-sm text-muted sm:max-w-56">{p.accountId}</span>
-          <span className="text-sm text-ink-soft">{modeName(p.mode)}</span>
+          <ModeChip mode={p.mode} />
           <span className="w-20 text-right font-medium tabular-nums">{usd(p.paid ?? p.maxPrice ?? p.referencePrice)}</span>
           <span className={`pill ${stepTone(p.step)}`}>{stepLabel(p.step)}</span>
           <span className="w-24 text-right text-sm text-muted">{ago(p.createdAt)}</span>
@@ -135,6 +136,7 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
             items={[
               ["Id", p.id],
               ["Account", <Link key="a" href={`/admin/purchases?account=${encodeURIComponent(p.accountId)}`} className="underline">{p.accountId}</Link>],
+              ["Mode", modeName(p.mode)],
               ["Reference price", usd(p.referencePrice)],
               p.maxPrice !== undefined && ["Max price", usd(p.maxPrice)],
               p.paid !== undefined && ["Paid", usd(p.paid)],
