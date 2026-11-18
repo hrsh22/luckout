@@ -20,3 +20,8 @@ auditConfig:
     # (@reown/appkit > WalletConnect > unstorage > anymatch), in unstorage's file-watching driver, which a browser
     # never runs, and no glob there comes from a visitor. No fixed version is published yet (needs >= 4.0.8).
     - GHSA-fc5q-39xc-vjpf
+    # bigint-buffer, "buffer overflow via toBigIntLE()": a bug in its native addon. It reaches us only through the
+    # web's Solana libraries (@solana/spl-token > @solana/buffer-layout-utils), which run in the browser, where the
+    # package uses its plain JavaScript version (copy, reverse, BigInt) and the addon is never built (allowBuilds
+    # above). No fixed version is published (the advisory lists none; npm's latest is 1.1.5).
+    - GHSA-3gc7-fjrx-p6mg
