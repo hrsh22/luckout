@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import { SqlClient } from "effect/sql"
 import { GrammyError } from "grammy"
+import { redemptionFields } from "@luckout/api"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
@@ -23,6 +24,17 @@ test("a failed send is logged without the message it carried", () => {
   assert.equal(describe(e), "sendMessage: 403 Forbidden: bot was blocked by the user")
   assert.equal(describe(new TypeError("fetch failed")), "TypeError: fetch failed")
   assert.equal(describe({ payload: { text: "Code: SECRET-123" } }), "object")
+})
+
+test("a card's code and PIN are labelled from wherever Bitrefill puts them", () => {
+  // Swiggy: the gift code comes as `pin`, the PIN in extraFields, and `other` repeats it.
+  const swiggy = redemptionFields({ pin: "GIFTCODE00000001", other: "PIN Code: 123456", expirationTime: "2027-03-30T00:00:00.000Z", extraFields: { "PIN Code": "123456" } })
+  assert.deepEqual(swiggy.secrets, [{ label: "Code", value: "GIFTCODE00000001" }, { label: "PIN Code", value: "123456" }])
+  assert.equal(swiggy.other, undefined, "a repeat of the PIN isn't shown twice")
+  assert.equal(swiggy.expires, "2027-03-30T00:00:00.000Z")
+  assert.deepEqual(redemptionFields({ code: "SECRET-123", pin: "9876" }).secrets, [{ label: "Code", value: "SECRET-123" }, { label: "PIN", value: "9876" }])
+  assert.deepEqual(redemptionFields({ pin: "9876", other: "Dial *123#" }), { secrets: [{ label: "PIN", value: "9876" }], other: "Dial *123#", link: undefined, instructions: undefined, expires: undefined })
+  assert.deepEqual(redemptionFields(undefined).secrets, [])
 })
 
 test("only the latest link works, and disconnecting cancels links not opened yet", () =>

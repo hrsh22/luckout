@@ -1,4 +1,4 @@
-import { AgentAttestation, LinkInvalid, NewPurchase, NotFound, type Purchase } from "@luckout/api"
+import { AgentAttestation, LinkInvalid, NewPurchase, NotFound, type Purchase, redemptionFields } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
@@ -289,7 +289,7 @@ export class Telegram extends Context.Service<Telegram, {
         if (p.status !== "delivered") return p.error ?? `Purchase ${p.status}.`
         const paid = p.draw ? p.draw.finalPrice : p.referencePrice
         const diff = paid - p.referencePrice
-        const r = p.redemption ?? {}
+        const r = redemptionFields(p.redemption)
         const lines = [
           `${p.voucherName} ${p.value} is yours.`,
           !p.draw
@@ -297,9 +297,9 @@ export class Telegram extends Context.Service<Telegram, {
             : p.draw.cashback === 0
             ? `No cashback this time: you paid ${usdUp(paid)}.`
             : `${paid === 0 ? "100% off!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
-          typeof r.code === "string" ? `Code: ${r.code}` : "",
-          typeof r.pin === "string" ? `PIN: ${r.pin}` : "",
-          typeof r.link === "string" ? `Link: ${r.link}` : "",
+          ...r.secrets.map((f) => `${f.label}: ${f.value}`),
+          r.other ?? "",
+          r.link ? `Link: ${r.link}` : "",
           p.draw && p.settleTx ? `Draw Proof: ${webOrigin}/draw/${p.settleTx}` : ""
         ]
         return lines.filter(Boolean).join("\n")
