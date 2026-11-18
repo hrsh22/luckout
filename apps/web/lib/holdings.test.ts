@@ -21,6 +21,21 @@ test("a wallet's balances match the tokens we take, by chain and contract; the c
   assert.deepEqual([...gas], ["base"])
 })
 
+test("a Solana wallet's holdings, read from Solana without dollar values, are valued at 1Click's price; SOL pays its fees", () => {
+  const SOL = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+  const assets = [
+    { assetId: "sol-usdc", symbol: "USDC", chain: "sol", contract: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", price: 1 },
+    { assetId: "sol", symbol: "SOL", chain: "sol", price: 150 },
+    { assetId: "sol-usdt", symbol: "USDT", chain: "sol", contract: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", price: 1 }
+  ]
+  const { holdings, gas } = matchHoldings(assets, [
+    { symbol: "SOL", chainId: SOL, address: null, quantity: { numeric: "0.02" } },
+    { symbol: "", chainId: SOL, address: `${SOL}:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, quantity: { numeric: "12.5" } }
+  ])
+  assert.deepEqual([...holdings].map(([id, h]) => [id, h.amount, h.usd]), [["sol-usdc", 12.5, 12.5], ["sol", 0.02, 3]], "the mint's case is kept by Solana and matched as is")
+  assert.deepEqual([...gas], ["sol"])
+})
+
 test("Max leaves room for 1Click's spread, and gas when paying with the chain's own coin", () => {
   assert.equal(maxTopUp({ symbol: "USDC", chain: "base" }, { amount: 47.12, usd: 47.1 }), 46.39)
   assert.equal(maxTopUp({ symbol: "ETH", chain: "base" }, { amount: 0.01, usd: 20 }), 19.65)

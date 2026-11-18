@@ -1,12 +1,12 @@
 import { NodeHttpServer } from "@effect/platform-node"
-import { AuthApi, CurrentAccount, evmSignInMessage, SessionApi, SignedChallenge, SignedEvmChallenge } from "@luckout/api"
+import { AuthApi, base58Encode, CurrentAccount, evmSignInMessage, SessionApi, SignedChallenge, SignedEvmChallenge, SignedSolanaChallenge, solanaSignInMessage } from "@luckout/api"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { createSiweMessage } from "viem/siwe"
 import { Effect, Layer } from "effect"
 import { HttpRouter } from "effect/http"
 import { HttpApi, HttpApiBuilder } from "effect/http-api"
 import assert from "node:assert/strict"
-import { createHmac } from "node:crypto"
+import { createHmac, generateKeyPairSync, sign } from "node:crypto"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
@@ -41,7 +41,7 @@ test("the sign-in message names the network, and a session works only on its own
     assert.equal(c.message, "Sign in to Luckout (testnet)")
     const s = yield* auth.verify(new SignedChallenge({ accountId: "alice.testnet", publicKey: "ed25519:x", signature: "", nonce: c.nonce }))
     assert.deepEqual(signed, ["Sign in to Luckout (testnet)"])
-    assert.equal(yield* auth.authenticate(s.token), "alice.testnet")
+    assert.equal((yield* auth.authenticate(s.token)).accountId, "alice.testnet")
 
     const e = Date.now() + 60_000
     const mainnet = yield* auth.authenticate(mint({ a: "alice.near", e, n: "mainnet" })).pipe(Effect.flip)
@@ -56,13 +56,13 @@ test("signing out everywhere ends every earlier session; a new sign-in works", (
     const signIn = Effect.flatMap(auth.challenge, (c) =>
       auth.verify(new SignedChallenge({ accountId: "bob.testnet", publicKey: "ed25519:x", signature: "", nonce: c.nonce })))
     const before = yield* signIn
-    assert.equal(yield* auth.authenticate(before.token), "bob.testnet")
+    assert.equal((yield* auth.authenticate(before.token)).accountId, "bob.testnet")
     yield* auth.signOutEverywhere("bob.testnet")
     const ended = yield* auth.authenticate(before.token).pipe(Effect.flip)
     assert.equal(ended._tag, "Unauthorized")
     yield* Effect.sleep("5 millis")
     const after = yield* signIn
-    assert.equal(yield* auth.authenticate(after.token), "bob.testnet")
+    assert.equal((yield* auth.authenticate(after.token)).accountId, "bob.testnet")
   })))
 
 /** What the Web App sends after an EVM wallet signed in on `uri`. */
@@ -80,7 +80,7 @@ test("an EVM wallet signs in as its lowercase address, once per challenge, and o
     const signedIn = yield* evmSignIn(c, wallet)
     const s = yield* auth.verifyEvm(signedIn)
     assert.equal(s.accountId, wallet.address.toLowerCase())
-    assert.equal(yield* auth.authenticate(s.token), wallet.address.toLowerCase())
+    assert.equal((yield* auth.authenticate(s.token)).accountId, wallet.address.toLowerCase())
 
     const again = yield* auth.verifyEvm(signedIn).pipe(Effect.flip)
     assert.match(again.message, /expired/, "a challenge signs in once")
@@ -127,6 +127,50 @@ test("the EVM sign-in text is a Sign-In with Ethereum message naming our site, a
     assert.equal(s.accountId, wallet.address.toLowerCase())
   })))
 
+/** A Solana key: its address, its NEAR Intents account (the key in hex), and what the Web App sends after it signs in on `uri`. */
+const solanaWallet = () => {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519")
+  const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32)
+  const address = base58Encode(raw)
+  const signIn = (c: { message: string; nonce: string }, uri = "https://luckout.test", as = address) => {
+    const site = { uri, issuedAt: new Date().toISOString() }
+    const signature = sign(null, Buffer.from(solanaSignInMessage({ challenge: c, address: as, ...site })), privateKey).toString("base64")
+    return new SignedSolanaChallenge({ address: as, signature, nonce: c.nonce, ...site })
+  }
+  return { address, accountId: raw.toString("hex"), signIn }
+}
+
+test("a Solana wallet signs in as its key in hex, only with its own key, and only on our site", () =>
+  run(Effect.gen(function*() {
+    const auth = yield* Auth
+    const wallet = solanaWallet()
+    const c = yield* auth.challenge
+    const text = solanaSignInMessage({ challenge: c, address: wallet.address, uri: "https://luckout.test", issuedAt: "2026-11-18T12:00:00.000Z" })
+    assert.match(text, new RegExp(`^luckout\\.test wants you to sign in with your Solana account:\n${wallet.address}\n\nSign in to Luckout \\(testnet\\)\\.`))
+    const s = yield* auth.verifySolana(wallet.signIn(c))
+    assert.deepEqual([s.accountId, s.wallet], [wallet.accountId, "solana"])
+    assert.deepEqual(yield* auth.authenticate(s.token), { accountId: wallet.accountId, wallet: "solana" })
+
+    // Someone else's key, claiming this address.
+    const forged = yield* auth.verifySolana(solanaWallet().signIn(yield* auth.challenge, "https://luckout.test", wallet.address)).pipe(Effect.flip)
+    assert.match(forged.message, /isn't from this Solana address/)
+    const phished = yield* auth.verifySolana(wallet.signIn(yield* auth.challenge, "https://luckout.example")).pipe(Effect.flip)
+    assert.match(phished.message, /Luckout's own site/)
+    const notAKey = yield* auth.verifySolana(new SignedSolanaChallenge({ ...wallet.signIn(yield* auth.challenge), address: "abc" })).pipe(Effect.flip)
+    assert.match(notAKey.message, /isn't a Solana signature/)
+  })))
+
+test("a session names the wallet it signed in with; one from before that is read from its account", () =>
+  run(Effect.gen(function*() {
+    const auth = yield* Auth
+    const e = Date.now() + 60_000
+    const evm = "0x53a19a03679e8d5e9253a998dcde6c71dbb002a2"
+    assert.deepEqual(yield* auth.authenticate(mint({ a: evm, e, n: "testnet", i: Date.now() })), { accountId: evm, wallet: "evm" })
+    const implicit = "ad".repeat(32)
+    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", i: Date.now() })), { accountId: implicit, wallet: "near" })
+    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", i: Date.now(), w: "solana" })), { accountId: implicit, wallet: "solana" })
+  })))
+
 test("a NEAR wallet is shown our site's host as the recipient", () =>
   run(Effect.gen(function*() {
     const auth = yield* Auth
@@ -144,7 +188,7 @@ test("signing out ends that session only, at once; the same account's other sess
     yield* auth.signOut(laptop.token)
     const ended = yield* auth.authenticate(laptop.token).pipe(Effect.flip)
     assert.match(ended.message, /Signed out/)
-    assert.equal(yield* auth.authenticate(phone.token), "carol.testnet")
+    assert.equal((yield* auth.authenticate(phone.token)).accountId, "carol.testnet")
     // Junk is ignored rather than stored.
     yield* auth.signOut("not-a-token")
     yield* auth.signOut("")
@@ -161,7 +205,8 @@ const AuthGroup = HttpApiBuilder.group(SessionTestApi, "auth", (handlers) =>
     return handlers.handleAll({
       challenge: () => auth.challenge,
       verify: ({ payload }) => startSession(auth.verify(payload)),
-      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload))
+      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload)),
+      verifySolana: ({ payload }) => startSession(auth.verifySolana(payload))
     })
   }))
 const SessionGroup = HttpApiBuilder.group(SessionTestApi, "session", (handlers) =>
@@ -195,14 +240,14 @@ test("the session token reaches the browser only as an HttpOnly cookie, which ev
     const signedIn = await post("/auth/verify", {}, { accountId: "dave.testnet", publicKey: "ed25519:x", signature: "", nonce: c.nonce })
     assert.equal(signedIn.status, 200)
     const body = await signedIn.json()
-    assert.deepEqual(Object.keys(body).sort(), ["accountId", "expiresAt"], "no token in the body")
+    assert.deepEqual(Object.keys(body).sort(), ["accountId", "expiresAt", "wallet"], "no token in the body")
     const setCookie = signedIn.headers.get("set-cookie") ?? ""
     assert.match(setCookie, /^luckout_session=[\w-]+\.[\w-]+;/)
     for (const part of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/", `Expires=${new Date(body.expiresAt).toUTCString()}`]) assert.ok(setCookie.includes(part), `${part} in ${setCookie}`)
     const cookie = setCookie.split(";")[0]!
     const token = cookie.slice("luckout_session=".length)
     assert.equal(await run(Effect.gen(function*() {
-      return yield* (yield* Auth).authenticate(token)
+      return (yield* (yield* Auth).authenticate(token)).accountId
     })), "dave.testnet")
 
     // Our site's own calls may carry it, with credentials; another site's may not even ask.

@@ -1,8 +1,9 @@
 "use client"
 
-// EVM wallets (ADR-0011) through Reown AppKit and wagmi. Loaded only when someone picks an EVM
-// wallet, so NEAR wallets never download it. The wallet signs messages (sign-in and NEAR Intents)
-// and, for a Top-Up, sends its own tokens on its own chain: the only gas an EVM customer pays.
+// EVM wallets (ADR-0011) through Reown AppKit and wagmi. Loaded only when someone picks an EVM or
+// Solana wallet (the one AppKit modal serves both; Solana's side is lib/solana.ts), so NEAR wallets
+// never download it. The wallet signs messages (sign-in and NEAR Intents) and, for a Top-Up, sends
+// its own tokens on its own chain: the only gas an EVM customer pays.
 
 import type { AppKitNetwork } from "@reown/appkit/networks"
 import type { Config } from "@wagmi/core"
@@ -12,24 +13,25 @@ export const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID || "bafd317da3
 /** 1Click's chain names → EVM chain ids, for the chains a Top-Up or withdrawal can use. */
 export const EVM_CHAIN_IDS: Record<string, number> = { eth: 1, arb: 42161, base: 8453, pol: 137, bsc: 56 }
 /** 1Click's chain names → what people call them. */
-export const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain" }
+export const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana" }
 
 type Kit = Awaited<ReturnType<typeof setUp>>
 let kit: Promise<Kit> | undefined
 
 async function setUp() {
-  const [{ createAppKit }, { WagmiAdapter }, n, core] = await Promise.all([
+  const [{ createAppKit }, { WagmiAdapter }, { SolanaAdapter }, n, core] = await Promise.all([
     import("@reown/appkit"),
     import("@reown/appkit-adapter-wagmi"),
+    import("@reown/appkit-adapter-solana"),
     import("@reown/appkit/networks"),
     import("@wagmi/core")
   ])
-  const networks: [AppKitNetwork, ...Array<AppKitNetwork>] = [n.base, n.mainnet, n.arbitrum, n.polygon, n.bsc]
-  const adapter = new WagmiAdapter({ projectId, networks })
+  const evmNetworks: [AppKitNetwork, ...Array<AppKitNetwork>] = [n.base, n.mainnet, n.arbitrum, n.polygon, n.bsc]
+  const adapter = new WagmiAdapter({ projectId, networks: evmNetworks })
   const modal = createAppKit({
-    // AppKit's own types disagree under exactOptionalPropertyTypes (`namespace?:` vs required); the adapter is the documented one.
-    adapters: [adapter as never],
-    networks,
+    // AppKit's own types disagree under exactOptionalPropertyTypes (`namespace?:` vs required); the adapters are the documented ones.
+    adapters: [adapter as never, new SolanaAdapter() as never],
+    networks: [...evmNetworks, n.solana as AppKitNetwork],
     projectId,
     metadata: { name: "Luckout", description: "Checkout, but lucky", url: window.location.origin, icons: [`${window.location.origin}/logo.png`] },
     // Regular accounts only: NEAR Intents checks signatures by key recovery, which smart accounts and
@@ -41,7 +43,8 @@ async function setUp() {
   return { modal, config: adapter.wagmiConfig as Config, core }
 }
 
-const load = () => (kit ??= setUp())
+/** The one AppKit modal, set up on first use. */
+export const load = () => (kit ??= setUp())
 
 /** The connected address, lowercase, after reconnecting a wallet from an earlier visit. */
 export async function evmAddress() {
@@ -80,7 +83,7 @@ export async function connectEvm(): Promise<string> {
         }
       })
     ]
-    void modal.open()
+    void modal.open({ namespace: "eip155" })
   })
 }
 
@@ -144,8 +147,12 @@ export async function sendFromWallet(expected: string, o: { chain: string; contr
   return hash
 }
 
-export async function disconnectEvm() {
+/** Disconnects whatever EVM or Solana wallet AppKit holds (nothing to do if it was never loaded). */
+export async function disconnectWallets() {
   if (!kit) return
-  const { config, core } = await kit
-  await core.disconnect(config).catch(() => {})
+  const { config, core, modal } = await kit
+  await Promise.all([core.disconnect(config).catch(() => {}), modal.disconnect("solana").catch(() => {})])
 }
+
+/** One of the chains a Top-Up or withdrawal can use with this kind of wallet (1Click's chain names). */
+export const walletChain = (wallet: "evm" | "solana", chain: string) => (wallet === "solana" ? chain === "sol" : !!EVM_CHAIN_IDS[chain])

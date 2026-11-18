@@ -1566,13 +1566,17 @@ fn the_contract_never_operates_itself_from_the_start() {
     Contract::new(owner(), contract(), usdc());
 }
 
-// ---------- EVM customers through NEAR Intents (ADR-0011) ----------
+// ---------- EVM and Solana customers through NEAR Intents (ADR-0011) ----------
 
 fn intents() -> AccountId {
     id("intents.near")
 }
 fn evm() -> AccountId {
     id("0x53a19a03679e8d5e9253a998dcde6c71dbb002a2")
+}
+/// A Solana wallet's NEAR Intents account: its ed25519 public key in hex.
+fn solana() -> AccountId {
+    id("ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf")
 }
 fn for_evm() -> String {
     format!(r#"{{"for":"{}"}}"#, evm())
@@ -1606,17 +1610,23 @@ fn nears_intents_is_fixed_per_network() {
 }
 
 #[test]
-fn only_lowercase_evm_addresses_are_evm_accounts() {
-    assert!(is_evm_account(&evm()));
+fn only_lowercase_evm_addresses_and_solana_keys_sign_through_intents() {
+    assert!(is_intents_signer(&evm()));
+    assert!(is_intents_signer(&solana()));
     for s in [
         "alice.near",
         "0x53a19a03679e8d5e9253a998dcde6c71dbb002a",
         "0x53a19a03679e8d5e9253a998dcde6c71dbb002a2a",
         "0x53a19a03679e8d5e9253a998dcde6c71dbb002g2",
         "1x53a19a03679e8d5e9253a998dcde6c71dbb002a2",
+        // A Solana key one hex digit short, one too long, and with a letter past f.
+        "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5c",
+        "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf0",
+        "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cg",
+        "0xad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5",
     ] {
         if let Ok(a) = s.parse::<AccountId>() {
-            assert!(!is_evm_account(&a), "{s}");
+            assert!(!is_intents_signer(&a), "{s}");
         }
     }
 }
@@ -1637,7 +1647,7 @@ fn only_intents_names_the_account_a_deposit_credits() {
 }
 
 #[test]
-#[should_panic(expected = "Only EVM accounts are credited this way")]
+#[should_panic(expected = "Only EVM and Solana accounts are credited this way")]
 fn intents_cannot_credit_a_near_account() {
     let mut c = setup(0, USDC);
     as_(usdc());
@@ -1690,7 +1700,7 @@ fn the_evm_customer_cannot_call_on_auth_directly() {
 }
 
 #[test]
-#[should_panic(expected = "Only EVM accounts sign through NEAR Intents")]
+#[should_panic(expected = "Only EVM and Solana accounts sign through NEAR Intents")]
 fn near_accounts_never_sign_through_intents() {
     let mut c = setup(500 * USDC, 50 * USDC);
     let _ = auth(
@@ -1754,6 +1764,30 @@ fn an_evm_withdrawal_goes_only_to_their_own_intents_account() {
                 json!({ "account_id": evm(), "amount": "2000000" }),
             ),
         ]
+    );
+}
+
+#[test]
+fn a_solana_customer_moves_in_and_withdraws_to_their_own_intents_account() {
+    let mut c = setup(500 * USDC, USDC);
+    as_(usdc());
+    let msg = format!(r#"{{"for":"{}","mode":{{"lucky":1}}}}"#, solana());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), msg);
+    let a = c.get_account(solana()).unwrap();
+    assert_eq!((a.balance.0, a.default_mode), (5 * USDC, Mode::Lucky(1)));
+    let _ = auth(
+        &mut c,
+        solana(),
+        json!({ "withdraw": { "amount": "2000000" } }),
+    );
+    assert_eq!(c.get_account(solana()).unwrap().balance.0, 3 * USDC);
+    assert_eq!(
+        sent()[0],
+        (
+            usdc(),
+            "ft_transfer_call".into(),
+            json!({ "receiver_id": "intents.near", "amount": "2000000", "memo": null, "msg": solana() }),
+        )
     );
 }
 

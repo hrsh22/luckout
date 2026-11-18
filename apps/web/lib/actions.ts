@@ -29,7 +29,7 @@ export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {}
  * re-reads the balance whatever happened, and resolves false (never throws) if the wallet refused or it failed.
  */
 export function useWalletActions() {
-  const { accountId, token, evm, refresh, send, signIntent } = useSession()
+  const { accountId, token, intents, refresh, send, signIntent } = useSession()
   const qc = useQueryClient()
 
   /** Each step may ask the wallet to approve or sign; the toast says what's happening throughout. */
@@ -37,7 +37,7 @@ export function useWalletActions() {
     // One wallet request at a time: a second tap while this one is open answers false and asks the wallet nothing.
     oneAtATime(async () => {
       if (!accountId) return false
-      const id = toast.loading(pending, { description: evm ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
+      const id = toast.loading(pending, { description: intents ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
       try {
         await f((text) => toast.loading(text, { id }))
         toast.success(typeof done === "string" ? done : done(), { id, description: undefined })
@@ -86,26 +86,26 @@ export function useWalletActions() {
 
   return {
     /**
-     * Testnet only: 100 test USDC from the faucet, deposited in the same approval. An EVM wallet has no
+     * Testnet only: 100 test USDC from the faucet, deposited in the same approval. An EVM or Solana wallet has no
      * NEAR account to call the faucet from: the server puts it in its NEAR Intents account, and one
      * signature moves it in.
      */
     faucet: () =>
-      evm
+      intents
         ? steps("Getting 100 test USDC", "100 test USDC added to your balance", async (say) => {
           await api((c) => c.topup.faucet(), token)
           say("Moving it into Luckout")
           await send(depositCall(100_000_000, startMode()))
         })
         : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000, startMode())),
-    /** From the NEAR wallet, or for an EVM wallet from its NEAR Intents account. */
+    /** From the NEAR wallet, or for an EVM or Solana wallet from its NEAR Intents account. */
     deposit: (micro: number) =>
-      run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro, startMode()))
+      run(intents ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro, startMode()))
         .then(async (ok) => (ok && (await savePendingMode()), ok)),
     withdraw: (micro: number) =>
-      run(`Withdrawing ${usd(micro)}`, evm ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),
+      run(`Withdrawing ${usd(micro)}`, intents ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),
     /**
-     * EVM wallets (ADR-0011): out of Luckout into their own NEAR Intents account, then, with `asset`, on to
+     * EVM and Solana wallets (ADR-0011): out of Luckout into their own NEAR Intents account, then, with `asset`, on to
      * their own address on that chain through 1Click. If the second step fails, the money waits in NEAR Intents.
      */
     withdrawTo: (micro: number, asset: TopUpAsset) => {
@@ -126,7 +126,7 @@ export function useWalletActions() {
     },
     /**
      * All of a token held in their NEAR Intents account (1Click's change or a refund), to their own wallet through
-     * 1Click: an EVM wallet gets it as it is on its own chain, a NEAR wallet as USDC. One signature; Luckout pays the fee.
+     * 1Click: an EVM or Solana wallet gets it as it is on its own chain, a NEAR wallet as USDC. One signature; Luckout pays the fee.
      */
     sendBack: (h: HeldToken) => {
       let arriving = ""
@@ -134,7 +134,7 @@ export function useWalletActions() {
         const q = await api((c) => c.topup.sendBack({ payload: { assetId: h.assetId } }), token)
         const to = { receiverId: q.depositAddress, token: q.assetId, amount: q.amount }
         try {
-          if (evm) {
+          if (intents) {
             const signed = await signIntent(transferIntent(to))
             await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
           } else {

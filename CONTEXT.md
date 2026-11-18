@@ -29,7 +29,7 @@ Moving value from any supported chain into a customer's Balance through a NEAR I
 _Avoid_: Payment, bridge
 
 **Intents Account**:
-A customer's own account in NEAR Intents, named after their EVM address and controlled only by their EVM key; an EVM wallet's Top-Ups pass through it and its withdrawals return to it, and Luckout moves money out of it only with the customer's signature.
+A customer's own account in NEAR Intents, named after their EVM address or their Solana key (in hex) and controlled only by that key; an EVM or Solana wallet's Top-Ups pass through it and its withdrawals return to it, and Luckout moves money out of it only with the customer's signature.
 _Avoid_: Deposit address, wallet, sub-account
 
 **Agent**:

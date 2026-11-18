@@ -4,16 +4,16 @@ import { AmountField } from "@/components/amount-field"
 import { shortAccount } from "@/components/avatar"
 import { sortAssets, TokenPicker } from "@/components/token-picker"
 import { TopUp } from "@/components/top-up"
-import { TopUpEvm } from "@/components/top-up-evm"
+import { TopUpWallet } from "@/components/top-up-wallet"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
 import { api } from "@/lib/api"
-import { EVM_CHAIN_IDS } from "@/lib/evm"
+import { walletChain } from "@/lib/evm"
 import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
 import { pendingMode } from "@/lib/onboarding"
-import { useSession } from "@/lib/session"
+import { useSession, WALLET_NAMES } from "@/lib/session"
 import type { TopUpAsset } from "@luckout/api"
 import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
 import { toast } from "sonner"
@@ -41,7 +41,7 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
  * takes minutes and lands by itself: once it's sent, `onContinue` lets the customer go on without waiting for it.
  */
 export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | undefined; onDone: (ok: boolean) => void; onContinue?: () => void }) {
-  const { accountId, walletUsdc, walletNear, gasFree, evm } = useSession()
+  const { accountId, walletUsdc, walletNear, gasFree, intents, wallet } = useSession()
   // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
   const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
   const actions = useWalletActions()
@@ -55,8 +55,8 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
       : "25"
   )
   const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
-  // An EVM wallet tops up from its own chain; "wallet" is then the USDC already in its NEAR Intents account.
-  const [tab, setTab] = useState<"wallet" | "chain">(evm ? "chain" : "wallet")
+  // An EVM or Solana wallet tops up from its own chain; "wallet" is then the USDC already in its NEAR Intents account.
+  const [tab, setTab] = useState<"wallet" | "chain">(intents ? "chain" : "wallet")
   const micro = toMicro(amount)
 
   const done = async (ok: boolean) => {
@@ -74,7 +74,7 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
       {network === "testnet" && (
         <div className="flex flex-col gap-3 rounded-[1.5rem] bg-gold-soft p-5 text-gold-ink">
           <p className="flex items-center gap-2 font-semibold"><Droplets size={18} aria-hidden="true" />This is the testnet</p>
-          <p className="text-[15px]">Get 100 free test USDC, deposited straight into your balance in one {evm ? "signature" : "approval"}.</p>
+          <p className="text-[15px]">Get 100 free test USDC, deposited straight into your balance in one {intents ? "signature" : "approval"}.</p>
           <Button variant="gold" size="lg" loading={busy === "faucet" || busy === "mode"} disabled={!!busy || noGas} onClick={() => (setBusy("faucet"), actions.faucet().then(done))}>
             {busy === "mode" ? "Saving your default mode" : "Get 100 test USDC"}
           </Button>
@@ -83,7 +83,7 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
 
       {network === "mainnet" && (
         <div role="tablist" className="flex rounded-full bg-soft p-1">
-          {(evm ? (["chain", "wallet"] as const) : (["wallet", "chain"] as const)).map((t) => (
+          {(intents ? (["chain", "wallet"] as const) : (["wallet", "chain"] as const)).map((t) => (
             <button
               key={t}
               role="tab"
@@ -92,20 +92,20 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
               onClick={() => setTab(t)}
               className="h-10 flex-1 rounded-full text-sm font-semibold text-muted transition-colors aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-card"
             >
-              {t === "wallet" ? (evm ? "From NEAR Intents" : "From your NEAR wallet") : evm ? "From your EVM wallet" : "From another chain"}
+              {t === "wallet" ? (intents ? "From NEAR Intents" : "From your NEAR wallet") : intents ? `From your ${WALLET_NAMES[wallet!]} wallet` : "From another chain"}
             </button>
           ))}
         </div>
       )}
 
       {tab === "chain" && network === "mainnet"
-        ? evm ? <TopUpEvm need={need} onDone={done} onContinue={onContinue} /> : <TopUp need={need} onDone={done} onContinue={onContinue} />
+        ? intents ? <TopUpWallet need={need} onDone={done} onContinue={onContinue} /> : <TopUp need={need} onDone={done} onContinue={onContinue} />
         // Testnet with nothing to deposit: the faucet above is the whole story.
         : network === "testnet" && inWallet < 1_000_000
         ? null
         : (
           <div className="flex flex-col gap-4">
-            {network === "testnet" && <p className="font-semibold">{evm ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
+            {network === "testnet" && <p className="font-semibold">{intents ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
             <AmountField
               label="Amount to deposit in USDC"
               value={amount}
@@ -119,7 +119,7 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
               ]}
             />
             <p className="text-sm text-muted">
-              {accountId && (evm ? `Your NEAR Intents account has ${usd(inWallet)} USDC. ` : `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `)}
+              {accountId && (intents ? `Your NEAR Intents account has ${usd(inWallet)} USDC. ` : `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `)}
               Deposits start at $1.{gasFree && " No network fee: Luckout pays it."}
             </p>
             <Button
@@ -129,8 +129,8 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
               onClick={() => (setBusy("deposit"), actions.deposit(micro).then(done))}
             >
               {micro > inWallet
-                ? `More than your ${evm ? "NEAR Intents account" : "wallet"} holds`
-                : `${evm ? "Move" : "Deposit"} ${micro >= 1_000_000 ? usd(micro) : ""}${evm ? " into Luckout" : ""}`}
+                ? `More than your ${intents ? "NEAR Intents account" : "wallet"} holds`
+                : `${intents ? "Move" : "Deposit"} ${micro >= 1_000_000 ? usd(micro) : ""}${intents ? " into Luckout" : ""}`}
             </Button>
           </div>
         )}
@@ -176,16 +176,16 @@ function GasNotice({ accountId }: { accountId: string }) {
 }
 
 export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { account, accountId, evm, token } = useSession()
+  const { account, accountId, intents, wallet, token } = useSession()
   const actions = useWalletActions()
   const [amount, setAmount] = useState("")
   const [busy, setBusy] = useState(false)
-  // EVM wallets on mainnet pick where it lands (ADR-0011); "" keeps it in their NEAR Intents account.
+  // EVM and Solana wallets on mainnet pick where it lands (ADR-0011); "" keeps it in their NEAR Intents account.
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>([])
   const [to, setTo] = useState("")
   const balance = Number(account?.balance ?? 0)
   const micro = toMicro(amount)
-  const outward = evm && network === "mainnet"
+  const outward = intents && network === "mainnet"
 
   useEffect(() => {
     if (open) setAmount(dollars(balance))
@@ -194,11 +194,11 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
   useEffect(() => {
     if (!open || !outward || !token) return
     api((c) => c.topup.assets(), token).then((all) => {
-      const usdc = sortAssets(all.filter((a) => EVM_CHAIN_IDS[a.chain] && (a.symbol === "USDC" || a.symbol === "USDT")))
+      const usdc = sortAssets(all.filter((a) => walletChain(wallet === "solana" ? "solana" : "evm", a.chain) && (a.symbol === "USDC" || a.symbol === "USDT")))
       setAssets(usdc)
-      setTo((t) => t || (usdc.find((a) => a.symbol === "USDC" && a.chain === "base")?.assetId ?? ""))
+      setTo((t) => t || (usdc.find((a) => a.symbol === "USDC" && a.chain === (wallet === "solana" ? "sol" : "base"))?.assetId ?? ""))
     }, () => {})
-  }, [open, outward, token])
+  }, [open, outward, token, wallet])
   const destination = assets.find((a) => a.assetId === to)
 
   return (
@@ -209,8 +209,8 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
       description={`${
         outward
           ? "USDC goes to your own address on the chain you pick, or stays in your NEAR Intents account."
-          : evm
-          ? "USDC goes to your NEAR Intents account, where your EVM wallet controls it."
+          : intents
+          ? `USDC goes to your NEAR Intents account, where your ${WALLET_NAMES[wallet!]} wallet controls it.`
           : `USDC goes back to ${accountId ? shortAccount(accountId) : "your wallet"}.`
       } Money locked in a purchase in progress stays until it finishes.`}
     >

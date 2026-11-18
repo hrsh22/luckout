@@ -141,6 +141,16 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 - **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `staging.luckout.wtf`, `testnet.luckout.wtf` and `localhost`, or WalletConnect refuses to connect there.
 - **Testnet NEAR Intents** at `intents.luckout.testnet` is the exact wasm `intents.near` runs, deployed with `new({config:{wnear_id:"wrap.testnet",fees:{fee:0,fee_collector:"luckout.testnet"},roles:{super_admins:["luckout.testnet"]}}})` and registered on test USDC. To redeploy it after `intents.near` upgrades: fetch the code with the RPC's `view_code`, check its hash, and deploy it without an init call.
 
+## Solana wallets (ADR-0011, amended 2026-11-18)
+
+Staging has them first. Production gets them later, in this order:
+
+1. **Prove it on staging:** a small Top-Up from a real Solana wallet (USDC on Solana, plus a little SOL for the fee and the deposit address's token account, about 0.002 SOL), a settings change, and a withdrawal back to the Solana address.
+2. **Upgrade `app.luckout.near` before the release merges into `main`:** steps 2 to 6 of [Upgrading the contract](#upgrading-the-contract) with `production`, using the wasm from the `staging` push run of the release's merge commit. Production's apps then send Solana ids (64 hex), which the contract running now refuses ("Only EVM accounts are credited this way"), so a Solana customer's move-in would bounce back to their NEAR Intents account until it's upgraded.
+3. **Merge** the release into `main`. Migration 0024 adds `intents_swaps.wallet`, nullable, so going back to an earlier commit stays safe.
+
+Nothing else to configure: no new environment variables, Solana wallets use the same Reown project and allowed domains as EVM wallets (one AppKit modal), and their intents go through the existing relayer and its caps.
+
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
 ## Logs

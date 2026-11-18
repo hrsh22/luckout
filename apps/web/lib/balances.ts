@@ -2,7 +2,8 @@
 
 import { projectId } from "@/lib/evm"
 import { matchHoldings, type ReownBalance } from "@/lib/holdings"
-import type { TopUpAsset } from "@luckout/api"
+import { solanaBalances } from "@/lib/solana"
+import { solanaAddress, type TopUpAsset } from "@luckout/api"
 import { useQuery } from "@tanstack/react-query"
 
 export { GAS_COIN, type Holding, maxTopUp } from "@/lib/holdings"
@@ -19,12 +20,17 @@ const fetchBalances = async (address: string): Promise<ReadonlyArray<ReownBalanc
   return ((await r.json()) as { balances?: ReadonlyArray<ReownBalance> }).balances ?? []
 }
 
-/** The connected EVM wallet's holdings of the tokens we take (see matchHoldings); nothing until (or unless) read. */
-export const useWalletHoldings = (address: string | undefined, assets: ReadonlyArray<TopUpAsset> | undefined) => {
+/**
+ * The connected EVM or Solana wallet's holdings of the tokens we take (see matchHoldings); nothing until (or unless)
+ * read. Reown's lookup has nothing for Solana, so a Solana wallet's are read from Solana itself.
+ */
+export const useWalletHoldings = (accountId: string | undefined, wallet: "evm" | "solana", assets: ReadonlyArray<TopUpAsset> | undefined) => {
+  // Solana is asked about each token we take by its mint, so it needs the tokens first.
+  const mints = assets?.flatMap((a) => (a.chain === "sol" && a.contract ? [a.contract] : [])) ?? []
   const q = useQuery({
-    queryKey: ["wallet-balances", address],
-    queryFn: () => fetchBalances(address!),
-    enabled: !!address,
+    queryKey: ["wallet-balances", accountId, wallet, mints],
+    queryFn: () => (wallet === "solana" ? solanaBalances(solanaAddress(accountId!), mints) : fetchBalances(accountId!)),
+    enabled: !!accountId && (wallet !== "solana" || !!assets),
     staleTime: 30_000,
     retry: 1
   })

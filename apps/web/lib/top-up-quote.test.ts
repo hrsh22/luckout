@@ -2,15 +2,19 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { pricedAsShown, transferFor } from "./top-up-quote.ts"
 
-const usdcBase = { symbol: "USDC", chain: "base", contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }
+const usdcBase = { symbol: "USDC", chain: "base", contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }
 const ethBase = { symbol: "ETH", chain: "base" }
 const quote = { symbol: "USDC", chain: "base", depositAddress: "0x1111111111111111111111111111111111111111", amountIn: "20010000", amountInFormatted: "20.01", usdcOut: 20_000_000 }
 
 test("a Top-Up transfer takes its token from the asset that was quoted, and everything else from the quote", () => {
-  assert.deepEqual(transferFor(usdcBase, quote), { chain: "base", contract: usdcBase.contract, to: quote.depositAddress, amount: "20010000" })
+  assert.deepEqual(transferFor(usdcBase, quote), { chain: "base", contract: usdcBase.contract, decimals: 6, to: quote.depositAddress, amount: "20010000" })
   // The chain's own coin has no contract: it is sent as a plain transfer.
   const eth = { ...quote, symbol: "ETH", amountIn: "6000000000000000", amountInFormatted: "0.006" }
-  assert.deepEqual(transferFor(ethBase, eth), { chain: "base", contract: undefined, to: quote.depositAddress, amount: "6000000000000000" })
+  assert.deepEqual(transferFor(ethBase, eth), { chain: "base", contract: undefined, decimals: undefined, to: quote.depositAddress, amount: "6000000000000000" })
+  // A Solana token is sent by its mint, with its decimals (an SPL transfer states them).
+  const usdcSol = { symbol: "USDC", chain: "sol", contract: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6 }
+  const sol = { ...quote, chain: "sol", depositAddress: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM" }
+  assert.deepEqual(transferFor(usdcSol, sol), { chain: "sol", contract: usdcSol.contract, decimals: 6, to: sol.depositAddress, amount: "20010000" })
 })
 
 test("a quote is never sent with another token than the one it was asked for", () => {

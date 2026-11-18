@@ -301,6 +301,12 @@ const migrations = Migrator.fromRecord({
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE purchases ADD COLUMN use_by TIMESTAMPTZ`
     yield* sql`CREATE INDEX purchases_use_by ON purchases (voucher_id, created_at) WHERE use_by IS NOT NULL`
+  }),
+  // Solana wallets (ADR-0011): an account named like a NEAR implicit one may be either, so each swap keeps the kind of
+  // wallet it was quoted for. Earlier rows stay NULL and are read from the account's name (TopUp.ts).
+  "0024_swap_wallet": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN wallet TEXT CHECK (wallet IN ('near', 'evm', 'solana'))`
   })
 })
 

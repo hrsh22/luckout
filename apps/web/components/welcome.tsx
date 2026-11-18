@@ -113,7 +113,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
         >
           {step === 0 && (
             <>
-              <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with a NEAR or EVM wallet to start." />
+              <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with a NEAR, EVM or Solana wallet to start." />
               <div className="grid gap-3 sm:grid-cols-3">
                 <Point icon={Zap} tint="sky" title="Codes in about a minute" body="Bitrefill sends the code once it sees our payment." />
                 <Point icon={Sparkles} tint="gold" title="Cashback by chance" body="Lucky modes can pay back part of the price, sometimes all of it." />
@@ -122,7 +122,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               <div className="card flex flex-col items-start gap-3 p-6">
                 <SignInButton size="lg" label="Sign in" inline />
                 {signInError && <p role="alert" className={`text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
-                <p className="text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, Intear) and EVM wallets (MetaMask, Rabby) both work.</p>
+                <p className="text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, Intear), EVM wallets (MetaMask, Rabby) and Solana wallets (Phantom, Solflare) all work.</p>
               </div>
             </>
           )}

@@ -1,11 +1,37 @@
-// NEAR Intents payloads an EVM wallet signs (ADR-0011). The web app builds them with these helpers
-// and the server rebuilds each one to check it, so the relayer only pays for intents exactly as the
-// app makes them.
+import type { Wallet } from "./index.ts"
+
+// NEAR Intents payloads an EVM or Solana wallet signs (ADR-0011). The web app builds them with these
+// helpers and the server rebuilds each one to check it, so the relayer only pays for intents exactly
+// as the app makes them.
 
 /** An EVM customer: their address in lowercase, which is also their NEAR Intents account. */
 export const isEvmAccount = (id: string) => /^0x[0-9a-f]{40}$/.test(id)
 
-/** The Luckout calls an EVM customer signs through NEAR Intents' AuthCall (the contract's `AuthAction`). */
+/**
+ * A customer who may sign through NEAR Intents: an EVM address, or a Solana key as 64 lowercase hex (its NEAR
+ * Intents account). The second is also how a NEAR implicit account is named, held by the same key.
+ */
+export const isIntentsSigner = (id: string) => isEvmAccount(id) || /^[0-9a-f]{64}$/.test(id)
+
+/** How an account signs when its session doesn't say: only a Solana sign-in says "solana". */
+export const walletOf = (id: string): Wallet => (isEvmAccount(id) ? "evm" : "near")
+
+const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+
+/** A Solana address (base58) as its NEAR Intents account: the same 32 bytes in hex. Undefined if it isn't one. */
+export const solanaAccountId = (address: string) => {
+  try {
+    const bytes = base58Decode(address)
+    return bytes.length === 32 ? hex(bytes) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The other way round: the Solana address a Solana customer's account is named after. */
+export const solanaAddress = (accountId: string) => base58Encode(Uint8Array.from((accountId.match(/../g) ?? []).map((b) => parseInt(b, 16))))
+
+/** The Luckout calls an EVM or Solana customer signs through NEAR Intents' AuthCall (the contract's `AuthAction`). */
 export type AuthAction =
   | { readonly withdraw: { readonly amount: string } }
   | { readonly set_limits: { readonly per_purchase: string; readonly daily: string } }
@@ -108,6 +134,14 @@ export const intentSignature = (hex: string) => {
   if (bytes[64]! >= 27) bytes[64] = bytes[64]! - 27
   return `secp256k1:${base58Encode(bytes)}`
 }
+
+/** A Solana wallet's signature over an intent's text, as `intents.near` takes it (`raw_ed25519`). */
+export const solanaSignedIntent = (o: { payload: string; accountId: string; signature: Uint8Array }) => ({
+  standard: "raw_ed25519" as const,
+  payload: o.payload,
+  public_key: `ed25519:${solanaAddress(o.accountId)}`,
+  signature: `ed25519:${base58Encode(o.signature)}`
+})
 
 /** The other way round, for checking: `secp256k1:<base58>` back to 0x hex with v as 27/28. */
 export const personalSignature = (signature: string) => {

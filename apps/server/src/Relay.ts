@@ -114,7 +114,7 @@ export class Relay extends Context.Service<Relay, {
   /** Checks a base64 borsh SignedDelegate, sends it from the relayer, and waits until it has run. */
   send(accountId: string, signedDelegate: string): Effect.Effect<{ hash: string }, RelayFailed | RelayUnavailable>
   /**
-   * EVM wallets (ADR-0011): checks one signed NEAR Intents payload, sends it to `intents.near` from the
+   * EVM and Solana wallets (ADR-0011): checks one signed NEAR Intents payload, sends it to `intents.near` from the
    * relayer, and waits until it has run. `counted: false` leaves it out of the daily caps (not the admin's
    * switch), for a Top-Up's own move-in, sent once per real swap.
    */

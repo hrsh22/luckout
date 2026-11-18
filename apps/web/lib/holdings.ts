@@ -1,6 +1,6 @@
 import type { TopUpAsset } from "@luckout/api"
 
-/** What an EVM wallet holds of one token we can top up with: in the token's own units, and in dollars. */
+/** What an EVM or Solana wallet holds of one token we can top up with: in the token's own units, and in dollars. */
 export interface Holding {
   readonly amount: number
   readonly usd: number
@@ -9,18 +9,26 @@ export interface Holding {
 /** One entry of Reown's balance lookup. */
 export interface ReownBalance {
   readonly symbol: string
-  /** CAIP-2, e.g. "eip155:8453". */
+  /** CAIP-2, e.g. "eip155:8453" or "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp". */
   readonly chainId: string
   /** CAIP-10 for a token ("eip155:8453:0x8335…"); absent (or null) for the chain's own coin. */
   readonly address?: string | null
+  /** In dollars; without it, the amount at 1Click's price for the token. */
   readonly value?: number
   readonly quantity: { readonly numeric: string }
 }
 
-const CHAIN_IDS: Record<string, string> = { "eip155:1": "eth", "eip155:8453": "base", "eip155:42161": "arb", "eip155:137": "pol", "eip155:56": "bsc" }
+const CHAIN_IDS: Record<string, string> = {
+  "eip155:1": "eth",
+  "eip155:8453": "base",
+  "eip155:42161": "arb",
+  "eip155:137": "pol",
+  "eip155:56": "bsc",
+  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "sol"
+}
 
 /** The coin each chain's transfer fee is paid in. */
-export const GAS_COIN: Record<string, string> = { eth: "ETH", base: "ETH", arb: "ETH", pol: "POL", bsc: "BNB" }
+export const GAS_COIN: Record<string, string> = { eth: "ETH", base: "ETH", arb: "ETH", pol: "POL", bsc: "BNB", sol: "SOL" }
 
 /**
  * Each top-up token's holding in this wallet, by asset id, and the chains where it has some of the chain's own coin
@@ -34,7 +42,7 @@ export const matchHoldings = (assets: ReadonlyArray<TopUpAsset>, balances: Reado
       (a.contract ? x.address?.toLowerCase().endsWith(`:${a.contract.toLowerCase()}`) : !x.address && x.symbol === a.symbol)
     )
     const amount = b ? Number(b.quantity.numeric) : 0
-    if (amount > 0) holdings.set(a.assetId, { amount, usd: b?.value ?? 0 })
+    if (amount > 0) holdings.set(a.assetId, { amount, usd: b?.value ?? amount * (a.price ?? 0) })
   }
   const gas = new Set(
     balances.filter((x) => !x.address && Number(x.quantity.numeric) > 0).map((x) => CHAIN_IDS[x.chainId]).filter((c): c is string => !!c)

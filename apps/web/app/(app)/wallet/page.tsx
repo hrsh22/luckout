@@ -22,7 +22,7 @@ import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
 
 export default function WalletPage() {
-  const { accountId, account, walletUsdc, ready, evm, token } = useSession()
+  const { accountId, account, walletUsdc, ready, intents, token } = useSession()
   const checkout = useCheckoutEmail(token).data
   const actions = useWalletActions()
   const [adding, setAdding] = useState(false)
@@ -76,7 +76,7 @@ export default function WalletPage() {
             <p className="font-display mt-1 text-6xl leading-none font-extrabold tracking-[-0.03em] sm:text-7xl">
               {account === undefined ? <span className="skeleton inline-block h-14 w-48 rounded-full opacity-30" /> : <Money micro={balance} down />}
             </p>
-            {Number(walletUsdc) ? <p className="mt-3 text-sm text-white/60">{usd(walletUsdc!)} more USDC sits in your {evm ? "NEAR Intents account" : "NEAR wallet"}.</p> : null}
+            {Number(walletUsdc) ? <p className="mt-3 text-sm text-white/60">{usd(walletUsdc!)} more USDC sits in your {intents ? "NEAR Intents account" : "NEAR wallet"}.</p> : null}
             <div className="mt-8 flex flex-wrap gap-2">
               <Button variant="gold" onClick={() => setAdding(true)}><Plus />Add funds</Button>
               <Button variant="light" disabled={!balance} onClick={() => setWithdrawing(true)}>Withdraw</Button>

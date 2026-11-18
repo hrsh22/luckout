@@ -1,7 +1,8 @@
-import { type AuthAction, authCallIntent, isEvmAccount, moveInIntent, personalSignature, type SignedIntent, transferIntent } from "@luckout/api"
+import { type AuthAction, authCallIntent, base58Decode, isIntentsSigner, moveInIntent, personalSignature, type SignedIntent, solanaAddress, transferIntent } from "@luckout/api"
+import { createPublicKey, verify } from "node:crypto"
 import { recoverMessageAddress } from "viem"
 
-// The NEAR Intents payloads EVM customers sign (ADR-0011), checked before our relayer pays for one.
+// The NEAR Intents payloads EVM and Solana customers sign (ADR-0011), checked before our relayer pays for one.
 // Each must be signed by the signed-in account and hold exactly one intent, rebuilt here with the
 // same helpers the web app uses: moving USDC into the customer's own Balance, one of our contract
 // calls, or sending money to a 1Click swap this server quoted for them (a withdrawal, or a send-back).
@@ -97,7 +98,7 @@ export const intentRefusal = (intent: Record<string, unknown>, r: IntentRules): 
 /** Why we won't pay for this payload, judged on its text alone (the signature is checked separately). */
 export const payloadRefusal = (p: IntentPayload | undefined, r: IntentRules): string | undefined => {
   if (!p) return "That isn't a signed NEAR Intents message."
-  if (p.signer_id !== r.accountId || !isEvmAccount(p.signer_id)) return "This was signed for a different account than the one signed in."
+  if (p.signer_id !== r.accountId || !isIntentsSigner(p.signer_id)) return "This was signed for a different account than the one signed in."
   if (p.verifying_contract !== r.intentsId) return "This was signed for a different NEAR Intents contract."
   const deadline = Date.parse(p.deadline)
   if (!(deadline > r.now.getTime())) return "That approval expired. Try again."
@@ -107,8 +108,32 @@ export const payloadRefusal = (p: IntentPayload | undefined, r: IntentRules): st
   return intentRefusal(p.intents[0]!, r)
 }
 
-/** Whether the payload's signature is `accountId`'s own personal_sign over its text. */
+const SPKI_ED25519 = Buffer.from("302a300506032b6570032100", "hex")
+
+/** Whether `signature` is the ed25519 key `publicKey` (32 raw bytes) signing exactly `message`. */
+export const ed25519Signed = (publicKey: Uint8Array, message: string, signature: Uint8Array) => {
+  if (publicKey.length !== 32 || signature.length !== 64) return false
+  try {
+    return verify(null, Buffer.from(message), createPublicKey({ key: Buffer.concat([SPKI_ED25519, publicKey]), format: "der", type: "spki" }), signature)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the payload's signature is `accountId`'s own: an EVM account's personal_sign over its text, or a Solana
+ * account's ed25519 signature over its raw bytes by the key the account is named after.
+ */
 export const signedBy = async (signed: SignedIntent, accountId: string) => {
+  if (signed.standard === "raw_ed25519") {
+    if (!/^[0-9a-f]{64}$/.test(accountId) || signed.public_key !== `ed25519:${solanaAddress(accountId)}` || !signed.signature.startsWith("ed25519:")) return false
+    try {
+      return ed25519Signed(base58Decode(signed.public_key.slice(8)), signed.payload, base58Decode(signed.signature.slice(8)))
+    } catch {
+      return false
+    }
+  }
+  if (!accountId.startsWith("0x")) return false
   const signature = personalSignature(signed.signature)
   if (!signature) return false
   try {

@@ -1,10 +1,27 @@
-import { Authorization, Challenge, CurrentAccount, evmSignInMessage, Session, sessionCookie, type SignedChallenge, type SignedEvmChallenge, Unauthorized } from "@luckout/api"
-import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
+import {
+  Authorization,
+  base58Decode,
+  Challenge,
+  CurrentAccount,
+  evmSignInMessage,
+  Session,
+  sessionCookie,
+  type SignedChallenge,
+  type SignedEvmChallenge,
+  type SignedSolanaChallenge,
+  solanaAccountId,
+  solanaSignInMessage,
+  Unauthorized,
+  Wallet,
+  walletOf
+} from "@luckout/api"
+import { Config, Context, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { HttpServerRequest } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { getAddress, verifyMessage } from "viem"
+import { ed25519Signed } from "./Intents.ts"
 import { Near, Network } from "./Near.ts"
 
 const NONCE_TTL_MINUTES = 5
@@ -13,6 +30,7 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 /** A new session: its token goes into the cookie (startSession), never into an answer's body. */
 export interface SignedIn {
   readonly accountId: string
+  readonly wallet: Wallet
   readonly token: string
   readonly expiresAt: number
 }
@@ -22,8 +40,10 @@ export class Auth extends Context.Service<Auth, {
   verify(signed: SignedChallenge): Effect.Effect<SignedIn, Unauthorized>
   /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage`, made on one of our own sites, by a regular EVM account (EOA). */
   verifyEvm(signed: SignedEvmChallenge): Effect.Effect<SignedIn, Unauthorized>
-  /** The account a session token belongs to. */
-  authenticate(token: string): Effect.Effect<string, Unauthorized>
+  /** Solana sign-in (ADR-0011): an ed25519 signature of `solanaSignInMessage`, made on one of our own sites. */
+  verifySolana(signed: SignedSolanaChallenge): Effect.Effect<SignedIn, Unauthorized>
+  /** The account a session token belongs to, and the kind of wallet it signed in with. */
+  authenticate(token: string): Effect.Effect<{ readonly accountId: string; readonly wallet: Wallet }, Unauthorized>
   /** Ends the one session `token` is, so a copy of it kept elsewhere stops working. */
   signOut(token: string): Effect.Effect<void>
   /** Ends every session the account has now, on every device. */
@@ -74,7 +94,7 @@ export class Auth extends Context.Service<Auth, {
           nonce: Buffer.from(signed.nonce, "base64")
         })
         if (!ok) return yield* denied("Signature is not from a full-access key of this account")
-        return yield* issue(signed.accountId)
+        return yield* issue(signed.accountId, walletOf(signed.accountId))
       })
 
       const verifyEvm = Effect.fn("Auth.verifyEvm")(function*(signed: SignedEvmChallenge) {
@@ -94,17 +114,30 @@ export class Auth extends Context.Service<Auth, {
           })
         ).pipe(Effect.orElseSucceed(() => false))
         if (!ok) return yield* denied("That signature isn't from this address. Luckout works with regular EVM accounts, not smart-contract wallets.")
-        return yield* issue(address)
+        return yield* issue(address, "evm")
       })
 
-      const issue = (accountId: string) =>
+      const verifySolana = Effect.fn("Auth.verifySolana")(function*(signed: SignedSolanaChallenge) {
+        yield* useNonce(signed.nonce)
+        // The account is the key in hex, as NEAR Intents names it (ADR-0011).
+        const accountId = solanaAccountId(signed.address)
+        const signature = Buffer.from(signed.signature, "base64")
+        if (!accountId || signature.length !== 64) return yield* denied("That isn't a Solana signature")
+        if (!sites.has(signed.uri)) return yield* denied("Sign in from Luckout's own site")
+        // The same check NEAR Intents makes on the raw bytes, so a wallet that signs in can also sign intents.
+        const text = solanaSignInMessage({ challenge: { message, nonce: signed.nonce }, address: signed.address, uri: signed.uri, issuedAt: signed.issuedAt })
+        if (!ed25519Signed(base58Decode(signed.address), text, signature)) return yield* denied("That signature isn't from this Solana address.")
+        return yield* issue(accountId, "solana")
+      })
+
+      const issue = (accountId: string, wallet: Wallet) =>
         Effect.gen(function*() {
           // Remembered so the solvency check can count this customer's balance (Monitor).
           yield* sql`INSERT INTO known_accounts (account_id) VALUES (${accountId}) ON CONFLICT DO NOTHING`.pipe(Effect.orDie)
           const issuedAt = Date.now()
           const expiresAt = issuedAt + SESSION_TTL_MS
-          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, i: issuedAt })).toString("base64url")
-          return { accountId, token: `${payload}.${mac(payload)}`, expiresAt } satisfies SignedIn
+          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, i: issuedAt, w: wallet })).toString("base64url")
+          return { accountId, wallet, token: `${payload}.${mac(payload)}`, expiresAt } satisfies SignedIn
         })
 
       const authenticate = (token: string) =>
@@ -114,7 +147,7 @@ export class Auth extends Context.Service<Auth, {
           const given = Buffer.from(tag)
           if (given.length !== expected.length || !timingSafeEqual(given, expected)) return yield* denied("Invalid session")
           const session = yield* Effect.try({
-            try: () => JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number; n: string; i: number },
+            try: () => JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number; n: string; i: number; w?: unknown },
             catch: () => denied("Invalid session")
           })
           if (typeof session.a !== "string" || typeof session.e !== "number" || typeof session.i !== "number" || session.n !== network) {
@@ -126,7 +159,8 @@ export class Auth extends Context.Service<Auth, {
                    EXISTS (SELECT 1 FROM ended_sessions WHERE tag = ${tag}) AS ended`.pipe(Effect.orDie)
           if (state?.ended) return yield* denied("Signed out; sign in again")
           if (state?.after && session.i <= new Date(state.after).getTime()) return yield* denied("Signed out everywhere; sign in again")
-          return session.a
+          // Signed by us, so `w` is one we wrote; tokens from before it named no wallet, and none of those was Solana.
+          return { accountId: session.a, wallet: Schema.is(Wallet)(session.w) ? session.w : walletOf(session.a) }
         })
 
       // A token is its own proof until it expires, so ending one early means remembering it until then
@@ -144,7 +178,7 @@ export class Auth extends Context.Service<Auth, {
         sql`INSERT INTO session_resets (account_id, after) VALUES (${accountId}, now())
             ON CONFLICT (account_id) DO UPDATE SET after = now()`.pipe(Effect.asVoid, Effect.orDie)
 
-      return Auth.of({ challenge, verify, verifyEvm, authenticate, signOut, signOutEverywhere })
+      return Auth.of({ challenge, verify, verifyEvm, verifySolana, authenticate, signOut, signOutEverywhere })
     })
   )
 }
@@ -159,7 +193,7 @@ export const startSession = <E, R>(signedIn: Effect.Effect<SignedIn, E, R>) =>
   Effect.flatMap(signedIn, (s) =>
     Effect.as(
       HttpApiBuilder.securitySetCookie(sessionCookie, s.token, { ...COOKIE, expires: new Date(s.expiresAt) }),
-      new Session({ accountId: s.accountId, expiresAt: s.expiresAt })
+      new Session({ accountId: s.accountId, wallet: s.wallet, expiresAt: s.expiresAt })
     ))
 
 /** The session token the request came with, "" without one. */
@@ -175,8 +209,7 @@ export const AuthorizationLive = Layer.effect(
     const auth = yield* Auth
     return Authorization.of({
       cookie: (httpEffect, { credential }) =>
-        Effect.flatMap(auth.authenticate(Redacted.value(credential)), (accountId) =>
-          Effect.provideService(httpEffect, CurrentAccount, { accountId }))
+        Effect.flatMap(auth.authenticate(Redacted.value(credential)), (who) => Effect.provideService(httpEffect, CurrentAccount, who))
     })
   })
 )

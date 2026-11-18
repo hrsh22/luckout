@@ -66,17 +66,19 @@ pub fn intents_account() -> AccountId {
     id.parse().unwrap()
 }
 
-/// An EVM customer: their address in lowercase, which is also their NEAR Intents account.
-pub fn is_evm_account(id: &AccountId) -> bool {
+/// A customer who signs through NEAR Intents, named as their NEAR Intents account is: an EVM address
+/// in lowercase (`0x` + 40 hex), or a Solana key as 64 lowercase hex. The second is also how a NEAR
+/// implicit account is named, held by the same ed25519 key, so such an account may act either way.
+pub fn is_intents_signer(id: &AccountId) -> bool {
     let s = id.as_str();
-    s.len() == 42
-        && s.starts_with("0x")
-        && s[2..]
-            .bytes()
+    let hex = |h: &str| {
+        h.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    (s.len() == 42 && s.starts_with("0x") && hex(&s[2..])) || (s.len() == 64 && hex(s))
 }
 
-/// A deposit's JSON `msg`. One from NEAR Intents names the EVM account it credits (`{"for":"0x…"}`); any
+/// A deposit's JSON `msg`. One from NEAR Intents names the EVM or Solana account it credits (`{"for":"0x…"}`); any
 /// deposit may carry the Default Mode the account starts with (`"mode"`), which applies only if this deposit
 /// creates the account: Welcome asks for it before there is an account to save it on.
 #[near(serializers = [json])]
@@ -87,7 +89,7 @@ struct DepositMsg {
     mode: Option<Mode>,
 }
 
-/// What an EVM customer signs through NEAR Intents' `AuthCall` (ADR-0011): the same calls a NEAR
+/// What an EVM or Solana customer signs through NEAR Intents' `AuthCall` (ADR-0011): the same calls a NEAR
 /// wallet makes itself, e.g. `{"withdraw":{"amount":"5000000"}}`.
 #[near(serializers = [json])]
 #[serde(rename_all = "snake_case")]
@@ -342,7 +344,7 @@ impl Contract {
     // ---------- deposits ----------
 
     /// USDC `ft_transfer_call` hook. msg "" credits the sender's Balance; msg "reserve" (owner only)
-    /// funds the Cashback Reserve; msg `{"for":"0x…"}` from NEAR Intents credits that EVM customer. A JSON msg
+    /// funds the Cashback Reserve; msg `{"for":"0x…"}` from NEAR Intents credits that EVM or Solana customer. A JSON msg
     /// may add `"mode"`, the Default Mode a new account starts with (`{"mode":{"lucky":1}}` from a wallet).
     pub fn ft_on_transfer(
         &mut self,
@@ -369,8 +371,8 @@ impl Contract {
                         .account
                         .unwrap_or_else(|| env::panic_str("Name the account to credit"));
                     require!(
-                        is_evm_account(&id),
-                        "Only EVM accounts are credited this way"
+                        is_intents_signer(&id),
+                        "Only EVM and Solana accounts are credited this way"
                     );
                     id
                 } else {
@@ -420,18 +422,18 @@ impl Contract {
         self.reclaim_as(env::predecessor_account_id(), purchase_id);
     }
 
-    /// An EVM customer's own call, vouched for by NEAR Intents (ADR-0011): `intents.near` checked that
-    /// `signer_id` signed `msg` before calling. Only EVM accounts sign this way, so a customer who
-    /// signs in with a NEAR wallet depends on NEAR Intents for nothing. A withdrawal goes only to the
-    /// signer's own NEAR Intents account, never to an address anyone else picks.
+    /// An EVM or Solana customer's own call, vouched for by NEAR Intents (ADR-0011): `intents.near` checked
+    /// that `signer_id` signed `msg` before calling. Only those accounts sign this way, so a customer with a
+    /// named NEAR account depends on NEAR Intents for nothing. A withdrawal goes only to the signer's own
+    /// NEAR Intents account, never to an address anyone else picks.
     pub fn on_auth(&mut self, signer_id: AccountId, msg: String) -> PromiseOrValue<()> {
         require!(
             env::predecessor_account_id() == intents_account(),
             "Only NEAR Intents vouches for a signer"
         );
         require!(
-            is_evm_account(&signer_id),
-            "Only EVM accounts sign through NEAR Intents"
+            is_intents_signer(&signer_id),
+            "Only EVM and Solana accounts sign through NEAR Intents"
         );
         let action: AuthAction = near_sdk::serde_json::from_str(&msg)
             .unwrap_or_else(|_| env::panic_str("Unknown action"));
