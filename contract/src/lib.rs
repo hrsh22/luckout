@@ -36,6 +36,11 @@ const GAS_ON_SEND: Gas = Gas::from_tgas(10);
 const GAS_FT_TRANSFER_CALL: Gas = Gas::from_tgas(50);
 /// The Draw callback's gas is set here, not by the caller (it uses ~3 Tgas).
 const GAS_DRAW: Gas = Gas::from_tgas(20);
+/// `on_draw_many`'s gas: a base plus this much per Draw, so a full cart's Draws fit in one callback.
+const GAS_DRAW_MANY_BASE: Gas = Gas::from_tgas(5);
+const GAS_DRAW_EACH: Gas = Gas::from_tgas(4);
+/// The most cards one call admits, quotes or settles: Bitrefill's own cart size.
+pub const MAX_CART: usize = 15;
 
 #[ext_contract(ext_ft)]
 #[allow(dead_code)]
@@ -219,6 +224,23 @@ pub struct Quote {
     pub max_price: U128,
 }
 
+/// One card of a cart, with the same terms `purchase` takes.
+#[near(serializers = [json])]
+pub struct CartItem {
+    pub reference_price: U128,
+    pub mode: Option<Mode>,
+    pub order_id: String,
+    pub max_debit: U128,
+    pub lucky_amount: Option<U128>,
+}
+
+/// One card to price in a cart.
+#[near(serializers = [json])]
+pub struct QuoteItem {
+    pub reference_price: U128,
+    pub mode: Mode,
+}
+
 #[near(serializers = [json])]
 pub struct Reserve {
     pub free: U128,
@@ -346,7 +368,10 @@ impl Contract {
                     let id = d
                         .account
                         .unwrap_or_else(|| env::panic_str("Name the account to credit"));
-                    require!(is_evm_account(&id), "Only EVM accounts are credited this way");
+                    require!(
+                        is_evm_account(&id),
+                        "Only EVM accounts are credited this way"
+                    );
                     id
                 } else {
                     // Only NEAR Intents names someone else: a wallet's deposit credits the wallet.
@@ -455,71 +480,67 @@ impl Contract {
         lucky_amount: Option<U128>,
     ) -> u64 {
         self.assert_operator();
+        self.admit(
+            &customer,
+            CartItem {
+                reference_price,
+                mode,
+                order_id,
+                max_debit,
+                lucky_amount,
+            },
+        )
+    }
+
+    /// Admits a cart: every card, or none. Each card is admitted as `purchase` would admit it, in order,
+    /// so the Balance and the daily limit are checked against the cards before it, the per-purchase limit
+    /// against each card, and each Lucky card's Cashback Cap and lock come from the Free Reserve the cards
+    /// before it left. Any refusal refuses the whole cart. Each card's `order_id` keeps it idempotent.
+    pub fn purchase_many(&mut self, customer: AccountId, items: Vec<CartItem>) -> Vec<u64> {
+        self.assert_operator();
         require!(
-            !order_id.is_empty() && order_id.len() <= 64,
-            "Invalid order id"
+            !items.is_empty() && items.len() <= MAX_CART,
+            "A cart holds 1 to 15 cards"
         );
-        if let Some(&id) = self.orders.get(&order_id) {
-            let p = self.purchases.get(&id).unwrap();
-            require!(
-                p.customer == customer && p.reference_price.0 == reference_price.0,
-                "Order id belongs to another purchase"
-            );
-            return id;
+        items
+            .into_iter()
+            .map(|item| self.admit(&customer, item))
+            .collect()
+    }
+
+    /// Settles a cart's cards in one call: confirms delivery of `delivered` and fails `failed`, each as
+    /// `confirm_delivery` and `fail_purchase` would. The Lucky Buys' Draws then run together in one later
+    /// receipt (`on_draw_many`), so, as for one card, no transaction can undo a confirmation after seeing a
+    /// result. Each Draw still has its own random value (`draw_random` with its purchase id). A delivered
+    /// card whose Draw callback failed is drawn again.
+    pub fn settle(&mut self, delivered: Vec<u64>, failed: Vec<u64>) -> PromiseOrValue<()> {
+        self.assert_operator();
+        require!(
+            !(delivered.is_empty() && failed.is_empty())
+                && delivered.len() + failed.len() <= MAX_CART,
+            "Settle 1 to 15 cards at a time"
+        );
+        let mut draws = vec![];
+        for purchase_id in delivered {
+            let p = self.load(purchase_id);
+            if p.status == Status::Drawing || self.deliver(purchase_id, p) {
+                draws.push(purchase_id);
+            }
         }
-        require!(!self.paused, "New purchases are paused");
-        let r = reference_price.0;
-        let mut a = self.existing_account(&customer);
-        let mode = mode.unwrap_or(a.default_mode);
-        let q = self.quote_internal(r, mode, lucky_amount.map(|l| l.0));
-        let debit = q.max_price.0;
-        require!(
-            debit <= max_debit.0,
-            "Price changed since you confirmed; please confirm again"
-        );
-
-        require!(
-            debit <= a.per_purchase_limit.0,
-            "Over the per-purchase spending limit"
-        );
-        let day = env::block_timestamp() / DAY_NS;
-        if a.day != day {
-            a.day = day;
-            a.spent_today = U128(0);
+        for purchase_id in failed {
+            let p = self.pending(purchase_id);
+            self.unwind(purchase_id, p, Status::Failed);
         }
-        require!(
-            a.spent_today.0 + debit <= a.daily_limit.0,
-            "Over the daily spending limit"
-        );
-        require!(a.balance.0 >= debit, "Insufficient balance");
-        a.balance.0 -= debit;
-        a.spent_today.0 += debit;
-        self.accounts.insert(customer.clone(), a);
-
-        let lock = match mode {
-            Mode::Normal => 0,
-            Mode::Lucky(v) => q.lucky_amount.0 * self.version(v).max_discount_bps() / BPS,
-        };
-        self.free_reserve -= lock;
-        self.locked_reserve += lock;
-
-        let id = self.next_purchase_id;
-        self.next_purchase_id += 1;
-        self.orders.insert(order_id, id);
-        let p = Purchase {
-            customer,
-            mode,
-            reference_price,
-            lucky_amount: q.lucky_amount,
-            max_price: q.max_price,
-            locked: U128(lock),
-            created_at: env::block_timestamp(),
-            status: Status::Pending,
-            cashback: U128(0),
-        };
-        emit("purchase", json!({ "purchase_id": id, "purchase": &p }));
-        self.purchases.insert(id, p);
-        id
+        if draws.is_empty() {
+            return PromiseOrValue::Value(());
+        }
+        let gas = GAS_DRAW_MANY_BASE
+            .saturating_add(Gas::from_gas(GAS_DRAW_EACH.as_gas() * draws.len() as u64));
+        PromiseOrValue::Promise(
+            Self::ext(env::current_account_id())
+                .with_static_gas(gas)
+                .on_draw_many(draws),
+        )
     }
 
     /// Confirms delivery. A Lucky Buy's Draw then runs in `on_draw`, a separate receipt with
@@ -529,27 +550,14 @@ impl Contract {
     /// Draw callback failed schedules the Draw again.
     pub fn confirm_delivery(&mut self, purchase_id: u64) -> PromiseOrValue<Purchase> {
         self.assert_operator();
-        let mut p = self.load(purchase_id);
+        let p = self.load(purchase_id);
         if p.status == Status::Drawing {
             return PromiseOrValue::Promise(self.schedule_draw(purchase_id));
         }
-        require!(p.status == Status::Pending, "Purchase is already closed");
-        self.proceeds += p.reference_price.0;
-        emit(
-            "delivered",
-            json!({ "purchase_id": purchase_id, "customer": p.customer }),
-        );
-        match p.mode {
-            Mode::Normal => {
-                p.status = Status::Delivered;
-                self.purchases.insert(purchase_id, p.clone());
-                PromiseOrValue::Value(p)
-            }
-            Mode::Lucky(_) => {
-                p.status = Status::Drawing;
-                self.purchases.insert(purchase_id, p);
-                PromiseOrValue::Promise(self.schedule_draw(purchase_id))
-            }
+        if self.deliver(purchase_id, p) {
+            PromiseOrValue::Promise(self.schedule_draw(purchase_id))
+        } else {
+            PromiseOrValue::Value(self.load(purchase_id))
         }
     }
 
@@ -569,58 +577,26 @@ impl Contract {
             env::signer_account_id() != env::current_account_id(),
             "The contract's own key can't run a Draw"
         );
-        let mut p = self.load(purchase_id);
-        require!(p.status == Status::Drawing, "Draw already done");
-        let Mode::Lucky(v) = p.mode else {
-            env::panic_str("Not a Lucky Buy")
-        };
-        let version = self.version(v).clone();
-        // The block's seed is never used raw: random = sha256(seed ‖ purchase_id), see draw_random.
-        let seed = env::random_seed_array();
-        let random = draw_random(&seed, purchase_id);
-        let roll = roll_from_random(&random);
-        let final_bps = final_bps_for_roll(&version.outcomes, roll);
-        let r = p.reference_price.0;
-        let lucky = p.lucky_amount.0;
-        let max_price = p.max_price.0;
-        let final_price = final_price(r, lucky, max_price, final_bps);
-        let cashback = max_price - final_price;
-        let premium = max_price - r;
-
-        let mut a = self.existing_account(&p.customer);
-        a.balance.0 += cashback;
-        a.premiums_paid.0 += premium;
-        a.cashback_received.0 += cashback;
-        self.accounts.insert(p.customer.clone(), a);
-
-        // Free Reserve changes by Risk Premium - Cashback once the lock is released.
-        self.locked_reserve -= p.locked.0;
-        self.free_reserve = self.free_reserve + p.locked.0 + premium - cashback;
-        self.lucky_settled += 1;
-        self.lucky_amount_total += lucky;
-        self.lucky_paid_total += lucky + premium - cashback;
-        p.cashback = U128(cashback);
-        p.status = Status::Delivered;
-
-        emit(
-            "draw",
-            json!({
-                "purchase_id": purchase_id,
-                "customer": p.customer,
-                "game_version": v,
-                "reference_price": p.reference_price,
-                "lucky_amount": p.lucky_amount,
-                "max_price": p.max_price,
-                "seed": hex(&seed),
-                "random": hex(&random),
-                "roll": roll,
-                "final_bps": final_bps,
-                "final_price": U128(final_price),
-                "cashback": U128(cashback),
-            }),
+        require!(
+            self.load(purchase_id).status == Status::Drawing,
+            "Draw already done"
         );
-        self.purchases.insert(purchase_id, p.clone());
-        p
+        self.draw(purchase_id)
+    }
+
+    /// Runs the Draws of a cart's Lucky Buys (`settle`), each exactly as `on_draw` runs one. One already
+    /// drawn (say, by a `retry_draw` that got there first) is left as it is.
+    #[private]
+    pub fn on_draw_many(&mut self, purchase_ids: Vec<u64>) {
+        require!(
+            env::signer_account_id() != env::current_account_id(),
+            "The contract's own key can't run a Draw"
+        );
+        for purchase_id in purchase_ids {
+            if self.load(purchase_id).status == Status::Drawing {
+                self.draw(purchase_id);
+            }
+        }
     }
 
     /// Bitrefill could not deliver: everything returns to the customer, no Draw.
@@ -874,6 +850,32 @@ impl Contract {
         self.quote_internal(reference_price.0, mode, None)
     }
 
+    /// A cart's terms, card by card, as `purchase_many` would admit them now: each Lucky card's Cashback
+    /// Cap and lock come from the Free Reserve the cards before it left. A Lucky card the reserve can't
+    /// cover at all comes back Normal, at the Reference Price; one it covers in part plays that part.
+    pub fn quote_many(&self, items: Vec<QuoteItem>) -> Vec<Quote> {
+        require!(
+            !items.is_empty() && items.len() <= MAX_CART,
+            "A cart holds 1 to 15 cards"
+        );
+        let mut free = self.free_reserve;
+        items
+            .into_iter()
+            .map(|i| {
+                let r = i.reference_price.0;
+                let mode = match i.mode {
+                    Mode::Lucky(v) if self.lucky_allowed(free, r, v) == 0 => Mode::Normal,
+                    m => m,
+                };
+                let q = self.quote_at(free, r, mode, None);
+                if let Mode::Lucky(v) = mode {
+                    free -= q.lucky_amount.0 * self.version(v).max_discount_bps() / BPS;
+                }
+                q
+            })
+            .collect()
+    }
+
     pub fn get_account(&self, account_id: AccountId) -> Option<Account> {
         self.accounts.get(&account_id).cloned()
     }
@@ -920,9 +922,173 @@ impl Contract {
 }
 
 impl Contract {
+    /// Admits one card (`purchase`, `purchase_many`): debits the Maximum Price and locks the reserve.
+    fn admit(&mut self, customer: &AccountId, item: CartItem) -> u64 {
+        let CartItem {
+            reference_price,
+            mode,
+            order_id,
+            max_debit,
+            lucky_amount,
+        } = item;
+        let customer = customer.clone();
+        require!(
+            !order_id.is_empty() && order_id.len() <= 64,
+            "Invalid order id"
+        );
+        if let Some(&id) = self.orders.get(&order_id) {
+            let p = self.purchases.get(&id).unwrap();
+            require!(
+                p.customer == customer && p.reference_price.0 == reference_price.0,
+                "Order id belongs to another purchase"
+            );
+            return id;
+        }
+        require!(!self.paused, "New purchases are paused");
+        let r = reference_price.0;
+        let mut a = self.existing_account(&customer);
+        let mode = mode.unwrap_or(a.default_mode);
+        let q = self.quote_internal(r, mode, lucky_amount.map(|l| l.0));
+        let debit = q.max_price.0;
+        require!(
+            debit <= max_debit.0,
+            "Price changed since you confirmed; please confirm again"
+        );
+
+        require!(
+            debit <= a.per_purchase_limit.0,
+            "Over the per-purchase spending limit"
+        );
+        let day = env::block_timestamp() / DAY_NS;
+        if a.day != day {
+            a.day = day;
+            a.spent_today = U128(0);
+        }
+        require!(
+            a.spent_today.0 + debit <= a.daily_limit.0,
+            "Over the daily spending limit"
+        );
+        require!(a.balance.0 >= debit, "Insufficient balance");
+        a.balance.0 -= debit;
+        a.spent_today.0 += debit;
+        self.accounts.insert(customer.clone(), a);
+
+        let lock = match mode {
+            Mode::Normal => 0,
+            Mode::Lucky(v) => q.lucky_amount.0 * self.version(v).max_discount_bps() / BPS,
+        };
+        self.free_reserve -= lock;
+        self.locked_reserve += lock;
+
+        let id = self.next_purchase_id;
+        self.next_purchase_id += 1;
+        self.orders.insert(order_id, id);
+        let p = Purchase {
+            customer,
+            mode,
+            reference_price,
+            lucky_amount: q.lucky_amount,
+            max_price: q.max_price,
+            locked: U128(lock),
+            created_at: env::block_timestamp(),
+            status: Status::Pending,
+            cashback: U128(0),
+        };
+        emit("purchase", json!({ "purchase_id": id, "purchase": &p }));
+        self.purchases.insert(id, p);
+        id
+    }
+
+    /// A Lucky Buy's Draw (`on_draw`, `on_draw_many`): rolls, credits the Cashback, releases the lock.
+    fn draw(&mut self, purchase_id: u64) -> Purchase {
+        let mut p = self.load(purchase_id);
+        let Mode::Lucky(v) = p.mode else {
+            env::panic_str("Not a Lucky Buy")
+        };
+        let version = self.version(v).clone();
+        // The block's seed is never used raw: random = sha256(seed ‖ purchase_id), see draw_random.
+        let seed = env::random_seed_array();
+        let random = draw_random(&seed, purchase_id);
+        let roll = roll_from_random(&random);
+        let final_bps = final_bps_for_roll(&version.outcomes, roll);
+        let r = p.reference_price.0;
+        let lucky = p.lucky_amount.0;
+        let max_price = p.max_price.0;
+        let final_price = final_price(r, lucky, max_price, final_bps);
+        let cashback = max_price - final_price;
+        let premium = max_price - r;
+
+        let mut a = self.existing_account(&p.customer);
+        a.balance.0 += cashback;
+        a.premiums_paid.0 += premium;
+        a.cashback_received.0 += cashback;
+        self.accounts.insert(p.customer.clone(), a);
+
+        // Free Reserve changes by Risk Premium - Cashback once the lock is released.
+        self.locked_reserve -= p.locked.0;
+        self.free_reserve = self.free_reserve + p.locked.0 + premium - cashback;
+        self.lucky_settled += 1;
+        self.lucky_amount_total += lucky;
+        self.lucky_paid_total += lucky + premium - cashback;
+        p.cashback = U128(cashback);
+        p.status = Status::Delivered;
+
+        emit(
+            "draw",
+            json!({
+                "purchase_id": purchase_id,
+                "customer": p.customer,
+                "game_version": v,
+                "reference_price": p.reference_price,
+                "lucky_amount": p.lucky_amount,
+                "max_price": p.max_price,
+                "seed": hex(&seed),
+                "random": hex(&random),
+                "roll": roll,
+                "final_bps": final_bps,
+                "final_price": U128(final_price),
+                "cashback": U128(cashback),
+            }),
+        );
+        self.purchases.insert(purchase_id, p.clone());
+        p
+    }
+
+    /// Confirms one delivery (`confirm_delivery`, `settle`): the card's price becomes proceeds. A Normal
+    /// purchase is done; a Lucky Buy waits for its Draw, and true says to schedule it.
+    fn deliver(&mut self, purchase_id: u64, mut p: Purchase) -> bool {
+        require!(p.status == Status::Pending, "Purchase is already closed");
+        self.proceeds += p.reference_price.0;
+        emit(
+            "delivered",
+            json!({ "purchase_id": purchase_id, "customer": p.customer }),
+        );
+        let lucky = matches!(p.mode, Mode::Lucky(_));
+        p.status = if lucky {
+            Status::Drawing
+        } else {
+            Status::Delivered
+        };
+        self.purchases.insert(purchase_id, p);
+        lucky
+    }
+
     /// `confirmed` is the Lucky Amount the customer saw: it is played as is, or refused if the
     /// reserve no longer covers it. Without it, the Lucky Amount is the most the reserve allows now.
     fn quote_internal(&self, r: u128, mode: Mode, confirmed: Option<u128>) -> Quote {
+        self.quote_at(self.free_reserve, r, mode, confirmed)
+    }
+
+    /// The most of `r` a Lucky Buy on version `v` can play with `free` Free Reserve: its best result pays at
+    /// most the Cashback Cap, and its lock always fits in Free Reserve.
+    fn lucky_allowed(&self, free: u128, r: u128, v: u32) -> u128 {
+        let version = self.version(v);
+        r.min(self.max_cashback_at(free).saturating_mul(BPS) / version.max_cashback_bps())
+            .min(free * BPS / version.max_discount_bps())
+    }
+
+    /// `quote_internal` as if Free Reserve were `free` (`quote_many` prices each card on what the ones before it left).
+    fn quote_at(&self, free: u128, r: u128, mode: Mode, confirmed: Option<u128>) -> Quote {
         require!(r >= MIN_REFERENCE_PRICE, "Purchases start at 0.5 USDC");
         let (lucky, premium) = match mode {
             Mode::Normal => {
@@ -934,10 +1100,7 @@ impl Contract {
             }
             Mode::Lucky(v) => {
                 let version = self.version(v);
-                // The best result pays at most the Cashback Cap, and its lock always fits in Free Reserve.
-                let allowed = r
-                    .min(self.max_cashback().saturating_mul(BPS) / version.max_cashback_bps())
-                    .min(self.free_reserve * BPS / version.max_discount_bps());
+                let allowed = self.lucky_allowed(free, r, v);
                 let lucky = match confirmed {
                     None => allowed,
                     Some(x) => {
@@ -970,10 +1133,12 @@ impl Contract {
 
     /// The most Cashback one Lucky Buy can pay now: the lower of the Cashback Cap's limits.
     fn max_cashback(&self) -> u128 {
+        self.max_cashback_at(self.free_reserve)
+    }
+
+    fn max_cashback_at(&self, free: u128) -> u128 {
         let c = self.cashback_cap();
-        let share = c
-            .reserve_bps
-            .map_or(u128::MAX, |b| self.free_reserve * b as u128 / BPS);
+        let share = c.reserve_bps.map_or(u128::MAX, |b| free * b as u128 / BPS);
         c.fixed.map_or(u128::MAX, |f| f.0).min(share)
     }
 

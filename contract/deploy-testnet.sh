@@ -34,6 +34,6 @@ call "$USDC" ft_transfer_call "{\"receiver_id\":\"$APP\",\"amount\":\"1000000000
 
 # The server's key can only call the purchase methods (ADR-0001).
 near account add-key "$SERVER" grant-function-call-access --allowance unlimited --contract-account-id "$APP" \
-  --function-names 'purchase, confirm_delivery, fail_purchase' autogenerate-new-keypair save-to-legacy-keychain "${NET[@]}" "${SIGN[@]}"
+  --function-names 'purchase, confirm_delivery, fail_purchase, purchase_many, settle' autogenerate-new-keypair save-to-legacy-keychain "${NET[@]}" "${SIGN[@]}"
 
 echo "Done. Put the new function-call key from ~/.near-credentials/testnet/$SERVER/ into OPERATOR_PRIVATE_KEY in .env."

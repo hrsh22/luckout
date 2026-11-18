@@ -56,7 +56,7 @@ done
 # 4. The server's key can only call the purchase methods (ADR-0001). Its full-access key stays on
 #    this machine; the VM gets only this one.
 run account add-key "$SERVER" grant-function-call-access --allowance unlimited --contract-account-id "$APP" \
-  --function-names 'purchase, confirm_delivery, fail_purchase' autogenerate-new-keypair save-to-legacy-keychain "${NET[@]}" "${SIGN[@]}"
+  --function-names 'purchase, confirm_delivery, fail_purchase, purchase_many, settle' autogenerate-new-keypair save-to-legacy-keychain "${NET[@]}" "${SIGN[@]}"
 
 cat <<NEXT
 
