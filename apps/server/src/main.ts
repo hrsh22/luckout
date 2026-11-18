@@ -76,7 +76,8 @@ const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
       challenge: () => auth.challenge,
       // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when.
       verify: ({ payload }) => startSession(auth.verify(payload)),
-      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload))
+      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload)),
+      verifySolana: ({ payload }) => startSession(auth.verifySolana(payload))
     })
   })
 )
@@ -132,15 +133,15 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
     const topup = yield* TopUp
     return handlers.handleAll({
       assets: () => topup.assets,
-      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.dry ?? false)),
+      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.dry ?? false, a.wallet)),
       status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
       move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
-      faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId)),
+      faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId, a.wallet)),
       transfers: () => CurrentAccount.use((a) => topup.transfers(a.accountId)),
-      held: () => CurrentAccount.use((a) => topup.held(a.accountId)),
+      held: () => CurrentAccount.use((a) => topup.held(a.accountId, a.wallet)),
       sent: ({ payload }) => CurrentAccount.use((a) => topup.sent(a.accountId, payload.depositAddress, payload.txHash)),
-      sendBack: ({ payload }) => CurrentAccount.use((a) => topup.sendBack(a.accountId, payload.assetId)),
-      exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc))
+      sendBack: ({ payload }) => CurrentAccount.use((a) => topup.sendBack(a.accountId, payload.assetId, a.wallet)),
+      exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc, a.wallet))
     })
   })
 )

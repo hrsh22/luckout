@@ -12,7 +12,8 @@ const Token = Schema.Struct({
   blockchain: Schema.String,
   symbol: Schema.String,
   contractAddress: Schema.optional(Schema.NullOr(Schema.String)),
-  decimals: Schema.optional(Schema.Number)
+  decimals: Schema.optional(Schema.Number),
+  price: Schema.optional(Schema.Number)
 })
 export type Token = typeof Token.Type
 

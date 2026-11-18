@@ -2,7 +2,7 @@
 export const network = process.env.NEXT_PUBLIC_NEAR_NETWORK === "mainnet" ? "mainnet" : "testnet"
 export const contractId = process.env.NEXT_PUBLIC_LUCKOUT_CONTRACT_ID || "app.luckout.testnet"
 export const usdcId = process.env.NEXT_PUBLIC_USDC_CONTRACT_ID || "usdc.luckout.testnet"
-/** NEAR Intents, where an EVM wallet's money waits outside Luckout (ADR-0011); fixed per network, as in the contract. */
+/** NEAR Intents, where an EVM or Solana wallet's money waits outside Luckout (ADR-0011); fixed per network, as in the contract. */
 export const intentsId = network === "mainnet" ? "intents.near" : "intents.luckout.testnet"
 // Tried in order when one is down, slow or rate-limited: the same providers as the server's defaults (apps/server/src/Near.ts).
 const rpcUrls = network === "mainnet"

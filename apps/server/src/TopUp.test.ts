@@ -7,12 +7,12 @@ import { Near } from "./Near.ts"
 import { echoProblem, OneClick, type QuoteRequest } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
 import { fakeNear } from "./testing.ts"
-import { intentPayload, intentSignature, moveInIntent } from "@luckout/api"
+import { intentPayload, intentSignature, moveInIntent, solanaAddress } from "@luckout/api"
 import { SqlClient } from "effect/sql"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { Alerts } from "./Alerts.ts"
-import { isLate, noticeFor, phaseOf, type SwapRow, TopUp } from "./TopUp.ts"
+import { isLate, noticeFor, phaseOf, refundsToWallet, type SwapRow, TopUp } from "./TopUp.ts"
 import type { SwapDetails } from "./OneClick.ts"
 
 // Live dry-run quotes against 1Click mainnet (no funds move, no key needed).
@@ -427,6 +427,43 @@ test("a Top-Up's refund, and the extra it asks for, go back to an EVM wallet on 
     Effect.all([t.quote(EVM, BASE, 1_000_000), t.quote(EVM, "nep141:sol.omft.near", 1_000_000), t.quote(EVM, "nep141:eth.omft.near", 1_000_000), t.quote(NEAR, BASE, 1_000_000)])
   )
   assert.deepEqual(w.asked.map((r) => [r.refundTo, r.refundType]), [[EVM, "ORIGIN_CHAIN"], [EVM, "INTENTS"], [EVM, "INTENTS"], [NEAR, "INTENTS"]], "Ethereum's gas could eat the change")
+})
+
+test("a Solana wallet's money lands in its NEAR Intents account and goes back to its Solana address; a NEAR implicit account of the same name is untouched", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const SOL_ADDRESS = solanaAddress(SOL_ID)
+  const SOL = "nep141:sol.omft.near"
+  const w = mainnetTopUp({ [SOL]: "5", [BASE]: "7" })
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* t.quote(SOL_ID, SOL, 1_000_000, false, "solana") // dq-1
+      yield* t.quote(SOL_ID, BASE, 1_000_000, false, "solana") // dq-2: paid from Base, so refunds wait in NEAR Intents
+      yield* t.quote(SOL_ID, SOL, 1_000_000, false, "near") // dq-3: the same name, signed in with a NEAR wallet
+      yield* t.exit(SOL_ID, SOL, 1_000_000, "solana") // dq-4
+      const refused = yield* Effect.all([t.exit(SOL_ID, BASE, 1_000_000, "solana"), t.exit(SOL_ID, SOL, 1_000_000, "near")].map(Effect.flip))
+      const held = yield* t.held(SOL_ID, "solana")
+      yield* t.sendBack(SOL_ID, SOL, "solana") // dq-5
+      yield* sql`UPDATE intents_swaps SET status = 'SUCCESS'`
+      const rows = yield* sql<SwapRow>`SELECT * FROM intents_swaps ORDER BY deposit_address`
+      return { refused, held, rows }
+    })
+  )
+  assert.deepEqual(w.asked.map((a) => [a.recipient, a.recipientType, a.refundTo, a.refundType]), [
+    [SOL_ID, "INTENTS", SOL_ADDRESS, "ORIGIN_CHAIN"],
+    [SOL_ID, "INTENTS", SOL_ID, "INTENTS"],
+    [SOL_ID, "DESTINATION_CHAIN", SOL_ID, "INTENTS"],
+    [SOL_ADDRESS, "DESTINATION_CHAIN", SOL_ID, "INTENTS"],
+    [SOL_ADDRESS, "DESTINATION_CHAIN", SOL_ID, "INTENTS"]
+  ])
+  assert.deepEqual(r.refused.map((e) => e.message), ["That token can't be withdrawn to your wallet", "Withdrawals to other chains are for EVM and Solana wallets"])
+  assert.deepEqual(r.held.map((h) => [h.symbol, h.chain, h.sendable]), [["SOL", "sol", true], ["USDC", "base", false]], "a Solana wallet has no address on Base")
+  assert.deepEqual(r.rows.map((x) => [x.deposit_address, x.wallet, phaseOf(x), refundsToWallet(x)]), [
+    ["dq-1", "solana", "in-intents", true],
+    ["dq-2", "solana", "in-intents", false],
+    ["dq-3", "near", "in-wallet", false],
+    ["dq-4", "solana", "done", false],
+    ["dq-5", "solana", "done", false]
+  ])
 })
 
 test("a held token goes to the customer's own wallet: an EVM wallet's as it is on its chain, a NEAR wallet's as USDC", async () => {

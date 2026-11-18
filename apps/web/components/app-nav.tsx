@@ -8,11 +8,11 @@ import { useWalletActions } from "@/lib/actions"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
-import { useSession } from "@/lib/session"
+import { useSession, WALLET_NAMES } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
 import { ACTIVE_PHASES, arriving, useIsAdmin, useTransfers } from "@/lib/queries"
 import { usd } from "@/lib/format"
-import type { Transfer, TransferPhase } from "@luckout/api"
+import { solanaAddress, type Transfer, type TransferPhase } from "@luckout/api"
 import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import Link from "next/link"
@@ -66,7 +66,7 @@ export function AppNav() {
 }
 
 /**
- * The one sign-in button: it asks which kind of wallet (NEAR, or EVM through NEAR Intents, ADR-0011),
+ * The one sign-in button: it asks which kind of wallet (NEAR, or EVM or Solana through NEAR Intents, ADR-0011),
  * then says which step the wallet is on. Where there's no room to show why sign-in stopped (the nav,
  * the receipt), it says so in a toast.
  */
@@ -78,7 +78,7 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
   inline?: boolean
 }) {
   const { signIn, signing, ready } = useSession()
-  const go = (kind: "near" | "evm") =>
+  const go = (kind: "near" | "evm" | "solana") =>
     signIn(kind).then((problem) => {
       if (!problem) return onDone?.()
       if (!inline) problem.cancelled ? toast(problem.message) : toast.error(problem.message)
@@ -101,6 +101,10 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
               <span className="font-semibold">EVM wallet</span>
               <span className="text-sm text-muted">MetaMask, Rabby, Coinbase and more. No NEAR needed.</span>
             </Menu.Item>
+            <Menu.Item className={item} onClick={() => void go("solana")}>
+              <span className="font-semibold">Solana wallet</span>
+              <span className="text-sm text-muted">Phantom, Solflare, Backpack and more. No NEAR needed.</span>
+            </Menu.Item>
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>
@@ -109,7 +113,9 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
 }
 
 function AccountMenu({ id }: { id: string }) {
-  const { signOut, token } = useSession()
+  const { signOut, token, wallet } = useSession()
+  // A Solana account is its key in hex; people know it by its address.
+  const shown = wallet === "solana" ? solanaAddress(id) : id
   const isAdmin = useIsAdmin(token)
   const router = useRouter()
   const [everywhere, setEverywhere] = useState(false)
@@ -120,10 +126,10 @@ function AccountMenu({ id }: { id: string }) {
       <Menu.Root>
         <Menu.Trigger
           className="flex h-10 min-w-0 items-center gap-2 rounded-full bg-soft py-1 pr-3 pl-1 font-semibold transition-colors hover:bg-[#ebe9f3] data-[popup-open]:bg-[#ebe9f3]"
-          aria-label={`Account ${id}`}
+          aria-label={`Account ${shown}`}
         >
           <Avatar id={id} size={32} />
-          <span className="hidden max-w-[9rem] truncate text-sm sm:block">{shortAccount(id)}</span>
+          <span className="hidden max-w-[9rem] truncate text-sm sm:block">{shortAccount(shown)}</span>
           <ChevronDown size={16} className="text-muted" aria-hidden="true" />
         </Menu.Trigger>
         <Menu.Portal>
@@ -132,12 +138,12 @@ function AccountMenu({ id }: { id: string }) {
               <div className="flex items-center gap-3 px-3 pt-2 pb-3">
                 <Avatar id={id} size={40} />
                 <div className="min-w-0">
-                  <p className="truncate font-semibold" title={id}>{shortAccount(id)}</p>
-                  <p className="text-sm text-muted">{/^0x/.test(id) ? `EVM wallet · NEAR ${network}` : `NEAR ${network}`}</p>
+                  <p className="truncate font-semibold" title={shown}>{shortAccount(shown)}</p>
+                  <p className="text-sm text-muted">{wallet && wallet !== "near" ? `${WALLET_NAMES[wallet]} wallet · NEAR ${network}` : `NEAR ${network}`}</p>
                 </div>
               </div>
-              <Menu.Item className={item} onClick={() => navigator.clipboard.writeText(id).then(() => toast.success("Account copied"))}>
-                <Copy size={18} className="text-muted" />Copy account
+              <Menu.Item className={item} onClick={() => navigator.clipboard.writeText(shown).then(() => toast.success(shown === id ? "Account copied" : "Address copied"))}>
+                <Copy size={18} className="text-muted" />{shown === id ? "Copy account" : "Copy address"}
               </Menu.Item>
               <Menu.Item className={item} onClick={() => router.push("/wallet")}>
                 <Wallet size={18} className="text-muted" />Wallet and limits

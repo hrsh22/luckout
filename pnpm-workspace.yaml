@@ -4,6 +4,11 @@ packages:
 allowBuilds:
   # Its postinstall only checks AppKit versions.
   '@reown/appkit': false
+  # Native speed-ups for Node that @solana/web3.js pulls in (Solana wallets in the web app); each has a plain
+  # JavaScript fallback, and the browser bundle never builds them anyway.
+  bigint-buffer: false
+  bufferutil: false
+  utf-8-validate: false
 # Advisories pnpm audit (CI's audit job) accepts, each with why. Remove an entry once its fix is installed.
 auditConfig:
   ignoreGhsas:

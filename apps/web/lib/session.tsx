@@ -6,19 +6,25 @@ import {
   evmSignInMessage,
   intentPayload,
   intentSignature,
-  isEvmAccount,
   type Mode,
   moveInIntent,
   SignedChallenge,
   SignedEvmChallenge,
-  type SignedIntent
+  type SignedIntent,
+  SignedSolanaChallenge,
+  solanaAddress,
+  solanaSignedIntent,
+  solanaSignInMessage,
+  type Wallet,
+  walletOf
 } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
 import { getAddress } from "viem"
 import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
-import { connectEvm, disconnectEvm, evmAddress, evmChainId, signText, watchEvm } from "./evm"
+import { connectEvm, disconnectWallets, evmAddress, evmChainId, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
+import { connectSolana, signSolana, solanaAccount, watchSolana } from "./solana"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
 export interface ContractAccount {
@@ -55,40 +61,45 @@ interface Session {
   account: ContractAccount | null | undefined
   /** Why the account couldn't be read from the chain; refresh() tries again. */
   accountError: string | undefined
-  /** USDC held in the wallet, not yet deposited; for an EVM wallet, in its NEAR Intents account (ADR-0011) */
+  /** USDC held in the wallet, not yet deposited; for an EVM or Solana wallet, in its NEAR Intents account (ADR-0011) */
   walletUsdc: string | undefined
   /** NEAR in the wallet, in yoctoNEAR: it pays the network fee unless our relayer does */
   walletNear: string | undefined
   /** Our relayer pays this account's network fees: the wallet can sign for it and today's free relays aren't used up. */
   gasFree: boolean | undefined
-  /** Signed in with an EVM wallet: it acts through NEAR Intents, and our relayer pays every NEAR fee. */
-  evm: boolean
+  /** The kind of wallet signed in with; undefined when signed out. */
+  wallet: Wallet | undefined
+  /** Signed in with an EVM or Solana wallet: it acts through NEAR Intents, and our relayer pays every NEAR fee. */
+  intents: boolean
   signing: SignInStep | undefined
   signInError: SignInProblem | undefined
   /** Resolves undefined once signed in, or why it didn't happen. */
-  signIn(kind?: "near" | "evm"): Promise<SignInProblem | undefined>
+  signIn(kind?: Wallet): Promise<SignInProblem | undefined>
   signOut(): Promise<void>
   refresh(): Promise<void>
   /** Signs the calls in one wallet approval and sends them, fee paid by our relayer when it can. */
   send(...calls: Array<Call>): Promise<void>
-  /** EVM wallets: one NEAR Intents payload holding `intent`, signed with personal_sign and valid for `minutes`. */
+  /** EVM and Solana wallets: one NEAR Intents payload holding `intent`, signed by the wallet and valid for `minutes`. */
   signIntent(intent: object, minutes?: number): Promise<SignedIntent>
 }
 
 const STORAGE = "luckout.session"
 
-/** Everything the app shows about an account, read straight from the chain. An EVM wallet's USDC waits in NEAR Intents. */
-const readAccount = (id: string) =>
+/** What each kind of wallet is called on the page. */
+export const WALLET_NAMES: Record<Wallet, string> = { near: "NEAR", evm: "EVM", solana: "Solana" }
+
+/** Everything the app shows about an account, read straight from the chain. An EVM or Solana wallet's USDC waits in NEAR Intents. */
+const readAccount = (id: string, intents: boolean) =>
   Promise.all([
     view<ContractAccount | null>(contractId, "get_account", { account_id: id }),
-    isEvmAccount(id) ? intentsUsdc(id) : view<string>(usdcId, "ft_balance_of", { account_id: id }),
-    isEvmAccount(id) ? Promise.resolve(undefined) : nearBalance(id).catch(() => undefined)
+    intents ? intentsUsdc(id) : view<string>(usdcId, "ft_balance_of", { account_id: id }),
+    intents ? Promise.resolve(undefined) : nearBalance(id).catch(() => undefined)
   ])
-/** Whether our relayer will pay this account's next fee (ADR-0008). An EVM wallet signs only what the relayer sends. */
-const relayable = (token: string, evm: boolean) =>
-  Promise.all([evm || canSignForRelay(), api((c) => c.relay.status(), token).then((s) => s.available, () => false)]).then(([a, b]) => a && b)
+/** Whether our relayer will pay this account's next fee (ADR-0008). An EVM or Solana wallet signs only what the relayer sends. */
+const relayable = (token: string, intents: boolean) =>
+  Promise.all([intents || canSignForRelay(), api((c) => c.relay.status(), token).then((s) => s.available, () => false)]).then(([a, b]) => a && b)
 
-/** The contract calls an EVM wallet makes through NEAR Intents (ADR-0011), from the calls a NEAR wallet would sign. */
+/** The contract calls an EVM or Solana wallet makes through NEAR Intents (ADR-0011), from the calls a NEAR wallet would sign. */
 const AUTH_METHODS = new Set(["withdraw", "set_default_mode", "set_limits", "reclaim", "retry_draw"])
 const asIntent = (account: string, c: Call) => {
   if (c.receiverId === contractId && AUTH_METHODS.has(c.method)) return authCallIntent(contractId, { [c.method]: c.args } as AuthAction)
@@ -98,20 +109,22 @@ const asIntent = (account: string, c: Call) => {
   if (c.receiverId === usdcId && c.method === "ft_transfer_call" && args.receiver_id === contractId && (args.msg === "" || mode !== undefined)) {
     return moveInIntent({ usdcId, contractId, account, amount: String(args.amount), mode })
   }
-  throw new Error("EVM wallets can't do that here.")
+  throw new Error("This wallet can't do that here.")
 }
 const SessionContext = createContext<Session | null>(null)
 
-/** What is saved of a session: who and until when. The token never reaches the page (an HttpOnly cookie). */
+/** What is saved of a session: who, with which kind of wallet, and until when. The token never reaches the page (an HttpOnly cookie). */
 interface Saved {
   accountId: string
+  wallet: Wallet
   expiresAt: number
 }
 const nameOf = (s: Saved) => `${s.accountId}:${s.expiresAt}`
 const load = (): Saved | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")
-    return s && s.expiresAt > Date.now() ? s : undefined
+    // Saved before sessions named their wallet: none of those was Solana.
+    return s && s.expiresAt > Date.now() ? { ...s, wallet: s.wallet ?? walletOf(s.accountId) } : undefined
   } catch {
     return undefined
   }
@@ -135,7 +148,7 @@ const endOnServer = (who: string | undefined) => {
 }
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<{ accountId: string; token: string }>()
+  const [session, setSession] = useState<{ accountId: string; token: string; wallet: Wallet }>()
   const [ready, setReady] = useState(false)
   const [account, setAccount] = useState<ContractAccount | null>()
   const [accountError, setAccountError] = useState<string>()
@@ -149,7 +162,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // never be shown to the next.
   const current = useRef<string | undefined>(undefined)
   current.current = accountId
-  const evm = !!accountId && isEvmAccount(accountId)
+  const wallet = session?.wallet
+  const intents = wallet === "evm" || wallet === "solana"
   const qc = useQueryClient()
 
   // Signed out, switched or expired: nothing read for the last account (purchases and their codes
@@ -178,7 +192,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     if (!accountId || !token) return
     try {
-      const [[a, w, n], free] = await Promise.all([readAccount(accountId), relayable(token, evm)])
+      const [[a, w, n], free] = await Promise.all([readAccount(accountId, intents), relayable(token, intents)])
       // Signed out or switched while this was on its way: it's someone else's balance now.
       if (current.current !== accountId) return
       setAccount(a)
@@ -191,24 +205,26 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       setAccountError(errorMessage(e))
       throw e
     }
-  }, [accountId, token, evm])
+  }, [accountId, token, intents])
 
   // Restore the saved session only if the wallet is still on the same account.
   useEffect(() => {
     const saved = load()
-    const connected = saved && isEvmAccount(saved.accountId)
+    const connected = saved?.wallet === "evm"
       ? evmAddress()
+      : saved?.wallet === "solana"
+      ? solanaAccount()
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
     const leftBehind = () => {
       void endOnServer(saved?.accountId)
       forget()
     }
     connected.then((id) => {
-      if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved) })
+      if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved), wallet: saved.wallet })
       else leftBehind()
     }, leftBehind).finally(() => setReady(true))
     // The NEAR connector loads its wallet list from elsewhere first. If that hangs, the page must not: Sign in
-    // appears anyway (an EVM wallet doesn't need it), and a late answer still restores the session above.
+    // appears anyway (an EVM or Solana wallet doesn't need it), and a late answer still restores the session above.
     const waited = setTimeout(() => setReady(true), 8000)
     return () => clearTimeout(waited)
   }, [])
@@ -223,17 +239,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("storage", onStorage)
   }, [accountId, reset])
 
-  // An EVM wallet that switched address or disconnected no longer matches this session.
+  // An EVM or Solana wallet that switched account or disconnected no longer matches this session.
   useEffect(() => {
-    if (!evm) return
+    if (!intents) return
     let stop: (() => void) | undefined
     let live = true
-    watchEvm((id) => id !== accountId && leave()).then((s) => (live ? (stop = s) : s()), () => {})
+    const watch = wallet === "solana" ? watchSolana : watchEvm
+    watch((id) => id !== accountId && leave()).then((s) => (live ? (stop = s) : s()), () => {})
     return () => {
       live = false
       stop?.()
     }
-  }, [evm, accountId, leave])
+  }, [intents, wallet, accountId, leave])
 
   // The wallet signed out or switched accounts elsewhere: this session no longer matches it.
   useEffect(() => {
@@ -286,19 +303,32 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     return api((c) => c.auth.verifyEvm({ payload: new SignedEvmChallenge({ address, signature, nonce: challenge.nonce, ...site }) }))
   }
 
-  const signIn = async (kind: "near" | "evm" = "near") => {
+  /** An ed25519 signature of a Sign In With Solana message naming this site, with a Solana wallet (ADR-0011). */
+  const signInSolana = async () => {
+    const id = await connectSolana()
+    const address = solanaAddress(id)
+    const challenge = await api((c) => c.auth.challenge())
+    const site = { uri: window.location.origin, issuedAt: new Date().toISOString() }
+    setSigning("message")
+    const signature = await signSolana(id, solanaSignInMessage({ challenge, address, ...site }))
+    return api((c) =>
+      c.auth.verifySolana({ payload: new SignedSolanaChallenge({ address, signature: btoa(String.fromCharCode(...signature)), nonce: challenge.nonce, ...site }) })
+    )
+  }
+
+  const signIn = async (kind: Wallet = "near") => {
     setSignInError(undefined)
     setSigning("wallet")
     try {
-      const s = await (kind === "evm" ? signInEvm() : signInNear())
+      const s = await (kind === "evm" ? signInEvm() : kind === "solana" ? signInSolana() : signInNear())
       try {
         localStorage.setItem(STORAGE, JSON.stringify(s))
       } catch {}
       // Read the account before switching to signed in, so the page settles once: a new customer
       // sees Welcome straight away instead of a signed-in flash, a lookup, then a jump.
       const [read, free] = await Promise.all([
-        readAccount(s.accountId).catch((e: unknown) => new Error(errorMessage(e))),
-        relayable(nameOf(s), isEvmAccount(s.accountId))
+        readAccount(s.accountId, s.wallet !== "near").catch((e: unknown) => new Error(errorMessage(e))),
+        relayable(nameOf(s), s.wallet !== "near")
       ])
       if (read instanceof Error) {
         // Whatever was held before isn't this account's: show "couldn't read", never another balance.
@@ -313,7 +343,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         setAccountError(undefined)
       }
       setGasFree(free)
-      setSession({ accountId: s.accountId, token: nameOf(s) })
+      setSession({ accountId: s.accountId, token: nameOf(s), wallet: s.wallet })
       return undefined
     } catch (e) {
       const problem = {
@@ -336,13 +366,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       nonce: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
       intents: [intent]
     })
+    if (session.wallet === "solana") return solanaSignedIntent({ payload, accountId: session.accountId, signature: await signSolana(session.accountId, payload) })
     return { standard: "erc191", payload, signature: intentSignature(await signText(session.accountId, payload)) }
   }
 
   const send = async (...calls: Array<Call>) => {
     if (!session) throw new Error("Sign in first.")
-    // An EVM wallet has no NEAR to pay with: each call is a signed intent our relayer sends, or nothing.
-    if (evm) {
+    // An EVM or Solana wallet has no NEAR to pay with: each call is a signed intent our relayer sends, or nothing.
+    if (intents) {
       for (const call of calls) {
         const signed = await signIntent(asIntent(session.accountId, call))
         try {
@@ -384,12 +415,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     await endOnServer(current.current)
     clear()
-    await Promise.all([near().disconnect().catch(() => {}), disconnectEvm()])
+    await Promise.all([near().disconnect().catch(() => {}), disconnectWallets()])
   }
 
   return (
     <SessionContext
-      value={{ accountId, token, ready, account, accountError, walletUsdc, walletNear, gasFree, evm, signing, signInError, signIn, signOut, refresh, send, signIntent }}
+      value={{ accountId, token, ready, account, accountError, walletUsdc, walletNear, gasFree, wallet, intents, signing, signInError, signIn, signOut, refresh, send, signIntent }}
     >
       {children}
     </SessionContext>

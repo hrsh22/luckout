@@ -75,7 +75,7 @@ export type Mode = typeof Mode.Type
 // ---------- auth ----------
 
 /** The signed-in NEAR account, provided to authenticated endpoints. */
-export class CurrentAccount extends Context.Service<CurrentAccount, { readonly accountId: string }>()(
+export class CurrentAccount extends Context.Service<CurrentAccount, { readonly accountId: string; readonly wallet: Wallet }>()(
   "luckout/CurrentAccount"
 ) {}
 
@@ -139,19 +139,53 @@ export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("Signed
   issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
 }) {}
 
-/** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), as `intents.near` takes it. */
-export const SignedIntent = Schema.Struct({
-  standard: Schema.Literal("erc191"),
-  /** The signed JSON text: signer_id, verifying_contract, deadline, nonce, intents. */
-  payload: Schema.String.check(Schema.isMaxLength(4096)),
-  /** secp256k1:<base58 of r, s and a recovery bit> */
-  signature: Schema.String.check(Schema.isMaxLength(200))
-})
+/**
+ * Solana sign-in (ADR-0011): the text the wallet signs, in the Sign In With Solana format, which Solana wallets read
+ * like EIP-4361 and compare with the page asking. `address` is base58, `issuedAt` an ISO time.
+ */
+export const solanaSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; issuedAt: string }) =>
+  `${new URL(o.uri).host} wants you to sign in with your Solana account:\n${o.address}\n\n` +
+  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
+  `URI: ${o.uri}\nVersion: 1\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
+
+export class SignedSolanaChallenge extends Schema.Class<SignedSolanaChallenge>("SignedSolanaChallenge")({
+  /** base58 public key */
+  address: Schema.String.check(Schema.isMaxLength(64)),
+  /** base64 of the 64-byte ed25519 signature */
+  signature: Schema.String.check(Schema.isMaxLength(200)),
+  nonce: Schema.String,
+  uri: Schema.String,
+  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
+}) {}
+
+/** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), or a Solana wallet as raw bytes, as `intents.near` takes it. */
+export const SignedIntent = Schema.Union([
+  Schema.Struct({
+    standard: Schema.Literal("erc191"),
+    /** The signed JSON text: signer_id, verifying_contract, deadline, nonce, intents. */
+    payload: Schema.String.check(Schema.isMaxLength(4096)),
+    /** secp256k1:<base58 of r, s and a recovery bit> */
+    signature: Schema.String.check(Schema.isMaxLength(200))
+  }),
+  Schema.Struct({
+    standard: Schema.Literal("raw_ed25519"),
+    payload: Schema.String.check(Schema.isMaxLength(4096)),
+    /** ed25519:<base58 of the Solana address's 32 bytes> */
+    public_key: Schema.String.check(Schema.isMaxLength(100)),
+    /** ed25519:<base58 of the 64-byte signature> */
+    signature: Schema.String.check(Schema.isMaxLength(200))
+  })
+])
 export type SignedIntent = typeof SignedIntent.Type
 
-/** Who signed in and until when. The token itself is only ever in the `sessionCookie`. */
+/** How the customer signed in. A Solana account is named like a NEAR implicit one, so only this tells them apart. */
+export const Wallet = Schema.Literals(["near", "evm", "solana"])
+export type Wallet = typeof Wallet.Type
+
+/** Who signed in, with which kind of wallet, and until when. The token itself is only ever in the `sessionCookie`. */
 export class Session extends Schema.Class<Session>("Session")({
   accountId: Schema.String,
+  wallet: Wallet,
   expiresAt: Schema.Number
 }) {}
 
@@ -307,7 +341,8 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
 export class AuthApi extends HttpApiGroup.make("auth").add(
   HttpApiEndpoint.post("challenge", "/auth/challenge", { success: Challenge }),
   HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized }),
-  HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized })
+  HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized }),
+  HttpApiEndpoint.post("verifySolana", "/auth/verify-solana", { payload: SignedSolanaChallenge, success: Session, error: Unauthorized })
 ) {}
 
 /** Ends the session the request came with, or every session of the signed-in account, on every device (a lost phone, a shared computer). */
@@ -392,9 +427,11 @@ export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   assetId: Schema.String,
   symbol: Schema.String,
   chain: Schema.String,
-  /** The token's contract on an EVM chain, so an EVM wallet can send it; absent for the chain's own coin. */
+  /** The token's contract on an EVM chain (its mint on Solana), so the wallet can send it; absent for the chain's own coin. */
   contract: Schema.optional(Schema.String),
-  decimals: Schema.optional(Schema.Number)
+  decimals: Schema.optional(Schema.Number),
+  /** 1Click's price in USD, for showing what a wallet's holding is worth. */
+  price: Schema.optional(Schema.Number)
 }) {}
 
 export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({

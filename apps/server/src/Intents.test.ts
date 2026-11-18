@@ -1,11 +1,11 @@
-import { authCallIntent, intentPayload, intentSignature, moveInIntent, transferIntent } from "@luckout/api"
+import { authCallIntent, intentPayload, intentSignature, moveInIntent, solanaAddress, solanaSignedIntent, transferIntent } from "@luckout/api"
 import assert from "node:assert/strict"
-import { randomBytes } from "node:crypto"
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto"
 import { test } from "node:test"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { type IntentRules, parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
 
-// The relayer pays only for EVM customers' own intents, exactly as the web app builds them (ADR-0011).
+// The relayer pays only for EVM and Solana customers' own intents, exactly as the web app builds them (ADR-0011).
 
 const me = privateKeyToAccount(generatePrivateKey())
 const ME = me.address.toLowerCase()
@@ -85,4 +85,25 @@ test("the signature must be the signed-in account's own personal_sign over the t
   assert.equal(await signedBy({ ...signed, signature: intentSignature(await other.signMessage({ message: text })) }, ME), false)
   assert.equal(await signedBy({ ...signed, payload: text.replace("5000000", "6000000") }, ME), false)
   assert.equal(await signedBy({ ...signed, signature: "secp256k1:abc" }, ME), false)
+})
+
+test("a Solana wallet's intent is signed over its raw text by the key its account is named after (raw_ed25519)", async () => {
+  const key = () => {
+    const k = generateKeyPairSync("ed25519")
+    return { k, id: k.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("hex") }
+  }
+  const sol = key()
+  const text = payload([moveIn("5000000", sol.id)], { signer: sol.id })
+  assert.equal(refusal(text, { accountId: sol.id }), undefined, "a Solana account moves its own Top-Up in")
+  const signed = solanaSignedIntent({ payload: text, accountId: sol.id, signature: sign(null, Buffer.from(text), sol.k.privateKey) })
+  assert.equal(signed.public_key, `ed25519:${solanaAddress(sol.id)}`)
+  assert.equal(await signedBy(signed, sol.id), true)
+  const other = key()
+  assert.equal(await signedBy({ ...signed, signature: solanaSignedIntent({ payload: text, accountId: other.id, signature: sign(null, Buffer.from(text), other.k.privateKey) }).signature }, sol.id), false, "another key")
+  assert.equal(await signedBy({ ...signed, payload: text.replace("5000000", "6000000") }, sol.id), false, "the text changed")
+  assert.equal(await signedBy(signed, other.id), false, "for another account")
+  assert.equal(await signedBy({ ...signed, public_key: `ed25519:${solanaAddress(other.id)}` }, sol.id), false, "naming another key")
+  // Each kind of account signs only its own way.
+  assert.equal(await signedBy({ standard: "erc191", payload: text, signature: intentSignature(await me.signMessage({ message: text })) }, sol.id), false)
+  assert.equal(await signedBy({ ...signed, payload: payload([moveIn()]) }, ME), false)
 })

@@ -101,7 +101,7 @@ export function RecentTransfers() {
  * token paid with. Luckout can't spend it, but it's the customer's: one tap sends it to their own wallet.
  */
 export function HeldInIntents() {
-  const { token, evm } = useSession()
+  const { token, intents } = useSession()
   const actions = useWalletActions()
   const held = useHeld(token).data ?? []
   const [sending, setSending] = useState<string>()
@@ -119,7 +119,7 @@ export function HeldInIntents() {
             <span className="font-semibold">{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
             {h.sendable && (
               <Button size="sm" variant="light" disabled={sending !== undefined} onClick={() => sendBack(h)}>
-                {evm ? `Send to my wallet on ${chain(h.chain)}` : "Send to my NEAR wallet as USDC"}
+                {intents ? `Send to my wallet on ${chain(h.chain)}` : "Send to my NEAR wallet as USDC"}
               </Button>
             )}
           </li>
@@ -137,7 +137,7 @@ export function HeldInIntents() {
 }
 
 function Row({ t }: { t: Transfer }) {
-  const { evm, walletUsdc } = useSession()
+  const { intents, walletUsdc } = useSession()
   const actions = useWalletActions()
   const incoming = t.direction === "in"
   // A quote nobody has paid into yet keeps its address behind a tap: it's often one the customer started and left.
@@ -159,7 +159,7 @@ function Row({ t }: { t: Transfer }) {
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <p className="font-semibold">{titleOf(t)}</p>
-        <p className="text-sm text-ink-soft">{say(t, evm, sitting >= 1_000_000)}</p>
+        <p className="text-sm text-ink-soft">{say(t, intents, sitting >= 1_000_000)}</p>
 
         {((unpaid && shown) || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm sm:flex-row">
@@ -189,7 +189,7 @@ function Row({ t }: { t: Transfer }) {
           {t.phase === "in-wallet" && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
           )}
-          {evm && (t.phase === "in-intents" || (t.phase === "refunded" && t.direction === "out")) && sitting >= 1_000_000 && (
+          {intents && (t.phase === "in-intents" || (t.phase === "refunded" && t.direction === "out")) && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(sitting)}>Move {usd(sitting)} into Luckout</Button>
           )}
           {t.depositTx && TX_EXPLORERS[t.chain] && (
@@ -248,7 +248,7 @@ function PasteTx({ t }: { t: Transfer }) {
 }
 
 /** One sentence: where the money is right now, and what happens next. */
-function say(t: Transfer, evm: boolean, canDeposit: boolean) {
+function say(t: Transfer, intents: boolean, canDeposit: boolean) {
   const usual = minutes(t.timeEstimateSeconds)
   switch (t.phase) {
     case "awaiting-transfer":
@@ -271,7 +271,7 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
     case "in-wallet":
       return canDeposit ? "Landed in your NEAR wallet. Deposit it to use it in Luckout." : "Landed in your NEAR wallet."
     case "in-intents":
-      return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${evm ? "Move it in below." : ""}`.trim()
+      return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${intents ? "Move it in below." : ""}`.trim()
     case "done":
       return t.direction === "in"
         ? "In your Luckout balance."
@@ -279,7 +279,7 @@ function say(t: Transfer, evm: boolean, canDeposit: boolean) {
     case "refunded": {
       const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
       if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`
-      if (t.direction === "out") return `${why} 1Click sent it back to your NEAR Intents account${evm ? "; move it back into Luckout below." : "."}`
+      if (t.direction === "out") return `${why} 1Click sent it back to your NEAR Intents account${intents ? "; move it back into Luckout below." : "."}`
       return `${why} 1Click sent ${t.refunded ? `${t.refunded} ${t.symbol}` : "it"} back to ${refundPlace(t)}${t.refundsToWallet ? "." : ", listed below."}`
     }
   }

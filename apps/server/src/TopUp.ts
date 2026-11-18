@@ -1,16 +1,18 @@
 import {
   ExitQuote,
   HeldToken,
-  isEvmAccount,
   SendBackQuote,
   type SignedIntent,
+  solanaAddress,
   TopUpAsset,
   TopUpQuote,
   TopUpStatus,
   TopUpUnavailable,
   Transfer,
   type TransferPhase,
-  tokenAmount
+  tokenAmount,
+  type Wallet,
+  walletOf
 } from "@luckout/api"
 import { Config, Context, Effect, Layer, Schedule } from "effect"
 import { formatUnits } from "viem"
@@ -26,13 +28,16 @@ import { Relay } from "./Relay.ts"
 // The server pins the destination (USDC) and the recipient (the signed-in account), so this
 // endpoint can't be used to swap anything else or pay anyone else.
 //
-// EVM wallets (ADR-0011) have no NEAR account: their swap lands in their own NEAR Intents account,
-// and the intent they signed when it started moves exactly that USDC into Luckout once it lands.
+// EVM and Solana wallets (ADR-0011) have no NEAR account: their swap lands in their own NEAR Intents
+// account, and the intent they signed when it started moves exactly that USDC into Luckout once it lands.
 // Withdrawals go the other way: a 1Click quote from their Intents account to their own address.
 //
 // What 1Click sends back (a refund, or the extra a Top-Up asked for) goes to the wallet it came from when that's an
-// EVM wallet paying on an EVM chain; otherwise it lands in the customer's NEAR Intents account, in the token paid
-// with, and a send-back moves it to their own wallet (direction 'back').
+// EVM or Solana wallet paying on its own chain; otherwise it lands in the customer's NEAR Intents account, in the
+// token paid with, and a send-back moves it to their own wallet (direction 'back').
+//
+// A Solana account is named like a NEAR implicit one, so the kind of wallet comes from the session, and each swap
+// keeps the kind it was quoted for (`wallet`; rows from before it are read from the account's name).
 
 export const MAINNET_USDC = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
 export const NEAR_USDC_ASSET = `nep141:${MAINNET_USDC}`
@@ -40,6 +45,10 @@ const SYMBOLS = new Set(["USDC", "USDT", "ETH", "BTC", "SOL", "wNEAR"])
 const CHAINS = new Set(["eth", "arb", "base", "sol", "btc", "pol", "bsc", "near"])
 /** Chains an EVM wallet can withdraw to: its own address works on each. */
 const EVM_CHAINS = new Set(["eth", "arb", "base", "pol", "bsc"])
+/** The chains a wallet signing through NEAR Intents has its own address on. */
+const HOME_CHAINS: Record<Wallet, ReadonlySet<string>> = { near: new Set(), evm: EVM_CHAINS, solana: new Set(["sol"]) }
+/** That wallet's address on its own chains: an EVM account is its address; a Solana account is its key in hex. */
+const homeAddress = (accountId: string, wallet: Wallet) => (wallet === "solana" ? solanaAddress(accountId) : accountId)
 /** Top-Ups whose move-in may wait at once, per account, so nobody can crowd out everyone else's. */
 const MOST_WAITING = 3
 /** Swaps checked per pass, least recently checked first. */
@@ -69,16 +78,18 @@ const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", 
 const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
 const walletOn = (c: string | null) => (c === "near" ? "your NEAR wallet" : `your wallet on ${chainName(c)}`)
 /**
- * EVM chains where 1Click's refund to the paying wallet costs it a fraction of a cent: it pays the gas out of the refund
+ * Chains where 1Click's refund to the paying wallet costs it a fraction of a cent: it pays the gas out of the refund
  * (on Base, 0.0024 of a 0.0101 USDC change), so on Ethereum a Top-Up's change could be eaten whole.
  */
-const CHEAP_REFUND_CHAINS = new Set(["arb", "base", "pol", "bsc"])
+const CHEAP_REFUND_CHAINS = new Set(["arb", "base", "pol", "bsc", "sol"])
+/** The kind of wallet a swap was quoted for. */
+const walletOfRow = (r: Pick<SwapRow, "account_id" | "wallet">): Wallet => r.wallet ?? walletOf(r.account_id)
 /**
- * A Top-Up's refund goes straight back to the wallet it came from: an EVM wallet signs with its own key (Intents.ts),
- * so its address is its own on every EVM chain. Anything else goes to their NEAR Intents account.
+ * A Top-Up's refund goes straight back to the wallet it came from: an EVM or Solana wallet signs with its own key
+ * (Intents.ts), so its address is its own on its chains. Anything else goes to their NEAR Intents account.
  */
-export const refundsToWallet = (r: Pick<SwapRow, "direction" | "account_id" | "chain">) =>
-  r.direction === "in" && isEvmAccount(r.account_id) && r.chain !== null && CHEAP_REFUND_CHAINS.has(r.chain)
+export const refundsToWallet = (r: Pick<SwapRow, "direction" | "account_id" | "chain" | "wallet">) =>
+  r.direction === "in" && r.chain !== null && CHEAP_REFUND_CHAINS.has(r.chain) && HOME_CHAINS[walletOfRow(r)].has(r.chain)
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 
 /** A row of `intents_swaps`: one 1Click swap of a customer's money. */
@@ -86,6 +97,8 @@ export interface SwapRow {
   readonly deposit_address: string
   readonly deposit_memo: string | null
   readonly account_id: string
+  /** The kind of wallet it was quoted for; null on rows from before Solana wallets. */
+  readonly wallet?: Wallet | null
   readonly direction: "in" | "out" | "back"
   readonly usdc: string
   readonly symbol: string | null
@@ -116,12 +129,12 @@ export interface SwapRow {
 const ms = (d: Date | string | null) => (d === null ? undefined : new Date(d).getTime())
 
 /** Where the money is, in the customer's words (see TransferPhase). */
-export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "status" | "move">): TransferPhase => {
+export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "wallet" | "status" | "move">): TransferPhase => {
   if (r.status === "REFUNDED" || r.status === "FAILED") return "refunded"
   if (r.status === "INCOMPLETE_DEPOSIT" && r.direction === "in") return "incomplete"
   if (r.status === "SUCCESS") {
     if (r.direction !== "in") return "done"
-    if (!isEvmAccount(r.account_id)) return "in-wallet"
+    if (walletOfRow(r) === "near") return "in-wallet"
     return r.move === "moved" ? "done" : r.move === "waiting" ? "moving" : "in-intents"
   }
   if (!r.status || r.status === "PENDING_DEPOSIT") return r.direction === "in" ? "awaiting-transfer" : "swapping"
@@ -208,24 +221,25 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
 
 export class TopUp extends Context.Service<TopUp, {
   readonly assets: Effect.Effect<ReadonlyArray<TopUpAsset>, TopUpUnavailable>
-  quote(accountId: string, originAsset: string, usdc: number, dry?: boolean): Effect.Effect<TopUpQuote, TopUpUnavailable>
+  /** `wallet`: how the customer signed in (by default, read from the account's name). */
+  quote(accountId: string, originAsset: string, usdc: number, dry?: boolean, wallet?: Wallet): Effect.Effect<TopUpQuote, TopUpUnavailable>
   status(accountId: string, depositAddress: string): Effect.Effect<TopUpStatus, TopUpUnavailable>
   /** The app paid this Top-Up from the customer's wallet: keeps the transaction and passes it to 1Click. */
   sent(accountId: string, depositAddress: string, txHash: string): Effect.Effect<void, TopUpUnavailable>
-  /** EVM wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
+  /** EVM and Solana wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
   move(accountId: string, depositAddress: string, signed: SignedIntent): Effect.Effect<void, TopUpUnavailable>
-  /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
-  faucet(accountId: string): Effect.Effect<void, TopUpUnavailable>
+  /** Testnet, EVM and Solana wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
+  faucet(accountId: string, wallet?: Wallet): Effect.Effect<void, TopUpUnavailable>
   /** The customer's swaps still on their way, and those that ended in the last day. */
   transfers(accountId: string): Effect.Effect<ReadonlyArray<Transfer>>
   /** What else is in the customer's NEAR Intents account (change and refunds from 1Click), so none of it is out of sight. */
-  held(accountId: string): Effect.Effect<ReadonlyArray<HeldToken>, TopUpUnavailable>
+  held(accountId: string, wallet?: Wallet): Effect.Effect<ReadonlyArray<HeldToken>, TopUpUnavailable>
   /** A quote to send all of a held token to the customer's own wallet; they sign the transfer into it. */
-  sendBack(accountId: string, assetId: string): Effect.Effect<SendBackQuote, TopUpUnavailable>
+  sendBack(accountId: string, assetId: string, wallet?: Wallet): Effect.Effect<SendBackQuote, TopUpUnavailable>
   /** One tracking pass now, as the background loop runs every 15 seconds (tests). */
   readonly trackNow: Effect.Effect<void>
-  /** EVM wallets: a quote to send USDC from their NEAR Intents account to their own address on another chain. */
-  exit(accountId: string, destinationAsset: string, usdc: number): Effect.Effect<ExitQuote, TopUpUnavailable>
+  /** EVM and Solana wallets: a quote to send USDC from their NEAR Intents account to their own address on their own chain. */
+  exit(accountId: string, destinationAsset: string, usdc: number, wallet?: Wallet): Effect.Effect<ExitQuote, TopUpUnavailable>
 }>()("luckout/TopUp") {
   static readonly layer = Layer.effect(
     TopUp,
@@ -248,21 +262,21 @@ export class TopUp extends Context.Service<TopUp, {
                 assetId: t.assetId,
                 symbol: t.symbol,
                 chain: t.blockchain,
-                ...(t.contractAddress && EVM_CHAINS.has(t.blockchain) ? { contract: t.contractAddress } : {}),
-                ...(t.decimals !== undefined ? { decimals: t.decimals } : {})
+                ...(t.contractAddress && (EVM_CHAINS.has(t.blockchain) || t.blockchain === "sol") ? { contract: t.contractAddress } : {}),
+                ...(t.decimals !== undefined ? { decimals: t.decimals } : {}),
+                ...(t.price !== undefined ? { price: t.price } : {})
               })
             )
         ),
         Effect.mapError(unavailable)
       )
 
-      const quote = Effect.fn("TopUp.quote")(function*(accountId: string, originAsset: string, usdc: number, dry = false) {
+      const quote = Effect.fn("TopUp.quote")(function*(accountId: string, originAsset: string, usdc: number, dry = false, wallet: Wallet = walletOf(accountId)) {
         if (!mainnet && !dry) return yield* fail("Top-ups from other chains run on mainnet. On testnet, use the test USDC faucet.")
         if (!Number.isInteger(usdc) || usdc < 1_000_000 || usdc > 2_000_000_000) return yield* fail("Top up between 1 and 2,000 USDC")
         const asset = (yield* assets).find((t) => t.assetId === originAsset)
         if (!asset) return yield* fail("That token isn't supported for top-ups")
-        const evm = isEvmAccount(accountId)
-        const home = refundsToWallet({ direction: "in", account_id: accountId, chain: asset.chain })
+        const home = refundsToWallet({ direction: "in", account_id: accountId, chain: asset.chain, wallet })
         const deadline = refundsBegin()
         const asked: QuoteRequest = {
           dry,
@@ -272,11 +286,11 @@ export class TopUp extends Context.Service<TopUp, {
           destinationAsset: NEAR_USDC_ASSET,
           amount: String(usdc),
           recipient: accountId,
-          // An EVM wallet's USDC lands in its own NEAR Intents account (ADR-0011).
-          recipientType: evm ? "INTENTS" : "DESTINATION_CHAIN",
+          // An EVM or Solana wallet's USDC lands in its own NEAR Intents account (ADR-0011).
+          recipientType: wallet === "near" ? "DESTINATION_CHAIN" : "INTENTS",
           // Refunds, and the extra this asks for, go back to the paying wallet when we know its address there;
           // otherwise to the customer's own NEAR Intents account.
-          refundTo: accountId,
+          refundTo: home ? homeAddress(accountId, wallet) : accountId,
           refundType: home ? "ORIGIN_CHAIN" : "INTENTS",
           deadline: deadline.toISOString()
         }
@@ -287,8 +301,8 @@ export class TopUp extends Context.Service<TopUp, {
         if (problem) return yield* fail(`${problem}. Try again.`)
         // Every Top-Up is recorded, so the customer can always see where their money is, even after leaving.
         if (!dry) {
-          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
-                     VALUES (${q.depositAddress!}, ${accountId}, 'in', ${Number(q.amountOut)}, ${asset.symbol}, ${asset.chain}, ${q.amountInFormatted},
+          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, wallet, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
+                     VALUES (${q.depositAddress!}, ${accountId}, ${wallet}, 'in', ${Number(q.amountOut)}, ${asset.symbol}, ${asset.chain}, ${q.amountInFormatted},
                              ${q.depositMemo ?? null}, ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
         }
         return new TopUpQuote({
@@ -384,12 +398,12 @@ export class TopUp extends Context.Service<TopUp, {
         if (row) yield* oneClick.submitDeposit({ txHash, depositAddress })
       })
 
-      const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number) {
-        if (!isEvmAccount(accountId)) return yield* fail("Withdrawals to other chains are for EVM wallets")
+      const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number, wallet: Wallet = walletOf(accountId)) {
+        if (wallet === "near") return yield* fail("Withdrawals to other chains are for EVM and Solana wallets")
         if (!mainnet) return yield* fail("Withdrawals to other chains run on mainnet.")
         if (!Number.isInteger(usdc) || usdc < 1_000_000 || usdc > 2_000_000_000) return yield* fail("Withdraw between 1 and 2,000 USDC")
-        const asset = (yield* assets).find((t) => t.assetId === destinationAsset && EVM_CHAINS.has(t.chain))
-        if (!asset) return yield* fail("That token can't be withdrawn to an EVM wallet")
+        const asset = (yield* assets).find((t) => t.assetId === destinationAsset && HOME_CHAINS[wallet].has(t.chain))
+        if (!asset) return yield* fail("That token can't be withdrawn to your wallet")
         const deadline = refundsBegin()
         const asked: QuoteRequest = {
           dry: false,
@@ -400,7 +414,7 @@ export class TopUp extends Context.Service<TopUp, {
           destinationAsset,
           amount: String(usdc),
           // Their own address, on the chain they picked.
-          recipient: accountId,
+          recipient: homeAddress(accountId, wallet),
           recipientType: "DESTINATION_CHAIN",
           refundTo: accountId,
           refundType: "INTENTS",
@@ -410,8 +424,8 @@ export class TopUp extends Context.Service<TopUp, {
         if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
         const problem = echoProblem(echo, asked)
         if (problem) return yield* fail(`${problem}. Try again.`)
-        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_out, deadline, time_estimate)
-                   VALUES (${q.depositAddress}, ${accountId}, 'out', ${usdc}, ${asset.symbol}, ${asset.chain}, ${q.amountOutFormatted ?? null},
+        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, wallet, direction, usdc, symbol, chain, amount_out, deadline, time_estimate)
+                   VALUES (${q.depositAddress}, ${accountId}, ${wallet}, 'out', ${usdc}, ${asset.symbol}, ${asset.chain}, ${q.amountOutFormatted ?? null},
                            ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
         return new ExitQuote({
           depositAddress: q.depositAddress,
@@ -423,11 +437,11 @@ export class TopUp extends Context.Service<TopUp, {
         })
       })
 
-      // An EVM wallet on testnet has no NEAR account to call the faucet from: our relayer gets the test
+      // An EVM or Solana wallet on testnet has no NEAR account to call the faucet from: our relayer gets the test
       // USDC and deposits it into their NEAR Intents account, the way 1Click delivers a Top-Up on mainnet.
-      const faucet = Effect.fn("TopUp.faucet")(function*(accountId: string) {
+      const faucet = Effect.fn("TopUp.faucet")(function*(accountId: string, wallet: Wallet = walletOf(accountId)) {
         if (mainnet) return yield* fail("There's no faucet on mainnet")
-        if (!isEvmAccount(accountId)) return yield* fail("NEAR wallets call the faucet themselves")
+        if (wallet === "near") return yield* fail("NEAR wallets call the faucet themselves")
         const day = new Date().toISOString().slice(0, 10)
         const persist = (key: string) => (tx: { hash: string; bytes: string }) =>
           sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${key}, ${accountId}, ${JSON.stringify(tx)}::jsonb)
@@ -453,7 +467,7 @@ export class TopUp extends Context.Service<TopUp, {
         )
       })
 
-      // Sends a Top-Up's signed move-in once its swap has landed (EVM wallets). A refunded swap, or one that
+      // Sends a Top-Up's signed move-in once its swap has landed (EVM and Solana wallets). A refunded swap, or one that
       // never lands, leaves the money in the customer's own NEAR Intents account, where the web app offers to move it.
       const moveIn = (r: SwapRow, d: SwapDetails) =>
         Effect.gen(function*() {
@@ -600,13 +614,13 @@ export class TopUp extends Context.Service<TopUp, {
           )
         )
 
-      // An EVM wallet's USDC in NEAR Intents is its Luckout wallet balance already (ADR-0011): everything else is listed.
-      const holdings = (accountId: string) =>
+      // An EVM or Solana wallet's USDC in NEAR Intents is its Luckout wallet balance already (ADR-0011): everything else is listed.
+      const holdings = (accountId: string, wallet: Wallet) =>
         Effect.gen(function*() {
           const nearUsdc = `nep141:${near.usdcId}`
-          const evm = isEvmAccount(accountId)
+          const intents = wallet !== "near"
           const owned = yield* near.view<ReadonlyArray<{ token_id: string }>>("mt_tokens_for_owner", { account_id: accountId }, near.intentsId)
-          const ids = owned.map((t) => t.token_id).filter((id) => !(evm && id === nearUsdc))
+          const ids = owned.map((t) => t.token_id).filter((id) => !(intents && id === nearUsdc))
           if (ids.length === 0) return []
           const [balances, tokens] = yield* Effect.all([
             near.view<ReadonlyArray<string>>("mt_batch_balance_of", { account_id: accountId, token_ids: ids }, near.intentsId),
@@ -617,23 +631,22 @@ export class TopUp extends Context.Service<TopUp, {
             const t = id === nearUsdc ? { symbol: "USDC", blockchain: "near", decimals: 6 } : tokens.find((x) => x.assetId === id)
             // ponytail: tokens 1Click doesn't list are skipped; nothing Luckout sends a customer is one of them.
             if (raw === 0n || !t || t.decimals === undefined) return []
-            // An EVM wallet takes it as it is, on its own chain; a NEAR wallet as USDC (its NEAR USDC there: near-intents.org).
-            const sendable = mainnet && (evm ? EVM_CHAINS.has(t.blockchain) : id !== nearUsdc)
+            // An EVM or Solana wallet takes it as it is, on its own chain; a NEAR wallet as USDC (its NEAR USDC there: near-intents.org).
+            const sendable = mainnet && (intents ? HOME_CHAINS[wallet].has(t.blockchain) : id !== nearUsdc)
             return [{ assetId: id, symbol: t.symbol, chain: t.blockchain, raw, amount: formatUnits(raw, t.decimals), sendable }]
           })
         })
 
-      const held = (accountId: string) =>
-        holdings(accountId).pipe(
+      const held = (accountId: string, wallet: Wallet = walletOf(accountId)) =>
+        holdings(accountId, wallet).pipe(
           Effect.map((hs) => hs.map(({ raw: _, ...h }) => new HeldToken(h))),
           Effect.mapError(unavailable)
         )
 
-      const sendBack = Effect.fn("TopUp.sendBack")(function*(accountId: string, assetId: string) {
-        const h = (yield* holdings(accountId).pipe(Effect.mapError(unavailable))).find((x) => x.assetId === assetId)
+      const sendBack = Effect.fn("TopUp.sendBack")(function*(accountId: string, assetId: string, wallet: Wallet = walletOf(accountId)) {
+        const h = (yield* holdings(accountId, wallet).pipe(Effect.mapError(unavailable))).find((x) => x.assetId === assetId)
         if (!h?.sendable) return yield* fail("There's none of that to send to your wallet.")
-        const evm = isEvmAccount(accountId)
-        const to = evm ? { asset: assetId, symbol: h.symbol, chain: h.chain } : { asset: `nep141:${near.usdcId}`, symbol: "USDC", chain: "near" }
+        const to = wallet !== "near" ? { asset: assetId, symbol: h.symbol, chain: h.chain } : { asset: `nep141:${near.usdcId}`, symbol: "USDC", chain: "near" }
         const deadline = refundsBegin()
         const asked: QuoteRequest = {
           dry: false,
@@ -643,7 +656,7 @@ export class TopUp extends Context.Service<TopUp, {
           depositType: "INTENTS",
           destinationAsset: to.asset,
           amount: String(h.raw),
-          recipient: accountId,
+          recipient: homeAddress(accountId, wallet),
           recipientType: "DESTINATION_CHAIN",
           // If it doesn't go through, it's back where it was.
           refundTo: accountId,
@@ -654,8 +667,8 @@ export class TopUp extends Context.Service<TopUp, {
         if (!q.depositAddress) return yield* fail("1Click returned no deposit address")
         const problem = echoProblem(echo, asked)
         if (problem) return yield* fail(`${problem}. Try again.`)
-        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, direction, usdc, symbol, chain, amount_in, amount_out, origin_asset, origin_amount, deadline, time_estimate)
-                   VALUES (${q.depositAddress}, ${accountId}, 'back', 0, ${to.symbol}, ${to.chain}, ${h.amount}, ${q.amountOutFormatted ?? null},
+        yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, wallet, direction, usdc, symbol, chain, amount_in, amount_out, origin_asset, origin_amount, deadline, time_estimate)
+                   VALUES (${q.depositAddress}, ${accountId}, ${wallet}, 'back', 0, ${to.symbol}, ${to.chain}, ${h.amount}, ${q.amountOutFormatted ?? null},
                            ${assetId}, ${String(h.raw)}, ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
         return new SendBackQuote({
           depositAddress: q.depositAddress,
@@ -671,16 +684,17 @@ export class TopUp extends Context.Service<TopUp, {
       return TopUp.of({
         assets,
         // A price check (dry) creates nothing, so only real quotes count against the account's cap.
-        quote: (accountId, originAsset, usdc, dry = false) => (dry ? quote(accountId, originAsset, usdc, true) : capped(accountId, quote(accountId, originAsset, usdc, false))),
+        quote: (accountId, originAsset, usdc, dry = false, wallet = walletOf(accountId)) =>
+          dry ? quote(accountId, originAsset, usdc, true, wallet) : capped(accountId, quote(accountId, originAsset, usdc, false, wallet)),
         status,
         sent,
         move,
         faucet,
         transfers,
         held,
-        sendBack: (accountId, assetId) => capped(accountId, sendBack(accountId, assetId)),
+        sendBack: (accountId, assetId, wallet) => capped(accountId, sendBack(accountId, assetId, wallet)),
         trackNow: trackPass,
-        exit: (accountId, destinationAsset, usdc) => capped(accountId, exit(accountId, destinationAsset, usdc))
+        exit: (accountId, destinationAsset, usdc, wallet) => capped(accountId, exit(accountId, destinationAsset, usdc, wallet))
       })
     })
   )

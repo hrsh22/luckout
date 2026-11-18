@@ -83,7 +83,7 @@ export const Monitor = Layer.effectDiscard(
         yield* alerts.admin(`operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
       }
       if (near.relayerId && (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer) {
-        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM wallets' top-ups, withdrawals and settings wait until it has more`)
+        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM and Solana wallets' top-ups, withdrawals and settings wait until it has more`)
       }
       if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
         yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`)

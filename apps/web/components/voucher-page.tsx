@@ -395,7 +395,7 @@ function BuyAction({ quote, need, onBuy, onAdd }: {
   onBuy: (q: Quote) => void
   onAdd: (short: number) => void
 }) {
-  const { accountId, account, accountError, refresh, evm, gasFree, token } = useSession()
+  const { accountId, account, accountError, refresh, intents, gasFree, token } = useSession()
   const actions = useWalletActions()
   const shop = useShopStatus().data
   const checkout = useCheckoutEmail(token).data
@@ -448,7 +448,7 @@ function BuyAction({ quote, need, onBuy, onAdd }: {
           Raise to {[overPer && `${usd(per)} a purchase`, overDay && `${usd(daily)} a day`].filter(Boolean).join(", ")}
         </Button>
         <p className="text-sm">
-          {evm || gasFree ? "One approval, no fee" : "One approval"}, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
+          {intents || gasFree ? "One approval, no fee" : "One approval"}, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
         </p>
       </div>
     )

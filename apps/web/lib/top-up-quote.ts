@@ -1,16 +1,16 @@
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 
 /**
- * What the wallet is asked to transfer for an EVM Top-Up. The token comes from the asset the quote was asked for
+ * What the wallet is asked to transfer for an EVM or Solana Top-Up. The token comes from the asset the quote was asked for
  * and everything else from the quote; a pair that doesn't belong together is refused, because the wrong token at a
  * deposit address is the customer's money sent where nothing credits it.
  */
 export const transferFor = (
-  asset: Pick<TopUpAsset, "symbol" | "chain" | "contract">,
+  asset: Pick<TopUpAsset, "symbol" | "chain" | "contract" | "decimals">,
   q: Pick<TopUpQuote, "symbol" | "chain" | "depositAddress" | "amountIn">
 ) => {
   if (asset.symbol !== q.symbol || asset.chain !== q.chain) throw new Error("This price was for another token. Nothing was sent: start the top-up again.")
-  return { chain: q.chain, contract: asset.contract, to: q.depositAddress, amount: q.amountIn }
+  return { chain: q.chain, contract: asset.contract, decimals: asset.decimals, to: q.depositAddress, amount: q.amountIn }
 }
 
 type Priced = Pick<TopUpQuote, "symbol" | "chain" | "amountInFormatted">

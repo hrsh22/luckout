@@ -7,11 +7,12 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet, TransferReverted } from "@/lib/evm"
+import { sendFromWallet, TransferReverted, walletChain } from "@/lib/evm"
 import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { pendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
+import { sendFromSolana } from "@/lib/solana"
 import { pricedAsShown, transferFor } from "@/lib/top-up-quote"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
@@ -21,12 +22,13 @@ import { toast } from "sonner"
 const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 
 /**
- * An EVM wallet's Top-Up (ADR-0011): 1Click swaps the token into exact USDC in the customer's own NEAR
+ * An EVM or Solana wallet's Top-Up (ADR-0011): 1Click swaps the token into exact USDC in the customer's own NEAR
  * Intents account, and the intent they sign before sending moves it into Luckout once it lands. The
  * transfer on their own chain is the only fee they pay.
  */
-export function TopUpEvm({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
-  const { accountId, token, refresh, signIntent } = useSession()
+export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
+  const { accountId, token, refresh, signIntent, wallet } = useSession()
+  const kind = wallet === "solana" ? "solana" : "evm"
   const actions = useWalletActions()
   const qc = useQueryClient()
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
@@ -48,14 +50,14 @@ export function TopUpEvm({ onDone, onContinue, need }: { onDone?: (ok: boolean) 
   useEffect(() => {
     if (!token) return
     api((c) => c.topup.assets(), token).then((all) => {
-      const mine = sortAssets(all.filter((a) => EVM_CHAIN_IDS[a.chain]))
+      const mine = sortAssets(all.filter((a) => walletChain(kind, a.chain)))
       setAssets(mine)
       setAssetId(mine[0]?.assetId ?? "")
     }, (e) => setError(errorMessage(e)))
-  }, [token])
+  }, [token, kind])
 
-  // What the wallet holds on each chain (Reown's balance lookup): it orders the tokens and says what's short.
-  const { holdings, gas } = useWalletHoldings(accountId ?? undefined, assets)
+  // What the wallet holds on each chain: it orders the tokens and says what's short.
+  const { holdings, gas } = useWalletHoldings(accountId ?? undefined, kind, assets)
   const micro = toMicro(amount)
   const covers = (id: string) => (holdings?.get(id)?.usd ?? 0) >= (micro / 1e6) * 1.02
   const ordered = useMemo(() => {
@@ -156,7 +158,7 @@ export function TopUpEvm({ onDone, onContinue, need }: { onDone?: (ok: boolean) 
       if (Date.now() > Date.parse(q.deadline)) throw new Error("This price has expired. Nothing was sent: top up again for a new one.")
       await signMoveIn(q)
       try {
-        const txHash = await sendFromWallet(accountId, transfer, () => setSent(true))
+        const txHash = await (kind === "solana" ? sendFromSolana : sendFromWallet)(accountId, transfer, () => setSent(true))
         // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
         void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
       } catch (e) {

@@ -61,7 +61,9 @@ export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | und
         <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
       </p>
       <p className="text-sm text-muted">
-        Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee: {FEES[q.chain] ?? "set by your wallet"}
+        Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee:{" "}
+        {/* A token sent on Solana also opens the deposit address's account for that token, which the sender pays for. */}
+        {q.chain === "sol" && q.symbol !== "SOL" ? "about 0.002 SOL, with the deposit address's token account" : FEES[q.chain] ?? "set by your wallet"}
       </p>
       {warning && <p className="text-sm font-medium text-warn">{warning}</p>}
     </div>
