@@ -337,6 +337,21 @@ export class Refill extends Context.Service<Refill, {
           return yield* near.treasurySend(receiver, txActions, (signed) => save(row.id, { [column]: signed }))
         })
 
+      /**
+       * The refill waits at fund for `why` (the panel shows it), and an admin hears `alert` only when that's news.
+       * The reason lives on the row, so a refill waiting days for the owner says so once, not every pass or restart.
+       * Customers waiting for it are news too: they're part of the reason. A float top-up waits quietly.
+       */
+      const hold = (row: Row, why: string, alert: string) =>
+        Effect.gen(function*() {
+          const c = yield* credit.view
+          const customers = c.waiting.count > 0 ? ` ${c.waiting.count} purchase(s) worth ${usd(c.waiting.total)} are waiting for ${floatName}.` : ""
+          if (row.error === why + customers) return "wait" as Next
+          yield* save(row.id, { error: why + customers })
+          if (!isFloat(row)) yield* alerts.admin(alert + customers)
+          return "wait" as Next
+        })
+
       const step = (row: Row): Effect.Effect<Next, Unknown> =>
         Effect.gen(function*() {
           const amount = Number(row.amount)
@@ -372,16 +387,12 @@ export class Refill extends Context.Service<Refill, {
               // from the quote on, nothing may make it wait.
               const gas = yield* spendable(near, near.treasuryId!)
               if (gas < TREASURY_MIN_GAS) {
-                yield* save(row.id, { error: "The treasury needs a little NEAR for gas." })
-                yield* alerts.admin(`The treasury ${near.treasuryId} is out of NEAR for gas; send it 0.1 NEAR in Admin → Gas.`)
-                return "wait"
+                return yield* hold(row, "The treasury needs a little NEAR for gas.", `The treasury ${near.treasuryId} is out of NEAR for gas; send it 0.1 NEAR in Admin → Gas.`)
               }
               const w = yield* base.balances
               if (w.eth < BASE_MIN_GAS) {
                 const wallet = yield* base.address
-                yield* save(row.id, { error: "The Base wallet needs a little ETH for gas." })
-                yield* alerts.admin(`The Base wallet ${wallet} is out of ETH for gas; send it about $1 of ETH on Base.`)
-                return "wait"
+                return yield* hold(row, "The Base wallet needs a little ETH for gas.", `The Base wallet ${wallet} is out of ETH for gas; send it about $1 of ETH on Base.`)
               }
               // A refill uses what the wallet holds first (the float, or a swap that finished late); a float
               // top-up brings its whole amount in.
@@ -398,9 +409,11 @@ export class Refill extends Context.Service<Refill, {
                 return "next"
               }
               if (t.contractTreasury !== near.treasuryId) {
-                yield* save(row.id, { error: `The contract's treasury is ${t.contractTreasury ?? "not set"}, not ${near.treasuryId}. Fix it in Admin → Treasury.` })
-                yield* alerts.admin(`Refills can't be funded: the contract's treasury is ${t.contractTreasury ?? "not set"}, but the server signs as ${near.treasuryId}.`)
-                return "wait"
+                return yield* hold(
+                  row,
+                  `The contract's treasury is ${t.contractTreasury ?? "not set"}, not ${near.treasuryId}. Fix it in Admin → Treasury.`,
+                  `Refills can't be funded: the contract's treasury is ${t.contractTreasury ?? "not set"}, but the server signs as ${near.treasuryId}.`
+                )
               }
               // Short of money for all of it: an automatic refill shrinks to what can be funded now, so a
               // customer's card doesn't wait on topping the credit back up. Only here, before anything is signed.
@@ -420,21 +433,28 @@ export class Refill extends Context.Service<Refill, {
               const shortfall = cents(need - t.usdc)
               // A float top-up is never urgent: it waits for money quietly (the panel says why), and steps
               // aside if a real refill comes due meanwhile (giveWay).
-              const tell = (text: string) => (isFloat(row) ? Effect.void : alerts.admin(text))
               if (t.dailyCap === 0) {
-                yield* save(row.id, { error: `Waiting for ${usd(shortfall)} of proceeds in the treasury (manual mode).` })
-                yield* tell(`A ${refillName} is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`)
-                return "wait"
+                // Asking to move proceeds that aren't there yet would only confuse: say where the money can come from.
+                return yield* (t.proceeds >= shortfall
+                  ? hold(
+                    row,
+                    `Waiting for ${usd(shortfall)} of proceeds in the treasury (manual mode).`,
+                    `A ${refillName} is waiting: move ${usd(shortfall)} of proceeds to the treasury in Admin → Treasury, or switch it to automatic.`
+                  )
+                  : hold(
+                    row,
+                    `Waiting for ${usd(shortfall)} in the treasury (manual mode); the proceeds don't cover it yet.`,
+                    `A ${refillName} is waiting for ${usd(shortfall)} in the treasury, more than the proceeds hold: send USDC to ${near.treasuryId}, or move proceeds in Admin → Treasury once sales cover it.`
+                  ))
               }
               const capLeft = t.dailyCap - t.sweptToday
               if (Math.min(capLeft, t.proceeds) < shortfall) {
-                // Says which limit binds and what lifts it; the refill carries on by itself once it lifts.
+                // Says which limit binds and what lifts it; the refill carries on by itself once it lifts. No live
+                // proceeds figure in it: the reason would change with every sale and alert again each time.
                 const fix = capLeft < shortfall
                   ? `Today's cap allows ${usd(Math.max(0, capLeft))} more (${usd(t.sweptToday)} of ${usd(t.dailyCap)} used): raise it in Admin → Treasury → Change mode, say to ${usd(suggestedCap(t.dailyCap, t.sweptToday + shortfall))}, or it carries on when the cap resets.`
-                  : `The proceeds hold only ${usd(t.proceeds)}: it carries on as sales come in, or send USDC to ${near.treasuryId} to cover it now.`
-                yield* save(row.id, { error: `The treasury needs ${usd(shortfall)} more. ${fix}` })
-                yield* tell(`A ${usd(amount)} ${refillName} needs ${usd(shortfall)} more in the treasury. ${fix}`)
-                return "wait"
+                  : `The proceeds don't cover it yet: it carries on as sales come in, or send USDC to ${near.treasuryId} to cover it now.`
+                return yield* hold(row, `The treasury needs ${usd(shortfall)} more. ${fix}`, `A ${usd(amount)} ${refillName} needs ${usd(shortfall)} more in the treasury. ${fix}`)
               }
               // Pull exactly the shortfall: the treasury never holds more than refills need.
               const pulled = yield* treasuryTx(row, "sweep_tx", near.contractId, [
