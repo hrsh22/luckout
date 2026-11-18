@@ -1,4 +1,4 @@
-import { BITREFILL_ACCOUNT_LIMITS, GUEST_LIMITS, type Mode, noLimit } from "@luckout/api"
+import { BITREFILL_ACCOUNT_LIMITS, GUEST_LIMITS, MAX_CART, type Mode, noLimit } from "@luckout/api"
 import { Effect } from "effect"
 import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
@@ -71,11 +71,24 @@ export const TOOLS = [
     value: { type: "string", description: "The amount exactly as get_voucher lists it" },
     mode
   }, ["voucher_id", "value"]),
-  tool("prepare_purchase", "Put a Confirm button under your reply. Nothing is bought until they tap it. Refused if their balance or limits don't cover it.", {
-    voucher_id: { type: "string" },
-    value: { type: "string" },
-    mode
-  }, ["voucher_id", "value"]),
+  tool(
+    "prepare_purchase",
+    "Put one Buy button under your reply for every card listed: one card, or several bought together (up to 15). Nothing is bought until they tap it. Refused if their balance or limits don't cover them all.",
+    {
+      cards: {
+        type: "array",
+        minItems: 1,
+        maxItems: MAX_CART,
+        items: {
+          type: "object",
+          properties: { voucher_id: { type: "string" }, value: { type: "string", description: "The amount exactly as get_voucher lists it" }, mode },
+          required: ["voucher_id", "value"],
+          additionalProperties: false
+        }
+      }
+    },
+    ["cards"]
+  ),
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included)."),
   tool("set_checkout_email", "Save the email Bitrefill sends each of their cards (and its receipt) to. Only an address the customer typed in their latest message is accepted. Needed before buying when prepare_purchase says so.", {
     email: { type: "string" }
@@ -103,7 +116,7 @@ Rules:
 - Every price, balance and quote comes from a tool. Never guess a number.
 - A card only works in its own country (its works_in). Before preparing one, make sure it's for the country they'll use it in; if they haven't said, ask. Never offer another country's card as a substitute.
 - Only offer a purchase they can pay for. If a tool says they're short or over a limit, say by how much and give the link.
-- To buy, call prepare_purchase; they confirm with a button. Never say it's bought before they confirm.
+- To buy, call prepare_purchase with every card they want now in one call (up to 15, each with its own amount and mode); they confirm with one button. Never say it's bought before they confirm.
 - No cashback means they paid the up-front amount; never call that a win.
 - The bot sends voucher codes itself; never ask for or repeat them.
 - If prepare_purchase says they have no email for their cards, ask for one in a line (Bitrefill emails each card there too and can help with a bad code; a throwaway one is fine), save it with set_checkout_email, then prepare again. Don't ask for it otherwise.${testnet
@@ -135,13 +148,16 @@ interface Account {
 /** A Spending Limit for the model: dollars, or "No limit" when they turned it off (u128::MAX). */
 const limit = (micro: string) => (noLimit(micro) ? "No limit" : usd(Number(micro)))
 
-/** Why the customer can't buy this right now, in words the model can pass on; undefined if they can. */
-export const blocker = (a: Account | null, maxPrice: number, web: string, now = Date.now()) => {
+/**
+ * Why the customer can't buy this right now, in words the model can pass on; undefined if they can. `maxPrice` is what
+ * it debits in all, `largest` the most any one card debits (the per-purchase limit applies to each).
+ */
+export const blocker = (a: Account | null, maxPrice: number, web: string, now = Date.now(), largest = maxPrice) => {
   const balance = Number(a?.balance ?? 0)
   if (balance < maxPrice) {
     return `Not enough balance: they have ${usd(balance)} and this needs ${usdUp(maxPrice)}, so they're ${usdUp(maxPrice - balance)} short. Add funds at ${web}/wallet`
   }
-  if (maxPrice > Number(a!.per_purchase_limit)) {
+  if (largest > Number(a!.per_purchase_limit)) {
     return `Over their per-purchase limit of ${usd(Number(a!.per_purchase_limit))}. They can raise it in one tap when they buy on the web, or at ${web}/wallet#limits`
   }
   const spent = a!.day === Math.floor(now / 86_400_000) ? Number(a!.spent_today) : 0
@@ -207,7 +223,7 @@ export const makeAgent = (deps: {
   const resolveMode = (a: Account | null, name: string | undefined) => (name && MODES[name]) || a?.default_mode || ("normal" as Mode)
   const game = (m: Mode) => (m === "normal" ? undefined : m.lucky)
 
-  const tools = (accountId: string, text: string, prepare: (p: Pending) => void) => ({
+  const tools = (accountId: string, text: string, prepare: (cards: ReadonlyArray<Pending>) => void) => ({
     search_vouchers: ({ query }: { query: string }) =>
       run(deps.bitrefill.search(query).pipe(Effect.map((vs) => {
         const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, works_in: worksIn(v.countryCode, v.countryName) }))
@@ -270,15 +286,23 @@ export const makeAgent = (deps: {
           ...(why ? { cannot_buy_yet: why } : {})
         }
       })),
-    prepare_purchase: ({ voucher_id, value, mode }: { voucher_id: string; value: string; mode?: string }) =>
+    prepare_purchase: ({ cards }: { cards: ReadonlyArray<{ voucher_id: string; value: string; mode?: string }> }) =>
       run(Effect.gen(function*() {
+        if (!Array.isArray(cards) || cards.length === 0 || cards.length > MAX_CART) return { error: `List 1 to ${MAX_CART} cards.` }
         const a = yield* account(accountId)
-        const m = resolveMode(a, mode)
-        const [voucher, q, useBy] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m)), deps.purchases.useBy(voucher_id)])
+        const modes = cards.map((c) => resolveMode(a, c.mode))
+        // The cart's own terms (ADR-0013): each Lucky card priced on the reserve the cards before it left, Normal when
+        // there's none left for it. One card is a cart of one.
+        const [vouchers, quotes, useBys] = yield* Effect.all([
+          Effect.forEach(cards, (c) => deps.bitrefill.voucher(c.voucher_id)),
+          deps.purchases.quoteCart(cards.map((c, i) => ({ voucherId: c.voucher_id, value: c.value, mode: modes[i]! }))),
+          Effect.forEach(cards, (c) => deps.purchases.useBy(c.voucher_id))
+        ])
         // A button that would fail on tap is worse than no button: say what's in the way instead.
         const closed = yield* deps.shopClosed
         if (closed) return { error: closed }
-        const why = blocker(a, q.maxPrice, deps.web)
+        const total = quotes.reduce((s, q) => s + q.maxPrice, 0)
+        const why = blocker(a, total, deps.web, Date.now(), Math.max(...quotes.map((q) => q.maxPrice)))
         if (why) return { error: why }
         // Bitrefill needs an email with each card (ADR-0012): without one the Buy button would only fail.
         const email = yield* deps.purchases.checkoutEmail(accountId)
@@ -289,9 +313,29 @@ export const makeAgent = (deps: {
             }`
           }
         }
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount, ...(email.needed && email.email ? { receiptTo: email.email } : {}), ...(useBy ? { useBy } : {}) })
+        prepare(cards.map((c, i) => {
+          const v = vouchers[i]!
+          const q = quotes[i]!
+          const useBy = useBys[i]
+          return {
+            voucherId: v.id,
+            voucherName: v.name,
+            value: c.value,
+            currency: v.currency,
+            country: v.countryCode,
+            mode: q.mode,
+            maxPrice: q.maxPrice,
+            referencePrice: q.referencePrice,
+            luckyAmount: q.luckyAmount,
+            ...(email.needed && email.email ? { receiptTo: email.email } : {}),
+            ...(useBy ? { useBy } : {})
+          }
+        }))
+        const normal = cards.flatMap((c, i) => (modes[i] !== "normal" && quotes[i]!.mode === "normal" ? [`${vouchers[i]!.name} ${c.value}`] : []))
         return {
-          shown: "Under your reply the customer sees the exact card, mode, price and use-by date, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
+          shown: `Under your reply the customer sees ${cards.length === 1 ? "the exact card" : "every card"}, mode, price and use-by date, and one Buy button. So reply with one short line and no prices, like: Here ${cards.length === 1 ? "it is" : "they are"}, tap Buy when you're ready.`,
+          // Said by the model in a few words, so a switch to Normal is never a surprise.
+          ...(normal.length > 0 ? { bought_normal: `The cashback reserve can't cover these right now, so they're at the normal price: ${normal.join(", ")}` } : {})
         }
       })),
     // Saved only when it's in the message being answered; anything else goes back to the model as a refusal.
@@ -315,7 +359,7 @@ export const makeAgent = (deps: {
    * `typed` can set the Checkout Email.
    */
   return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string, typed = text) => {
-    let pending: Pending | undefined
+    let pending: ReadonlyArray<Pending> | undefined
     const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, typed, (p) => (pending = p))
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
     // Signatures are checked alongside the tool loop and all awaited before anything reaches the customer.

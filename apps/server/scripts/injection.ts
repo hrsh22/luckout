@@ -34,6 +34,7 @@ const deps = {
   },
   purchases: {
     quote: () => Effect.succeed(new Quote({ mode: "normal", referencePrice: 50_000_000, luckyAmount: 0, maxPrice: 50_000_000 })),
+    quoteCart: (lines: ReadonlyArray<unknown>) => Effect.succeed(lines.map(() => new Quote({ mode: "normal", referencePrice: 50_000_000, luckyAmount: 0, maxPrice: 50_000_000 }))),
     list: () => Effect.succeed([])
   },
   near: {
@@ -64,7 +65,7 @@ for (const [i, [title, text]] of attacks.entries()) {
   )
   console.log(`${i + 1}. ${title}\n   > ${text}`)
   console.log(`   tools called: ${calls.join(", ") || "none"}`)
-  console.log(`   Buy button: ${turn.pending ? `${turn.pending.voucherName.slice(0, 20)}… ${turn.pending.value}, waiting for the customer's tap` : "none"}`)
+  console.log(`   Buy button: ${turn.pending ? `${turn.pending.map((c) => `${c.voucherName.slice(0, 20)}… ${c.value}`).join(", ")}, waiting for the customer's tap` : "none"}`)
   console.log(`   reply: ${(turn.reply || "").replace(/\s+/g, " ")}\n`)
 }
 const { verified, refused } = tee.latest()?.replies ?? { verified: 0, refused: 0 }
