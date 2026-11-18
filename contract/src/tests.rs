@@ -2417,3 +2417,55 @@ fn the_smallest_withdrawal_is_one_base_unit() {
     let _ = c.withdraw_reserve(U128(1));
     assert_eq!(c.free_reserve, 500 * USDC - 1);
 }
+
+// ---------- the first deposit carries the Default Mode ----------
+
+fn mode_of(c: &Contract, who: AccountId) -> Mode {
+    c.get_account(who).unwrap().default_mode
+}
+
+#[test]
+fn a_wallets_first_deposit_starts_its_account_in_the_mode_it_names() {
+    let mut c = setup(0, USDC);
+    let _ = c.ft_on_transfer(id("bob.near"), U128(5 * USDC), r#"{"mode":{"lucky":1}}"#.into());
+    assert_eq!(mode_of(&c, id("bob.near")), Mode::Lucky(1));
+    assert_eq!(c.get_account(id("bob.near")).unwrap().balance.0, 5 * USDC);
+}
+
+#[test]
+fn a_deposit_never_changes_an_existing_accounts_mode() {
+    let mut c = setup(0, USDC);
+    let _ = c.ft_on_transfer(alice(), U128(5 * USDC), r#"{"mode":{"lucky":2}}"#.into());
+    assert_eq!(mode_of(&c, alice()), Mode::Normal);
+    assert_eq!(c.get_account(alice()).unwrap().balance.0, 6 * USDC, "the money still lands");
+}
+
+#[test]
+fn a_move_in_creating_an_evm_account_sets_its_mode_but_a_gift_to_an_existing_one_does_not() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let first = format!(r#"{{"for":"{}","mode":{{"lucky":1}}}}"#, evm());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), first);
+    assert_eq!(mode_of(&c, evm()), Mode::Lucky(1));
+    // Anyone can credit an EVM account through NEAR Intents: that must not change its settings.
+    let gift = format!(r#"{{"for":"{}","mode":"normal"}}"#, evm());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), gift);
+    assert_eq!(mode_of(&c, evm()), Mode::Lucky(1));
+    assert_eq!(evm_balance(&c), 10 * USDC);
+}
+
+#[test]
+fn an_unknown_game_version_is_ignored_and_the_money_still_lands() {
+    let mut c = setup(0, USDC);
+    let _ = c.ft_on_transfer(id("bob.near"), U128(5 * USDC), r#"{"mode":{"lucky":99}}"#.into());
+    assert_eq!(mode_of(&c, id("bob.near")), Mode::Normal);
+    assert_eq!(c.get_account(id("bob.near")).unwrap().balance.0, 5 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "Name the account to credit")]
+fn a_move_in_from_intents_must_still_name_the_account() {
+    let mut c = setup(0, USDC);
+    as_(usdc());
+    let _ = c.ft_on_transfer(intents(), U128(5 * USDC), r#"{"mode":"normal"}"#.into());
+}

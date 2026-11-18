@@ -30,6 +30,22 @@ const AUTH_ACTIONS = ["withdraw", "set_limits", "set_default_mode", "reclaim", "
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
+/** A move-in message's `mode`: undefined when it names none, null when it isn't "normal" or exactly `{"lucky":n}`. */
+const startMode = (msg: unknown): "normal" | { lucky: number } | undefined | null => {
+  let mode: unknown
+  try {
+    mode = (JSON.parse(String(msg)) as { mode?: unknown }).mode
+  } catch {
+    return null
+  }
+  if (mode === undefined || mode === "normal") return mode
+  const lucky = (mode as { lucky?: unknown } | null)?.lucky
+  return typeof mode === "object" && Object.keys(mode!).length === 1 && Number.isInteger(lucky) && (lucky as number) >= 0 &&
+      (lucky as number) < 2 ** 32
+    ? { lucky: lucky as number }
+    : null
+}
+
 export const parsePayload = (payload: string): IntentPayload | undefined => {
   try {
     const p = JSON.parse(payload)
@@ -50,7 +66,10 @@ export const intentRefusal = (intent: Record<string, unknown>, r: IntentRules): 
       if (typeof amount !== "string" || !/^[1-9][0-9]{0,15}$/.test(amount) || BigInt(amount) < 1_000_000n) {
         return "Move at least 1 USDC into Luckout."
       }
-      return same(intent, moveInIntent({ usdcId: r.usdcId, contractId: r.contractId, account: r.accountId, amount }))
+      // A first move-in may name the Default Mode the account starts with, in the shape the contract reads.
+      const mode = startMode(intent.msg)
+      if (mode === null) return "Luckout only pays to move USDC into your own Balance."
+      return same(intent, moveInIntent({ usdcId: r.usdcId, contractId: r.contractId, account: r.accountId, amount, mode }))
         ? undefined
         : "Luckout only pays to move USDC into your own Balance."
     }

@@ -10,6 +10,7 @@ import { api, cancelled, errorMessage } from "@/lib/api"
 import { CHAIN_NAMES, EVM_CHAIN_IDS, sendFromWallet, TransferReverted } from "@/lib/evm"
 import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
+import { pendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
 import { pricedAsShown, transferFor } from "@/lib/top-up-quote"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
@@ -128,7 +129,9 @@ export function TopUpEvm({ onDone, onContinue, need }: { onDone?: (ok: boolean) 
   /** Signed before anything is sent, so the USDC moves in even if this tab is closed. */
   const signMoveIn = async (q: TopUpQuote) => {
     if (!accountId || signed) return
-    const move = await signIntent(moveInIntent({ usdcId, contractId, account: accountId, amount: String(q.usdcOut) }), 24 * 60)
+    // A first Top-Up starts the account in Welcome's pick, so the mode needs no signature of its own.
+    const mode = pendingMode(accountId)
+    const move = await signIntent(moveInIntent({ usdcId, contractId, account: accountId, amount: String(q.usdcOut), mode }), 24 * 60)
     await api((c) => c.topup.move({ payload: { depositAddress: q.depositAddress, signed: move } }), token)
     setSigned(true)
     setStatus(new TopUpStatus({ status: "PENDING_DEPOSIT", move: "waiting" }))

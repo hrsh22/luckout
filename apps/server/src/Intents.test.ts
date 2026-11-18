@@ -27,6 +27,8 @@ const moveIn = (amount = "5000000", account = ME) => moveInIntent({ usdcId: ids.
 test("our own intents, built by the web app's helpers, are paid for", () => {
   const ok = [
     moveIn(),
+    moveInIntent({ usdcId: ids.usdcId, contractId: ids.contractId, account: ME, amount: "5000000", mode: { lucky: 1 } }),
+    moveInIntent({ usdcId: ids.usdcId, contractId: ids.contractId, account: ME, amount: "5000000", mode: "normal" }),
     authCallIntent(ids.contractId, { withdraw: { amount: "1000000" } }),
     authCallIntent(ids.contractId, { set_limits: { per_purchase: "1", daily: "2" } }),
     authCallIntent(ids.contractId, { set_default_mode: { mode: { lucky: 1 } } }),
@@ -53,6 +55,9 @@ test("anything else, or ours with one thing changed, is refused", () => {
     ["no intents", payload([])],
     ["crediting someone else", payload([moveIn("5000000", "0x" + "2".repeat(40))])],
     ["under 1 USDC", payload([moveIn("999999")])],
+    ["a mode the contract can't read", payload([{ ...moveIn(), msg: JSON.stringify({ for: ME, mode: { lucky: 1, also: 2 } }) }])],
+    ["a mode that isn't a mode", payload([{ ...moveIn(), msg: JSON.stringify({ for: ME, mode: "jackpot" }) }])],
+    ["a mode with something else", payload([{ ...moveIn(), msg: JSON.stringify({ for: ME, mode: "normal", also: 1 }) }])],
     ["to another contract", payload([{ ...moveIn(), receiver_id: "evil.test" }])],
     ["another token", payload([{ ...moveIn(), token: "fake-usdc.test" }])],
     ["a storage deposit", payload([{ ...moveIn(), storage_deposit: "1250000000000000000000" }])],
