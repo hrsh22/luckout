@@ -6,18 +6,19 @@ import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
 import { limitsText, tokenAmount, usd } from "./format"
 import { CHAIN_NAMES } from "./evm"
-import { modeName } from "./modes"
+import { modeName, sameMode } from "./modes"
 import { pendingMode, setPendingMode } from "./onboarding"
-import { type Call, contractId, intentsId, usdcId } from "./near"
+import { type Call, contractId, intentsId, usdcId, view } from "./near"
 import { useSession } from "./session"
 import { oneAtATime } from "./utils"
 
 const ONE_YOCTO = "1"
 
-export const depositCall = (micro: number): Call => ({
+/** `mode` is the Default Mode the account starts with if this deposit creates it (Welcome's pick); otherwise ignored. */
+export const depositCall = (micro: number, mode?: Mode | undefined): Call => ({
   receiverId: usdcId,
   method: "ft_transfer_call",
-  args: { receiver_id: contractId, amount: String(micro), msg: "" },
+  args: { receiver_id: contractId, amount: String(micro), msg: mode === undefined ? "" : JSON.stringify({ mode }) },
   deposit: ONE_YOCTO,
   tgas: 100
 })
@@ -60,16 +61,20 @@ export function useWalletActions() {
       args: { mode },
       deposit: ONE_YOCTO
     })
+  /** Welcome's pick, made before there was an account to save it on: the first deposit carries it. */
+  const startMode = () => (accountId ? pendingMode(accountId) : undefined)
   /**
-   * A mode chosen before the first deposit, when the contract had no account to save it on: saved once that deposit
-   * lands, by whichever of its ends sees it first (a deposit, the top-up form, or the header seeing a top-up land),
-   * each after its own wallet request is done.
+   * Once the first deposit has landed, Welcome's pick is done with: that deposit started the account in it. Only if
+   * someone else's deposit made the account first (a gift through NEAR Intents) did it start otherwise, and then the
+   * customer is asked to save their pick. Run by whichever end sees the deposit land first, after its own wallet request.
    */
   const savePendingMode = async () => {
-    const m = accountId ? pendingMode(accountId) : undefined
+    const m = startMode()
     if (!accountId || m === undefined) return
     setPendingMode(accountId, undefined)
-    if (m !== "normal") await setDefaultMode(m)
+    const started = await view<{ default_mode: Mode } | null>(contractId, "get_account", { account_id: accountId })
+      .then((a) => a?.default_mode, () => undefined)
+    if (started !== undefined && !sameMode(started, m)) await setDefaultMode(m)
   }
   const withdrawCall = (micro: number): Call => ({
     receiverId: contractId,
@@ -90,12 +95,12 @@ export function useWalletActions() {
         ? steps("Getting 100 test USDC", "100 test USDC added to your balance", async (say) => {
           await api((c) => c.topup.faucet(), token)
           say("Moving it into Luckout")
-          await send(depositCall(100_000_000))
+          await send(depositCall(100_000_000, startMode()))
         })
-        : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000)),
+        : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000, startMode())),
     /** From the NEAR wallet, or for an EVM wallet from its NEAR Intents account. */
     deposit: (micro: number) =>
-      run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro))
+      run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro, startMode()))
         .then(async (ok) => (ok && (await savePendingMode()), ok)),
     withdraw: (micro: number) =>
       run(`Withdrawing ${usd(micro)}`, evm ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),

@@ -93,8 +93,10 @@ const AUTH_METHODS = new Set(["withdraw", "set_default_mode", "set_limits", "rec
 const asIntent = (account: string, c: Call) => {
   if (c.receiverId === contractId && AUTH_METHODS.has(c.method)) return authCallIntent(contractId, { [c.method]: c.args } as AuthAction)
   const args = c.args as { receiver_id?: string; amount?: string; msg?: string }
-  if (c.receiverId === usdcId && c.method === "ft_transfer_call" && args.receiver_id === contractId && args.msg === "") {
-    return moveInIntent({ usdcId, contractId, account, amount: String(args.amount) })
+  // A deposit (depositCall), with the Default Mode a first one may carry.
+  const mode = args.msg?.startsWith("{") ? (JSON.parse(args.msg) as { mode?: Mode }).mode : undefined
+  if (c.receiverId === usdcId && c.method === "ft_transfer_call" && args.receiver_id === contractId && (args.msg === "" || mode !== undefined)) {
+    return moveInIntent({ usdcId, contractId, account, amount: String(args.amount), mode })
   }
   throw new Error("EVM wallets can't do that here.")
 }

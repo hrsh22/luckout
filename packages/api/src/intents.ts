@@ -16,13 +16,22 @@ export type AuthAction =
 /** Gas `intents.near` must give `on_auth`, whoever submits it: a withdrawal's transfer into Intents and our callback. */
 export const AUTH_CALL_GAS = "80000000000000"
 
-/** Moves `amount` USDC from the customer's NEAR Intents account into their Luckout Balance. */
-export const moveInIntent = (o: { usdcId: string; contractId: string; account: string; amount: string }) => ({
+/**
+ * Moves `amount` USDC from the customer's NEAR Intents account into their Luckout Balance. `mode` is the Default Mode
+ * the account starts with if this creates it (Welcome's pick); the contract ignores it for an existing account.
+ */
+export const moveInIntent = (o: {
+  usdcId: string
+  contractId: string
+  account: string
+  amount: string
+  mode?: "normal" | { readonly lucky: number } | undefined
+}) => ({
   intent: "ft_withdraw",
   token: o.usdcId,
   receiver_id: o.contractId,
   amount: o.amount,
-  msg: JSON.stringify({ for: o.account })
+  msg: JSON.stringify(o.mode === undefined ? { for: o.account } : { for: o.account, mode: o.mode })
 })
 
 /** Has `intents.near` call our contract's `on_auth` as the signer. */

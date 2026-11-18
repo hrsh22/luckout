@@ -71,12 +71,15 @@ pub fn is_evm_account(id: &AccountId) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A deposit from NEAR Intents names the EVM account it credits: `{"for":"0x…"}`.
+/// A deposit's JSON `msg`. One from NEAR Intents names the EVM account it credits (`{"for":"0x…"}`); any
+/// deposit may carry the Default Mode the account starts with (`"mode"`), which applies only if this deposit
+/// creates the account: Welcome asks for it before there is an account to save it on.
 #[near(serializers = [json])]
 #[serde(deny_unknown_fields)]
-struct DepositFor {
+struct DepositMsg {
     #[serde(rename = "for")]
-    account: AccountId,
+    account: Option<AccountId>,
+    mode: Option<Mode>,
 }
 
 /// What an EVM customer signs through NEAR Intents' `AuthCall` (ADR-0011): the same calls a NEAR
@@ -317,7 +320,8 @@ impl Contract {
     // ---------- deposits ----------
 
     /// USDC `ft_transfer_call` hook. msg "" credits the sender's Balance; msg "reserve" (owner only)
-    /// funds the Cashback Reserve; msg `{"for":"0x…"}` from NEAR Intents credits that EVM customer.
+    /// funds the Cashback Reserve; msg `{"for":"0x…"}` from NEAR Intents credits that EVM customer. A JSON msg
+    /// may add `"mode"`, the Default Mode a new account starts with (`{"mode":{"lucky":1}}` from a wallet).
     pub fn ft_on_transfer(
         &mut self,
         sender_id: AccountId,
@@ -333,16 +337,23 @@ impl Contract {
             "" => {
                 // NEAR Intents always names the customer: crediting `intents.near` itself would strand the money.
                 require!(sender_id != intents, "Name the account to credit");
-                self.credit(sender_id, amount);
+                self.credit(sender_id, amount, None);
             }
-            _ if sender_id == intents && msg.starts_with('{') => {
-                let d: DepositFor = near_sdk::serde_json::from_str(&msg)
+            _ if msg.starts_with('{') => {
+                let d: DepositMsg = near_sdk::serde_json::from_str(&msg)
                     .unwrap_or_else(|_| env::panic_str("Unknown deposit message"));
-                require!(
-                    is_evm_account(&d.account),
-                    "Only EVM accounts are credited this way"
-                );
-                self.credit(d.account, amount);
+                let id = if sender_id == intents {
+                    let id = d
+                        .account
+                        .unwrap_or_else(|| env::panic_str("Name the account to credit"));
+                    require!(is_evm_account(&id), "Only EVM accounts are credited this way");
+                    id
+                } else {
+                    // Only NEAR Intents names someone else: a wallet's deposit credits the wallet.
+                    require!(d.account.is_none(), "Unknown deposit message");
+                    sender_id
+                };
+                self.credit(id, amount, d.mode);
             }
             "reserve" => {
                 require!(sender_id == self.owner, "Only the owner funds the reserve");
@@ -1014,12 +1025,30 @@ impl Contract {
         }
     }
 
-    fn credit(&mut self, id: AccountId, amount: U128) {
+    /// `mode` is the Default Mode a new account starts with. It never changes an existing account: anyone can
+    /// credit an EVM account through NEAR Intents, and a gift must not change the customer's settings. An
+    /// unknown Game Version is ignored rather than refusing the money.
+    fn credit(&mut self, id: AccountId, amount: U128, mode: Option<Mode>) {
         require!(amount.0 >= MIN_DEPOSIT, "Deposit at least 1 USDC");
+        let new = !self.accounts.contains_key(&id);
+        let mode = mode.filter(|m| new && self.known_mode(*m));
         let mut a = self.accounts.get(&id).cloned().unwrap_or_default();
         a.balance.0 += amount.0;
+        if let Some(m) = mode {
+            a.default_mode = m;
+        }
         self.accounts.insert(id.clone(), a);
         emit("deposit", json!({ "account_id": id, "amount": amount }));
+        if let Some(m) = mode {
+            emit("default_mode", json!({ "account_id": id, "mode": m }));
+        }
+    }
+
+    fn known_mode(&self, mode: Mode) -> bool {
+        match mode {
+            Mode::Normal => true,
+            Mode::Lucky(v) => self.versions.get(v).is_some(),
+        }
     }
 
     fn limits(&mut self, id: AccountId, per_purchase: U128, daily: U128) {

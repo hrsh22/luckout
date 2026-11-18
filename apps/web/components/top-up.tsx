@@ -8,6 +8,7 @@ import { depositCall, useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
 import { dollars, tokenAmount, toMicro, usd, usdUp } from "@/lib/format"
 import { usdcId, view } from "@/lib/near"
+import { pendingMode } from "@/lib/onboarding"
 import { useHeld } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
@@ -275,7 +276,7 @@ export function TopUp({ onDone, onContinue, need }: { onDone?: (ok: boolean) => 
               const arrived = Number(await view<string>(usdcId, "ft_balance_of", { account_id: accountId }))
               const micro = Math.min(arrived, quote.usdcOut)
               if (!(micro > 0)) throw new Error("No USDC has arrived in your NEAR wallet yet. Try again in a minute.")
-              await send(depositCall(micro)).finally(() => refresh().catch(() => {}))
+              await send(depositCall(micro, accountId ? pendingMode(accountId) : undefined)).finally(() => refresh().catch(() => {}))
               setQuote(undefined)
               setStatus(undefined)
               toast.success(`${usd(micro)} added to your balance`)
