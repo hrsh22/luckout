@@ -282,3 +282,114 @@ async fn methods_that_take_no_deposit_refuse_one() -> anyhow::Result<()> {
     assert!(failure(&r).contains("doesn't accept deposit"), "{r:?}");
     Ok(())
 }
+
+/// A cart of `n` 1 USDC cards for Alice, Lucky on versions 0, 1, 2 in turn.
+fn lucky_cart(n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|i| {
+            json!({
+                "reference_price": USDC.to_string(), "mode": { "lucky": i % 3 },
+                "order_id": format!("cart-{i}"), "max_debit": (2 * USDC).to_string(),
+            })
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_full_cart_of_lucky_cards_is_admitted_settled_and_drawn_within_the_servers_gas(
+) -> anyhow::Result<()> {
+    let w = world().await?;
+    assert!(w.deposit(&w.alice, 50 * USDC, "").await?.is_success());
+    let r = w
+        .operator
+        .call(w.luckout.id(), "purchase_many")
+        .args_json(json!({ "customer": w.alice.id(), "items": lucky_cart(15) }))
+        .gas(OPERATOR_GAS)
+        .transact()
+        .await?;
+    assert!(r.is_success(), "{r:?}");
+    println!(
+        "purchase_many, 15 cards: {} Tgas burnt",
+        r.total_gas_burnt.as_tgas()
+    );
+    let ids: Vec<u64> = r.json()?;
+    assert_eq!(ids.len(), 15);
+
+    let r = w
+        .operator
+        .call(w.luckout.id(), "settle")
+        .args_json(json!({ "delivered": ids, "failed": [] }))
+        .gas(OPERATOR_GAS)
+        .transact()
+        .await?;
+    assert!(r.is_success() && r.receipt_failures().is_empty(), "{r:?}");
+    for o in r.receipt_outcomes() {
+        println!(
+            "settle receipt on {}: {} Tgas burnt",
+            o.executor_id,
+            o.gas_burnt.as_tgas()
+        );
+    }
+    println!(
+        "settle, 15 Lucky Draws: {} Tgas burnt in all",
+        r.total_gas_burnt.as_tgas()
+    );
+    assert_eq!(
+        r.logs()
+            .iter()
+            .filter(|l| l.contains("\"event\":\"draw\""))
+            .count(),
+        15
+    );
+    for id in &ids {
+        let p: Value = w
+            .luckout
+            .view("get_purchase")
+            .args_json(json!({ "purchase_id": id }))
+            .await?
+            .json()?;
+        assert_eq!(p["status"], "Delivered");
+    }
+    let reserve: Value = w.luckout.view("get_reserve").await?.json()?;
+    assert_eq!(reserve["locked"], "0");
+
+    // `#[private]`: the operator can't run the Draws itself.
+    let r = w
+        .operator
+        .call(w.luckout.id(), "on_draw_many")
+        .args_json(json!({ "purchase_ids": ids }))
+        .transact()
+        .await?;
+    assert!(failure(&r).contains("is private"), "{r:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_cart_leaves_nothing_behind() -> anyhow::Result<()> {
+    let w = world().await?;
+    assert!(w.deposit(&w.alice, 5 * USDC, "").await?.is_success());
+    let before: Value = w.luckout.view("get_reserve").await?.json()?;
+    // Two cards fit the 5 USDC; the third doesn't, so none is admitted.
+    let items: Vec<Value> = (0..3)
+        .map(|i| json!({ "reference_price": (2 * USDC).to_string(), "mode": "normal", "order_id": format!("all-{i}"), "max_debit": (2 * USDC).to_string() }))
+        .collect();
+    let r = w
+        .operator
+        .call(w.luckout.id(), "purchase_many")
+        .args_json(json!({ "customer": w.alice.id(), "items": items }))
+        .gas(OPERATOR_GAS)
+        .transact()
+        .await?;
+    assert!(failure(&r).contains("Insufficient balance"), "{r:?}");
+    assert_eq!(w.balance_of(&w.alice).await?, 5 * USDC);
+    let p: Value = w
+        .luckout
+        .view("get_purchase")
+        .args_json(json!({ "purchase_id": 0 }))
+        .await?
+        .json()?;
+    assert!(p.is_null(), "no card was recorded: {p}");
+    let after: Value = w.luckout.view("get_reserve").await?.json()?;
+    assert_eq!(before, after);
+    Ok(())
+}

@@ -2427,7 +2427,11 @@ fn mode_of(c: &Contract, who: AccountId) -> Mode {
 #[test]
 fn a_wallets_first_deposit_starts_its_account_in_the_mode_it_names() {
     let mut c = setup(0, USDC);
-    let _ = c.ft_on_transfer(id("bob.near"), U128(5 * USDC), r#"{"mode":{"lucky":1}}"#.into());
+    let _ = c.ft_on_transfer(
+        id("bob.near"),
+        U128(5 * USDC),
+        r#"{"mode":{"lucky":1}}"#.into(),
+    );
     assert_eq!(mode_of(&c, id("bob.near")), Mode::Lucky(1));
     assert_eq!(c.get_account(id("bob.near")).unwrap().balance.0, 5 * USDC);
 }
@@ -2437,7 +2441,11 @@ fn a_deposit_never_changes_an_existing_accounts_mode() {
     let mut c = setup(0, USDC);
     let _ = c.ft_on_transfer(alice(), U128(5 * USDC), r#"{"mode":{"lucky":2}}"#.into());
     assert_eq!(mode_of(&c, alice()), Mode::Normal);
-    assert_eq!(c.get_account(alice()).unwrap().balance.0, 6 * USDC, "the money still lands");
+    assert_eq!(
+        c.get_account(alice()).unwrap().balance.0,
+        6 * USDC,
+        "the money still lands"
+    );
 }
 
 #[test]
@@ -2457,7 +2465,11 @@ fn a_move_in_creating_an_evm_account_sets_its_mode_but_a_gift_to_an_existing_one
 #[test]
 fn an_unknown_game_version_is_ignored_and_the_money_still_lands() {
     let mut c = setup(0, USDC);
-    let _ = c.ft_on_transfer(id("bob.near"), U128(5 * USDC), r#"{"mode":{"lucky":99}}"#.into());
+    let _ = c.ft_on_transfer(
+        id("bob.near"),
+        U128(5 * USDC),
+        r#"{"mode":{"lucky":99}}"#.into(),
+    );
     assert_eq!(mode_of(&c, id("bob.near")), Mode::Normal);
     assert_eq!(c.get_account(id("bob.near")).unwrap().balance.0, 5 * USDC);
 }
@@ -2468,4 +2480,326 @@ fn a_move_in_from_intents_must_still_name_the_account() {
     let mut c = setup(0, USDC);
     as_(usdc());
     let _ = c.ft_on_transfer(intents(), U128(5 * USDC), r#"{"mode":"normal"}"#.into());
+}
+
+// ---------- carts ----------
+
+fn item(r: u128, mode: Mode, order: &str) -> CartItem {
+    CartItem {
+        reference_price: U128(r),
+        mode: Some(mode),
+        order_id: order.into(),
+        max_debit: U128(u128::MAX),
+        lucky_amount: None,
+    }
+}
+
+/// Four cards on a 100 USDC reserve, so each Lucky card's Cashback Cap and lock bind on what the ones before left.
+fn cart() -> Vec<(u128, Mode)> {
+    vec![
+        (10 * USDC, Mode::Lucky(2)),
+        (40 * USDC, Mode::Lucky(1)),
+        (5 * USDC, Mode::Normal),
+        (60 * USDC, Mode::Lucky(0)),
+    ]
+}
+
+fn cart_items() -> Vec<CartItem> {
+    cart()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (r, m))| item(r, m, &format!("o{i}")))
+        .collect()
+}
+
+#[test]
+fn a_cart_is_quoted_and_admitted_exactly_as_its_cards_would_be_one_by_one() {
+    let mut one = setup(100 * USDC, 500 * USDC);
+    raise_limits(&mut one);
+    let mut many = setup(100 * USDC, 500 * USDC);
+    raise_limits(&mut many);
+    as_(operator());
+    let singles: Vec<u64> = cart()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (r, m))| {
+            one.purchase(
+                alice(),
+                U128(r),
+                Some(m),
+                format!("o{i}"),
+                U128(u128::MAX),
+                None,
+            )
+        })
+        .collect();
+    let quotes = many.quote_many(
+        cart()
+            .into_iter()
+            .map(|(r, mode)| QuoteItem {
+                reference_price: U128(r),
+                mode,
+            })
+            .collect(),
+    );
+    as_(operator());
+    let ids = many.purchase_many(alice(), cart_items());
+    assert_eq!(ids, singles);
+    for (i, id) in ids.iter().enumerate() {
+        let (a, b) = (
+            one.get_purchase(*id).unwrap(),
+            many.get_purchase(*id).unwrap(),
+        );
+        assert_eq!(
+            (a.mode, a.lucky_amount.0, a.max_price.0, a.locked.0),
+            (b.mode, b.lucky_amount.0, b.max_price.0, b.locked.0)
+        );
+        assert_eq!(
+            (quotes[i].lucky_amount.0, quotes[i].max_price.0),
+            (b.lucky_amount.0, b.max_price.0),
+            "the quote is what's admitted"
+        );
+    }
+    // The reserve binds: the 60 USDC Lite card plays only part of its price, on what the cards before it left.
+    let last = many.get_purchase(ids[3]).unwrap();
+    assert!(last.lucky_amount.0 > 0 && last.lucky_amount.0 < 60 * USDC);
+    assert_eq!(balance(&one), balance(&many));
+    assert_eq!(one.get_reserve().free.0, many.get_reserve().free.0);
+    assert_eq!(one.get_reserve().locked.0, many.get_reserve().locked.0);
+}
+
+#[test]
+fn a_lucky_card_the_reserve_cant_cover_is_quoted_normal() {
+    let c = setup(0, 100 * USDC);
+    let q = c.quote_many(vec![
+        QuoteItem {
+            reference_price: U128(10 * USDC),
+            mode: Mode::Lucky(1),
+        },
+        QuoteItem {
+            reference_price: U128(5 * USDC),
+            mode: Mode::Normal,
+        },
+    ]);
+    assert_eq!(
+        (q[0].mode, q[0].lucky_amount.0, q[0].max_price.0),
+        (Mode::Normal, 0, 10 * USDC)
+    );
+    assert_eq!((q[1].mode, q[1].max_price.0), (Mode::Normal, 5 * USDC));
+}
+
+#[test]
+fn a_retried_cart_returns_the_same_purchases_and_charges_once() {
+    let mut c = setup(100 * USDC, 500 * USDC);
+    raise_limits(&mut c);
+    as_(operator());
+    let first = c.purchase_many(alice(), cart_items());
+    let after = balance(&c);
+    let again = c.purchase_many(alice(), cart_items());
+    assert_eq!(first, again);
+    assert_eq!(balance(&c), after);
+}
+
+#[test]
+#[should_panic(expected = "Insufficient balance")]
+fn a_cart_is_refused_whole_when_its_total_passes_the_balance() {
+    // Each card alone fits the 30 USDC; all three don't. The panic undoes the first two (one receipt).
+    let mut c = setup(0, 30 * USDC);
+    as_(operator());
+    c.purchase_many(
+        alice(),
+        vec![
+            item(12 * USDC, Mode::Normal, "a"),
+            item(12 * USDC, Mode::Normal, "b"),
+            item(12 * USDC, Mode::Normal, "c"),
+        ],
+    );
+}
+
+#[test]
+#[should_panic(expected = "Over the daily spending limit")]
+fn a_cart_is_refused_whole_when_its_total_passes_the_daily_limit() {
+    let mut c = setup(0, 2_000 * USDC);
+    as_(operator());
+    // New accounts: 200 a purchase, 1,000 a day.
+    c.purchase_many(
+        alice(),
+        (0..6)
+            .map(|i| item(190 * USDC, Mode::Normal, &format!("d{i}")))
+            .collect(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "A cart holds 1 to 15 cards")]
+fn a_cart_holds_at_most_15_cards() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    c.purchase_many(
+        alice(),
+        (0..16)
+            .map(|i| item(USDC, Mode::Normal, &format!("x{i}")))
+            .collect(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Only the operator")]
+fn only_the_operator_admits_a_cart() {
+    let mut c = setup(0, 100 * USDC);
+    as_(alice());
+    c.purchase_many(alice(), vec![item(USDC, Mode::Normal, "a")]);
+}
+
+/// The created receipts' method, JSON args and attached gas.
+fn sent_with_gas() -> Vec<(String, Value, u64)> {
+    get_created_receipts()
+        .into_iter()
+        .flat_map(|r| {
+            r.actions.into_iter().filter_map(|a| match a {
+                MockAction::FunctionCallWeight {
+                    method_name,
+                    args,
+                    prepaid_gas,
+                    ..
+                } => Some((
+                    String::from_utf8(method_name).unwrap(),
+                    near_sdk::serde_json::from_slice(&args).unwrap(),
+                    prepaid_gas.as_gas(),
+                )),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn settling_a_cart_confirms_and_refunds_its_cards_then_draws_them_together_in_a_later_receipt() {
+    let mut c = setup(500 * USDC, 200 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        vec![
+            item(10 * USDC, Mode::Lucky(2), "a"),
+            item(10 * USDC, Mode::Normal, "b"),
+            item(10 * USDC, Mode::Lucky(1), "c"),
+            item(10 * USDC, Mode::Normal, "d"),
+        ],
+    );
+    let before = balance(&c);
+    as_(operator());
+    let _ = c.settle(vec![ids[0], ids[1], ids[2]], vec![ids[3]]);
+    // Nothing about any outcome exists yet in the settling receipt.
+    assert!(get_logs().iter().all(|l| !l.contains("\"draw\"")));
+    let status = |c: &Contract, i: usize| c.get_purchase(ids[i]).unwrap().status;
+    assert_eq!(
+        [status(&c, 0), status(&c, 1), status(&c, 2), status(&c, 3)],
+        [
+            Status::Drawing,
+            Status::Delivered,
+            Status::Drawing,
+            Status::Failed
+        ]
+    );
+    assert_eq!(
+        balance(&c),
+        before + 10 * USDC,
+        "the failed card is refunded in full"
+    );
+    assert_eq!(c.get_reserve().proceeds.0, 30 * USDC);
+    let s = sent_with_gas();
+    assert_eq!(s.len(), 1, "one callback for every Draw");
+    assert_eq!(s[0].0, "on_draw_many");
+    assert_eq!(s[0].1, json!({ "purchase_ids": [ids[0], ids[2]] }));
+    assert_eq!(s[0].2, Gas::from_tgas(5 + 4 * 2).as_gas());
+
+    // Each Draw comes out exactly as it would alone, from the same block's seed.
+    let mut alone = setup(500 * USDC, 200 * USDC);
+    as_(operator());
+    let solo = alone.purchase_many(
+        alice(),
+        vec![
+            item(10 * USDC, Mode::Lucky(2), "a"),
+            item(10 * USDC, Mode::Normal, "b"),
+            item(10 * USDC, Mode::Lucky(1), "c"),
+        ],
+    );
+    let expect = [
+        deliver(&mut alone, solo[0], [7; 32]).cashback.0,
+        deliver(&mut alone, solo[2], [7; 32]).cashback.0,
+    ];
+    call(contract(), DAY, [7; 32], 0);
+    c.on_draw_many(vec![ids[0], ids[2]]);
+    assert_eq!(
+        get_logs().iter().filter(|l| l.contains("\"draw\"")).count(),
+        2
+    );
+    let got = [
+        c.get_purchase(ids[0]).unwrap(),
+        c.get_purchase(ids[2]).unwrap(),
+    ];
+    assert!(got.iter().all(|p| p.status == Status::Delivered));
+    assert_eq!([got[0].cashback.0, got[1].cashback.0], expect);
+    assert_eq!(c.get_reserve().locked.0, 0);
+}
+
+#[test]
+fn a_cart_draw_left_by_a_failed_callback_is_drawn_by_the_next_settle_or_by_retry() {
+    let mut c = setup(500 * USDC, 200 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        vec![
+            item(10 * USDC, Mode::Lucky(2), "a"),
+            item(10 * USDC, Mode::Lucky(0), "b"),
+        ],
+    );
+    let _ = c.settle(ids.clone(), vec![]);
+    // The callback never ran (say, out of gas): settling again schedules the Draws again.
+    as_(operator());
+    let _ = c.settle(ids.clone(), vec![]);
+    assert_eq!(sent_with_gas()[0].1, json!({ "purchase_ids": ids }));
+    // A retry by the customer got to one first; the cart's callback leaves it as it is.
+    call(contract(), DAY, [3; 32], 0);
+    let first = c.on_draw(ids[0]);
+    call(contract(), DAY, [4; 32], 0);
+    c.on_draw_many(ids.clone());
+    assert_eq!(c.get_purchase(ids[0]).unwrap().cashback.0, first.cashback.0);
+    assert_eq!(c.get_purchase(ids[1]).unwrap().status, Status::Delivered);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_settle_naming_a_closed_card_is_refused_whole() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        vec![item(USDC, Mode::Normal, "a"), item(USDC, Mode::Normal, "b")],
+    );
+    let _ = c.settle(vec![ids[0]], vec![]);
+    let _ = c.settle(vec![ids[1]], vec![ids[0]]);
+}
+
+#[test]
+#[should_panic(expected = "Settle 1 to 15 cards at a time")]
+fn a_settle_names_at_least_one_card() {
+    let mut c = setup(0, 100 * USDC);
+    as_(operator());
+    let _ = c.settle(vec![], vec![]);
+}
+
+#[test]
+#[should_panic(expected = "The contract's own key can't run a Draw")]
+fn the_contracts_own_key_cant_run_a_carts_draws() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(alice(), vec![item(10 * USDC, Mode::Lucky(2), "a")]);
+    let _ = c.settle(ids.clone(), vec![]);
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(contract())
+        .predecessor_account_id(contract())
+        .signer_account_id(contract())
+        .build());
+    c.on_draw_many(ids);
 }
