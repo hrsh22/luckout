@@ -3,6 +3,7 @@ import { api } from "@/lib/api"
 import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
 import { usd } from "@/lib/format"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
+import { ChevronDown } from "lucide-react"
 import type { Metadata } from "next"
 import Link from "next/link"
 
@@ -98,29 +99,37 @@ export default async function Fair() {
           <h2 className="font-display text-3xl font-extrabold">The assistant's AI runs in a verified enclave</h2>
           <p className="max-w-[64ch] text-ink-soft">
             The Telegram assistant's model, <code className="font-mono text-sm text-ink">{tee.model}</code>, runs on NEAR AI Cloud inside a
-            secure enclave. Every hour our server checks that with a fresh nonce: NVIDIA verifies the GPUs, Intel verifies the CPU enclave,
-            and the enclave's signing key must be bound into both. Every reply must carry that key's signature over exactly what we sent
-            and got back, or the assistant doesn't send it. Without a passing check, the assistant stays offline.
+            secure enclave. Every hour our server checks it with a fresh nonce: NVIDIA verifies the GPUs and Intel the CPU enclave. Every
+            reply must be signed by the enclave's key, or the assistant doesn't send it, and without a passing check it stays offline.
           </p>
           <div className="grid gap-4 sm:grid-cols-3">
             <Figure label="Latest check" value={tee.ok ? "Passed" : "Failed"} />
             <Figure label="Replies verified since the server started" value={String(tee.replies.verified)} />
             <Figure label="Replies withheld" value={String(tee.replies.refused)} />
           </div>
-          <ul className="grid gap-1 text-ink-soft">
-            {tee.checks.map((c) => (
-              <li key={c.name}>
-                <span aria-hidden="true" className={c.ok ? "text-good" : "text-bad"}>{c.ok ? "✓" : "✗"}</span>{" "}
-                <span className="sr-only">{c.ok ? "Passed:" : "Failed:"}</span>
-                {c.name}
-              </li>
-            ))}
-          </ul>
-          <p className="text-sm break-all text-muted">
-            Checked {new Date(tee.checkedAt).toUTCString()} with nonce <code className="font-mono">{tee.nonce}</code>. Model signing key{" "}
-            <code className="font-mono">{tee.modelKeys.join(", ")}</code>.{" "}
-            <a href="https://docs.near.ai/cloud/verification" className="font-semibold text-ink underline underline-offset-4" target="_blank" rel="noreferrer">How NEAR AI attestation works</a>
-          </p>
+          {/* Every check, the nonce and the keys, folded: the count says whether anything needs a look. */}
+          <details className="group rounded-2xl bg-soft">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 font-semibold [&::-webkit-details-marker]:hidden">
+              {tee.checks.filter((c) => c.ok).length} of {tee.checks.length} checks passed
+              <ChevronDown size={18} className="shrink-0 text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+            </summary>
+            <div className="flex flex-col gap-3 px-4 pb-4">
+              <ul className="grid gap-1 text-ink-soft">
+                {tee.checks.map((c) => (
+                  <li key={c.name}>
+                    <span aria-hidden="true" className={c.ok ? "text-good" : "text-bad"}>{c.ok ? "✓" : "✗"}</span>{" "}
+                    <span className="sr-only">{c.ok ? "Passed:" : "Failed:"}</span>
+                    {c.name}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-sm break-all text-muted">
+                Checked {new Date(tee.checkedAt).toUTCString()} with nonce <code className="font-mono">{tee.nonce}</code>. Model signing key{" "}
+                <code className="font-mono">{tee.modelKeys.join(", ")}</code>.{" "}
+                <a href="https://docs.near.ai/cloud/verification" className="font-semibold text-ink underline underline-offset-4" target="_blank" rel="noreferrer">How NEAR AI attestation works</a>
+              </p>
+            </div>
+          </details>
         </section>
       )}
 

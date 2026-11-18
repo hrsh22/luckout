@@ -3,7 +3,7 @@ import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, plainText, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -290,18 +290,18 @@ test("a guest order Bitrefill rate-limits is an unknown to try again, never a re
   assert.equal(r.refused._tag, "Refused")
 })
 
-test("Bitrefill's HTML reads as plain text: one line per step, links kept, nothing else of the markup", () => {
+test("Bitrefill's HTML keeps its shape as lines: titles, numbered steps, nested items; links name their site", () => {
   assert.equal(
-    plainText("1. Open the app.\n<br>2. Tap &quot;Add&quot; &amp; enter the code.<br><br>"),
-    "1. Open the app.\n2. Tap \"Add\" & enter the code."
+    readableText("<p><strong>On the app:</strong></p><ol><li><span>Open it</span></li><li>Enter:<ul><li>Card number</li><li>PIN</li></ul></li><li>Tap &ldquo;Add&#8221; &amp; done&#x2026; &bogus;</li></ol><span>&nbsp;</span><p><strong>On the website:</strong></p><ol><li>Go to <a href=\"http://example.com\">example.com</a></li></ol>"),
+    "# On the app\n1. Open it\n2. Enter:\n  - Card number\n  - PIN\n3. Tap “Add” & done… &bogus;\n# On the website\n1. Go to example.com"
   )
   assert.equal(
-    plainText("<ol>\n<li>Log in.</li>\n<li>Redeem.</li>\n</ol>\n<p>Start <a href=\"https://store.example.com/redeem\">here</a>.</p><script>alert(1)</script>"),
-    "• Log in.\n• Redeem.\nStart here (https://store.example.com/redeem).\nalert(1)"
+    readableText("Validity:<br>12 months.\n<br>1. Open the app.<br>2) Add it.<p>Start <a href=\"https://store.example.com/redeem\">here</a>, or see https://www.example.org/terms</p><script>alert(1)</script>"),
+    "# Validity\n12 months.\n1. Open the app.\n2. Add it.\nStart here (store.example.com), or see example.org\nalert(1)"
   )
 })
 
-test("a card's page gets Bitrefill's pitch, steps, terms, rating and link; a link off bitrefill.com is dropped", async () => {
+test("a card's page gets Bitrefill's pitch, steps, terms and rating", async () => {
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
@@ -314,7 +314,6 @@ test("a card's page gets Bitrefill's pitch, steps, terms, rating and link; a lin
       subtitles: "Order meals.",
       instructions: "1. Open the app.<br>2. Add the voucher.",
       termsConditions: "Validity:<br>12 months.",
-      url: id === "swiggy-money-india" ? "https://www.bitrefill.com/swiggy-money-india/" : "https://evil.example.com/",
       ratings: { rating_value: 5, rating_count: 132, review_count: 59 }
     }
     return new Response(`data: ${JSON.stringify({ result: { content: [{ text: JSON.stringify(product) }] } })}\n`, { status: 200, headers: { "content-type": "text/event-stream" } })
@@ -323,10 +322,9 @@ test("a card's page gets Bitrefill's pitch, steps, terms, rating and link; a lin
     const [swiggy, other] = await run((b) => Effect.all([b.voucher("swiggy-money-india"), b.voucher("other-card")]), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
     assert.equal(swiggy.subtitle, "Order meals.")
     assert.equal(swiggy.howToRedeem, "1. Open the app.\n2. Add the voucher.")
-    assert.equal(swiggy.terms, "Validity:\n12 months.")
+    assert.equal(swiggy.terms, "# Validity\n12 months.")
     assert.deepEqual(swiggy.rating, { value: 5, count: 132 })
-    assert.equal(swiggy.bitrefillUrl, "https://www.bitrefill.com/swiggy-money-india/")
-    assert.equal(other.bitrefillUrl, undefined)
+    assert.equal(other.name, "other-card")
   } finally {
     globalThis.fetch = realFetch
   }

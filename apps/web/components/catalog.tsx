@@ -116,8 +116,7 @@ export function Catalog() {
       <div className="flex flex-col gap-3">
         <h1 className="font-display text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">Find a card</h1>
         <p className="max-w-[56ch] text-lg text-ink-soft">
-          Gift cards from Bitrefill for stores around the world. Each card works only in its own country, so pick yours, then choose to
-          pay the price or play for cashback.
+          Each card works in one country. Pick yours, then pay the price or play for cashback.
         </p>
       </div>
 
@@ -173,7 +172,7 @@ export function Catalog() {
         </div>
         {filters.country && (
           <p className="text-sm text-ink-soft">
-            Cards that work in {flag(filters.country)} {countryName(filters.country)}, including ones that work across a region or worldwide.
+            For {flag(filters.country)} {countryName(filters.country)}, plus regional and worldwide cards.
           </p>
         )}
       </div>

@@ -15,7 +15,8 @@ import { toast } from "sonner"
  * The Checkout Email (ADR-0012), prefilled with the saved one. Shown only where buying needs one.
  * `onSaved` also runs when it's submitted unchanged, so "Continue" works with an email already given.
  */
-export function CheckoutEmailForm({ label = "Save", onSaved }: { label?: string; onSaved?: () => void }) {
+/** `titled`: a heading above already names the field, so its label is for screen readers only. */
+export function CheckoutEmailForm({ label = "Save", onSaved, titled = false }: { label?: string; onSaved?: () => void; titled?: boolean }) {
   const { token } = useSession()
   const current = useCheckoutEmail(token).data?.email
   const save = useSaveCheckoutEmail(token)
@@ -32,7 +33,7 @@ export function CheckoutEmailForm({ label = "Save", onSaved }: { label?: string;
         else save.mutate(next, { onSuccess: () => onSaved?.() })
       }}
     >
-      <label htmlFor={id} className="font-semibold">Email for your cards</label>
+      <label htmlFor={id} className={titled ? "sr-only" : "font-semibold"}>Email for your cards</label>
       <div className="flex flex-col gap-2 sm:flex-row">
         <input
           id={id}
@@ -48,7 +49,7 @@ export function CheckoutEmailForm({ label = "Save", onSaved }: { label?: string;
       </div>
       {save.error
         ? <p role="alert" className="text-sm font-medium text-bad">{errorMessage(save.error)}</p>
-        : <p className="text-sm text-muted">Bitrefill emails each card here too, with its receipt, and uses it to help if a code doesn't work. A throwaway address is fine.</p>}
+        : <p className="text-sm text-muted">Each card and its receipt are emailed here too. A throwaway address is fine.</p>}
     </form>
   )
 }
@@ -115,8 +116,8 @@ export function BitrefillAccount() {
         <p className="font-display text-xl font-extrabold">{connected ? "Connected" : "Connect Bitrefill to raise your limits"}</p>
         <p className="text-[15px] text-ink-soft">
           {connected
-            ? "Your cards are bought on your own Bitrefill account, under its limits, and it gets their receipts. We still pay for every card."
-            : "As a guest, Bitrefill limits what one email can buy. Log in with your own Bitrefill account to buy under its limits instead. We still pay for every card."}
+            ? "Cards are bought on your Bitrefill account, under its limits. We still pay for every card."
+            : "Buy under your own Bitrefill account's higher limits. We still pay for every card."}
         </p>
       </div>
       {connected
@@ -126,7 +127,6 @@ export function BitrefillAccount() {
   )
 }
 
-const LIMITS_ARTICLE = "https://help.bitrefill.com/hc/en-us/articles/360019385360-Is-there-a-purchasing-top-up-limit"
 const whole = (micro: number) => usd(micro).replace(/\.00$/, "")
 
 function Meter({ label, used, of, text }: { label: string; used: number; of: number; text: string }) {
@@ -158,17 +158,14 @@ export function BitrefillLimits() {
       <div className="card flex flex-col gap-5 p-6">
         <div>
           <p className="font-display text-xl font-extrabold">Bitrefill's limits for your email</p>
-          <p className="text-[15px] text-ink-soft">Bitrefill limits what one email can buy as a guest. A card that would go over is refused before you pay.</p>
+          <p className="text-[15px] text-ink-soft">A card that would go over is stopped before you pay.</p>
         </div>
         <div className="grid gap-5 sm:grid-cols-3">
           <Meter label="Cards, last 24 hours" used={used.orders} of={GUEST_LIMITS.orders} text={`${used.orders} of ${GUEST_LIMITS.orders}`} />
           <Meter label="Spent, last 24 hours" used={used.day} of={GUEST_LIMITS.daily} text={`${usd(used.day)} of ${whole(GUEST_LIMITS.daily)}`} />
           <Meter label="Spent, last 30 days" used={used.month} of={GUEST_LIMITS.monthly} text={`${usd(used.month)} of ${whole(GUEST_LIMITS.monthly)}`} />
         </div>
-        <p className="text-sm text-muted">
-          Counted from your Luckout purchases. Cards bought on Bitrefill itself with this email count toward{" "}
-          <a className="underline underline-offset-2" href={LIMITS_ARTICLE} target="_blank" rel="noreferrer">Bitrefill's limits</a> too.
-        </p>
+        <p className="text-sm text-muted">Cards you buy on Bitrefill itself with this email count too.</p>
       </div>
     )
   }
@@ -181,7 +178,7 @@ export function BitrefillLimits() {
     <div className="card flex flex-col gap-5 p-6">
       <div>
         <p className="font-display text-xl font-extrabold">Your Bitrefill account's limits</p>
-        <p className="text-[15px] text-ink-soft">Your cards are bought under your account's limits. Bitrefill doesn't tell us your account's level, so both are here.</p>
+        <p className="text-[15px] text-ink-soft">Bitrefill doesn't share your account's level, so both are shown.</p>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
         {levels.map((l) => (
@@ -198,7 +195,6 @@ export function BitrefillLimits() {
         ))}
       </div>
       <p className="text-sm text-muted">
-        From <a className="underline underline-offset-2" href={LIMITS_ARTICLE} target="_blank" rel="noreferrer">Bitrefill's limits</a>.{" "}
         <a className="underline underline-offset-2" href="https://www.bitrefill.com/account/verification" target="_blank" rel="noreferrer">Verify your account</a> on Bitrefill to move up.
       </p>
     </div>

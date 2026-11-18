@@ -113,7 +113,7 @@ export default function WalletPage() {
         <div>
           <h2 className="font-display text-3xl font-extrabold">Default mode</h2>
           <p className="mt-1 max-w-[60ch] text-ink-soft">
-            Used for every purchase, here and in Telegram, unless you pick another one for that purchase. Changing it takes one approval.
+            Used here and in Telegram unless you pick another for a card. Changing it takes one approval.
           </p>
         </div>
         <ModePicker value={saving ?? chosen} onChange={pickMode} saving={saving} savedDefault={account?.default_mode} label="Default mode" />
@@ -125,12 +125,10 @@ export default function WalletPage() {
         <section className="flex flex-col gap-4">
           <div>
             <h2 className="font-display text-3xl font-extrabold">Email for your cards</h2>
-            <p className="mt-1 max-w-[60ch] text-ink-soft">
-              {checkout.email ? "Bitrefill gets this with each card you buy." : "Bitrefill needs one with each card you buy. Add it before your first card."}
-            </p>
+            {!checkout.email && <p className="mt-1 max-w-[60ch] text-ink-soft">Bitrefill needs one before your first card.</p>}
           </div>
           <div className="card p-6">
-            <CheckoutEmailForm onSaved={() => toast.success("Email saved")} />
+            <CheckoutEmailForm titled onSaved={() => toast.success("Email saved")} />
           </div>
           {checkout.bitrefill === undefined && <BitrefillLimits />}
         </section>
@@ -183,8 +181,7 @@ function Limits({ per, daily }: { per: string; daily: string }) {
       <div>
         <h2 className="font-display text-3xl font-extrabold">Spending limits</h2>
         <p className="mt-1 max-w-[60ch] text-ink-soft">
-          The contract checks these on every purchase: yours here, the Telegram bot's, and any our server submits. Only your wallet can change
-          them.
+          The contract enforces these on every purchase, from here or Telegram. Only your wallet can change them.
         </p>
       </div>
       <div className="card flex flex-col gap-5 p-6">
