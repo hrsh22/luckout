@@ -267,13 +267,17 @@ export class Near extends Context.Service<Near, {
               return yield* executed(hash)
             })
 
+          // Whether the chain has this transaction, asked without waiting: for one it never saw, a lookup that waits
+          // for execution times out (TIMEOUT_ERROR, after 30 s) instead of saying so (seen 2026-11-18).
+          const known = (hash: string) =>
+            rpc("tx seen", (p) => p.viewTransactionStatus({ txHash: hash, accountId: id, waitUntil: "NONE" })).pipe(
+              Effect.as(true),
+              Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
+            )
+
           const resume = (signed: Signed) =>
             Effect.gen(function*() {
-              const seen = yield* executed(signed.hash).pipe(
-                Effect.map(Option.some),
-                Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e)))
-              )
-              if (Option.isSome(seen)) return seen.value
+              if (yield* known(signed.hash)) return yield* executed(signed.hash)
               // Never seen: send the same bytes again (same hash, so it can't execute twice).
               const tx = SignedTransaction.decode(base64Decode(signed.bytes))
               const resent = yield* lock.withPermits(1)(
@@ -285,11 +289,8 @@ export class Near extends Context.Service<Near, {
               )
               if (!resent) {
                 // A dead nonce can also mean this very transaction already ran and the first lookup
-                // hit a lagging node. Ask again at final finality before calling it expired.
-                const final = yield* rpc("final tx status", (p) =>
-                  p.viewTransactionStatus({ txHash: signed.hash, accountId: id, waitUntil: "FINAL" })
-                ).pipe(Effect.map(Option.some), Effect.catchTag("NearUnavailable", (e) => (isUnknownTx(e.message) ? Effect.succeedNone : Effect.fail(e))))
-                if (Option.isSome(final)) return yield* toOutcome(signed.hash, final.value)
+                // hit a lagging node. Ask again before calling it expired.
+                if (yield* known(signed.hash)) return yield* executed(signed.hash)
                 return yield* new TxExpired({ hash: signed.hash })
               }
               return yield* executed(signed.hash)
