@@ -201,6 +201,12 @@ test("a swap is late once 1Click has had the money well past its usual time, nev
   assert.equal(isLate(row({ status: "PENDING_DEPOSIT", deposit_seen_at: null }), now), false, "we're waiting for the customer, not 1Click")
   assert.equal(isLate(row({ status: "SUCCESS", deposit_seen_at: seen(90) }), now), false, "done is never late")
   assert.equal(isLate(row({ status: "INCOMPLETE_DEPOSIT", deposit_seen_at: seen(90) }), now), false, "a short payment waits on the customer, who is told so")
+  assert.equal(isLate(row({ status: "SUCCESS", move: "waiting", status_at: seen(2) }), now), false, "landed, move-in still has time")
+  assert.equal(isLate(row({ status: "SUCCESS", move: "waiting", status_at: seen(6) }), now), true, "landed, move-in stuck")
+  assert.equal(isLate(row({ status: "SUCCESS", move: "moved", status_at: seen(60) }), now), false, "moved is never late")
+  const stuck = noticeFor(row({ status: "SUCCESS", move: "waiting", status_at: seen(6) }), now, "https://luckout.example")
+  assert.equal(stuck?.key, "late")
+  assert.match(stuck!.text, /landed, but moving it into your Luckout balance is taking longer/, "says where it is, not that 1Click may refund it")
 })
 
 test("each notice says what happened and what to do, keyed so it's sent once", () => {

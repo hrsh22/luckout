@@ -58,6 +58,8 @@ const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 const LATE_DEPOSIT_GRACE_MS = 2 * 60 * 60 * 1000
 /** A paid Top-Up 1Click hasn't seen this long past its deadline is chased: the customer and an admin are told. */
 const UNSEEN_MS = 5 * 60_000
+/** A landed Top-Up whose move-in has waited this long is late (it normally runs within one 15-second pass): both are told. */
+const MOVE_LATE_MS = 5 * 60_000
 /**
  * When 1Click starts refunding a swap that hasn't completed: what the customer is told to beat. (1Click's own
  * `deadline` in a quote is days later: how long the deposit address stays open, not when refunds begin.)
@@ -127,10 +129,12 @@ export const phaseOf = (r: Pick<SwapRow, "direction" | "account_id" | "status" |
 }
 
 /**
- * 1Click has the money but it's taking well over its usual time: safe, and the customer should hear so.
- * Never a short payment: that waits on the customer, who is told so instead.
+ * 1Click has the money but it's taking well over its usual time, or it landed and its move-in still hasn't run
+ * after MOVE_LATE_MS: safe, and the customer should hear so. Never a short payment: that waits on the customer,
+ * who is told so instead.
  */
-export const isLate = (r: Pick<SwapRow, "status" | "deposit_seen_at" | "time_estimate">, now: number) => {
+export const isLate = (r: Pick<SwapRow, "status" | "status_at" | "move" | "deposit_seen_at" | "time_estimate">, now: number) => {
+  if (r.status === "SUCCESS" && r.move === "waiting") return now - (ms(r.status_at) ?? now) > MOVE_LATE_MS
   const seen = ms(r.deposit_seen_at)
   if (seen === undefined || (r.status && (FINAL.has(r.status) || r.status === "INCOMPLETE_DEPOSIT"))) return false
   return now - seen > Math.max(10 * 60_000, 3 * (r.time_estimate ?? 0) * 1000)
@@ -185,6 +189,12 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
     return {
       key: "unseen",
       text: `1Click hasn't confirmed your ${amount} Top-Up transfer (${from}) yet. It's at 1Click's deposit address: it either goes through or comes back to ${refundPlace}. Luckout is looking into it. Track it: ${explorerOf(r.deposit_address)}`
+    }
+  }
+  if (phase === "moving" && isLate(r, now)) {
+    return {
+      key: "late",
+      text: `Your ${amount} Top-Up landed, but moving it into your Luckout balance is taking longer than usual. It's safe in your NEAR Intents account, and Luckout keeps trying. See ${web}/wallet`
     }
   }
   if (isLate(r, now)) {
@@ -458,7 +468,9 @@ export class TopUp extends Context.Service<TopUp, {
             return yield* relay.sendIntent(r.account_id, r.move_in!, { counted: false }).pipe(
               Effect.flatMap(() => done("moved", null)),
               // NEAR didn't answer: it may have run. Next pass resumes the same saved transaction.
-              Effect.catchTag("RelayFailed", (e) => (UNANSWERED.test(e.message) ? Effect.succeed(r) : done("failed", e.message))),
+              Effect.catchTag("RelayFailed", (e) =>
+                UNANSWERED.test(e.message) ? Effect.as(Effect.logWarning("move-in unanswered, resumed next pass", r.deposit_address), r) : done("failed", e.message)
+              ),
               // Not sent (the relayer is off): stays waiting and is tried again.
               Effect.catchTag("RelayUnavailable", (e) => Effect.as(Effect.logWarning("move-in waits for the relayer", e.message), r))
             )
@@ -498,6 +510,11 @@ export class TopUp extends Context.Service<TopUp, {
               // Telegram didn't take it: unclaimed, and the swap stays tracked, so a later pass sends it again.
               yield* sql`UPDATE intents_swaps SET told = array_remove(told, ${notice.key}), retell = true
                          WHERE deposit_address = ${r.deposit_address}`.pipe(Effect.orDie)
+            }
+            if (claimed && notice.key === "late" && phaseOf(r) === "moving") {
+              yield* alerts.admin(
+                `A ${usd(Number(r.usdc))} Top-Up landed over 5 minutes ago and still hasn't moved into Luckout: deposit ${r.deposit_address}, for ${r.account_id}. Check the relayer's NEAR and the server log.`
+              )
             }
             if (claimed && notice.key === "unseen") {
               // Anyone can name a transaction for their own quote, so these are told one by one only up to a handful:

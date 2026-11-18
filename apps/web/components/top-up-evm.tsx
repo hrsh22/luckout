@@ -2,7 +2,7 @@
 
 import { AmountField } from "@/components/amount-field"
 import { chainLabel, sortAssets, TokenPicker } from "@/components/token-picker"
-import { DepositAddress, topUpAmount, topUpPicks, TopUpPreview, useTopUpPreview } from "@/components/top-up"
+import { DepositAddress, OnItsWay, stepOf, TopUpSteps, topUpAmount, topUpPicks, TopUpPreview, useTopUpPreview } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
@@ -24,7 +24,7 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
  * Intents account, and the intent they sign before sending moves it into Luckout once it lands. The
  * transfer on their own chain is the only fee they pay.
  */
-export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; need?: number | undefined } = {}) {
+export function TopUpEvm({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
   const { accountId, token, refresh, signIntent } = useSession()
   const actions = useWalletActions()
   const qc = useQueryClient()
@@ -104,7 +104,8 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
         if (s.move === "moved" && !reported.current) {
           reported.current = true
           refresh().catch(() => {})
-          toast.success(`${usd(quote.usdcOut)} added to your balance`)
+          // Keyed by the Top-Up: the header says the same when it sees it land, and only one toast shows.
+          toast.success(`${usd(quote.usdcOut)} added to your balance`, { id: quote.depositAddress })
           // Like a wallet deposit: a mode chosen before the first one is saved now, and Welcome moves on.
           finished.current?.(true)
         }
@@ -294,10 +295,15 @@ export function TopUpEvm({ onDone, need }: { onDone?: (ok: boolean) => void; nee
                 </>
               )}
             {(signed || manual) && (
-              <p>
-                Status: <b>{status?.status.replaceAll("_", " ").toLowerCase() ?? "waiting for your transfer"}</b>
-                {status?.status === "SUCCESS" && status.move === "waiting" && ", moving it into Luckout"}
-              </p>
+              ["REFUNDED", "FAILED"].includes(status?.status ?? "")
+                ? <p className="font-medium text-warn">It didn't go through, and 1Click sent it back. Wallet shows where it is.</p>
+                // Not shown while it waits on the customer's one tap (below): nothing there is moving by itself.
+                : !(status?.move === "failed" || (status?.status === "SUCCESS" && !status.move)) && (
+                  <>
+                    <TopUpSteps at={stepOf(status?.status, true)} landing="In your Luckout balance" minutes={Math.ceil(quote.timeEstimateSeconds / 60)} />
+                    {(sent || manual) && <OnItsWay sent={sent} lands={signed ? "moves into your balance by itself" : "waits in your NEAR Intents account for one tap in Wallet"} onContinue={onContinue} />}
+                  </>
+                )
             )}
             {(status?.move === "failed" || (status?.status === "SUCCESS" && !status.move)) && (
               <div className="flex flex-col gap-2">

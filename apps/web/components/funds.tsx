@@ -12,7 +12,7 @@ import { api } from "@/lib/api"
 import { EVM_CHAIN_IDS } from "@/lib/evm"
 import { dollars, toMicro, usd, usdUp } from "@/lib/format"
 import { MIN_GAS_NEAR, network } from "@/lib/near"
-import { pendingMode, setPendingMode } from "@/lib/onboarding"
+import { pendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset } from "@luckout/api"
 import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
@@ -30,16 +30,17 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
       title="Add funds"
       description={need ? `You need ${usdUp(need)} more for this card.` : "Your balance pays for cards. Withdraw what you don't spend any time."}
     >
-      <AddFundsPanel key={need ?? 0} need={need} onDone={(ok) => ok && onOpenChange(false)} />
+      <AddFundsPanel key={need ?? 0} need={need} onDone={(ok) => ok && onOpenChange(false)} onContinue={() => onOpenChange(false)} />
     </Sheet>
   )
 }
 
 /**
  * Test USDC on testnet, a deposit from the wallet, or (on mainnet) a top-up from any chain. A mode
- * chosen before the first deposit is saved right after it, with one more approval.
+ * chosen before the first deposit is saved right after it, with one more approval. A top-up from another chain
+ * takes minutes and lands by itself: once it's sent, `onContinue` lets the customer go on without waiting for it.
  */
-export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onDone: (ok: boolean) => void }) {
+export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | undefined; onDone: (ok: boolean) => void; onContinue?: () => void }) {
   const { accountId, walletUsdc, walletNear, gasFree, evm } = useSession()
   // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
   const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
@@ -59,15 +60,9 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
   const micro = toMicro(amount)
 
   const done = async (ok: boolean) => {
-    if (ok && accountId) {
-      const m = pendingMode(accountId)
-      if (m) {
-        setPendingMode(accountId, undefined)
-        if (m !== "normal") {
-          setBusy("mode")
-          await actions.setDefaultMode(m)
-        }
-      }
+    if (ok && accountId && pendingMode(accountId)) {
+      setBusy("mode")
+      await actions.savePendingMode()
     }
     setBusy(undefined)
     onDone(ok)
@@ -104,7 +99,7 @@ export function AddFundsPanel({ need, onDone }: { need?: number | undefined; onD
       )}
 
       {tab === "chain" && network === "mainnet"
-        ? evm ? <TopUpEvm need={need} onDone={done} /> : <TopUp need={need} onDone={done} />
+        ? evm ? <TopUpEvm need={need} onDone={done} onContinue={onContinue} /> : <TopUp need={need} onDone={done} onContinue={onContinue} />
         // Testnet with nothing to deposit: the faucet above is the whole story.
         : network === "testnet" && inWallet < 1_000_000
         ? null

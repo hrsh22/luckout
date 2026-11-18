@@ -4,12 +4,15 @@ import { Avatar, shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
 import { NavShell } from "@/components/nav-shell"
 import { Button, buttonVariants } from "@/components/ui/button"
+import { useWalletActions } from "@/lib/actions"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
-import { ACTIVE_PHASES, useIsAdmin, useTransfers } from "@/lib/queries"
+import { ACTIVE_PHASES, arriving, useIsAdmin, useTransfers } from "@/lib/queries"
+import { usd } from "@/lib/format"
+import type { Transfer, TransferPhase } from "@luckout/api"
 import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import Link from "next/link"
@@ -197,26 +200,41 @@ function SignOutEverywhere({ open, onOpenChange }: { open: boolean; onOpenChange
   )
 }
 
+/** Where a Top-Up went, said wherever the customer is. Keyed by the Top-Up, so the top-up form's own toast isn't doubled. */
+const landed = (t: Transfer, toWallet: () => void) => {
+  const amount = usd(t.usdc)
+  const look = { id: t.depositAddress, action: { label: "Wallet", onClick: toWallet } }
+  if (t.phase === "done") toast.success(`${amount} added to your balance`, { id: t.depositAddress })
+  else if (t.phase === "in-wallet") toast(`Your ${amount} top-up landed in your NEAR wallet`, { ...look, description: "Deposit it into Luckout from Wallet with one tap." })
+  else if (t.phase === "in-intents") toast(`Your ${amount} top-up landed in your NEAR Intents account`, { ...look, description: "Move it into Luckout from Wallet with one tap." })
+  else if (t.phase === "refunded") toast.error(`Your ${amount} top-up didn't go through`, { ...look, description: "1Click sent it back. Wallet shows where it is." })
+}
+
 /** "+$2.50" while a top-up is on its way into the balance, so it never looks like it vanished. */
 function Arriving() {
   const { token, refresh } = useSession()
   const qc = useQueryClient()
+  const router = useRouter()
+  const actions = useWalletActions()
   const transfers = useTransfers(token)
-  const list = transfers.data ?? []
-  // Only money 1Click has and is delivering: not a quote still waiting for its transfer, nor one paid short.
-  const coming = list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving" || (t.phase === "awaiting-transfer" && t.depositTx)))
-  // When a transfer lands or is sent back, the balances it changed are read again (this is on every page).
-  const settled = list.filter((t) => !ACTIVE_PHASES.has(t.phase)).map((t) => `${t.depositAddress}:${t.phase}`).join()
-  const seen = useRef<string | undefined>(undefined)
-  const loaded = transfers.data !== undefined
+  const coming = arriving(transfers.data ?? [])
+  // When a transfer lands or is sent back, the balances it changed are read again (this is on every page), and a
+  // Top-Up says where it went: the customer needn't have waited on the top-up form for it.
+  const phases = useRef<Map<string, TransferPhase>>(undefined)
   useEffect(() => {
-    if (!loaded) return
-    if (seen.current !== undefined && seen.current !== settled) {
-      void refresh().catch(() => {})
-      void qc.invalidateQueries({ queryKey: ["held"] })
-    }
-    seen.current = settled
-  }, [loaded, settled, refresh])
+    const list = transfers.data
+    if (!list) return
+    const before = phases.current
+    phases.current = new Map(list.map((t) => [t.depositAddress, t.phase]))
+    // Only what changed while we watched: nothing is announced on page load.
+    const ended = before ? list.filter((t) => ACTIVE_PHASES.has(before.get(t.depositAddress)!) && !ACTIVE_PHASES.has(t.phase)) : []
+    if (ended.length === 0) return
+    void refresh().catch(() => {})
+    void qc.invalidateQueries({ queryKey: ["held"] })
+    for (const t of ended) if (t.direction === "in") landed(t, () => router.push("/wallet"))
+    // A first Top-Up that moved in by itself: the mode chosen before it is saved now (one more signature).
+    if (ended.some((t) => t.direction === "in" && t.phase === "done")) void actions.savePendingMode()
+  }, [transfers.data, refresh, qc, router]) // eslint-disable-line react-hooks/exhaustive-deps
   if (coming.length === 0) return null
   const total = coming.reduce((sum, t) => sum + t.usdc, 0)
   return (
