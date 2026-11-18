@@ -354,8 +354,14 @@ function Receipt({ shown, exact, info, error, retry, children }: {
             : `Exactly the price. No Draw, no cashback.`}
         </p>
       </div>
+      {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
+      {/* The action sits right under the price, so a laptop screen shows both; every outcome follows below it. */}
+      <div className="flex flex-col gap-3">
+        {children}
+        <p className="text-sm text-muted">You always get the card.{lucky ? " Any cashback lands in your balance." : ""}</p>
+      </div>
       {lucky && (
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-3 border-t border-line pt-5">
           <OddsBar outcomes={outcomes} />
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
           {shown.luckyAmount < shown.referencePrice && (
@@ -365,9 +371,6 @@ function Receipt({ shown, exact, info, error, retry, children }: {
           )}
         </div>
       )}
-      {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
-      {children}
-      <p className="text-sm text-muted">You always get the card.{lucky ? " Any cashback lands in your balance." : ""}</p>
     </div>
   )
 }
