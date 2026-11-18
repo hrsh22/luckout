@@ -10,7 +10,7 @@ import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
 import { purchasePollMs } from "@/lib/purchase-poll"
-import type { Purchase } from "@luckout/api"
+import { type Purchase, redemptionFields } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
@@ -35,11 +35,11 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
 }
 
 const redemption = (p: Purchase) => {
-  const text = (k: string) => (typeof p.redemption?.[k] === "string" ? (p.redemption[k] as string) : undefined)
+  const r = redemptionFields(p.redemption)
   // Bitrefill's expiry date, when the card has one.
-  const expiry = text("expiration_date")
-  const expires = expiry && !Number.isNaN(Date.parse(expiry)) ? new Date(expiry) : undefined
-  return { code: text("code"), pin: text("pin"), link: safeLink(text("link")), instructions: text("instructions"), expires }
+  const expires = r.expires && !Number.isNaN(Date.parse(r.expires)) ? new Date(r.expires) : undefined
+  const link = safeLink(r.link)
+  return { ...r, link, expires, any: r.secrets.length > 0 || !!link }
 }
 
 /** A delivered Lucky Buy whose Draw isn't recorded yet. */
@@ -106,7 +106,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
 
       <SafetyNet p={p} />
 
-      {(r.code || r.pin || r.link) && <CodeBlock p={p} />}
+      {r.any && <CodeBlock p={p} />}
 
       {p.draw && p.settleTx && <ProofLinks p={p} />}
 
@@ -238,13 +238,13 @@ export function CodeBlock({ p }: { p: Purchase }) {
   const r = redemption(p)
   return (
     <div className="card flex flex-col gap-3 p-5">
-      {r.code && <Secret label="Code" value={r.code} />}
-      {r.pin && <Secret label="PIN" value={r.pin} />}
+      {r.secrets.map((f, i) => <Secret key={i} label={f.label} value={f.value} />)}
       {r.link && (
         <a href={r.link} target="_blank" rel="noreferrer noopener" className={`${buttonVariants({ variant: "soft", size: "sm" })} self-start`}>
           Open the voucher<ExternalLink />
         </a>
       )}
+      {r.other && <p className="text-sm text-muted break-all">{r.other}</p>}
       {r.instructions && <p className="text-sm text-muted">{r.instructions}</p>}
       {r.expires && <p className="text-sm text-muted">Use it by {r.expires.toLocaleDateString(undefined, { dateStyle: "long" })}.</p>}
     </div>
@@ -367,7 +367,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
                   <CancelWaiting id={p.id} />
                 </>
               )}
-              {redemption(p).code || redemption(p).pin || redemption(p).link ? <CodeBlock p={p} /> : null}
+              {redemption(p).any ? <CodeBlock p={p} /> : null}
               {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (
                 <a href={explorer(p.settleTx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start`}>
                   Delivery transaction<ExternalLink />

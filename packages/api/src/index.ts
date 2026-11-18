@@ -3,6 +3,7 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchem
 
 export * from "./intents.ts"
 export * from "./limits.ts"
+export * from "./redemption.ts"
 
 /** Whole micro-USDC (6 decimals), never floats (ADR-0004). */
 export const MicroUsdc = Schema.Int
