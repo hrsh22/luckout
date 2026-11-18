@@ -233,7 +233,7 @@ const signIntent = async (intent: object, nonce = randomBytes(32).toString("base
   return { standard: "erc191", payload, signature: intentSignature(await evmKey.signMessage({ message: payload })) }
 }
 
-const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string; lostOnce?: boolean } = {}) => {
+const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string; lostOnce?: boolean; broke?: boolean } = {}) => {
   const sent: Array<{ receiver: string; method: string; args: unknown }> = []
   const near = fakeNear({
     contractId: APP,
@@ -255,6 +255,7 @@ const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: s
         const hash = `tx-${sent.length + 1}`
         sent.push({ receiver, method, args })
         yield* persist({ hash, bytes: "" })
+        if (o.broke) return yield* new NearUnavailable({ message: "send: NotEnoughBalanceError: Not enough balance for relayer.test (balance: 1, cost: 2)" })
         if (o.lostOnce && sent.length === 1) return yield* new NearUnavailable({ message: "send: timed out" })
         return { hash, value: null, events: [], failures: [] }
       }),
@@ -418,4 +419,12 @@ test("a Top-Up's move-in whose relayer transaction expired unsent is sent again 
   assert.match(r.first, /didn't answer in time/, "the message TopUp keeps a move-in waiting on")
   assert.equal(r.second, "tx-2")
   assert.equal(w.sent.length, 2)
+})
+
+test("NEAR refusing the relayer for want of NEAR is 'can't pay right now', not 'NEAR didn't answer': nothing ran", async () => {
+  const w = intentWorld({ broke: true })
+  const e = await w.tag(w.send(await signIntent(moveIn()), false))
+  // A Top-Up's move-in waits for the relayer on this, and logs it, instead of retrying silently as if it may have run.
+  assert.equal(e._tag, "RelayUnavailable")
+  assert.doesNotMatch(e.message, /didn't answer/)
 })

@@ -2,7 +2,7 @@ import { Config, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Base } from "./Base.ts"
-import { Near, Network } from "./Near.ts"
+import { Near, Network, OPERATOR_GAS, RELAY_GAS, TREASURY_GAS, upfront } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 
 const NEAR = 10n ** 24n
@@ -14,10 +14,12 @@ const PER_BYTE = 10n ** 19n
  * keeps the full lines; staging runs on a fifth of the NEAR, so it sets GAS_ALERT_PERCENT=20.
  */
 const PERCENT = BigInt(process.env.GAS_ALERT_PERCENT || 100)
+/** Never under what the account's heaviest call needs up front, and a quarter more: the alert comes before NEAR refuses one. */
+const covering = (line: bigint, gas: bigint) => (line > upfront(gas) * 5n / 4n ? line : upfront(gas) * 5n / 4n)
 export const GAS_ALERT = {
-  operator: NEAR * PERCENT / 200n,
-  relayer: NEAR * PERCENT / 200n,
-  treasury: NEAR * PERCENT / 1000n,
+  operator: covering(NEAR * PERCENT / 200n, OPERATOR_GAS),
+  relayer: covering(NEAR * PERCENT / 200n, RELAY_GAS),
+  treasury: covering(NEAR * PERCENT / 1000n, TREASURY_GAS),
   contract: NEAR * PERCENT / 100n
 } as const
 const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
@@ -81,7 +83,7 @@ export const Monitor = Layer.effectDiscard(
         yield* alerts.admin(`operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
       }
       if (near.relayerId && (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer) {
-        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; customers' wallets pay their own fees when it runs out`)
+        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM wallets' top-ups, withdrawals and settings wait until it has more`)
       }
       if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
         yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`)

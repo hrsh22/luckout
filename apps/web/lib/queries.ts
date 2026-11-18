@@ -1,6 +1,6 @@
 "use client"
 
-import { type Category, type Mode, type Purchase, type PurchasePage, type TransferPhase, VoucherSummary } from "@luckout/api"
+import { type Category, type Mode, type Purchase, type PurchasePage, type Transfer, type TransferPhase, VoucherSummary } from "@luckout/api"
 import { type InfiniteData, keepPreviousData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./api"
 import { contractId, view } from "./chain"
@@ -166,6 +166,10 @@ export const useTelegram = (token: string | undefined, waiting = false) =>
 
 /** Phases where the customer's money is still moving, or waiting on them: polled often. */
 export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "incomplete", "swapping", "moving"])
+
+/** Top-Ups 1Click has (or that we know were paid) and is delivering: not a quote still waiting for its transfer, nor one paid short. */
+export const arriving = (list: ReadonlyArray<Transfer>) =>
+  list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving" || (t.phase === "awaiting-transfer" && !!t.depositTx)))
 
 /**
  * The customer's Top-Ups and withdrawals through NEAR Intents (still moving, or ended in the last day),

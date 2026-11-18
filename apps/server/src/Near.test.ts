@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { failover, isDeadTx, isUnknownTx, otherNetworkAccounts, transportTrouble } from "./Near.ts"
+import { failover, isBrokeTx, isDeadTx, isUnknownTx, otherNetworkAccounts, RELAY_GAS, transportTrouble, upfront } from "./Near.ts"
 
 // A server refuses to start when its .env names accounts from the other network.
 
@@ -67,4 +67,8 @@ test("resuming a saved transaction reads near-api-js 7's errors right", () => {
   assert.ok(isDeadTx("resend: TransactionExpiredError: Transaction expired"), "expired: sign afresh")
   assert.ok(isDeadTx("resend: InvalidNonceError: Invalid nonce (ak: 5, tx: 4)"))
   assert.ok(!isUnknownTx("tx status: Error: https://x unavailable") && !isDeadTx("resend: TypeError: fetch failed"), "an outage is neither")
+  // Seen live 2026-11-18: NEAR refused a 300 Tgas relay from an account holding 0.149 NEAR.
+  const broke = "send: NotEnoughBalanceError: Not enough balance for relayer.staging.luckout.near (balance: 148931856932293899999998, cost: 300923390231353000000000)"
+  assert.ok(isBrokeTx(broke) && !transportTrouble(broke) && !isDeadTx(broke), "our fee: an answer, not an outage, nor a dead nonce")
+  assert.ok(upfront(300n * 10n ** 12n) <= 300923390231353000000000n && upfront(RELAY_GAS) < 148931856932293899999998n, "that account can send our intents at 120 Tgas")
 })

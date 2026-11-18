@@ -7,6 +7,7 @@ import { api, cancelled, errorMessage } from "./api"
 import { limitsText, tokenAmount, usd } from "./format"
 import { CHAIN_NAMES } from "./evm"
 import { modeName } from "./modes"
+import { pendingMode, setPendingMode } from "./onboarding"
 import { type Call, contractId, intentsId, usdcId } from "./near"
 import { useSession } from "./session"
 import { oneAtATime } from "./utils"
@@ -52,6 +53,24 @@ export function useWalletActions() {
     })
 
   const run = (pending: string, done: string, ...calls: Array<Call>) => steps(pending, done, () => send(...calls))
+  const setDefaultMode = (mode: Mode) =>
+    run(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, {
+      receiverId: contractId,
+      method: "set_default_mode",
+      args: { mode },
+      deposit: ONE_YOCTO
+    })
+  /**
+   * A mode chosen before the first deposit, when the contract had no account to save it on: saved once that deposit
+   * lands, by whichever of its ends sees it first (a deposit, the top-up form, or the header seeing a top-up land),
+   * each after its own wallet request is done.
+   */
+  const savePendingMode = async () => {
+    const m = accountId ? pendingMode(accountId) : undefined
+    if (!accountId || m === undefined) return
+    setPendingMode(accountId, undefined)
+    if (m !== "normal") await setDefaultMode(m)
+  }
   const withdrawCall = (micro: number): Call => ({
     receiverId: contractId,
     method: "withdraw",
@@ -75,7 +94,9 @@ export function useWalletActions() {
         })
         : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000)),
     /** From the NEAR wallet, or for an EVM wallet from its NEAR Intents account. */
-    deposit: (micro: number) => run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro)),
+    deposit: (micro: number) =>
+      run(evm ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro))
+        .then(async (ok) => (ok && (await savePendingMode()), ok)),
     withdraw: (micro: number) =>
       run(`Withdrawing ${usd(micro)}`, evm ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),
     /**
@@ -122,13 +143,8 @@ export function useWalletActions() {
         arriving = `${tokenAmount(q.amountOutFormatted, q.symbol, "down")} ${q.symbol} arrives in ${where} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
       })
     },
-    setDefaultMode: (mode: Mode) =>
-      run(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, {
-        receiverId: contractId,
-        method: "set_default_mode",
-        args: { mode },
-        deposit: ONE_YOCTO
-      }),
+    setDefaultMode,
+    savePendingMode,
     /** Micro-USDC strings, so "No limit" (u128::MAX) reaches the contract exactly. */
     setLimits: (perPurchase: string, daily: string) =>
       run("Saving your limits", `Limits saved: ${limitsText(perPurchase, daily)}`, {

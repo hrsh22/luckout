@@ -178,7 +178,9 @@ function Row({ t }: { t: Transfer }) {
         {t.late && (
           <p className="flex items-start gap-2 rounded-2xl bg-warn-soft p-3 text-sm text-warn">
             <Clock size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-            Taking longer than usual. It's safe: 1Click either delivers it or sends it back to {refundPlace(t)}. You don't need to do anything.
+            {t.phase === "moving"
+              ? "Moving it into your balance is taking longer than usual. It's safe in your NEAR Intents account, Luckout keeps trying, and we've been told."
+              : `Taking longer than usual. It's safe: 1Click either delivers it or sends it back to ${refundPlace(t)}. You don't need to do anything.`}
           </p>
         )}
 

@@ -8,7 +8,7 @@ import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, floatOf, MIN_REFILL, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
-import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TxExpired } from "./Near.ts"
+import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TREASURY_GAS, TxExpired, upfront } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
 import { stepRows } from "./Rows.ts"
 import { USDC_REGISTRATION } from "./Relay.ts"
@@ -70,8 +70,8 @@ const UNUSUAL_FLOOR = 100_000_000
 const STUCK_WATCH = "5 minutes"
 /** Failed tries in a row at one step before an admin is told: about 15 minutes of backoff (30 s, 1, 2, 4, 8 min). */
 const ALERT_AFTER_ATTEMPTS = 5
-/** The treasury needs a little NEAR to sign refills. */
-const TREASURY_MIN_GAS = 50_000_000_000_000_000_000_000n // 0.05 NEAR
+/** The treasury needs a little NEAR to sign refills: at least what NEAR asks up front for its heaviest call. */
+const TREASURY_MIN_GAS = upfront(TREASURY_GAS)
 /** The Base wallet needs a little ETH to pay (a USDC transfer costs well under a cent on Base). */
 export const BASE_MIN_GAS = 20_000_000_000_000n // 0.00002 ETH
 const EXPLORER = "https://explorer.near-intents.org/transactions/"
@@ -438,7 +438,7 @@ export class Refill extends Context.Service<Refill, {
               }
               // Pull exactly the shortfall: the treasury never holds more than refills need.
               const pulled = yield* treasuryTx(row, "sweep_tx", near.contractId, [
-                actions.functionCall("sweep_proceeds", { amount: String(shortfall) }, teraToGas("60"), 1n)
+                actions.functionCall("sweep_proceeds", { amount: String(shortfall) }, TREASURY_GAS, 1n)
               ]).pipe(Effect.flatMap(landed), Effect.catchTag("ContractRejected", rejected))
               if (pulled === "next") {
                 yield* save(row.id, { sweep_tx: null, error: null })

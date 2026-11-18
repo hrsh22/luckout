@@ -13,7 +13,7 @@ import { limitsText } from "@/lib/format"
 import { MODES, modeName, RECOMMENDED, sameMode } from "@/lib/modes"
 import { markWelcomed, pendingMode, setPendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { useCheckoutEmail } from "@/lib/queries"
+import { arriving, useCheckoutEmail, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode } from "@luckout/api"
 import { ArrowLeft, Check, ShieldCheck, Sparkles, Zap } from "lucide-react"
@@ -34,6 +34,8 @@ const EMAIL = 2
 export function Welcome({ onDone }: { onDone?: () => void }) {
   const { accountId, account, signInError, token } = useSession()
   const askEmail = useCheckoutEmail(token).data?.needed === true
+  // A top-up sent from another chain: it lands by itself, so the last step says it's coming rather than "no funds".
+  const coming = arriving(useTransfers(token).data ?? []).reduce((sum, t) => sum + t.usdc, 0)
   const actions = useWalletActions()
   const router = useRouter()
   // Already signed in: start at the first real decision, with no step-to-step animation on open.
@@ -162,7 +164,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               </button>
               <Heading title="Add funds" body="Your balance pays for cards, and you can withdraw what you don't spend at any time." />
               <div className="card p-5 sm:p-6">
-                <AddFundsPanel onDone={(ok) => ok && go(4)} />
+                <AddFundsPanel onDone={(ok) => ok && go(4)} onContinue={() => go(4)} />
               </div>
               {/* Over a page, "Skip for now" is in the header already. */}
               {!onDone && (
@@ -178,7 +180,9 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
                 <div className="card flex flex-col gap-2 p-6">
                   <span className="flex items-center gap-2 text-sm text-muted"><Avatar id={accountId} size={20} />{shortAccount(accountId)}</span>
                   <span className="font-display text-4xl font-extrabold"><Money micro={account?.balance ?? 0} down /></span>
-                  <span className="text-sm text-muted">{account ? "in your balance" : "No funds yet. Add them any time."}</span>
+                  <span className="text-sm text-muted">
+                    {coming > 0 ? <>in your balance, and <Money micro={coming} /> on its way</> : account ? "in your balance" : "No funds yet. Add them any time."}
+                  </span>
                 </div>
                 <ModeTile mode={account?.default_mode ?? pendingMode(accountId) ?? mode} saved={!!account} />
                 <div className="card flex flex-col gap-2 p-6">

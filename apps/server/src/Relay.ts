@@ -5,7 +5,7 @@ import { SqlClient } from "effect/sql"
 import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
-import { Near, Network, type SignedDelegate } from "./Near.ts"
+import { isBrokeTx, Near, type NearUnavailable, Network, type SignedDelegate } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
 // The relayer (NEP-366, ADR-0008): customers sign their own calls in the wallet without sending
@@ -152,6 +152,13 @@ export class Relay extends Context.Service<Relay, {
         near.relayerId ? quotaLeft(accountId).pipe(Effect.orElseSucceed(() => false)) : Effect.succeed(false)
 
       const failed = (message: string) => new RelayFailed({ message })
+      /** NEAR's trouble, for the customer. A refusal for our fee ran nothing: NEAR wallets then pay it themselves. */
+      const nearTrouble = (e: NearUnavailable) =>
+        Effect.fail(
+          isBrokeTx(e.message)
+            ? new RelayUnavailable({ message: "Luckout can't pay this network fee right now. Try again later." })
+            : failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")
+        )
 
       /** What a 1Click swap we quoted for this account takes from its NEAR Intents account: a withdrawal's USDC, or a send-back. */
       const quotedSwap = (accountId: string, depositAddress: unknown) =>
@@ -239,7 +246,7 @@ export class Relay extends Context.Service<Relay, {
         }).pipe(
           Effect.catchTags({
             ContractRejected: (e) => Effect.fail(failed(readable(e.message))),
-            NearUnavailable: () => Effect.fail(failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")),
+            NearUnavailable: nearTrouble,
             SqlError: (e) => Effect.die(e)
           })
         )
@@ -298,7 +305,7 @@ export class Relay extends Context.Service<Relay, {
         }).pipe(
           Effect.catchTags({
             ContractRejected: (e) => Effect.fail(failed(readable(e.message))),
-            NearUnavailable: () => Effect.fail(failed("NEAR didn't answer in time. It may still go through, so check your balance before trying again.")),
+            NearUnavailable: nearTrouble,
             SqlError: (e) => Effect.die(e)
           })
         )

@@ -12,7 +12,7 @@ import { useHeld } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Copy } from "lucide-react"
+import { Circle, CircleCheck, Copy, LoaderCircle } from "lucide-react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
@@ -83,6 +83,45 @@ export function DepositAddress({ address, memo }: { address: string; memo?: stri
   )
 }
 
+/** The step a Top-Up is on, from 1Click's status: 0 the transfer, 1 converting, 2 landing (an EVM move-in), 3 all done. */
+export const stepOf = (status: string | undefined, moving: boolean) =>
+  status === "PROCESSING" ? 1 : status === "SUCCESS" ? (moving ? 2 : 3) : 0
+
+/** A Top-Up's three steps, the one under way spinning: the customer sees it move, not 1Click's status codes. */
+export function TopUpSteps({ at, landing, minutes }: { at: number; landing: string; minutes: number }) {
+  const steps = ["Your transfer arrives", `Converted to USDC, usually in about ${minutes} min`, landing]
+  return (
+    <ol className="flex flex-col gap-1.5" aria-label="Top-up progress">
+      {steps.map((s, i) => (
+        <li key={i} aria-current={i === at ? "step" : undefined} className={`flex items-center gap-2 ${i === at ? "font-semibold" : i > at ? "text-muted" : ""}`}>
+          {i < at
+            ? <CircleCheck size={18} className="shrink-0 text-good" aria-hidden="true" />
+            : i === at
+            ? <LoaderCircle size={18} className="shrink-0 animate-spin" aria-hidden="true" />
+            : <Circle size={18} className="shrink-0" aria-hidden="true" />}
+          {s}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+/**
+ * Nothing more needs the customer once it's sent, so they needn't watch it: the header shows it on its way, a message
+ * says when it lands, and Wallet keeps every step.
+ */
+export function OnItsWay({ sent, lands, onContinue }: { sent: boolean; lands: string; onContinue?: (() => void) | undefined }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-2xl bg-white p-3">
+      <p>
+        {sent ? "No need to wait here:" : "Sent it? No need to wait here:"} it {lands}. You'll see it land wherever you are on Luckout,
+        and Wallet shows where it is.
+      </p>
+      {onContinue && <Button size="sm" className="self-start" onClick={onContinue}>Continue</Button>}
+    </div>
+  )
+}
+
 /**
  * A NEAR wallet can't show us its other chains, but its NEAR Intents account we can see: anything there (1Click's
  * change or a refund) is the cheapest place to start, so it's offered first.
@@ -125,7 +164,7 @@ export const topUpPicks = (need?: number) => [
  * Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit.
  * `onDone` runs once it's in the balance, like a wallet deposit (a mode chosen before it is saved then).
  */
-export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?: number | undefined } = {}) {
+export function TopUp({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
   const { accountId, token, refresh, send, gasFree } = useSession()
   const qc = useQueryClient()
   // Whether this NEAR account can hold USDC. No deposit address is offered until that's known: a swap's USDC sent
@@ -226,7 +265,10 @@ export function TopUp({ onDone, need }: { onDone?: (ok: boolean) => void; need?:
             confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, 1Click refunds it to your
             NEAR Intents account, and the Wallet page sends it on to your wallet.
           </p>
-          <p>Status: <b>{status?.replaceAll("_", " ").toLowerCase()}</b></p>
+          {status === "REFUNDED" || status === "FAILED"
+            ? <p className="font-medium text-warn">It didn't go through: 1Click sent it back to your NEAR Intents account. Wallet sends it on to your wallet.</p>
+            : <TopUpSteps at={stepOf(status, false)} landing="In your NEAR wallet, ready to deposit" minutes={Math.ceil(quote.timeEstimateSeconds / 60)} />}
+          {!(status && DONE.has(status)) && <OnItsWay sent={status !== "PENDING_DEPOSIT"} lands="lands in your NEAR wallet by itself, ready to deposit with one tap" onContinue={onContinue} />}
           {status === "SUCCESS" && (
             <Button className="self-start" disabled={busy} onClick={() => step(async () => {
               // The swap can deliver less than quoted: deposit what actually arrived, never more than the quote.

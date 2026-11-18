@@ -10,8 +10,7 @@ import {
   JsonRpcProvider,
   KeyPairSigner,
   type KeyPairString,
-  SignedTransaction,
-  teraToGas
+  SignedTransaction
 } from "near-api-js"
 import { verifyMessage } from "near-api-js/nep413"
 
@@ -86,6 +85,25 @@ export const otherNetworkAccounts = (network: "testnet" | "mainnet", env: Record
 export const isUnknownTx = (e: unknown) => /UNKNOWN_TRANSACTION|UnknownTransaction/.test(String(e))
 /** NEAR's own error kinds for a transaction that can no longer execute (`InvalidNonceError`, `TransactionExpiredError`). */
 export const isDeadTx = (e: unknown) => /InvalidNonce|Invalid nonce|expired/i.test(String(e))
+/** NEAR refused it because the sender can't cover its `upfront` cost: nothing ran, and it can't until the sender holds more NEAR. */
+export const isBrokeTx = (e: unknown) => /NotEnoughBalance|LackBalanceForState/.test(String(e))
+
+const TGAS = 10n ** 12n
+/** The operator's contract calls. */
+export const OPERATOR_GAS = 100n * TGAS
+/**
+ * A customer's signed intents (`execute_intents`): an AuthCall's 80 Tgas for `on_auth` (AUTH_CALL_GAS) plus
+ * intents.near's own 4-6, with room. The heaviest seen on mainnet used 18 Tgas in all (a withdrawal).
+ */
+export const RELAY_GAS = 120n * TGAS
+/** The treasury's heaviest call: Refill's `sweep_proceeds`. */
+export const TREASURY_GAS = 60n * TGAS
+/**
+ * What an account must hold before NEAR takes a call with this much gas: about 1 NEAR per 1,000 Tgas (0.3009 NEAR
+ * for 300 Tgas, seen 2026-11-18), though it burns and charges far less.
+ * ponytail: today's worst-case gas price, fixed; scale it if NEAR's gas price ever rises.
+ */
+export const upfront = (gas: bigint) => gas * 10n ** 9n
 
 /** Free public endpoints, each tried when the one before is rate-limited or down (checked 2026-11-10). */
 export const MAINNET_RPC_URLS = "https://free.rpc.fastnear.com,https://near.drpc.org,https://rpc.intea.rs"
@@ -261,7 +279,8 @@ export class Near extends Context.Service<Near, {
               const resent = yield* lock.withPermits(1)(
                 rpc("resend", (p) => p.sendTransactionUntil(tx, "INCLUDED")).pipe(
                   Effect.as(true),
-                  Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
+                  // Refused for want of NEAR, this copy never ran: signed afresh, it carries today's gas (and its upfront cost).
+                  Effect.catchTag("NearUnavailable", (e) => (isDeadTx(e.message) || isBrokeTx(e.message) ? Effect.succeed(false) : Effect.fail(e)))
                 )
               )
               if (!resent) {
@@ -292,7 +311,7 @@ export class Near extends Context.Service<Near, {
 
       const call = <E>(method: string, args: object, persist: (signed: Signed) => Effect.Effect<void, E>) =>
         operator
-          ? operator.send(contractId, [actions.functionCall(method, args, teraToGas("100"), 0n)], persist)
+          ? operator.send(contractId, [actions.functionCall(method, args, OPERATOR_GAS, 0n)], persist)
           : Effect.fail(new NearUnavailable({ message: "OPERATOR_ACCOUNT_ID / OPERATOR_PRIVATE_KEY not set" }))
 
       // The outer transaction goes from the relayer to the customer's account; the network checks
@@ -305,7 +324,7 @@ export class Near extends Context.Service<Near, {
       // Customers' signed NEAR Intents payloads (ADR-0011) go in one execute_intents call, gas on us.
       const relayerCall = <E>(receiverId: string, method: string, args: object, persist: (signed: Signed) => Effect.Effect<void, E>, deposit = 0n) =>
         relayer
-          ? relayer.send(receiverId, [actions.functionCall(method, args, teraToGas("300"), deposit)], persist)
+          ? relayer.send(receiverId, [actions.functionCall(method, args, RELAY_GAS, deposit)], persist)
           : Effect.fail(new NearUnavailable({ message: "RELAYER_ACCOUNT_ID / RELAYER_PRIVATE_KEY not set" }))
 
       const treasurySend = <E>(receiverId: string, txActions: Array<Action>, persist: (signed: Signed) => Effect.Effect<void, E>) =>
