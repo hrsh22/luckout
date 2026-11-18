@@ -45,6 +45,7 @@ const deps = {
     create: () => Effect.sync(() => void bought++),
     // Testnet: no Checkout Email needed. Mainnet tests swap in their own.
     checkoutEmail: () => Effect.succeed(new CheckoutEmail({ needed: false })),
+    useBy: () => Effect.succeed("2027-03-30T00:00:00.000Z"),
     setCheckoutEmail: (_: string, email: string) => Effect.succeed(new CheckoutEmail({ needed: true, email })),
     list: () =>
       Effect.succeed(new PurchasePage({
@@ -72,7 +73,8 @@ test("prepare_purchase returns a confirmation and buys nothing", async () => {
   model.close()
   assert.equal(bought, 0, "the model can't buy; only the customer's tap can")
   assert.deepEqual(turn.pending, {
-    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000, country: "KN"
+    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000, country: "KN",
+    useBy: "2027-03-30T00:00:00.000Z"
   })
   assert.equal(turn.reply, "Tap Buy to confirm.")
 })

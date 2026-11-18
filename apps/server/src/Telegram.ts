@@ -4,7 +4,7 @@ import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
-import { makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
+import { dateText, makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { makeAttestation } from "./Attestation.ts"
 import { Bitrefill } from "./Bitrefill.ts"
@@ -60,7 +60,9 @@ export const buySummary = (p: Pending) =>
   // A card only works in its own country: said on the button's line, every time.
   ` Works in ${worksIn(p.country)}.` +
   // Where Bitrefill sends the receipt: a changed address is in plain sight before every purchase.
-  (p.receiptTo ? ` Also emailed to ${p.receiptTo}.` : "")
+  (p.receiptTo ? ` Also emailed to ${p.receiptTo}.` : "") +
+  // Bitrefill gives no date before an order: the last delivered one's is the best guess, and said as one.
+  (p.useBy ? ` Use it by about ${dateText(p.useBy)}.` : "")
 
 /** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
 export const addLinkCode = (accountId: string, code: string, expiresAt: Date) =>
@@ -300,6 +302,7 @@ export class Telegram extends Context.Service<Telegram, {
           ...r.secrets.map((f) => `${f.label}: ${f.value}`),
           r.other ?? "",
           r.link ? `Link: ${r.link}` : "",
+          r.expires && !Number.isNaN(Date.parse(r.expires)) ? `Use it by ${dateText(r.expires)}.` : "",
           p.draw && p.settleTx ? `Draw Proof: ${webOrigin}/draw/${p.settleTx}` : ""
         ]
         return lines.filter(Boolean).join("\n")
