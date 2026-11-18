@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
@@ -62,7 +62,8 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
           const items = yield* bitrefill.popular(country, query.category)
           return new PopularCards({ ...(country ? { country } : {}), items })
         }),
-      voucher: ({ params }) => quiet(bitrefill.voucher(params.id)),
+      voucher: ({ params }) =>
+        quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game))
     })
   })

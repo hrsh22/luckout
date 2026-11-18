@@ -80,4 +80,5 @@ test("the Buy line says where the card is emailed, when it needs an email", () =
   const p = { voucherId: "v", voucherName: "Swiggy", value: "500", currency: "INR", country: "IN", mode: "normal" as const, maxPrice: 5_530_000, referencePrice: 5_530_000, luckyAmount: 0 }
   assert.equal(buySummary(p), "Swiggy, 500 INR: $5.53. Works in India only.")
   assert.equal(buySummary({ ...p, receiptTo: "me@example.com" }), "Swiggy, 500 INR: $5.53. Works in India only. Also emailed to me@example.com.")
+  assert.equal(buySummary({ ...p, useBy: "2027-03-30T18:29:59.000Z" }), "Swiggy, 500 INR: $5.53. Works in India only. Use it by about 30 March 2027.")
 })

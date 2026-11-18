@@ -59,8 +59,36 @@ const McpProduct = Schema.Struct({
     package_value: Schema.String,
     payment_price: Schema.String,
     payment_currency: Schema.Literal("USD")
-  }))
+  })),
+  // What Bitrefill's own page for the card shows; instructions and terms are HTML.
+  subtitles: Schema.optional(Schema.String),
+  instructions: Schema.optional(Schema.String),
+  termsConditions: Schema.optional(Schema.String),
+  url: Schema.optional(Schema.String),
+  ratings: Schema.optional(Schema.Struct({ rating_value: Schema.Number, rating_count: Schema.Number }))
 })
+
+/** Bitrefill's HTML as plain text: one line per paragraph, break or list item, links as "text (url)", every other tag dropped. */
+export const plainText = (html: string) =>
+  html
+    .replace(/<a\s[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, text: string) => (text.trim() && text.trim() !== href ? `${text.trim()} (${href})` : href))
+    .replace(/<li[^>]*>/gi, "\n• ")
+    .replace(/<br\s*\/?>|<\/p>|<\/li>|<\/h\d>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#0?39;|&#x27;/g, "'").replace(/&amp;/g, "&")
+    .split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n")
+
+/** What Bitrefill says about a card besides its prices, for the card's page. */
+const about = (p: typeof McpProduct.Type) => {
+  const text = (html: string | undefined) => (html && plainText(html)) || undefined
+  return {
+    subtitle: text(p.subtitles),
+    howToRedeem: text(p.instructions),
+    terms: text(p.termsConditions),
+    ...(p.ratings && p.ratings.rating_count > 0 ? { rating: { value: p.ratings.rating_value, count: Math.round(p.ratings.rating_count) } } : {}),
+    ...(p.url?.startsWith("https://www.bitrefill.com/") ? { bitrefillUrl: p.url } : {})
+  }
+}
 const McpPurchase = Schema.Struct({ response: Schema.Struct({ invoice_id: Schema.String }) })
 /** A guest invoice to pay in USDC on Base: exactly `altBasePrice` base units of `contractAddress`, to `address`. */
 const GuestPurchase = Schema.Struct({
@@ -573,7 +601,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           currency: p.currency,
           ...logos.get(p.id),
           packages: forSale(all),
-          tooSmall: tooSmall(all)
+          tooSmall: tooSmall(all),
+          ...about(p)
         })
       })
 

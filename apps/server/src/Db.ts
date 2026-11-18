@@ -295,6 +295,12 @@ const migrations = Migrator.fromRecord({
     const sql = yield* SqlClient.SqlClient
     // Sessions signed out before their token expired (Auth.ts): the token's signature, kept until that expiry.
     yield* sql`CREATE TABLE ended_sessions (tag TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)`
+  }),
+  // A delivered card's use-by date, outside its sealed Redemption Data, so a card's page can say it before buying.
+  "0023_purchase_use_by": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE purchases ADD COLUMN use_by TIMESTAMPTZ`
+    yield* sql`CREATE INDEX purchases_use_by ON purchases (voucher_id, created_at) WHERE use_by IS NOT NULL`
   })
 })
 

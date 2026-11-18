@@ -31,7 +31,18 @@ export class Voucher extends Schema.Class<Voucher>("Voucher")({
   ...VoucherSummary.fields,
   packages: Schema.Array(VoucherPackage),
   /** Amounts Bitrefill sells that Luckout can't: under the 0.5 USDC minimum purchase. */
-  tooSmall: Schema.optional(Schema.Array(VoucherPackage))
+  tooSmall: Schema.optional(Schema.Array(VoucherPackage)),
+  /** Bitrefill's one-line pitch for the card. */
+  subtitle: Schema.optional(Schema.String),
+  /** Bitrefill's steps to redeem the card, and its terms (validity, refunds, where it works), as plain text. */
+  howToRedeem: Schema.optional(Schema.String),
+  terms: Schema.optional(Schema.String),
+  /** Bitrefill's customer rating: out of 5, from `count` ratings. */
+  rating: Schema.optional(Schema.Struct({ value: Schema.Number, count: Schema.Int })),
+  /** The card's page on bitrefill.com. */
+  bitrefillUrl: Schema.optional(Schema.String),
+  /** ISO date: the use-by date on the last of these delivered through Luckout in the last 60 days. Cards come in batches, so the next is usually the same. */
+  useBy: Schema.optional(Schema.String)
 }) {}
 
 /** One page of the catalog. `next` is the `start` of the following page; absent on the last. */

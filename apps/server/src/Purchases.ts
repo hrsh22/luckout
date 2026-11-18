@@ -1,4 +1,4 @@
-import { BitrefillUnavailable, CheckoutEmail, Draw, GUEST_LIMITS, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, PurchasePage, Quote } from "@luckout/api"
+import { BitrefillUnavailable, CheckoutEmail, Draw, GUEST_LIMITS, type Mode, NewPurchase, NotFound, Purchase, PurchaseInvalid, PurchasePage, Quote, redemptionFields } from "@luckout/api"
 import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac } from "node:crypto"
@@ -58,6 +58,7 @@ interface Row {
   /** Whom a guest-checkout order was placed for: a guest (Checkout Email) or the customer's own Bitrefill account. */
   buyer: "guest" | "account" | null
   redemption: string | null
+  use_by: string | null
   settle_tx: Signed | null
   draw: Record<string, unknown> | null
   created_at: Date | string
@@ -91,6 +92,12 @@ const PAY_SEND_LIMIT_MS = 50 * 60_000
 /** Why a card couldn't be ordered: their Bitrefill login lapsed, and there's no Checkout Email to fall back on. */
 const LOGIN_LAPSED = "Your Bitrefill login expired. Connect again or add an email in Wallet."
 /** The email shape Bitrefill's buy-products accepts. */
+/** A delivered card's use-by date from its Redemption Data, as ISO; null if it has none or it isn't a date. */
+export const useByOf = (redemption: Readonly<Record<string, unknown>>) => {
+  const at = Date.parse(redemptionFields(redemption).expires ?? "")
+  return Number.isNaN(at) ? null : new Date(at).toISOString()
+}
+
 const EMAIL = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/
 /** About six hours of retries with backoff (30s doubling, capped at an hour). */
 const MAX_ATTEMPTS = 12
@@ -146,6 +153,8 @@ export class Purchases extends Context.Service<Purchases, {
   /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
   checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
   setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
+  /** The use-by date (ISO) on the last card of this voucher delivered in the last 60 days, if any. */
+  useBy(voucherId: string): Effect.Effect<string | undefined>
 }>()("luckout/Purchases") {
   static readonly layer = Layer.effect(
     Purchases,
@@ -394,7 +403,7 @@ export class Purchases extends Context.Service<Purchases, {
                 yield* alerts.admin(`purchase ${row.id}: Bitrefill didn't deliver paid invoice ${row.invoice_id} (${d.reason}); Base payment ${row.pay_tx.hash}. Ask Bitrefill support for a refund.`)
               }
               return yield* d._tag === "Delivered"
-                ? move(row, { step: "confirm", redemption: seal(row.id, d.redemption) })
+                ? move(row, { step: "confirm", redemption: seal(row.id, d.redemption), use_by: useByOf(d.redemption) })
                 : move(row, { step: "fail", error: d.reason })
             }
             case "confirm":
@@ -855,7 +864,16 @@ export class Purchases extends Context.Service<Purchases, {
       }).pipe(Effect.catchCause((cause) => Effect.logError("closed purchases pass failed", cause)))
       yield* settleClosed.pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
-      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, reconcileNow: reconcile, checkoutEmail, setCheckoutEmail })
+      const useBy = (voucherId: string) =>
+        sql<{ use_by: Date | string }>`
+          SELECT use_by FROM purchases
+          WHERE voucher_id = ${voucherId} AND use_by IS NOT NULL AND created_at > now() - interval '60 days'
+          ORDER BY created_at DESC LIMIT 1`.pipe(
+          Effect.orDie,
+          Effect.map(([r]) => (r ? new Date(r.use_by).toISOString() : undefined))
+        )
+
+      return Purchases.of({ quote, create, list, get, cancel, promoteWaiting: promote, reconcileNow: reconcile, checkoutEmail, setCheckoutEmail, useBy })
     })
   )
 }

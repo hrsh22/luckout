@@ -33,11 +33,15 @@ export interface Pending {
   readonly luckyAmount: number
   /** The Checkout Email this card and its receipt are also emailed to, when the order needs one: shown on the Buy line. */
   readonly receiptTo?: string
+  /** ISO: the use-by date on the last of these delivered recently (Purchases.useBy); shown on the Buy line. */
+  readonly useBy?: string
 }
 
 const regions = new Intl.DisplayNames(["en"], { type: "region" })
 /** Where a card can be used, in words: "India only", or "anywhere" for a worldwide ("XI") card. */
 export const worksIn = (code: string, name?: string) => (code === "XI" ? "anywhere" : `${name ?? regions.of(code) ?? code} only`)
+/** An ISO date as "30 March 2027" (UTC, so the same everywhere). */
+export const dateText = (iso: string) => new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })
 
 export const MODES: Record<string, Mode> = { normal: "normal", lite: { lucky: 0 }, classic: { lucky: 1 }, jackpot: { lucky: 2 } }
 export const modeName = (m: Mode) => (m === "normal" ? "Normal" : ["Lite", "Classic", "Jackpot"][m.lucky] ?? "Lucky")
@@ -212,10 +216,11 @@ export const makeAgent = (deps: {
           : { results }
       }))),
     get_voucher: ({ voucher_id }: { voucher_id: string }) =>
-      run(deps.bitrefill.voucher(voucher_id).pipe(Effect.map((v) => ({
+      run(Effect.zip(deps.bitrefill.voucher(voucher_id), deps.purchases.useBy(voucher_id)).pipe(Effect.map(([v, useBy]) => ({
         name: v.name,
         works_in: worksIn(v.countryCode, v.countryName),
         currency: v.currency,
+        ...(useBy ? { use_by: `about ${dateText(useBy)}: the date on the last one delivered; each card comes with its own` } : {}),
         amounts: v.packages.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })),
         ...(v.tooSmall?.length
           ? { not_sold_under_50_cent_minimum: v.tooSmall.map((p) => ({ value: p.value, price: usd(p.priceMicroUsdc) })) }
@@ -269,7 +274,7 @@ export const makeAgent = (deps: {
       run(Effect.gen(function*() {
         const a = yield* account(accountId)
         const m = resolveMode(a, mode)
-        const [voucher, q] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m))])
+        const [voucher, q, useBy] = yield* Effect.all([deps.bitrefill.voucher(voucher_id), deps.purchases.quote(voucher_id, value, game(m)), deps.purchases.useBy(voucher_id)])
         // A button that would fail on tap is worse than no button: say what's in the way instead.
         const closed = yield* deps.shopClosed
         if (closed) return { error: closed }
@@ -284,9 +289,9 @@ export const makeAgent = (deps: {
             }`
           }
         }
-        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount, ...(email.needed && email.email ? { receiptTo: email.email } : {}) })
+        prepare({ voucherId: voucher.id, voucherName: voucher.name, value, currency: voucher.currency, country: voucher.countryCode, mode: m, maxPrice: q.maxPrice, referencePrice: q.referencePrice, luckyAmount: q.luckyAmount, ...(email.needed && email.email ? { receiptTo: email.email } : {}), ...(useBy ? { useBy } : {}) })
         return {
-          shown: "Under your reply the customer sees the exact card, mode and price, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
+          shown: "Under your reply the customer sees the exact card, mode, price and use-by date, and a Buy button. So reply with one short line and no prices, like: Here it is, tap Buy when you're ready."
         }
       })),
     // Saved only when it's in the message being answered; anything else goes back to the model as a refusal.
