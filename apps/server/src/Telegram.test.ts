@@ -78,7 +78,13 @@ test("each Telegram user gets so many messages a minute and a day; a sweep keeps
 
 test("the Buy line says where the card is emailed, when it needs an email", () => {
   const p = { voucherId: "v", voucherName: "Swiggy", value: "500", currency: "INR", country: "IN", mode: "normal" as const, maxPrice: 5_530_000, referencePrice: 5_530_000, luckyAmount: 0 }
-  assert.equal(buySummary(p), "Swiggy, 500 INR: $5.53. Works in India only.")
-  assert.equal(buySummary({ ...p, receiptTo: "me@example.com" }), "Swiggy, 500 INR: $5.53. Works in India only. Also emailed to me@example.com.")
-  assert.equal(buySummary({ ...p, useBy: "2027-03-30T18:29:59.000Z" }), "Swiggy, 500 INR: $5.53. Works in India only. Use it by about 30 March 2027.")
+  assert.equal(buySummary([p]), "Swiggy, 500 INR: $5.53. Works in India only.")
+  assert.equal(buySummary([{ ...p, receiptTo: "me@example.com" }]), "Swiggy, 500 INR: $5.53. Works in India only. Also emailed to me@example.com.")
+  assert.equal(buySummary([{ ...p, useBy: "2027-03-30T18:29:59.000Z" }]), "Swiggy, 500 INR: $5.53. Works in India only. Use it by about 30 March 2027.")
+  // A cart: each card on its own line, then the total, and the email once.
+  const lucky = { ...p, voucherName: "Amazon", value: "10", currency: "USD", country: "US", mode: { lucky: 1 } as const, maxPrice: 12_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000 }
+  assert.equal(
+    buySummary([{ ...p, receiptTo: "me@example.com" }, { ...lucky, receiptTo: "me@example.com" }]),
+    "1. Swiggy, 500 INR: $5.53. Works in India only.\n2. Amazon, 10 USD on Classic: $12.00 now (price $10.00). Works in United States only.\n2 cards: $17.53 in all. Also emailed to me@example.com."
+  )
 })

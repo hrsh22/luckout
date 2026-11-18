@@ -22,6 +22,8 @@ const grotesk = fetch("https://fonts.googleapis.com/css2?family=Space+Grotesk:wg
   .catch(() => undefined)
 
 // Win Card (ADR-0005): shared link previews show the price paid, never Redemption Data.
+// ponytail: an image gets no query string, so a cart's settlement shows its first Draw; give the purchase its own path
+// segment if shared cart proofs need their own picture.
 export default async function Image({ params }: { params: Promise<{ tx: string }> }) {
   const tx = (await params).tx
   const [draw, font] = await Promise.all([TX_HASH.test(tx) ? loadDraw(tx).then((d) => d.draw, () => undefined) : undefined, grotesk])

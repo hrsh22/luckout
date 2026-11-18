@@ -42,6 +42,13 @@ const deps = {
   },
   purchases: {
     quote: () => Effect.succeed(new Quote({ mode: { lucky: 2 }, referencePrice: 10_000_000, luckyAmount: 10_000_000, maxPrice: 15_000_000 })),
+    // Each card on Jackpot as asked; a Normal one at its price.
+    quoteCart: (lines: ReadonlyArray<{ mode: unknown }>) =>
+      Effect.succeed(lines.map((l) =>
+        l.mode === "normal"
+          ? new Quote({ mode: "normal", referencePrice: 10_000_000, luckyAmount: 0, maxPrice: 10_000_000 })
+          : new Quote({ mode: { lucky: 2 }, referencePrice: 10_000_000, luckyAmount: 10_000_000, maxPrice: 15_000_000 })
+      )),
     create: () => Effect.sync(() => void bought++),
     // Testnet: no Checkout Email needed. Mainnet tests swap in their own.
     checkoutEmail: () => Effect.succeed(new CheckoutEmail({ needed: false })),
@@ -67,20 +74,20 @@ const deps = {
 const rich = { balance: "100000000", per_purchase_limit: "50000000", daily_limit: "100000000", day: 0, spent_today: "0", default_mode: "normal" }
 
 test("prepare_purchase returns a confirmation and buys nothing", async () => {
-  const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "Tap Buy to confirm." }])
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "Tap Buy to confirm." }])
   const agent = makeAgent({ ...(deps as object), testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
   const turn = await agent("alice.testnet", [], "buy me a 10 dollar test card on jackpot")
   model.close()
   assert.equal(bought, 0, "the model can't buy; only the customer's tap can")
-  assert.deepEqual(turn.pending, {
+  assert.deepEqual(turn.pending, [{
     voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000, country: "KN",
     useBy: "2027-03-30T00:00:00.000Z"
-  })
+  }])
   assert.equal(turn.reply, "Tap Buy to confirm.")
 })
 
 test("every completion's exact bytes are checked, and an unverified turn shows nothing", async () => {
-  const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "Tap Buy to confirm." }])
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "Tap Buy to confirm." }])
   const checked: Array<{ id: string; request: string; response: string }> = []
   // The tool step verifies; the final reply doesn't.
   const verify = async (request: string, response: string, id: string) => (checked.push({ id, request, response }), id === "chat-1")
@@ -126,7 +133,7 @@ test("history is trimmed in one cut, at a customer message", () => {
 })
 
 test("no Confirm button for a purchase the customer can't pay for", async () => {
-  const model = await fakeModel([call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }), { role: "assistant", content: "You're short." }])
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "You're short." }])
   const broke = { ...rich, balance: "500000" }
   const agent = makeAgent({ ...(deps as object), near: { view: () => Effect.succeed(broke) }, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
   const turn = await agent("alice.testnet", [], "buy it")
@@ -160,7 +167,7 @@ test("on mainnet, no Buy button until they've given an email for their cards; th
     checkoutEmail: () => Effect.sync(() => new CheckoutEmail({ needed: true, ...(email ? { email } : {}) })),
     setCheckoutEmail: (_: string, e: string) => Effect.sync(() => new CheckoutEmail({ needed: true, email: (email = e) }))
   }
-  const prepare = call("prepare_purchase", { voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" })
+  const prepare = call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] })
   const model = await fakeModel([prepare, { role: "assistant", content: "Which email should Bitrefill send the receipt to?" }, call("set_checkout_email", { email: "me@example.com" }), prepare, { role: "assistant", content: "Tap Buy." }])
   const agent = makeAgent({ ...(deps as object), purchases, testnet: false, apiKey: "test", baseURL: model.url, model: "fake" } as never)
   const first = await agent("alice.near", [], "buy me a 10 dollar card on jackpot")
@@ -169,8 +176,8 @@ test("on mainnet, no Buy button until they've given an email for their cards; th
   assert.equal(first.pending, undefined, "no button without an email")
   assert.match(String(model.seen[1]!.messages.at(-1)!.content), /haven't given an email/)
   assert.equal(email, "me@example.com")
-  assert.equal(second.pending?.voucherId, "test-gift-card-code")
-  assert.equal(second.pending?.receiptTo, "me@example.com", "the Buy line will say where the card is emailed")
+  assert.equal(second.pending?.[0]?.voucherId, "test-gift-card-code")
+  assert.equal(second.pending?.[0]?.receiptTo, "me@example.com", "the Buy line will say where the card is emailed")
   assert.equal(bought, 0)
 })
 
@@ -216,3 +223,18 @@ test("an address counts as typed only as a whole word of the customer's message"
   assert.ok(!typedByCustomer("send it to bob@example.com", ""))
 })
 
+
+test("several cards go under one button, priced as a cart and checked against the balance and limits together", async () => {
+  const two = call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }, { voucher_id: "test-gift-card-code", value: "10", mode: "normal" }] })
+  const eight = call("prepare_purchase", { cards: Array.from({ length: 8 }, () => ({ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" })) })
+  const model = await fakeModel([two, { role: "assistant", content: "Tap Buy." }, eight, { role: "assistant", content: "You're short." }])
+  const agent = makeAgent({ ...(deps as object), testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const cart = await agent("alice.testnet", [], "a 10 dollar test card on jackpot and one on normal")
+  const big = await agent("alice.testnet", cart.history, "make it eight on jackpot")
+  model.close()
+  assert.deepEqual(cart.pending?.map((c) => [c.mode, c.maxPrice]), [[{ lucky: 2 }, 15_000_000], ["normal", 10_000_000]])
+  // $120 in all against a $100 balance, though each card alone fits: no button.
+  assert.equal(big.pending, undefined)
+  assert.match(String(model.seen[3]!.messages.at(-1)!.content), /\$100\.00 and this needs \$120\.00/)
+  assert.equal(bought, 0)
+})

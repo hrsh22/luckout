@@ -6,7 +6,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type PaymentStatus, type SignedPayment } from "./Base.ts"
-import { Bitrefill, type Order } from "./Bitrefill.ts"
+import { Bitrefill, type CardDelivery, type Order } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
@@ -63,6 +63,10 @@ const world = (opts: {
   payDown?: boolean
   /** What Base says when it is only asked where a saved payment is; "pending" unless set. */
   statuses?: Array<PaymentStatus>
+  /** No Free Reserve left: a cart's Lucky cards are quoted Normal. */
+  reserveFull?: boolean
+  /** How each card of the next deliveries ends, one by one; delivered unless set. */
+  deliveries?: Array<"Delivered" | "Failed" | "Pending">
   /** Bitrefill can't be reached (or is rate limiting us) for this call: its outcome is unknown. */
   bitrefillDown?: "order" | "delivery"
 } = {}) => {
@@ -78,6 +82,13 @@ const world = (opts: {
   let kicks = 0
   /** Price lookups made at Bitrefill. */
   let lookups = 0
+  /** The contract's next purchase id. */
+  let nextPurchase = 7
+  /** Each `settle`: the purchase ids it confirmed and failed. */
+  const settled: Array<{ delivered: Array<number>; failed: Array<number> }> = []
+  /** How many cards each Bitrefill order held. */
+  const ordered: Array<number> = []
+  const deliveries = [...(opts.deliveries ?? [])]
   let shop = new ShopStatus({ open: true })
   const price = opts.price ?? 10_000_000
   const mode = opts.mode ?? "normal"
@@ -105,26 +116,43 @@ const world = (opts: {
     status: (hash) => Effect.sync(() => (asked.push(hash), statuses.shift() ?? "pending"))
   })
   const near = fakeNear({
-    view: <A>(method: string) =>
+    view: <A>(method: string, args?: unknown) =>
       Effect.succeed(
         (method === "get_account"
           ? (opts.account === undefined ? account : opts.account)
           : method === "quote"
           // The reserve covers $6 of a Lucky Buy right now.
           ? { mode, reference_price: String(price), lucky_amount: "6000000", max_price: String(price + 1_200_000) }
+          : method === "quote_many"
+          // Each card as `quote` prices it; with no reserve left, a Lucky card comes back Normal.
+          ? (args as { items: Array<{ reference_price: string; mode: Mode }> }).items.map((i) =>
+            typeof i.mode === "object" && !opts.reserveFull
+              ? { mode: i.mode, reference_price: i.reference_price, lucky_amount: "6000000", max_price: String(Number(i.reference_price) + 1_200_000) }
+              : { mode: "normal", reference_price: i.reference_price, lucky_amount: "0", max_price: i.reference_price }
+          )
           : { status: opts.onchain ?? "Pending", ...opts.onchainPurchase }) as A
       ),
+    // A cart's admission and settlement are logged card by card, under the single-card methods' names.
     call: (method, args, persist) =>
       Effect.gen(function*() {
-        calls.push(method)
-        yield* persist({ hash: `${method}-tx`, bytes: "" })
-        if (method === "purchase") {
-          admits.push(args as Record<string, unknown>)
+        if (method === "purchase_many") {
+          const { customer, items } = args as { customer: string; items: Array<Record<string, unknown>> }
+          for (const item of items) {
+            calls.push("purchase")
+            admits.push({ customer, ...item })
+          }
+          yield* persist({ hash: `${method}-tx`, bytes: "" })
           if (opts.admitRefused) return yield* new ContractRejected({ message: opts.admitRefused })
-          return outcome(7, [{ event: "purchase", data: [{ purchase: { mode: "normal", max_price: String(price), lucky_amount: "0" } }] }])
+          const ids = items.map(() => nextPurchase++)
+          return outcome(ids, ids.map((id) => ({ event: "purchase", data: [{ purchase_id: id, purchase: { mode: "normal", max_price: String(price), lucky_amount: "0" } }] })))
         }
+        const { delivered, failed } = args as { delivered: Array<number>; failed: Array<number> }
+        for (const _ of delivered) calls.push("confirm_delivery")
+        for (const _ of failed) calls.push("fail_purchase")
+        settled.push({ delivered, failed })
+        yield* persist({ hash: `${method}-tx`, bytes: "" })
         if (opts.confirm === "refused") return yield* new ContractRejected({ message: "Purchase is already closed" })
-        if (opts.confirm === "down" && method === "confirm_delivery") return yield* new NearUnavailable({ message: "send: timed out" })
+        if (opts.confirm === "down" && delivered.length > 0) return yield* new NearUnavailable({ message: "send: timed out" })
         return outcome(null)
       })
   })
@@ -138,24 +166,35 @@ const world = (opts: {
           ? Effect.fail(new BitrefillUnavailable({ message: "No such voucher" }))
           : Effect.succeed(new Voucher({ id: voucherId, name: "Card", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: price }] }))
       }),
-    order: (_id, _value, buyer) =>
+    order: (cart, buyer) =>
       Effect.suspend(() => (opts.bitrefillDown === "order" ? Effect.fail(new BitrefillUnavailable({ message: "Bitrefill is rate limiting us" })) : Effect.void)).pipe(Effect.andThen(Effect.sync((): Order => {
         calls.push(!opts.guest ? "order" : buyer && "token" in buyer ? `order:token:${buyer.token}` : `order:${buyer?.email}`)
+        ordered.push(cart.length)
         const tag = orders.shift() ?? (opts.guest ? "Invoiced" : "Ordered")
         // A token Bitrefill no longer takes: the tool never ran.
         if (tag === "Refused") return { _tag: "Refused", reason: opts.refusal ?? "HTTP 401 invalid_token" }
-        if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId: `inv-${calls.length}`, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price }
+        if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId: `inv-${calls.length}`, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price * cart.length }
         if (tag === "NoCredit") return { _tag: "NoCredit", reason: "Balance too low (INVALID_INPUT)" }
         // Ordering spends the credit, as Bitrefill would.
-        creditBalance -= price
+        creditBalance -= price * cart.length
         return { _tag: "Ordered", invoiceId: "inv-1" }
       }))),
-    delivery: (invoiceId, token) =>
+    delivery: (invoiceId, token, cart) =>
       opts.bitrefillDown === "delivery"
         ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
-        : Effect.sync(() => {
+        : Effect.suspend(() => {
           if (token) calls.push(`delivery:${token}`)
-          return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123", expirationTime: "2027-03-30T00:00:00.000Z" } }
+          const found = cart.map((_, i): CardDelivery => {
+            const tag = deliveries.shift() ?? "Delivered"
+            return tag === "Delivered"
+              ? { _tag: "Delivered", orderId: `o-${i}`, redemption: { code: `ABC-12${i + 3}`, expirationTime: "2027-03-30T00:00:00.000Z" } }
+              : tag === "Failed"
+              ? { _tag: "Failed", reason: `order o-${i} failed` }
+              : { _tag: "Pending" }
+          })
+          return found.every((d) => d._tag === "Pending")
+            ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
+            : Effect.succeed(found)
         }).pipe(Effect.delay(opts.deliveryDelay ?? 0)),
     // Each read takes `creditDelay` (set when it starts), like a slow Bitrefill.
     credit: Effect.suspend(() => Effect.delay(Effect.sync(() => ({ balance: creditBalance, room: 2_000_000_000 })), creditDelay))
@@ -190,6 +229,11 @@ const world = (opts: {
   )
   const buy = (key: string = crypto.randomUUID(), who = "alice.test") =>
     Purchases.use((p) => p.create(who, new NewPurchase({ voucherId, value: "10", mode, maxPrice: price + (mode === "normal" ? 0 : 1_200_000), idempotencyKey: key })))
+  /** A Cart of `keys.length` of the card, all in one request. */
+  const cart = (keys: ReadonlyArray<string>, who = "alice.test") =>
+    Purchases.use((p) =>
+      p.createCart(who, keys.map((k) => new NewPurchase({ voucherId, value: "10", mode, maxPrice: price + (mode === "normal" ? 0 : 1_200_000), idempotencyKey: k })))
+    )
   const run = <A, E>(e: Effect.Effect<A, E, Purchases | Credit | Connect | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
   return {
     calls,
@@ -200,7 +244,10 @@ const world = (opts: {
     asked,
     layer,
     buy,
+    cart,
     run,
+    settled,
+    ordered,
     kicks: () => kicks,
     lookups: () => lookups,
     setCredit: (micro: number) => void (creditBalance = micro),
@@ -213,7 +260,8 @@ const world = (opts: {
 const rowOf = (id: string) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
     sql<{ step: string; attempts: number; due: boolean; quoted_lucky_amount: string | null }>`
-      SELECT step, attempts, next_attempt_at <= now() AS due, quoted_lucky_amount::text FROM purchases WHERE id = ${id}`).pipe(Effect.map((r) => r[0]!))
+      SELECT p.step, c.attempts, c.next_attempt_at <= now() AS due, p.quoted_lucky_amount::text
+      FROM purchases p JOIN checkouts c ON c.id = p.checkout_id WHERE p.id = ${id}`).pipe(Effect.map((r) => r[0]!))
 
 /** Lets the workflow's own fiber run until the purchase stops moving. */
 const settled = (id: string) =>
@@ -232,9 +280,11 @@ const settled = (id: string) =>
 const restockRow = (createdHoursAgo: number, admittedHoursAgo: number) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
     sql<{ id: string }>`
-      INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit,
+      WITH co AS (INSERT INTO checkouts (account_id, step, created_at) VALUES ('alice.test', 'restock', now() - make_interval(mins => ${Math.round(createdHoursAgo * 60)}))
+                  RETURNING id)
+      INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit,
                              step, contract_purchase_id, admitted, created_at)
-      VALUES ('alice.test', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', '"normal"', 10000000, 10000000, 'restock', 7,
+      VALUES ((SELECT id FROM co), 'alice.test', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', '"normal"', 10000000, 10000000, 'restock', 7,
               ${JSON.stringify({ mode: "normal", max_price: "10000000", lucky_amount: "0", created_at: (Date.now() - admittedHoursAgo * 3_600_000) * 1e6 })},
               now() - make_interval(mins => ${Math.round(createdHoursAgo * 60)}))
       RETURNING id`).pipe(Effect.map((r) => r[0]!.id))
@@ -381,7 +431,7 @@ test("a purchase that waits too long is cancelled, and nothing was charged", asy
   const p = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
-    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = ${p.id}`
+    yield* sql`UPDATE checkouts SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = (SELECT checkout_id FROM purchases WHERE id = ${p.id})`
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     return yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", p.id))
   }))
@@ -396,7 +446,7 @@ test("if Bitrefill says the credit is too low after all, the charged purchase wa
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
     const waiting = p.status
-    yield* sql`UPDATE purchases SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = ${p.id}`
+    yield* sql`UPDATE checkouts SET created_at = now() - make_interval(mins => ${CREDIT_DEFAULTS.mainnet.waitMinutes + 1}) WHERE id = (SELECT checkout_id FROM purchases WHERE id = ${p.id})`
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     yield* Effect.sleep("300 millis")
     return { waiting, after: (yield* Effect.flatMap(Purchases, (s) => s.get("alice.test", p.id))).status }
@@ -491,7 +541,7 @@ test("each step gets its own retries: a backoff earned earlier never delays the 
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
     // Retries used up and an hour's backoff earned before it moves on.
-    yield* sql`UPDATE purchases SET attempts = 11, next_attempt_at = now() + interval '1 hour' WHERE id = ${p.id}`
+    yield* sql`UPDATE checkouts SET attempts = 11, next_attempt_at = now() + interval '1 hour' WHERE id = (SELECT checkout_id FROM purchases WHERE id = ${p.id})`
     w.setCredit(30_000_000)
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
@@ -578,8 +628,9 @@ test("a purchase that waited for credit is admitted at today's price", async () 
     const sql = yield* SqlClient.SqlClient
     // Accepted 20 minutes ago at $9, when Bitrefill's price was lower; it's $10 now.
     const [row] = yield* sql<{ id: string }>`
-      INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step, created_at)
-      VALUES ('alice.test', 'waited-key-1', 'test-card', 'Card', '10', 9000000, 11000000, 'waiting', now() - interval '20 minutes')
+      WITH co AS (INSERT INTO checkouts (account_id, step, created_at) VALUES ('alice.test', 'waiting', now() - interval '20 minutes') RETURNING id)
+      INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step, created_at)
+      VALUES ((SELECT id FROM co), 'alice.test', 'waited-key-1', 'test-card', 'Card', '10', 9000000, 11000000, 'waiting', now() - interval '20 minutes')
       RETURNING id`
     yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
     return yield* settled(row!.id)
@@ -656,8 +707,8 @@ test("Bitrefill's limits count per email, across accounts: the 16th card in a da
     const sql = yield* SqlClient.SqlClient
     const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'bob.test'`) as [{ email_key: string }]
     for (let i = 0; i < 15; i++) {
-      yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
-                 VALUES ('bob.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
+                 VALUES ((SELECT id FROM co), 'bob.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
     }
     return yield* w.buy().pipe(Effect.flip)
   }))
@@ -715,8 +766,8 @@ test("a connected customer's card is ordered on their own Bitrefill account, wit
     const sql = yield* SqlClient.SqlClient
     const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'alice.test'`) as [{ email_key: string }]
     for (let i = 0; i < 15; i++) {
-      yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
-                 VALUES ('alice.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
+                 VALUES ((SELECT id FROM co), 'alice.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
     }
     const connected = yield* connectAs()
     const seen = yield* Purchases.use((s) => s.checkoutEmail("alice.test"))
@@ -785,7 +836,7 @@ test("a login Bitrefill stops taking (401) is renewed once and the card ordered 
 /** Makes every open purchase due, as 30 seconds of waiting would, then runs one reconciler pass. */
 const reconcilePass = Effect.gen(function*() {
   const sql = yield* SqlClient.SqlClient
-  yield* sql`UPDATE purchases SET updated_at = now() - interval '1 minute', next_attempt_at = now()`
+  yield* sql`UPDATE checkouts SET updated_at = now() - interval '1 minute', next_attempt_at = now()`
   yield* Purchases.use((s) => s.reconcileNow)
 })
 const stepIs = (want: string) =>
@@ -838,9 +889,9 @@ test("a Base payment is never saved over one another run already saved: the save
     yield* stepIs("pay")
     // Another run's payment lands in the row while this one is still signing its own.
     const other = { to: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: "10000000", nonce: 9, maxFeePerGas: "1", maxPriorityFeePerGas: "1", raw: "0x02", hash: "0xother" }
-    yield* sql`UPDATE purchases SET pay_tx = ${JSON.stringify(other)}::jsonb`
+    yield* sql`UPDATE checkouts SET pay_tx = ${JSON.stringify(other)}::jsonb`
     const p = yield* Fiber.join(buying)
-    const during = { status: p.status, paid: w.paid.length, hash: (yield* sql<{ hash: string }>`SELECT pay_tx->>'hash' AS hash FROM purchases`)[0]!.hash }
+    const during = { status: p.status, paid: w.paid.length, hash: (yield* sql<{ hash: string }>`SELECT pay_tx->>'hash' AS hash FROM checkouts`)[0]!.hash }
     yield* reconcilePass
     return { during, after: yield* settled(p.id) }
   }))
@@ -856,7 +907,7 @@ test("a signed Base payment is never sent again once its invoice nears expiry: B
     const sql = yield* SqlClient.SqlClient
     const p = yield* w.buy()
     // Signed and sent, not mined; then 51 minutes pass since the invoice.
-    yield* sql`UPDATE purchases SET invoice_at = now() - interval '51 minutes'`
+    yield* sql`UPDATE checkouts SET invoice_at = now() - interval '51 minutes'`
     yield* reconcilePass
     const waiting = (yield* sql<{ step: string; error: string | null }>`SELECT step, error FROM purchases`)[0]!
     yield* reconcilePass
@@ -878,7 +929,7 @@ test("a charged purchase that can't be paid for in time is refunded in full, wit
     const p = yield* w.buy()
     const before = (yield* rowOf(p.id)).step
     // Never signed: its invoice goes stale, and the purchase is now 23.5 hours old (Reclaim opens at 24).
-    yield* sql`UPDATE purchases SET invoice_at = now() - interval '41 minutes', created_at = now() - interval '1410 minutes'`
+    yield* sql`UPDATE checkouts SET invoice_at = now() - interval '41 minutes', created_at = now() - interval '1410 minutes'`
     yield* reconcilePass
     return { before, after: yield* settled(p.id) }
   }))
@@ -939,7 +990,7 @@ test("a guest order Bitrefill never took is refunded in full once the retries ru
     const p = yield* w.buy()
     const before = (yield* rowOf(p.id)).step
     // Twelve tries later Bitrefill still hasn't taken the order.
-    yield* sql`UPDATE purchases SET attempts = 12`
+    yield* sql`UPDATE checkouts SET attempts = 12`
     yield* reconcilePass
     return { before, after: yield* settled(p.id) }
   }))
@@ -956,7 +1007,7 @@ test("a guest order Bitrefill never took is refunded in full once the retries ru
     yield* withEmail("alice@example.com")
     const sql = yield* SqlClient.SqlClient
     const p = yield* paid.buy()
-    yield* sql`UPDATE purchases SET attempts = 12`
+    yield* sql`UPDATE checkouts SET attempts = 12`
     yield* reconcilePass
     return yield* settled(p.id)
   }))
@@ -1008,9 +1059,9 @@ test("a Base payment signed after its invoice neared expiry is neither saved nor
     const buying = yield* Effect.forkChild(w.buy())
     yield* stepIs("pay")
     // The invoice passes 50 minutes while the payment is still being signed (the wallet's lock, Chain Signatures).
-    yield* sql`UPDATE purchases SET invoice_at = now() - interval '51 minutes'`
+    yield* sql`UPDATE checkouts SET invoice_at = now() - interval '51 minutes'`
     const p = yield* Fiber.join(buying)
-    const [row] = yield* sql<{ step: string; saved: boolean }>`SELECT step, pay_tx IS NOT NULL AS saved FROM purchases`
+    const [row] = yield* sql<{ step: string; saved: boolean }>`SELECT p.step, c.pay_tx IS NOT NULL AS saved FROM purchases p JOIN checkouts c ON c.id = p.checkout_id`
     const during = { status: p.status, paid: w.paid.length, ...row! }
     yield* reconcilePass
     return { during, after: yield* settled(p.id) }
@@ -1037,8 +1088,8 @@ test("the purchase list pages newest first, every purchase exactly once, and onl
     // Saved straight to the table, at whole minutes, so two can share one instant.
     const add = (who: string, minutesAgo: number) =>
       sql<{ id: string }>`
-        INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step, created_at)
-        VALUES (${who}, ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', '"normal"', 10000000, 10000000, 'failed',
+        WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, requested_mode, reference_price, max_debit, step, created_at)
+        VALUES ((SELECT id FROM co), ${who}, ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', '"normal"', 10000000, 10000000, 'failed',
                 date_trunc('minute', now()) - make_interval(mins => ${minutesAgo}))
         RETURNING id`.pipe(Effect.map((r) => r[0]!.id))
     const mine = [yield* add("alice.test", 1), yield* add("alice.test", 2), yield* add("alice.test", 2), yield* add("alice.test", 3), yield* add("alice.test", 4)]
@@ -1064,4 +1115,128 @@ test("the purchase list pages newest first, every purchase exactly once, and onl
     assert.equal(all.items.length, 5)
     assert.equal(all.next, undefined)
   }))
+})
+
+const keys = (n: number) => Array.from({ length: n }, () => crypto.randomUUID())
+
+test("a cart buys every card as its own purchase, each admitted, delivered and drawn on its own", async () => {
+  const w = world()
+  const r = await w.run(Effect.gen(function*() {
+    const asked = keys(3)
+    const placed = yield* w.cart(asked)
+    const steps = yield* Effect.forEach(placed, (p) => settled(p.id))
+    const again = yield* w.cart(asked)
+    return { placed, steps, again }
+  }))
+  assert.equal(r.placed.length, 3)
+  assert.deepEqual(r.steps, ["settled", "settled", "settled"])
+  assert.deepEqual(w.calls.filter((c) => c === "purchase").length, 3)
+  assert.deepEqual(w.calls.filter((c) => c === "confirm_delivery").length, 3)
+  assert.deepEqual(r.again.map((p) => p.id), r.placed.map((p) => p.id), "a retry with the same keys returns the same purchases, in order")
+  assert.equal(w.calls.filter((c) => c === "purchase").length, 3, "and buys nothing again")
+})
+
+test("a cart is checked as a whole before anything is signed: all its cards or none", async () => {
+  const poor = world({ account: { ...account, balance: "25000000" } })
+  const e = await poor.run(poor.cart(keys(3)).pipe(Effect.flip))
+  assert.match(e.message, /Insufficient balance/)
+  const capped = world({ account: { ...account, daily_limit: "25000000" } })
+  const d = await capped.run(capped.cart(keys(3)).pipe(Effect.flip))
+  assert.match(d.message, /daily spending limit/)
+  const perCard = world({ account: { ...account, per_purchase_limit: "5000000" } })
+  const c = await perCard.run(perCard.cart(keys(2)).pipe(Effect.flip))
+  assert.match(c.message, /^Card 10: Over the per-purchase spending limit/, "a cart says which card")
+  const dup = world()
+  const k = crypto.randomUUID()
+  const twice = await dup.run(dup.cart([k, k]).pipe(Effect.flip))
+  assert.match(twice.message, /its own key/)
+  for (const x of [poor, capped, perCard, dup]) assert.deepEqual(x.calls, [], "nothing signed")
+  const rows = await poor.run(Effect.flatMap(SqlClient.SqlClient, (sql) => sql<{ n: number }>`SELECT count(*)::int AS n FROM purchases`))
+  assert.equal(rows[0]!.n, 0, "nothing recorded")
+})
+
+test("a guest cart counts all its cards against the email's 15 a day", async () => {
+  const w = world({ real: true, guest: true, credit: 1_000_000_000 })
+  const e = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'alice.test'`) as [{ email_key: string }]
+    for (let i = 0; i < 12; i++) {
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id)
+                 VALUES ((SELECT id FROM co), 'alice.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`})`
+    }
+    return yield* w.cart(keys(4)).pipe(Effect.flip)
+  }))
+  assert.match(e.message, /15 cards a day per email, and yours has had 12 in the last 24 hours\. This cart can have at most 3\./)
+  assert.deepEqual(w.calls, [])
+})
+
+test("a cart the float can't cover waits whole, uncharged, for a refill sized for it, then goes as one order", async () => {
+  const w = world({ real: true, price: 10_000_000, credit: 25_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const placed = yield* w.cart(keys(3))
+    w.setCredit(100_000_000)
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
+    return { placed, steps: yield* Effect.forEach(placed, (p) => settled(p.id)) }
+  }))
+  assert.deepEqual(r.placed.map((p) => p.status), ["waiting", "waiting", "waiting"])
+  assert.equal(w.kicks(), 1)
+  assert.deepEqual(r.steps, ["settled", "settled", "settled"])
+  assert.deepEqual(w.ordered, [3], "one Bitrefill order for the whole cart")
+})
+
+test("a cart of 15 Lucky cards is admitted, ordered, paid and settled as one, each card with its own purchase", async () => {
+  const w = world({ mode: { lucky: 1 }, real: true, guest: true, credit: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(15))
+    return { placed, steps: yield* Effect.forEach(placed, (p) => settled(p.id)) }
+  }))
+  assert.ok(r.steps.every((s) => s === "settled"), JSON.stringify(r.steps))
+  assert.equal(w.calls.filter((c) => c === "purchase").length, 15, "admitted together")
+  assert.deepEqual(w.ordered, [15], "one invoice")
+  assert.equal(w.paid.length, 1, "one Base payment")
+  assert.equal(w.paid[0]!.amount, 150_000_000)
+  assert.equal(w.settled.length, 1, "one settlement")
+  assert.equal(w.settled[0]!.delivered.length, 15)
+  assert.equal(new Set(r.placed.map((p) => p.checkoutId)).size, 1, "one checkout")
+})
+
+test("a Lucky card the reserve no longer covers is refused before anything is signed, so the customer confirms again", async () => {
+  const w = world({ mode: { lucky: 1 }, reserveFull: true })
+  const e = await w.run(w.cart(keys(2)).pipe(Effect.flip))
+  assert.match(e.message, /^Card 10: That quote is out of date/)
+  assert.deepEqual(w.calls, [])
+})
+
+test("each card of a cart gets its own code, and a card Bitrefill fails is refunded without holding the others", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: ["Delivered", "Failed", "Delivered"] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(3))
+    yield* Effect.forEach(placed, (p) => settled(p.id))
+    return yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id)))
+  }))
+  assert.deepEqual(r.map((p) => p.status), ["delivered", "failed", "delivered"])
+  assert.deepEqual(r.map((p) => p.redemption?.code), ["ABC-123", undefined, "ABC-125"], "each card its own order's code")
+  assert.deepEqual(w.settled, [{ delivered: [7, 9], failed: [8] }])
+  assert.ok(w.alerts.some((a) => /didn't deliver purchase .* on paid invoice/.test(a)), "we paid for it: ask Bitrefill for the money back")
+})
+
+test("a card still on its way doesn't hold the others: they're settled now, it is later", async () => {
+  // Still pending when it's asked about alone too: the run pauses there, the others settled.
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: ["Delivered", "Pending", "Delivered", "Pending"] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(3))
+    const first = yield* Effect.forEach(placed, (p) => settled(p.id))
+    // The reconciler comes by again; this time the slow card is there.
+    yield* Effect.flatMap(SqlClient.SqlClient, (sql) => sql`UPDATE checkouts SET updated_at = now() - interval '1 minute', next_attempt_at = now()`)
+    yield* Effect.flatMap(Purchases, (s) => s.reconcileNow)
+    return { first, then: yield* Effect.forEach(placed, (p) => settled(p.id)) }
+  }))
+  assert.deepEqual(r.first, ["settled", "delivery", "settled"])
+  assert.deepEqual(r.then, ["settled", "settled", "settled"])
+  assert.deepEqual(w.settled, [{ delivered: [7, 9], failed: [] }, { delivered: [8], failed: [] }])
 })

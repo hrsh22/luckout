@@ -66,8 +66,8 @@ const run = <A, E>(e: Effect.Effect<A, E, Admin | Relay | Credit | Sales | SqlCl
 
 const purchase = (id: string, step: string, error: string | null, minutesAgo = 30) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
-    sql`INSERT INTO purchases (id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, error, created_at)
-        VALUES (${id}, 'alice.testnet', ${id}, 'Test Card', 'test-card', '10', 10000000, ${step}, ${error}, now() - make_interval(mins => ${minutesAgo}))`)
+    sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, error, created_at)
+        VALUES ((SELECT id FROM co), ${id}, 'alice.testnet', ${id}, 'Test Card', 'test-card', '10', 10000000, ${step}, ${error}, now() - make_interval(mins => ${minutesAgo}))`)
 
 test("only whitelisted accounts are admins", () =>
   run(Effect.gen(function*() {
@@ -179,8 +179,8 @@ test("the overview shows how near the busiest Checkout Email is to Bitrefill's l
     yield* sql`INSERT INTO checkout_emails (account_id, email, email_key) VALUES ('alice.testnet', 'sealed', 'k1'), ('bob.testnet', 'sealed', 'k2')`
     // Two cards for one email today, one for the other, one rejected (never reached Bitrefill) and one 2 days old.
     const add = (id: string, key: string, step: string, price: number, hoursAgo: number, invoice: string | null) =>
-      sql`INSERT INTO purchases (id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, email_key, invoice_id, created_at)
-          VALUES (${id}, 'alice.testnet', ${id}, 'Card', 'amazon-us', '10', ${price}, ${step}, ${key}, ${invoice}, now() - make_interval(hours => ${hoursAgo}))`
+      sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, email_key, invoice_id, created_at)
+          VALUES ((SELECT id FROM co), ${id}, 'alice.testnet', ${id}, 'Card', 'amazon-us', '10', ${price}, ${step}, ${key}, ${invoice}, now() - make_interval(hours => ${hoursAgo}))`
     yield* add("00000000-0000-0000-0000-0000000000c1", "k1", "settled", 10_000_000, 1, "i1")
     yield* add("00000000-0000-0000-0000-0000000000c2", "k1", "pay", 5_000_000, 2, "i2")
     yield* add("00000000-0000-0000-0000-0000000000c3", "k1", "rejected", 50_000_000, 1, null)
@@ -287,8 +287,8 @@ test("a purchase is found by its id however old, past the latest 300 an account'
     const old = "00000000-0000-4000-8000-000000000400"
     yield* purchase(old, "settled", null, 60 * 24 * 40)
     // 300 newer ones by the same customer.
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step)
-               SELECT 'alice.testnet', 'k' || n, 'Test Card', 'test-card', '10', 10000000, 'settled' FROM generate_series(1, 300) n`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step)
+               SELECT (SELECT id FROM co), 'alice.testnet', 'k' || n, 'Test Card', 'test-card', '10', 10000000, 'settled' FROM generate_series(1, 300) n`
     const mine = yield* admin.purchases("alice.testnet")
     assert.equal(mine.length, 300)
     assert.ok(!mine.some((p) => p.id === old), "it is past the latest 300")

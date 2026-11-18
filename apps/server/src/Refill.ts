@@ -292,7 +292,7 @@ export class Refill extends Context.Service<Refill, {
           const w = yield* base.balances
           if (!endsInFloat(row)) return { missing: Number(row.amount) - w.usdc, usdc: w.usdc }
           const [p] = yield* sql<{ paid: string }>`
-            SELECT COALESCE(sum(pay_amount), 0)::text AS paid FROM purchases WHERE ordered_at > ${new Date(row.swap?.walletAt ?? row.created_at)}`.pipe(Effect.orDie)
+            SELECT COALESCE(sum(pay_amount), 0)::text AS paid FROM checkouts WHERE ordered_at > ${new Date(row.swap?.walletAt ?? row.created_at)}`.pipe(Effect.orDie)
           return { missing: (row.swap?.walletUsdc ?? 0) + Number(row.amount) - Number(p?.paid ?? 0) - w.usdc, usdc: w.usdc }
         })
 

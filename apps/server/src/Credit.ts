@@ -139,7 +139,7 @@ export class Credit extends Context.Service<Credit, {
           SELECT
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(HELD_STEPS)}), 0)::text AS held,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > ${since}), 0)::text AS ordered_since,
-            COALESCE(sum(pay_amount) FILTER (WHERE step = 'pay' AND pay_tx IS NOT NULL), 0)::text AS in_flight,
+            (SELECT COALESCE(sum(pay_amount), 0) FROM checkouts WHERE step = 'pay' AND pay_tx IS NOT NULL)::text AS in_flight,
             count(*) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)})::int AS waiting,
             COALESCE(sum(reference_price) FILTER (WHERE step IN ${sql.in(WAITING_STEPS)}), 0)::text AS waiting_total,
             COALESCE(sum(reference_price) FILTER (WHERE ordered_at > now() - interval '7 days'), 0)::text AS week,

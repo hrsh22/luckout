@@ -74,13 +74,15 @@ interface Receipt {
 }
 
 /** The Draw a transaction logged, counting only receipts our contract ran successfully (no look-alikes). */
-export const drawEvent = (receipts: ReadonlyArray<Receipt>, contractId: string) =>
+/** A cart's settlement logs several Draws (ADR-0013): `purchaseId` picks one, else the first. */
+export const drawEvent = (receipts: ReadonlyArray<Receipt>, contractId: string, purchaseId?: number) =>
   receipts
     .filter((r) => r.outcome.executor_id === contractId && !("Failure" in r.outcome.status))
     .flatMap((r) => r.outcome.logs)
     .filter((l) => l.startsWith("EVENT_JSON:"))
     .map((l) => JSON.parse(l.slice(11)) as { standard: string; event: string; data: Array<unknown> })
-    .find((e) => e.standard === "luckout" && e.event === "draw")?.data[0] as DrawEvent | undefined
+    .find((e) => e.standard === "luckout" && e.event === "draw" && (purchaseId === undefined || Number((e.data[0] as DrawEvent).purchase_id) === purchaseId))
+    ?.data[0] as DrawEvent | undefined
 
 const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/
 const ARCHIVAL = { mainnet: "https://archival-rpc.mainnet.fastnear.com", testnet: "https://archival-rpc.testnet.fastnear.com" } as const
@@ -210,7 +212,14 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
       name: "verify_draw",
       description:
         "Recompute a Luckout Draw from its NEAR transaction: random value = sha256(block random seed ‖ purchase id), then the roll, the outcome and the Cashback, each compared with what the contract logged.",
-      inputSchema: { type: "object", properties: { tx_hash: { type: "string", description: "The NEAR transaction that ran the Draw" } }, required: ["tx_hash"] },
+      inputSchema: {
+        type: "object",
+        properties: {
+          tx_hash: { type: "string", description: "The NEAR transaction that ran the Draw" },
+          purchase_id: { type: "integer", description: "Which Draw, when the transaction settled a cart of several (its link's ?purchase=)" }
+        },
+        required: ["tx_hash"]
+      },
       run: async (args) => {
         const tx = text(args, "tx_hash", 44)
         if (!TX_HASH.test(tx)) throw new ToolError("tx_hash must be a NEAR transaction hash")
@@ -223,7 +232,8 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
           signal: AbortSignal.timeout(15_000)
         }).then((r) => r.json() as Promise<{ result?: { receipts_outcome: Array<Receipt> } }>).catch(() => undefined)
         if (!res?.result) throw new ToolError("NEAR RPC couldn't find that transaction.")
-        const draw = drawEvent(res.result.receipts_outcome, near.contractId)
+        const purchaseId = Number.isSafeInteger(args.purchase_id) ? Number(args.purchase_id) : undefined
+        const draw = drawEvent(res.result.receipts_outcome, near.contractId, purchaseId)
         if (!draw) throw new ToolError("That transaction has no Luckout Draw.")
         const version = (await run(near.view<Array<GameVersion>>("get_game_versions")))[draw.game_version]
         if (!version) throw new ToolError(`Unknown Game Version ${draw.game_version}`)
@@ -233,7 +243,7 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
           mode: version.name,
           all_match: checks.every((c) => c.ok),
           checks: checks.map(({ label, expected, recomputed, ok }) => ({ label, logged: expected, recomputed, ok })),
-          proof_page: `${web}/draw/${tx}`
+          proof_page: `${web}/draw/${tx}?purchase=${draw.purchase_id}`
         }
       }
     }

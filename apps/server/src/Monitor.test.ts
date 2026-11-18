@@ -7,7 +7,7 @@ import { Base } from "./Base.ts"
 import { DbMemory } from "./Db.ts"
 import { Monitor, secretWarning } from "./Monitor.ts"
 import { Near, NearUnavailable } from "./Near.ts"
-import { OPEN_STEPS } from "./Purchases.ts"
+import { OPEN_STEPS, CHECKOUT_OPEN_STEPS } from "./Purchases.ts"
 import { fakeBase, fakeNear } from "./testing.ts"
 
 // The Monitor's first round runs as soon as its layer is built: seed the database, build it, read the alerts.
@@ -40,8 +40,8 @@ const healthy = fakeNear({
 
 const purchaseAt = (step: string, minutesAgo: number) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
-    sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, created_at)
-        VALUES ('alice.test', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', 10000000, ${step}, now() - make_interval(mins => ${minutesAgo}))`)
+    sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, created_at)
+        VALUES ((SELECT id FROM co), 'alice.test', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', 10000000, ${step}, now() - make_interval(mins => ${minutesAgo}))`)
 
 test("a purchase unfinished after 15 minutes raises an alert at every open step, `pay` included", async () => {
   for (const step of OPEN_STEPS) {
@@ -69,6 +69,16 @@ test("the reconciler's index covers every open step", async () => {
     )
   )
   for (const step of OPEN_STEPS) assert.ok(def.includes(`'${step}'`), `${step} missing from: ${def}`)
+})
+
+test("the checkout reconciler's index covers every open checkout step", async () => {
+  const def = await Effect.runPromise(
+    Effect.flatMap(SqlClient.SqlClient, (sql) => sql<{ indexdef: string }>`SELECT indexdef FROM pg_indexes WHERE indexname = 'checkouts_open'`).pipe(
+      Effect.map((r) => r[0]!.indexdef),
+      Effect.provide(DbMemory)
+    )
+  )
+  for (const step of CHECKOUT_OPEN_STEPS) assert.ok(def.includes(`'${step}'`), `${step} missing from: ${def}`)
 })
 
 // Once the Bitrefill client secret lapses no card can be bought, so the admin hears ahead of time.
@@ -158,8 +168,8 @@ test("an account that bought or was relayed is read every round, wherever it sta
         sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.test' FROM generate_series(1, 200) n`,
         // Signed in after all of them, so last in the queue.
         sql`INSERT INTO known_accounts (account_id, first_seen) VALUES ('buyer.test', now() + interval '1 minute'), ('relayed.test', now() + interval '1 minute')`,
-        sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step)
-            VALUES ('buyer.test', 'k1', 'amazon-us', 'Card', '10', 10000000, 'settled')`,
+        sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step)
+            VALUES ((SELECT id FROM co), 'buyer.test', 'k1', 'amazon-us', 'Card', '10', 10000000, 'settled')`,
         sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES ('h1', 'relayed.test', '{}'::jsonb)`
       ]))
   })

@@ -52,15 +52,22 @@ export const messageLimits = (perMinute = MESSAGES_PER_MINUTE, perDay = MESSAGES
   }
 }
 
-/** The line under the Agent's reply, written by code: exactly what the button buys, and where the receipt goes. */
-export const buySummary = (p: Pending) =>
+/**
+ * The lines under the Agent's reply, written by code: exactly what the button buys, and where the receipt goes. One
+ * line for one card; several are numbered, with their total.
+ */
+export const buySummary = (cards: ReadonlyArray<Pending>) => {
+  const receipt = cards[0]?.receiptTo ? ` Also emailed to ${cards[0].receiptTo}.` : ""
+  if (cards.length === 1) return cardLine(cards[0]!) + receipt
+  const total = cards.reduce((s, c) => s + c.maxPrice, 0)
+  return [...cards.map((c, i) => `${i + 1}. ${cardLine(c)}`), `${cards.length} cards: ${usdUp(total)} in all.${receipt}`].join("\n")
+}
+const cardLine = (p: Pending) =>
   (p.maxPrice === p.referencePrice
     ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
     : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
   // A card only works in its own country: said on the button's line, every time.
   ` Works in ${worksIn(p.country)}.` +
-  // Where Bitrefill sends the receipt: a changed address is in plain sight before every purchase.
-  (p.receiptTo ? ` Also emailed to ${p.receiptTo}.` : "") +
   // Bitrefill gives no date before an order: the last delivered one's is the best guess, and said as one.
   (p.useBy ? ` Use it by about ${dateText(p.useBy)}.` : "")
 
@@ -189,7 +196,7 @@ export class Telegram extends Context.Service<Telegram, {
 
       // ponytail: chat history and pending confirmations live in memory (lost on restart, one process).
       const history = new Map<number, { messages: Array<ChatCompletionMessageParam>; at: number }>()
-      const pending = new Map<string, Pending & { telegramUserId: number; accountId: string; expires: number }>()
+      const pending = new Map<string, { cards: ReadonlyArray<Pending>; telegramUserId: number; accountId: string; expires: number }>()
 
       const linkedAccount = (telegramUserId: number) =>
         db(sql<{ account_id: string }>`SELECT account_id FROM telegram_links WHERE telegram_user_id = ${telegramUserId}`)
@@ -275,11 +282,11 @@ export class Telegram extends Context.Service<Telegram, {
         history.set(ctx.chat.id, { messages: trimHistory(turn.history), at: Date.now() })
         if (!turn.pending) return void ctx.reply(turn.reply || "…")
         const id = randomUUID()
-        pending.set(id, { ...turn.pending, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
-        const p = turn.pending
-        const summary = buySummary(p)
-        await ctx.reply(`${turn.reply}\n\n${summary}`.trim(), {
-          reply_markup: new InlineKeyboard().text(`Buy for ${usdUp(p.maxPrice)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
+        const cards = turn.pending
+        pending.set(id, { cards, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
+        const total = cards.reduce((s, c) => s + c.maxPrice, 0)
+        await ctx.reply(`${turn.reply}\n\n${buySummary(cards)}`.trim(), {
+          reply_markup: new InlineKeyboard().text(cards.length === 1 ? `Buy for ${usdUp(total)}` : `Buy ${cards.length} cards for ${usdUp(total)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
         })
       }))
 
@@ -324,10 +331,21 @@ export class Telegram extends Context.Service<Telegram, {
         }
         await ctx.answerCallbackQuery({ text: "Buying…" })
         inChat(ctx.chat!.id, async () => {
+          // The contract refuses to debit more than each card's maximum shown on the button. The button's id keys each
+          // card, so a second tap returns the same purchases (ADR-0007).
+          const items = p.cards.map((c, i) =>
+            new NewPurchase({
+              voucherId: c.voucherId,
+              value: c.value,
+              mode: c.mode,
+              maxPrice: c.maxPrice,
+              ...(c.mode === "normal" ? {} : { luckyAmount: c.luckyAmount }),
+              idempotencyKey: p.cards.length === 1 ? id! : `${id}:${i}`
+            })
+          )
           const outcome = await Effect.runPromise(
-            // The contract refuses to debit more than the maximum shown on the button.
-            purchases.create(p.accountId, new NewPurchase({ voucherId: p.voucherId, value: p.value, mode: p.mode, maxPrice: p.maxPrice, ...(p.mode === "normal" ? {} : { luckyAmount: p.luckyAmount }), idempotencyKey: id! }))
-              .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: result }))
+            (items.length === 1 ? Effect.map(purchases.create(p.accountId, items[0]!), (one) => [one]) : purchases.createCart(p.accountId, items))
+              .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: (bought) => bought.map(result).join("\n\n") }))
           )
           await ctx.reply(outcome)
         })

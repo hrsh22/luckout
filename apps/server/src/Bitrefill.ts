@@ -153,11 +153,14 @@ const GuestPurchase = Schema.Struct({
   })
 })
 /** A guest invoice as get-invoice-by-id reads it back. */
+/** What an order says it is: Bitrefill lists a cart's orders in cart order, each with its product and amount. */
+const OrderProduct = Schema.optional(Schema.Struct({ id: Schema.String, value: Schema.optional(Schema.Unknown) }))
 const GuestInvoice = Schema.Struct({
   invoice_status: Schema.String,
   orders: Schema.Array(Schema.Struct({
     order_id: Schema.String,
     status: Schema.String,
+    product: OrderProduct,
     redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
   }))
 })
@@ -180,10 +183,37 @@ const data = <A, I>(s: Schema.Codec<A, I>) => Schema.Struct({ data: s })
 /** Redemption Data exactly as Bitrefill sends it (code, link, pin, instructions…). */
 export type Redemption = Readonly<Record<string, unknown>>
 
-export type Delivery =
-  | { readonly _tag: "Delivered"; readonly invoiceId: string; readonly orderId: string; readonly redemption: Redemption }
-  /** Bitrefill definitely did not deliver, so the purchase can be failed and refunded. */
+/** One card of an order: its product and amount. */
+export interface Card {
+  readonly id: string
+  readonly value: string
+}
+
+/** Where one card of an invoice is. */
+export type CardDelivery =
+  | { readonly _tag: "Delivered"; readonly orderId: string; readonly redemption: Redemption }
+  /** Bitrefill definitely did not deliver it, so it can be failed and refunded. */
   | { readonly _tag: "Failed"; readonly reason: string }
+  /** Not yet: still on its way, or not found in the invoice (a human looks once the retries run out). */
+  | { readonly _tag: "Pending" }
+
+/**
+ * Each card's order in an invoice: the first one not yet taken with the card's product and amount. An order that
+ * names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is the order Bitrefill keeps.
+ */
+export const matchOrders = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined }>(
+  cards: ReadonlyArray<Card>,
+  orders: ReadonlyArray<O>
+): Array<O | undefined> => {
+  const taken = new Set<number>()
+  return cards.map((card, i) => {
+    let k = orders.findIndex((o, j) => !taken.has(j) && o.product?.id === card.id && (o.product.value === undefined || String(o.product.value) === card.value))
+    if (k < 0 && !taken.has(i) && orders[i] && !orders[i].product) k = i
+    if (k < 0) return undefined
+    taken.add(k)
+    return orders[k]
+  })
+}
 
 export type Order =
   | { readonly _tag: "Ordered"; readonly invoiceId: string }
@@ -391,9 +421,12 @@ export class Bitrefill extends Context.Service<Bitrefill, {
    * with the customer's Checkout Email or on their own Bitrefill account; otherwise it's paid at once from the
    * USD balance. Save the invoice before going on.
    */
-  order(id: string, value: string, buyer?: Buyer): Effect.Effect<Order, BitrefillUnavailable>
-  /** Polls an invoice for up to ~1 minute; still pending is an error (unknown, not failed). A guest invoice needs its access token. */
-  delivery(invoiceId: string, accessToken?: string): Effect.Effect<Delivery, BitrefillUnavailable>
+  order(cards: ReadonlyArray<Card>, buyer?: Buyer): Effect.Effect<Order, BitrefillUnavailable>
+  /**
+   * Polls an invoice for up to ~1 minute, until every card is delivered or failed, and says where each of `cards` is.
+   * Nothing settled yet is an error (unknown, not failed). A guest invoice needs its access token.
+   */
+  delivery(invoiceId: string, accessToken: string | undefined, cards: ReadonlyArray<Card>): Effect.Effect<ReadonlyArray<CardDelivery>, BitrefillUnavailable>
   /** Our USD store credit, and how much more Bitrefill lets us hold (micro-USDC). */
   readonly credit: Effect.Effect<{ readonly balance: number; readonly room: number }, BitrefillUnavailable>
   /** Asks for `amount` (micro-USDC, whole cents) of USD credit, paid 1:1 in USDC on Base. */
@@ -660,11 +693,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         })
       })
 
-      const createInvoice = (id: string, value: string) =>
-        isTest(id)
+      const createInvoice = (cards: ReadonlyArray<Card>) =>
+        cards.every((c) => isTest(c.id))
           ? HttpClientRequest.post("/invoices").pipe(
             HttpClientRequest.bodyJsonUnsafe({
-              products: [{ product_id: id, package_id: `${id}<&>${value}`, quantity: 1 }],
+              products: cards.map((c) => ({ product_id: c.id, package_id: `${c.id}<&>${c.value}`, quantity: 1 })),
               payment_method: "balance",
               auto_pay: true
             }),
@@ -675,7 +708,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             Effect.catch((e): Effect.Effect<never, Rejected | BitrefillUnavailable> => (httpStatus(e) >= 400 && httpStatus(e) < 500 ? refusal(e) : Effect.fail(unavailable(e))))
           )
           : mcp("buy-products", {
-            cart_items: [{ product_id: id, package_value: value }],
+            cart_items: cards.map((c) => ({ product_id: c.id, package_value: c.value })),
             payment_method: "balance",
             balance_currency: "USD"
           }, McpPurchase).pipe(Effect.map((r) => r.response.invoice_id))
@@ -706,16 +739,16 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // a malformed address) is simply refused here and expires unpaid. On the customer's own account it's the
       // same invoice, without an email (the receipt goes to the account's); a 401 there means their login lapsed.
       // A guest's card is also sent to their Checkout Email as a Bitrefill gift, so the code reaches them outside Luckout too.
-      const invoiceOrder = (id: string, value: string, buyer: Buyer) => {
-        const item = { product_id: id, package_value: value }
+      const invoiceOrder = (cards: ReadonlyArray<Card>, buyer: Buyer) => {
+        const items = cards.map((c) => ({ product_id: c.id, package_value: c.value }))
         const args = { payment_method: "usdc_base", return_payment_link: false }
         return ("email" in buyer
           ? asGuest("buy-products", {
             ...args,
-            cart_items: [{ ...item, gift: { recipient_email: buyer.email, recipient_name: buyer.email.split("@")[0]!.slice(0, 100), sender_name: "Luckout" } }],
+            cart_items: items.map((item) => ({ ...item, gift: { recipient_email: buyer.email, recipient_name: buyer.email.split("@")[0]!.slice(0, 100), sender_name: "Luckout" } })),
             email: buyer.email
           }, GuestPurchase)
-          : mcp("buy-products", { ...args, cart_items: [item] }, GuestPurchase, buyer.token)).pipe(
+          : mcp("buy-products", { ...args, cart_items: items }, GuestPurchase, buyer.token)).pipe(
           Effect.flatMap(({ response: r }): Effect.Effect<Order, Rejected> => {
             const pay = r.payment_info
             if (pay.contractAddress.toLowerCase() !== BASE_USDC) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Base` }))
@@ -726,10 +759,10 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
       }
 
-      const order = Effect.fn("Bitrefill.order")(function*(id: string, value: string, buyer?: Buyer) {
+      const order = Effect.fn("Bitrefill.order")(function*(cards: ReadonlyArray<Card>, buyer?: Buyer) {
         if (guest) {
           if (!buyer) return { _tag: "Refused", reason: "no Checkout Email" } as Order
-          return yield* invoiceOrder(id, value, buyer).pipe(
+          return yield* invoiceOrder(cards, buyer).pipe(
             // A 429 is Bitrefill's rate limit, not a verdict on the order: the tool never ran and no invoice exists,
             // so it's an unknown to try again (the reconciler does), never a refusal that refunds the customer.
             Effect.catchTag("Rejected", (e): Effect.Effect<Order, BitrefillUnavailable> =>
@@ -738,7 +771,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
                 : Effect.succeed({ _tag: "Refused", reason: e.reason }))
           )
         }
-        return yield* createInvoice(id, value).pipe(
+        return yield* createInvoice(cards).pipe(
           Effect.map((invoiceId): Order => ({ _tag: "Ordered", invoiceId })),
           Effect.catchTag("Rejected", (e) => {
             const limit = ORDER_LIMIT.test(e.reason)
@@ -759,28 +792,57 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         pollAt = nextGuestPoll(pollAt, now)
         return Effect.sleep(pollAt - now)
       })
+      /**
+       * Where each card is, from the invoice's orders: delivered with its code, failed (the order or the whole invoice
+       * ended without one), or still pending. Nothing settled at all is an unknown, tried again later.
+       */
+      const cardsIn = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined }>(
+        invoiceId: string,
+        cards: ReadonlyArray<Card>,
+        orders: ReadonlyArray<O>,
+        failed: (o: O | undefined) => string | undefined,
+        orderId: (o: O) => string,
+        status: string
+      ): Effect.Effect<ReadonlyArray<CardDelivery>, BitrefillUnavailable> => {
+        const found = matchOrders(cards, orders).map((o): CardDelivery => {
+          if (o?.redemption_info) return { _tag: "Delivered", orderId: orderId(o), redemption: o.redemption_info }
+          const why = failed(o)
+          return why ? { _tag: "Failed", reason: why } : { _tag: "Pending" }
+        })
+        return found.every((d) => d._tag === "Pending")
+          ? Effect.fail(unavailable(`invoice ${invoiceId} is still ${status}`))
+          : Effect.succeed(found)
+      }
+      const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
+        invoiceFailed || matchOrders(cards, orders).every((o) => !!o && (!!o.redemption_info || GUEST_FAILED.test(o.status ?? "")))
+
       // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.
-      const guestDelivery = (invoiceId: string, accessToken: string) =>
+      const guestDelivery = (invoiceId: string, accessToken: string, cards: ReadonlyArray<Card>) =>
         Effect.andThen(pollSlot, asGuest("get-invoice-by-id", { invoice_id: invoiceId, invoice_access_token: accessToken }, GuestInvoice)).pipe(
           Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
           retry,
           Effect.repeat({
             schedule: Schedule.spaced("5 seconds"),
-            until: (i) => !!i.orders[0]?.redemption_info || GUEST_FAILED.test(i.invoice_status) || GUEST_FAILED.test(i.orders[0]?.status ?? ""),
+            until: (i) => settled(cards, i.orders, GUEST_FAILED.test(i.invoice_status)),
             times: 12
           }),
-          Effect.flatMap((i): Effect.Effect<Delivery, BitrefillUnavailable> => {
-            const o = i.orders[0]
-            if (o?.redemption_info) return Effect.succeed({ _tag: "Delivered", invoiceId, orderId: o.order_id, redemption: o.redemption_info })
-            if (GUEST_FAILED.test(i.invoice_status) || GUEST_FAILED.test(o?.status ?? "")) {
-              return Effect.succeed({ _tag: "Failed", reason: `invoice ${invoiceId} is ${i.invoice_status}, order ${o?.status ?? "missing"}` })
-            }
-            return Effect.fail(unavailable(`invoice ${invoiceId} is still ${i.invoice_status}, order ${o?.status ?? "missing"}`))
-          })
+          Effect.flatMap((i) =>
+            cardsIn(
+              invoiceId,
+              cards,
+              i.orders,
+              (o) =>
+                GUEST_FAILED.test(i.invoice_status) || GUEST_FAILED.test(o?.status ?? "")
+                  ? `invoice ${invoiceId} is ${i.invoice_status}, order ${o?.status ?? "missing"}`
+                  : undefined,
+              (o) => o.order_id,
+              i.invoice_status
+            )
+          )
         )
 
-      const delivery = Effect.fn("Bitrefill.delivery")(function*(invoiceId: string, accessToken?: string) {
-        if (accessToken !== undefined) return yield* guestDelivery(invoiceId, accessToken)
+      const delivery = Effect.fn("Bitrefill.delivery")(function*(invoiceId: string, accessToken: string | undefined, cards: ReadonlyArray<Card>) {
+        if (accessToken !== undefined) return yield* guestDelivery(invoiceId, accessToken, cards)
         // Delivery normally takes well under a second; poll for up to ~1 minute.
         const invoice = yield* get(`/invoices/${invoiceId}`, Invoice).pipe(
           Effect.repeat({
@@ -789,12 +851,14 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             times: 60
           })
         )
-        const o = invoice.orders[0]
-        if (invoice.status === "all_delivered" && o?.redemption_info) {
-          return { _tag: "Delivered", invoiceId, orderId: o.id, redemption: o.redemption_info } as const
-        }
-        if (invoice.status === "all_error") return { _tag: "Failed", reason: `invoice ${invoiceId} is all_error` } as const
-        return yield* Effect.fail(unavailable(`invoice ${invoiceId} is still ${invoice.status}`))
+        return yield* cardsIn(
+          invoiceId,
+          cards,
+          invoice.orders,
+          () => (invoice.status === "all_error" ? `invoice ${invoiceId} is all_error` : undefined),
+          (o) => o.id,
+          invoice.status
+        )
       })
 
       // Only MCP sees the USD sub-account; REST reports the primary (BTC) one.

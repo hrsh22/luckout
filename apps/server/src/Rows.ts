@@ -2,14 +2,14 @@ import { Effect } from "effect"
 import type { SqlClient } from "effect/sql"
 
 /** Objects (signed transactions, quotes) are stored as JSON; dates and scalars as they are. */
-const json = (v: unknown) => (v === null || typeof v !== "object" || v instanceof Date ? v : JSON.stringify(v))
+export const json = (v: unknown) => (v === null || typeof v !== "object" || v instanceof Date ? v : JSON.stringify(v))
 
 /**
- * Row plumbing for the two step machines, purchases and refills. A row moves on from the step it was
+ * Row plumbing for the step machines: checkouts (and their cards, purchases) and refills. A row moves on from the step it was
  * loaded at, or not at all, so each step's side effect happens once; and each step starts with its own
  * retries, so a backoff earned at one never delays the next.
  */
-export const stepRows = (sql: SqlClient.SqlClient, table: "purchases" | "refills") => {
+export const stepRows = (sql: SqlClient.SqlClient, table: "purchases" | "checkouts" | "refills") => {
   const set = (fields: Record<string, unknown>) => sql.update(Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, json(v)])))
   return {
     /** Saves fields without moving the row on. */

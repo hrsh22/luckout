@@ -12,6 +12,7 @@ import { RichText } from "@/components/rich-text"
 import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
+import { addToCart, type CartLine, useCart } from "@/lib/cart"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
@@ -21,13 +22,14 @@ import { modePalette } from "@/lib/palette"
 import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { openingAmount, openingMode } from "@/lib/voucher-choice"
-import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
+import { DEFAULT_LIMITS, MAX_CART, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, CalendarClock, ChevronDown, Star, Zap } from "lucide-react"
+import { ArrowLeft, CalendarClock, ChevronDown, ShoppingCart, Star, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react"
+import { toast } from "sonner"
 
 /** Back to the results this card came from, not just the empty shop. */
 const lastSearch = () => {
@@ -261,7 +263,14 @@ function Voucher() {
                         )}
                       </ul>
                     )}
-                    {shown && <BuyButton quote={quote.data} need={shown.maxPrice} onBuy={(q) => buy.mutate(q)} />}
+                    {shown && (
+                      <BuyButton
+                        need={shown.maxPrice}
+                        label={quote.data && `Buy for ${usdUp(quote.data.maxPrice)}`}
+                        onBuy={() => quote.data && buy.mutate(quote.data)}
+                      />
+                    )}
+                    {shown && look && value && <AddToCart line={{ voucherId: id, value, mode, name: look.name, currency: look.currency, image: look.image, background: look.background }} />}
                   </Receipt>
                 </motion.div>
               )}
@@ -372,12 +381,31 @@ function Receipt({ shown, exact, info, error, retry, children }: {
   )
 }
 
+/** Puts this card, amount and mode in the Cart, to buy with others in one go. */
+function AddToCart({ line }: { line: Omit<CartLine, "key"> }) {
+  const router = useRouter()
+  const full = useCart().length >= MAX_CART
+  return (
+    <Button
+      size="lg"
+      variant="light"
+      disabled={full}
+      onClick={() => {
+        if (addToCart(line)) toast.success(`${line.name} ${line.value} ${line.currency} is in your cart`, { action: { label: "View cart", onClick: () => router.push("/cart") } })
+      }}
+    >
+      <ShoppingCart />{full ? `Your cart is full (${MAX_CART} cards)` : "Add to cart"}
+    </Button>
+  )
+}
+
 /**
  * The Add funds sheet stays outside BuyAction's branches, on the amount it opened with: a quote renewed every 20 s, a
  * balance read or the shop closing mid Top-Up must not unmount it or restart its steps. It goes when the customer
- * closes it or the Top-Up lands.
+ * closes it or the Top-Up lands. `need` is what buying debits in all, `largest` the most any one card debits (the
+ * per-purchase limit applies to each), and no `label` means the price is still being checked.
  */
-function BuyButton(props: { quote: Quote | undefined; need: number; onBuy: (q: Quote) => void }) {
+export function BuyButton(props: { need: number; largest?: number; label: string | undefined; onBuy: () => void }) {
   const [open, setOpen] = useState(false)
   const [short, setShort] = useState(0)
   return (
@@ -389,10 +417,11 @@ function BuyButton(props: { quote: Quote | undefined; need: number; onBuy: (q: Q
 }
 
 /** One button that knows what's in the way: signing in, funds, limits, or the Checkout Email, and fixes it on the spot. */
-function BuyAction({ quote, need, onBuy, onAdd }: {
-  quote: Quote | undefined
+function BuyAction({ need, largest = need, label, onBuy, onAdd }: {
   need: number
-  onBuy: (q: Quote) => void
+  largest?: number
+  label: string | undefined
+  onBuy: () => void
   onAdd: (short: number) => void
 }) {
   const { accountId, account, accountError, refresh, intents, gasFree, token } = useSession()
@@ -421,11 +450,11 @@ function BuyAction({ quote, need, onBuy, onAdd }: {
   const balance = Number(account?.balance ?? 0)
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
   // A limit that's off is u128::MAX, so it's never "over" and never shown in dollars here.
-  const overPer = !!account && need > Number(account.per_purchase_limit)
+  const overPer = !!account && largest > Number(account.per_purchase_limit)
   const overDay = !!account && today + need > Number(account.daily_limit)
   // Up to the new defaults, or what this purchase needs (to the whole dollar) if that's more; the other limit stays as it is.
   const raised = (floor: number, needed: number) => String(Math.max(floor, Math.ceil(needed / 1e6) * 1e6))
-  const per = overPer ? raised(DEFAULT_LIMITS.perPurchase, need) : account?.per_purchase_limit
+  const per = overPer ? raised(DEFAULT_LIMITS.perPurchase, largest) : account?.per_purchase_limit
   const daily = overDay ? raised(DEFAULT_LIMITS.daily, today + need) : account?.daily_limit
 
   if (balance < need) {
@@ -463,8 +492,8 @@ function BuyAction({ quote, need, onBuy, onAdd }: {
   }
   return (
     <div className="flex flex-col gap-2">
-      <Button size="lg" loading={!quote} onClick={() => quote && onBuy(quote)}>
-        {quote ? `Buy for ${usdUp(quote.maxPrice)}` : "Checking the price"}
+      <Button size="lg" loading={!label} onClick={() => label && onBuy()}>
+        {label ?? "Checking the price"}
       </Button>
       {checkout?.needed && checkout.email && (
         <p className="text-sm text-muted">
