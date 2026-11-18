@@ -312,7 +312,12 @@ export class SessionApi extends HttpApiGroup.make("session").add(
 export class CheckoutEmail extends Schema.Class<CheckoutEmail>("CheckoutEmail")({
   needed: Schema.Boolean,
   email: Schema.optional(Schema.String),
-  bitrefill: Schema.optional(Schema.Boolean)
+  bitrefill: Schema.optional(Schema.Boolean),
+  /**
+   * What this email has used of a guest's limits (GUEST_LIMITS) through Luckout: cards in the last 24 hours, and
+   * micro-USDC in the last 24 hours and 30 days. Only with an email that orders need.
+   */
+  used: Schema.optional(Schema.Struct({ orders: Schema.Int, day: MicroUsdc, month: MicroUsdc }))
 }) {}
 
 export class PurchasesApi extends HttpApiGroup.make("purchases").add(

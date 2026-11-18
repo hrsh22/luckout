@@ -3,11 +3,11 @@ import { SqlClient } from "effect/sql"
 import { ContractId, Network } from "./Near.ts"
 
 /**
- * Operator alerts and customer notices. Everything is logged; with TELEGRAM_BOT_TOKEN set,
+ * Operator alerts and customer notices. Alerts are logged; with TELEGRAM_BOT_TOKEN set,
  * admin alerts also go to ALERT_TELEGRAM_CHAT_ID and customer notices to their linked chat.
  */
 export class Alerts extends Context.Service<Alerts, {
-  /** Something a human must look at. The same text is sent at most once an hour. */
+  /** Something a human must look at. The same text is logged and sent at most once an hour. */
   admin(text: string): Effect.Effect<void>
   /**
    * A short notice to the customer's linked Telegram chat, if any. Never Redemption Data. False only when
@@ -60,12 +60,15 @@ export class Alerts extends Context.Service<Alerts, {
       const lastSent = new Map<string, number>()
       const admin = (text: string) =>
         Effect.gen(function*() {
-          yield* Effect.logError(`ALERT [${where}] ${text}`)
           const now = Date.now()
           for (const [t, at] of lastSent) if (at <= now - DEDUPE_MS) lastSent.delete(t)
-          if (lastSent.has(text) || Option.isNone(adminChat)) return
+          // A watcher raises the same alert every minute while its cause lasts: it's logged once an hour too,
+          // so the log shows what else happened.
+          if (lastSent.has(text)) return
+          yield* Effect.logError(`ALERT [${where}] ${text}`)
           // Held while sending, so the same alert at the same moment isn't sent twice; only a delivered one counts.
           lastSent.set(text, now)
+          if (Option.isNone(adminChat)) return
           if ((yield* telegram(adminChat.value, `⚠️ Luckout [${where}]: ${text}`)) !== "sent") lastSent.delete(text)
         })
 

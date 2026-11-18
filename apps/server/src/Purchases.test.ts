@@ -594,6 +594,7 @@ test("a guest card carries the customer's email, is paid once from the Base Floa
   assert.deepEqual(w.paid, [{ to: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: 10_000_000, resent: false }])
   assert.ok(!r.stored.includes("alice"), "the email is sealed at rest")
   assert.deepEqual({ needed: r.seen.needed, email: r.seen.email }, { needed: true, email: "alice@example.com" })
+  assert.deepEqual(r.seen.used, { orders: 1, day: 10_000_000, month: 10_000_000 }, "what the email has used of a guest's limits")
 })
 
 test("a buy request stops waiting after its limit and answers pending; the card still arrives and Telegram says so", async () => {
