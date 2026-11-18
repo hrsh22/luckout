@@ -5,7 +5,9 @@ import { Money } from "@/components/money"
 import { NavShell } from "@/components/nav-shell"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { useCart } from "@/lib/cart"
+import { cartCount, openCart, useCart } from "@/lib/cart"
+import { CartDrawer } from "@/components/cart-drawer"
+import { AnimatePresence, motion } from "motion/react"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
@@ -34,7 +36,7 @@ export function AppNav() {
       links={LINKS}
       right={
         <>
-          <CartLink />
+          <CartButton />
           {accountId
         ? (
           <>
@@ -71,19 +73,34 @@ export function AppNav() {
   )
 }
 
-/** The Cart, once something is in it. */
-function CartLink() {
-  const n = useCart().length
-  if (n === 0) return null
+/** The Cart, always in the same place: its count, and the drawer it opens. The count pops when it changes. */
+function CartButton() {
+  const n = cartCount(useCart())
   return (
-    <Link
-      href="/cart"
-      aria-label={`Cart, ${n} ${n === 1 ? "card" : "cards"}`}
-      className="relative grid size-10 shrink-0 place-items-center rounded-full bg-soft transition-colors hover:bg-[#ebe9f3]"
-    >
-      <ShoppingCart size={18} aria-hidden="true" />
-      <span className="absolute -top-1 -right-1 grid h-5 min-w-5 place-items-center rounded-full bg-ink px-1 text-xs font-bold text-white">{n}</span>
-    </Link>
+    <>
+      <button
+        type="button"
+        onClick={openCart}
+        aria-label={n === 0 ? "Cart, empty" : `Cart, ${n} ${n === 1 ? "card" : "cards"}`}
+        className="relative grid size-10 shrink-0 place-items-center rounded-full bg-soft transition-colors hover:bg-[#ebe9f3]"
+      >
+        <ShoppingCart size={18} aria-hidden="true" />
+        <AnimatePresence initial={false}>
+          {n > 0 && (
+            <motion.span
+              key={n}
+              initial={{ scale: 0.4, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ type: "spring", stiffness: 520, damping: 22 }}
+              className="absolute -top-1 -right-1 grid h-5 min-w-5 place-items-center rounded-full bg-ink px-1 text-xs font-bold text-white"
+            >
+              {n}
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </button>
+      <CartDrawer />
+    </>
   )
 }
 
