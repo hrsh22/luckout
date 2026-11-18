@@ -60,33 +60,87 @@ const McpProduct = Schema.Struct({
     payment_price: Schema.String,
     payment_currency: Schema.Literal("USD")
   })),
-  // What Bitrefill's own page for the card shows; instructions and terms are HTML.
+  // What Bitrefill's own page for the card shows; steps and terms are HTML.
   subtitles: Schema.optional(Schema.String),
   instructions: Schema.optional(Schema.String),
   termsConditions: Schema.optional(Schema.String),
-  url: Schema.optional(Schema.String),
   ratings: Schema.optional(Schema.Struct({ rating_value: Schema.Number, rating_count: Schema.Number }))
 })
 
-/** Bitrefill's HTML as plain text: one line per paragraph, break or list item, links as "text (url)", every other tag dropped. */
-export const plainText = (html: string) =>
-  html
-    .replace(/<a\s[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href: string, text: string) => (text.trim() && text.trim() !== href ? `${text.trim()} (${href})` : href))
-    .replace(/<li[^>]*>/gi, "\n• ")
-    .replace(/<br\s*\/?>|<\/p>|<\/li>|<\/h\d>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&#0?39;|&#x27;/g, "'").replace(/&amp;/g, "&")
-    .split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n")
+const ENTITIES: Record<string, string> = {
+  nbsp: " ", lt: "<", gt: ">", quot: "\"", apos: "'", amp: "&", ldquo: "“", rdquo: "”", lsquo: "‘", rsquo: "’",
+  ndash: "–", mdash: "—", hellip: "…", bull: "•", middot: "·", trade: "™", reg: "®", copy: "©", euro: "€", pound: "£", times: "×"
+}
+const entity = (m: string, e: string) =>
+  e.startsWith("#")
+    ? String.fromCodePoint(...[Number(e[1] === "x" || e[1] === "X" ? `0x${e.slice(2)}` : e.slice(1))].filter((n) => Number.isInteger(n) && n > 0 && n <= 0x10ffff)) || m
+    : ENTITIES[e.toLowerCase()] ?? m
+const host = (url: string) => URL.parse(url)?.hostname.replace(/^www\./, "")
+
+/**
+ * Bitrefill's HTML (a card's steps and terms) as lines a page can lay out: "# " a title, "1. " a step,
+ * "- " an item (two spaces more for each list it sits in), anything else a paragraph. Links keep their
+ * words and name their site, never a clickable address; every other tag is dropped.
+ */
+export const readableText = (html: string) => {
+  const lines: Array<string> = []
+  const lists: Array<{ ordered: boolean; n: number }> = []
+  let text = ""
+  let bold = 0
+  /** Whether the line so far has any words outside <strong>: an all-bold line is a title. */
+  let plain = false
+  let link: { href: string; at: number } | undefined
+  const end = () => {
+    const t = text.replace(/\s+/g, " ").trim()
+    const allBold = !plain
+    text = ""
+    plain = false
+    if (!t) return
+    const list = lists.at(-1)
+    if (list) return void lines.push(`${"  ".repeat(lists.length - 1)}${list.ordered ? `${++list.n}.` : "-"} ${t}`)
+    // "Validity:" on its own, or a short all-bold line, titles what follows.
+    if (t.length <= 60 && (allBold || /^[^.!?]+:$/.test(t))) return void lines.push(`# ${t.replace(/:$/, "")}`)
+    lines.push(t.replace(/^(\d+)[.)]\s+/, "$1. "))
+  }
+  for (const [, close, tag, attrs, words] of html.matchAll(/<(\/?)([a-zA-Z][\w-]*)([^>]*)>|([^<]+)/g)) {
+    if (words !== undefined) {
+      const t = words.replace(/&(#?\w+);/g, entity)
+      if (t.trim() && bold === 0) plain = true
+      text += t
+      continue
+    }
+    const name = tag!.toLowerCase()
+    if (name === "ol" || name === "ul") {
+      end()
+      if (close) lists.pop()
+      else lists.push({ ordered: name === "ol", n: 0 })
+    } else if (["br", "p", "div", "li", "tr"].includes(name) || /^h\d$/.test(name)) end()
+    else if (name === "strong" || name === "b") bold = Math.max(0, bold + (close ? -1 : 1))
+    else if (name === "a" && !close) {
+      const href = attrs?.match(/href="([^"]*)"/)?.[1]
+      link = href ? { href, at: text.length } : undefined
+    } else if (name === "a" && link) {
+      const words = text.slice(link.at).trim()
+      const site = host(link.href)
+      // "flipkart.com" or a bare address reads as the site; "here" keeps its word and says where.
+      if (site && (!words || /^(https?:\/\/|www\.)|^[\w-]+(\.[\w-]+)+\/?$/i.test(words))) text = text.slice(0, link.at) + site
+      else if (site && !words.toLowerCase().includes(site)) text += ` (${site})`
+      link = undefined
+    }
+  }
+  end()
+  // Addresses typed out as text read as their site too.
+  return lines.map((l) => l.replace(/https?:\/\/[^\s)]+/g, (u) => host(u) ?? u)).join("\n")
+}
 
 /** What Bitrefill says about a card besides its prices, for the card's page. */
 const about = (p: typeof McpProduct.Type) => {
-  const text = (html: string | undefined) => (html && plainText(html)) || undefined
+  const text = (html: string | undefined) => (html && readableText(html)) || undefined
   return {
     subtitle: text(p.subtitles),
     howToRedeem: text(p.instructions),
     terms: text(p.termsConditions),
-    ...(p.ratings && p.ratings.rating_count > 0 ? { rating: { value: p.ratings.rating_value, count: Math.round(p.ratings.rating_count) } } : {}),
-    ...(p.url?.startsWith("https://www.bitrefill.com/") ? { bitrefillUrl: p.url } : {})
+    ...(p.ratings && p.ratings.rating_count > 0 ? { rating: { value: p.ratings.rating_value, count: Math.round(p.ratings.rating_count) } } : {})
   }
 }
 const McpPurchase = Schema.Struct({ response: Schema.Struct({ invoice_id: Schema.String }) })

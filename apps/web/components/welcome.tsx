@@ -150,7 +150,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               </button>
               <Heading title="An email for your cards" body="Bitrefill, which delivers the cards, needs one with each card you buy. You can change it later in Wallet." />
               <div className="card p-5 sm:p-6">
-                <CheckoutEmailForm label="Continue" onSaved={() => go(account ? 4 : 3)} />
+                <CheckoutEmailForm titled label="Continue" onSaved={() => go(account ? 4 : 3)} />
               </div>
               {/* Its own skip even over a page: the header's "Skip for now" would also skip Add funds. */}
               <Button variant="ghost" className="self-start" onClick={() => go(account ? 4 : 3)}>Add it later</Button>

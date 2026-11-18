@@ -8,6 +8,7 @@ import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { OddsBar, OddsList } from "@/components/odds"
 import { Progress, PurchaseResult, usePolledPurchase } from "@/components/purchase-view"
+import { RichText } from "@/components/rich-text"
 import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
@@ -22,7 +23,7 @@ import { useSession } from "@/lib/session"
 import { openingAmount, openingMode } from "@/lib/voucher-choice"
 import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft, ChevronDown, ExternalLink, Star } from "lucide-react"
+import { ArrowLeft, CalendarClock, ChevronDown, Star, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
@@ -141,15 +142,17 @@ function Voucher() {
                   <p className="self-start rounded-full bg-ink px-3 py-1 text-sm font-semibold text-white">
                     {flag(look.countryCode)} {look.countryCode === WORLDWIDE ? "Works worldwide" : `Works in ${countryName(look.countryCode, look.countryName)} only`}
                   </p>
-                  {voucher.data?.subtitle && <p className="text-ink-soft">{voucher.data.subtitle}</p>}
-                  <p className="text-ink-soft">Paid out in {look.currency}. Delivered as a code, usually within a minute.</p>
-                  {voucher.data?.rating && (
-                    <p className="flex items-center gap-1.5 text-sm text-muted">
-                      <Star size={14} className="fill-current text-ink" aria-hidden="true" />
-                      <span className="font-semibold text-ink">{voucher.data.rating.value.toFixed(1)}</span>
-                      from {voucher.data.rating.count.toLocaleString()} ratings on Bitrefill
-                    </p>
-                  )}
+                  {voucher.data?.subtitle && <p className="text-lg text-ink-soft">{voucher.data.subtitle}</p>}
+                  <p className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted">
+                    {voucher.data?.rating && (
+                      <span className="inline-flex items-center gap-1.5">
+                        <Star size={14} className="fill-current text-ink" aria-hidden="true" />
+                        <span className="font-semibold text-ink">{voucher.data.rating.value.toFixed(1)}</span>
+                        from {voucher.data.rating.count.toLocaleString()} ratings on Bitrefill
+                      </span>
+                    )}
+                    <span className="inline-flex items-center gap-1.5"><Zap size={14} className="text-ink" aria-hidden="true" />Code in about a minute</span>
+                  </p>
                 </>
               )}
             </div>
@@ -199,7 +202,7 @@ function Voucher() {
           <section className="flex flex-col gap-4" aria-labelledby="mode">
             <div>
               <h2 id="mode" className="font-display text-2xl font-extrabold">How do you want to pay?</h2>
-              <p className="mt-1 text-ink-soft">Lucky modes cost more up front, then pay cashback in fixed slabs. Any cashback leaves you below the price.</p>
+              <p className="mt-1 text-ink-soft">Pay the price, or add a little for a chance at cashback.</p>
               {unknownDefault && <p className="mt-1 text-sm text-muted">Your default mode isn't offered on this page yet, so it opens on Normal.</p>}
             </div>
             <ModePicker value={mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
@@ -208,13 +211,8 @@ function Voucher() {
           {(voucher.data?.howToRedeem || voucher.data?.terms) && (
             <section className="flex flex-col gap-3" aria-labelledby="about">
               <h2 id="about" className="font-display text-2xl font-extrabold">Before you buy</h2>
-              {voucher.data.howToRedeem && <Details title="How to redeem" text={voucher.data.howToRedeem} />}
-              {voucher.data.terms && <Details title="Terms and validity" text={voucher.data.terms} />}
-              {voucher.data.bitrefillUrl && (
-                <a href={voucher.data.bitrefillUrl} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
-                  See this card on Bitrefill<ExternalLink size={14} />
-                </a>
-              )}
+              {voucher.data.howToRedeem && <Details title="How to redeem"><RichText text={voucher.data.howToRedeem} /></Details>}
+              {voucher.data.terms && <Details title="Terms and validity"><RichText text={voucher.data.terms} list /></Details>}
             </section>
           )}
         </div>
@@ -247,15 +245,21 @@ function Voucher() {
                       ? { run: () => void voucher.refetch(), busy: voucher.isFetching }
                       : undefined}
                   >
-                    {shown && look && look.countryCode !== WORLDWIDE && (
-                      <p className="text-sm text-ink-soft">
-                        {flag(look.countryCode)} For {countryName(look.countryCode, look.countryName)} only: it can't be used in another country's store.
-                      </p>
-                    )}
-                    {shown && voucher.data?.useBy && (
-                      <p className="text-sm text-ink-soft">
-                        Use it by about <span className="font-semibold text-ink">{new Date(voucher.data.useBy).toLocaleDateString(undefined, { dateStyle: "long" })}</span>: the date on the last one we delivered. Yours shows its own date with the code.
-                      </p>
+                    {shown && look && (look.countryCode !== WORLDWIDE || voucher.data?.useBy) && (
+                      <ul className="flex flex-col gap-1.5 text-sm text-ink-soft">
+                        {look.countryCode !== WORLDWIDE && (
+                          <li className="flex items-center gap-2">
+                            <span className="w-4 text-center" aria-hidden="true">{flag(look.countryCode)}</span>Works in {countryName(look.countryCode, look.countryName)} only
+                          </li>
+                        )}
+                        {voucher.data?.useBy && (
+                          // Bitrefill gives no date before an order: this is the last delivered card's, said as such.
+                          <li className="flex items-center gap-2">
+                            <CalendarClock size={16} className="text-muted" aria-hidden="true" />
+                            <span>Recent ones expire <span className="font-semibold text-ink">{new Date(voucher.data.useBy).toLocaleDateString(undefined, { dateStyle: "long" })}</span></span>
+                          </li>
+                        )}
+                      </ul>
                     )}
                     {shown && <BuyButton quote={quote.data} need={shown.maxPrice} onBuy={(q) => buy.mutate(q)} />}
                   </Receipt>
@@ -297,14 +301,14 @@ function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | nul
 }
 
 /** One of Bitrefill's texts about the card, folded until opened. */
-function Details({ title, text }: { title: string; text: string }) {
+function Details({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <details className="card group p-5">
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-semibold [&::-webkit-details-marker]:hidden">
+    <details className="card group overflow-hidden">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-5 font-semibold [&::-webkit-details-marker]:hidden">
         {title}
         <ChevronDown size={18} className="shrink-0 text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
       </summary>
-      <p className="mt-3 text-sm whitespace-pre-line break-words text-ink-soft">{text}</p>
+      <div className="border-t border-line px-5 pt-4 pb-5 break-words">{children}</div>
     </details>
   )
 }
@@ -356,15 +360,14 @@ function Receipt({ shown, exact, info, error, retry, children }: {
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
           {shown.luckyAmount < shown.referencePrice && (
             <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Only {usd(shown.luckyAmount)} of the price plays, because one purchase gets at most {usd(best.cashback)} back right now. The
-              rest is at the normal price.
+              Cashback is capped at {usd(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
             </p>
           )}
         </div>
       )}
       {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
       {children}
-      <p className="text-sm text-muted">{lucky ? "Cashback lands in your balance right after delivery. " : ""}You always get the card.</p>
+      <p className="text-sm text-muted">You always get the card.{lucky ? " Any cashback lands in your balance." : ""}</p>
     </div>
   )
 }
