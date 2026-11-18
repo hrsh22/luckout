@@ -155,7 +155,7 @@ const world = (opts: {
         ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
         : Effect.sync(() => {
           if (token) calls.push(`delivery:${token}`)
-          return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123" } }
+          return { _tag: "Delivered" as const, invoiceId, orderId: "o-1", redemption: { code: "ABC-123", expirationTime: "2027-03-30T00:00:00.000Z" } }
         }).pipe(Effect.delay(opts.deliveryDelay ?? 0)),
     // Each read takes `creditDelay` (set when it starts), like a slow Bitrefill.
     credit: Effect.suspend(() => Effect.delay(Effect.sync(() => ({ balance: creditBalance, room: 2_000_000_000 })), creditDelay))
@@ -245,6 +245,20 @@ test("a purchase walks every step and shows the code only once delivered", async
   assert.equal(p.status, "delivered")
   assert.equal(p.redemption?.code, "ABC-123")
   assert.deepEqual(w.calls, ["purchase", "order", "confirm_delivery"])
+})
+
+test("a delivered card's use-by date is kept outside its sealed code, so the card's page can show it before buying", async () => {
+  const w = world()
+  const r = await w.run(Effect.gen(function*() {
+    yield* w.buy()
+    const purchases = yield* Purchases
+    const fresh = yield* purchases.useBy("test-card")
+    const other = yield* purchases.useBy("amazon-us")
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE purchases SET created_at = now() - interval '61 days'`
+    return { fresh, other, stale: yield* purchases.useBy("test-card") }
+  }))
+  assert.deepEqual(r, { fresh: "2027-03-30T00:00:00.000Z", other: undefined, stale: undefined }, "only this card's, and only from the last 60 days")
 })
 
 test("the same idempotency key never buys twice", async () => {

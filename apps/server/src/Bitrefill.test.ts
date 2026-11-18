@@ -3,7 +3,7 @@ import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, plainText, popularBrands, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -288,6 +288,48 @@ test("a guest order Bitrefill rate-limits is an unknown to try again, never a re
   assert.equal(r.limited._tag, "BitrefillUnavailable")
   assert.match(r.limited.message, /rate limiting/)
   assert.equal(r.refused._tag, "Refused")
+})
+
+test("Bitrefill's HTML reads as plain text: one line per step, links kept, nothing else of the markup", () => {
+  assert.equal(
+    plainText("1. Open the app.\n<br>2. Tap &quot;Add&quot; &amp; enter the code.<br><br>"),
+    "1. Open the app.\n2. Tap \"Add\" & enter the code."
+  )
+  assert.equal(
+    plainText("<ol>\n<li>Log in.</li>\n<li>Redeem.</li>\n</ol>\n<p>Start <a href=\"https://store.example.com/redeem\">here</a>.</p><script>alert(1)</script>"),
+    "• Log in.\n• Redeem.\nStart here (https://store.example.com/redeem).\nalert(1)"
+  )
+})
+
+test("a card's page gets Bitrefill's pitch, steps, terms, rating and link; a link off bitrefill.com is dropped", async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
+    const product = {
+      id,
+      name: id,
+      country_code: "IN",
+      currency: "INR",
+      packages: [{ package_value: "50", payment_price: "0.56", payment_currency: "USD" }],
+      subtitles: "Order meals.",
+      instructions: "1. Open the app.<br>2. Add the voucher.",
+      termsConditions: "Validity:<br>12 months.",
+      url: id === "swiggy-money-india" ? "https://www.bitrefill.com/swiggy-money-india/" : "https://evil.example.com/",
+      ratings: { rating_value: 5, rating_count: 132, review_count: 59 }
+    }
+    return new Response(`data: ${JSON.stringify({ result: { content: [{ text: JSON.stringify(product) }] } })}\n`, { status: 200, headers: { "content-type": "text/event-stream" } })
+  }) as typeof fetch
+  try {
+    const [swiggy, other] = await run((b) => Effect.all([b.voucher("swiggy-money-india"), b.voucher("other-card")]), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    assert.equal(swiggy.subtitle, "Order meals.")
+    assert.equal(swiggy.howToRedeem, "1. Open the app.\n2. Add the voucher.")
+    assert.equal(swiggy.terms, "Validity:\n12 months.")
+    assert.deepEqual(swiggy.rating, { value: 5, count: 132 })
+    assert.equal(swiggy.bitrefillUrl, "https://www.bitrefill.com/swiggy-money-india/")
+    assert.equal(other.bitrefillUrl, undefined)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 test("a guest's card is also emailed to their Checkout Email as a gift", async () => {

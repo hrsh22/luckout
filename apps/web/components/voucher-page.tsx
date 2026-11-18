@@ -22,7 +22,7 @@ import { useSession } from "@/lib/session"
 import { openingAmount, openingMode } from "@/lib/voucher-choice"
 import { DEFAULT_LIMITS, type Mode, NewPurchase, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowLeft } from "lucide-react"
+import { ArrowLeft, ChevronDown, ExternalLink, Star } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
@@ -141,7 +141,15 @@ function Voucher() {
                   <p className="self-start rounded-full bg-ink px-3 py-1 text-sm font-semibold text-white">
                     {flag(look.countryCode)} {look.countryCode === WORLDWIDE ? "Works worldwide" : `Works in ${countryName(look.countryCode, look.countryName)} only`}
                   </p>
+                  {voucher.data?.subtitle && <p className="text-ink-soft">{voucher.data.subtitle}</p>}
                   <p className="text-ink-soft">Paid out in {look.currency}. Delivered as a code, usually within a minute.</p>
+                  {voucher.data?.rating && (
+                    <p className="flex items-center gap-1.5 text-sm text-muted">
+                      <Star size={14} className="fill-current text-ink" aria-hidden="true" />
+                      <span className="font-semibold text-ink">{voucher.data.rating.value.toFixed(1)}</span>
+                      from {voucher.data.rating.count.toLocaleString()} ratings on Bitrefill
+                    </p>
+                  )}
                 </>
               )}
             </div>
@@ -196,6 +204,19 @@ function Voucher() {
             </div>
             <ModePicker value={mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
           </section>
+
+          {(voucher.data?.howToRedeem || voucher.data?.terms) && (
+            <section className="flex flex-col gap-3" aria-labelledby="about">
+              <h2 id="about" className="font-display text-2xl font-extrabold">Before you buy</h2>
+              {voucher.data.howToRedeem && <Details title="How to redeem" text={voucher.data.howToRedeem} />}
+              {voucher.data.terms && <Details title="Terms and validity" text={voucher.data.terms} />}
+              {voucher.data.bitrefillUrl && (
+                <a href={voucher.data.bitrefillUrl} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
+                  See this card on Bitrefill<ExternalLink size={14} />
+                </a>
+              )}
+            </section>
+          )}
         </div>
 
         <aside ref={panel} className="flex flex-col gap-4 lg:sticky lg:top-28" aria-live="polite">
@@ -229,6 +250,11 @@ function Voucher() {
                     {shown && look && look.countryCode !== WORLDWIDE && (
                       <p className="text-sm text-ink-soft">
                         {flag(look.countryCode)} For {countryName(look.countryCode, look.countryName)} only: it can't be used in another country's store.
+                      </p>
+                    )}
+                    {shown && voucher.data?.useBy && (
+                      <p className="text-sm text-ink-soft">
+                        Use it by about <span className="font-semibold text-ink">{new Date(voucher.data.useBy).toLocaleDateString(undefined, { dateStyle: "long" })}</span>: the date on the last one we delivered. Yours shows its own date with the code.
                       </p>
                     )}
                     {shown && <BuyButton quote={quote.data} need={shown.maxPrice} onBuy={(q) => buy.mutate(q)} />}
@@ -267,6 +293,19 @@ function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | nul
         <Button size="lg" onClick={() => panel.current?.scrollIntoView({ behavior: "smooth", block: "center" })}>Review and buy</Button>
       </div>
     </div>
+  )
+}
+
+/** One of Bitrefill's texts about the card, folded until opened. */
+function Details({ title, text }: { title: string; text: string }) {
+  return (
+    <details className="card group p-5">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-semibold [&::-webkit-details-marker]:hidden">
+        {title}
+        <ChevronDown size={18} className="shrink-0 text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+      </summary>
+      <p className="mt-3 text-sm whitespace-pre-line break-words text-ink-soft">{text}</p>
+    </details>
   )
 }
 
