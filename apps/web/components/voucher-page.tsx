@@ -12,7 +12,9 @@ import { RichText } from "@/components/rich-text"
 import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
-import { addToCart, type CartLine, useCart } from "@/lib/cart"
+import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
+import { totals, useCartQuote, useCheckout } from "@/lib/checkout"
+import { Quantity } from "@/components/quantity"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdUp } from "@/lib/format"
@@ -29,7 +31,6 @@ import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react"
-import { toast } from "sonner"
 
 /** Back to the results this card came from, not just the empty shop. */
 const lastSearch = () => {
@@ -104,6 +105,14 @@ function Voucher() {
       qc.invalidateQueries({ queryKey: ["quote", id] })
     }
   })
+  // Several of this card: one checkout, each copy with its own key (fresh per choice, like the single one's).
+  const [quantity, setQuantity] = useState(1)
+  const many = quantity > 1
+  const keys = useMemo(() => Array.from({ length: quantity }, () => crypto.randomUUID()), [id, value, modeSlug(mode), round, quantity]) // eslint-disable-line react-hooks/exhaustive-deps
+  const card: CartCard | undefined = look && value ? { voucherId: id, value, mode, name: look.name, currency: look.currency, image: look.image, background: look.background } : undefined
+  const units = card && many ? keys.map((key) => ({ line: card, key })) : []
+  const checkout = useCheckout()
+  const cartQuote = useCartQuote(units, many && !checkout.isPending).data
   const live = usePolledPurchase(buy.data, token)
   // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
   const quote = useQuote(id, value, mode, !live && !buy.isPending)
@@ -223,16 +232,20 @@ function Voucher() {
           <AnimatePresence mode="wait" initial={false}>
             {live
               ? <PurchaseResult key="result" p={live} onAgain={() => (buy.reset(), setRound((r) => r + 1))} />
-              : buy.isPending
-              ? <Buying key="buying" mode={mode} name={look?.name ?? ""} value={value ?? ""} />
+              : buy.isPending || checkout.isPending
+              ? <Buying key="buying" mode={mode} name={look?.name ?? ""} value={value ?? ""} count={quantity} />
               : (
                 <motion.div key="receipt" exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.15 }}>
                   <Receipt
                     shown={shown}
-                    exact={!!quote.data}
+                    exact={!!quote.data && (!many || !!cartQuote)}
                     info={info}
+                    count={quantity}
+                    total={many ? cartQuote && totals(cartQuote).pay : undefined}
                     error={buy.error
                       ? errorMessage(buy.error)
+                      : checkout.error
+                      ? errorMessage(checkout.error)
                       : quote.error
                       ? errorMessage(quote.error)
                       : voucher.data && !value
@@ -264,20 +277,37 @@ function Voucher() {
                       </ul>
                     )}
                     {shown && (
-                      <BuyButton
-                        need={shown.maxPrice}
-                        label={quote.data && `Buy for ${usdUp(quote.data.maxPrice)}`}
-                        onBuy={() => quote.data && buy.mutate(quote.data)}
-                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-semibold">Quantity</span>
+                        <Quantity label={`Quantity of ${look?.name ?? "this card"}`} value={quantity} max={MAX_CART} onChange={setQuantity} />
+                      </div>
                     )}
-                    {shown && look && value && <AddToCart line={{ voucherId: id, value, mode, name: look.name, currency: look.currency, image: look.image, background: look.background }} />}
+                    {shown && (many
+                      ? (
+                        <BuyButton
+                          need={cartQuote ? totals(cartQuote).pay : shown.maxPrice * quantity}
+                          largest={cartQuote ? totals(cartQuote).largest : shown.maxPrice}
+                          label={cartQuote && `Buy ${quantity} for ${usdUp(totals(cartQuote).pay)}`}
+                          onBuy={() => cartQuote && checkout.mutate(units.map((u, i) => ({ ...u, quote: cartQuote[i]! })))}
+                        />
+                      )
+                      : (
+                        <BuyButton
+                          need={shown.maxPrice}
+                          label={quote.data && `Buy for ${usdUp(quote.data.maxPrice)}`}
+                          onBuy={() => quote.data && buy.mutate(quote.data)}
+                        />
+                      ))}
+                    {shown && card && <AddToCart card={card} quantity={quantity} />}
                   </Receipt>
                 </motion.div>
               )}
           </AnimatePresence>
         </aside>
       </div>
-      {shown && !live && !buy.isPending && <JumpToBuy panel={panel} name={info.name} amount={shown.maxPrice} />}
+      {shown && !live && !buy.isPending && !checkout.isPending && (
+        <JumpToBuy panel={panel} name={many ? `${quantity} × ${info.name}` : info.name} amount={many && cartQuote ? totals(cartQuote).pay : shown.maxPrice * quantity} />
+      )}
     </div>
   )
 }
@@ -286,7 +316,7 @@ function Voucher() {
  * Phones: the price and the buy panel sit below the amounts and modes, so a bar keeps the price in sight and
  * takes you to the panel (which handles signing in, adding funds and limits). Gone once the panel is on screen.
  */
-function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | null>; name: string; amount: number }) {
+export function JumpToBuy({ panel, name, amount }: { panel: RefObject<HTMLElement | null>; name: string; amount: number }) {
   const [inView, setInView] = useState(true)
   useEffect(() => {
     const el = panel.current
@@ -322,10 +352,13 @@ function Details({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Receipt({ shown, exact, info, error, retry, children }: {
+function Receipt({ shown, exact, info, count = 1, total, error, retry, children }: {
   shown: Quote | undefined
   exact: boolean
   info: NonNullable<ReturnType<typeof modeInfo>>
+  /** How many of the card; the price shown is for all of them (`total`, from the cart's own quote, once it's in). */
+  count?: number
+  total?: number | undefined
   error?: string | undefined
   /** Asks for the price again; absent when there's nothing to price. */
   retry?: { run: () => void; busy: boolean } | undefined
@@ -356,11 +389,12 @@ function Receipt({ shown, exact, info, error, retry, children }: {
       </div>
       <div>
         <p className="text-ink-soft">{lucky ? "You pay now" : "You pay"}</p>
-        <p className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={shown.maxPrice} up /></p>
+        <p className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={total ?? shown.maxPrice * count} up /></p>
         <p className="mt-2 text-[15px] text-ink-soft">
+          {count > 1 && <span className="font-semibold text-ink">{count} cards. Each: </span>}
           {lucky
-            ? `The ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back.`
-            : `Exactly the price. No Draw, no cashback.`}
+            ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
+            : `${count > 1 ? "exactly" : "Exactly"} the price. No Draw, no cashback.`}
         </p>
       </div>
       {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
@@ -384,20 +418,13 @@ function Receipt({ shown, exact, info, error, retry, children }: {
   )
 }
 
-/** Puts this card, amount and mode in the Cart, to buy with others in one go. */
-function AddToCart({ line }: { line: Omit<CartLine, "key"> }) {
-  const router = useRouter()
-  const full = useCart().length >= MAX_CART
+/** Puts this card, amount and mode in the Cart, as many as chosen; the Cart then opens to show them there. */
+function AddToCart({ card, quantity }: { card: CartCard; quantity: number }) {
+  const room = cartRoom(useCart())
   return (
-    <Button
-      size="lg"
-      variant="light"
-      disabled={full}
-      onClick={() => {
-        if (addToCart(line)) toast.success(`${line.name} ${line.value} ${line.currency} is in your cart`, { action: { label: "View cart", onClick: () => router.push("/cart") } })
-      }}
-    >
-      <ShoppingCart />{full ? `Your cart is full (${MAX_CART} cards)` : "Add to cart"}
+    <Button size="lg" variant="light" disabled={quantity > room} onClick={() => addToCart(card, quantity)}>
+      <ShoppingCart />
+      {room === 0 ? `Your cart is full (${MAX_CART} cards)` : quantity > room ? `Your cart has room for ${room} more` : "Add to cart"}
     </Button>
   )
 }
@@ -508,7 +535,7 @@ function BuyAction({ need, largest = need, label, onBuy, onAdd }: {
   )
 }
 
-function Buying({ mode, name, value }: { mode: Mode; name: string; value: string }) {
+function Buying({ mode, name, value, count = 1 }: { mode: Mode; name: string; value: string; count?: number }) {
   const pal = modePalette(mode)
   return (
     <motion.div
@@ -518,7 +545,7 @@ function Buying({ mode, name, value }: { mode: Mode; name: string; value: string
       className="voucher rounded-[1.75rem] p-6"
       style={{ background: pal.tile, color: pal.ink }}
     >
-      <p className="pill">{name}, {value}</p>
+      <p className="pill">{count > 1 ? `${count} × ` : ""}{name}, {value}</p>
       <h2 className="font-display mt-4 text-5xl leading-none font-extrabold">Buying on {modeName(mode)}</h2>
       <Progress />
     </motion.div>

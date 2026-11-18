@@ -7,14 +7,30 @@ import { errorMessage } from "@/lib/api"
 import { usd } from "@/lib/format"
 import { usePurchases } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { type Purchase } from "@luckout/api"
+import { ArrowLeft, Check } from "lucide-react"
 import Link from "next/link"
-import { useState } from "react"
+import { useSearchParams } from "next/navigation"
+import { Suspense, useState } from "react"
 
-export default function Purchases() {
+export default function Page() {
+  return (
+    <Suspense>
+      <Purchases />
+    </Suspense>
+  )
+}
+
+function Purchases() {
   const { accountId, token, ready } = useSession()
   const list = usePurchases(token)
   const [open, setOpen] = useState<string>()
-  const purchases = list.data?.pages.flatMap((p) => p.items)
+  // Right after a checkout: just its cards, filling in as each arrives (the list keeps checking while any is on its way).
+  const order = useSearchParams().get("order")
+  const all = list.data?.pages.flatMap((p) => p.items)
+  const ordered = order ? all?.filter((p) => p.checkoutId === order) : undefined
+  if (ordered && ordered.length > 0) return <Order cards={ordered} open={open} setOpen={setOpen} />
+  const purchases = all
   const delivered = purchases?.filter((p) => p.status === "delivered") ?? []
   const cashback = delivered.reduce((s, p) => s + (p.draw?.cashback ?? 0), 0)
   const free = delivered.filter((p) => p.draw?.finalPrice === 0).length
@@ -66,6 +82,41 @@ export default function Purchases() {
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+/** One checkout's cards, right after paying: how many are ready, then each card, its code and its Draw. */
+function Order({ cards, open, setOpen }: { cards: ReadonlyArray<Purchase>; open: string | undefined; setOpen: (id: string | undefined) => void }) {
+  const ready = cards.filter((p) => p.status === "delivered").length
+  const done = cards.every((p) => p.status !== "pending" && p.status !== "waiting")
+  const waiting = cards.some((p) => p.status === "waiting")
+  return (
+    <div className="flex flex-col gap-8">
+      <Link href="/purchases" className="inline-flex items-center gap-2 self-start font-semibold text-muted hover:text-ink">
+        <ArrowLeft size={18} />All purchases
+      </Link>
+      <div className="card flex flex-col gap-4 p-6 sm:p-8">
+        <span className={`grid size-12 place-items-center rounded-full ${done ? "bg-good-soft text-good" : "bg-soft text-ink-soft"}`}>
+          {done ? <Check size={24} /> : <span className="size-3 animate-pulse rounded-full bg-current" />}
+        </span>
+        <div>
+          <h1 className="font-display text-4xl leading-tight font-extrabold sm:text-5xl">
+            {done ? (ready === cards.length ? "Your cards are ready" : "Your order is done") : "Your cards are on their way"}
+          </h1>
+          <p className="mt-2 text-lg text-ink-soft">
+            {ready} of {cards.length} ready.{" "}
+            {done
+              ? ready < cards.length ? "Any card that couldn't be delivered went back to your balance in full." : "Open a card for its code."
+              : waiting
+              ? "We're topping up our gift card supply first; you're only charged once it's ready."
+              : "Codes show up here as each card arrives, usually within a minute."}
+          </p>
+        </div>
+      </div>
+      <ul className="flex flex-col gap-3">
+        {cards.map((p) => <PurchaseRow key={p.id} p={p} open={open === p.id} onToggle={() => setOpen(open === p.id ? undefined : p.id)} />)}
+      </ul>
     </div>
   )
 }
