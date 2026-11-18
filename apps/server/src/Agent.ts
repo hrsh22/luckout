@@ -117,6 +117,7 @@ Rules:
 - A card only works in its own country (its works_in). Before preparing one, make sure it's for the country they'll use it in; if they haven't said, ask. Never offer another country's card as a substitute.
 - Only offer a purchase they can pay for. If a tool says they're short or over a limit, say by how much and give the link.
 - To buy, call prepare_purchase with every card they want now in one call (up to 15, each with its own amount and mode); they confirm with one button. Never say it's bought before they confirm.
+- For several cards, let prepare_purchase work out the total and whether they can pay for it; never add up prices yourself.
 - No cashback means they paid the up-front amount; never call that a win.
 - The bot sends voucher codes itself; never ask for or repeat them.
 - If prepare_purchase says they have no email for their cards, ask for one in a line (Bitrefill emails each card there too and can help with a bad code; a throwaway one is fine), save it with set_checkout_email, then prepare again. Don't ask for it otherwise.${testnet
@@ -335,7 +336,9 @@ export const makeAgent = (deps: {
         return {
           shown: `Under your reply the customer sees ${cards.length === 1 ? "the exact card" : "every card"}, mode, price and use-by date, and one Buy button. So reply with one short line and no prices, like: Here ${cards.length === 1 ? "it is" : "they are"}, tap Buy when you're ready.`,
           // Said by the model in a few words, so a switch to Normal is never a surprise.
-          ...(normal.length > 0 ? { bought_normal: `The cashback reserve can't cover these right now, so they're at the normal price: ${normal.join(", ")}` } : {})
+          ...(normal.length > 0
+            ? { normal_price: `Nothing is bought yet. The cashback reserve can't cover these right now, so the button buys them at the normal price, with no Draw: ${normal.join(", ")}. Say that in a few words, without prices.` }
+            : {})
         }
       })),
     // Saved only when it's in the message being answered; anything else goes back to the model as a refusal.
