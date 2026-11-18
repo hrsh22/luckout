@@ -10,16 +10,22 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cache } from "react"
 
-type Props = { params: Promise<{ tx: string }> }
+/** `purchase`: which Draw, when the transaction settled a cart (ADR-0013). */
+type Props = { params: Promise<{ tx: string }>; searchParams: Promise<{ purchase?: string }> }
+
+const purchaseOf = async (searchParams: Props["searchParams"]) => {
+  const p = (await searchParams).purchase
+  return p && /^\d{1,15}$/.test(p) ? Number(p) : undefined
+}
 
 // Once per request: generateMetadata and the page share it (RPC POSTs aren't memoized like GET fetches).
-const load = cache(async (tx: string) => {
+const load = cache(async (tx: string, purchase: number | undefined) => {
   if (!TX_HASH.test(tx)) notFound()
-  return loadDraw(tx).catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }))
+  return loadDraw(tx, purchase).catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }))
 })
 
-export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const d = await load((await params).tx)
+export async function generateMetadata({ params, searchParams }: Props): Promise<Metadata> {
+  const d = await load((await params).tx, await purchaseOf(searchParams))
   if ("error" in d) return { title: "Draw Proof" }
   const paid = Number(d.draw.final_price)
   return {
@@ -28,9 +34,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   }
 }
 
-export default async function DrawProof({ params }: Props) {
+export default async function DrawProof({ params, searchParams }: Props) {
   const tx = (await params).tx
-  const d = await load(tx)
+  const d = await load(tx, await purchaseOf(searchParams))
   if ("error" in d) {
     return (
       <main id="main" className="mx-auto w-full max-w-[1000px] px-6 pt-14 sm:px-10">

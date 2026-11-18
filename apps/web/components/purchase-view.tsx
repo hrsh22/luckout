@@ -276,13 +276,15 @@ function Secret({ label, value }: { label: string; value: string }) {
 }
 
 function ProofLinks({ p }: { p: Purchase }) {
+  // One settlement can hold a whole cart's Draws (ADR-0013): the link names this card's.
+  const proof = `/draw/${p.settleTx}${p.contractPurchaseId === undefined ? "" : `?purchase=${p.contractPurchaseId}`}`
   const share = () => {
-    const url = `${window.location.origin}/draw/${p.settleTx}`
+    const url = `${window.location.origin}${proof}`
     navigator.clipboard.writeText(url).then(() => toast.success("Draw Proof link copied", { description: "Anyone can open it and check the Draw." }))
   }
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <Link href={`/draw/${p.settleTx}`} className={buttonVariants({ variant: "soft", size: "sm" })}>
+      <Link href={proof} className={buttonVariants({ variant: "soft", size: "sm" })}>
         <ShieldCheck />Check this Draw
       </Link>
       {p.draw && p.draw.cashback > 0 && (

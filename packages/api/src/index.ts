@@ -215,6 +215,8 @@ export const PurchaseStatus = Schema.Literals(["pending", "waiting", "delivered"
 
 export class Purchase extends Schema.Class<Purchase>("Purchase")({
   id: Schema.String,
+  /** The checkout it was bought in: the cards confirmed together (ADR-0013). */
+  checkoutId: Schema.optional(Schema.String),
   voucherId: Schema.String,
   voucherName: Schema.String,
   /** The card's logo and brand colour, when we know them. */
@@ -255,6 +257,22 @@ export class NewPurchase extends Schema.Class<NewPurchase>("NewPurchase")({
   luckyAmount: Schema.optional(MicroUsdc),
   /** Client-generated; retrying with the same key never buys twice. */
   idempotencyKey: Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(64))
+}) {}
+
+/** The most cards one Cart holds: Bitrefill's own cart size, and a guest email's cards a day (GUEST_LIMITS.orders). */
+export const MAX_CART = 15
+
+/** Several cards confirmed at once. Each is its own purchase, with its own key, Draw and refund. */
+export class NewCart extends Schema.Class<NewCart>("NewCart")({
+  items: Schema.Array(NewPurchase).check(Schema.isMinLength(1), Schema.isMaxLength(MAX_CART))
+}) {}
+
+/** The cards of a Cart to price: each card's voucher, amount and mode. */
+export class CartQuoteRequest extends Schema.Class<CartQuoteRequest>("CartQuoteRequest")({
+  items: Schema.Array(Schema.Struct({ voucherId: Schema.String, value: Schema.String, mode: Mode })).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(MAX_CART)
+  )
 }) {}
 
 export class PurchaseInvalid extends Schema.TaggedError<PurchaseInvalid>()(
@@ -335,6 +353,15 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
     query: { voucherId: Schema.String, value: Schema.String, game: Schema.optional(Schema.NumberFromString) },
     success: Quote,
     error: [BitrefillUnavailable, PurchaseInvalid]
+  }),
+  /**
+   * A Cart's terms, card by card, as the contract would admit it now (ADR-0013): each Lucky card priced on the reserve
+   * the cards before it left. A Lucky card the reserve can't cover at all comes back Normal.
+   */
+  HttpApiEndpoint.post("quoteCart", "/quote/cart", {
+    payload: CartQuoteRequest,
+    success: Schema.Array(Quote),
+    error: [BitrefillUnavailable, PurchaseInvalid]
   })
 ) {}
 
@@ -372,6 +399,12 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.post("create", "/purchases", {
     payload: NewPurchase,
     success: Purchase,
+    error: [BitrefillUnavailable, PurchaseInvalid]
+  }),
+  /** Buys every card in a Cart, or none: the purchases come back in the Cart's order and run on their own. */
+  HttpApiEndpoint.post("createCart", "/purchases/cart", {
+    payload: NewCart,
+    success: Schema.Array(Purchase),
     error: [BitrefillUnavailable, PurchaseInvalid]
   }),
   /** Newest first, a page at a time. `before` is the `next` of the page before: the id of its last purchase. */

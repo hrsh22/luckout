@@ -64,7 +64,8 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
         }),
       voucher: ({ params }) =>
         quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))),
-      quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game))
+      quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game)),
+      quoteCart: ({ payload }) => quiet(purchases.quoteCart(payload.items))
     })
   })
 )
@@ -99,6 +100,7 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
     const connect = yield* Connect
     return handlers.handleAll({
       create: ({ payload }) => CurrentAccount.use((a) => purchases.create(a.accountId, payload)),
+      createCart: ({ payload }) => CurrentAccount.use((a) => purchases.createCart(a.accountId, payload.items)),
       list: ({ query }) => CurrentAccount.use((a) => purchases.list(a.accountId, { before: query.before })),
       get: ({ params }) =>
         UUID.test(params.id)

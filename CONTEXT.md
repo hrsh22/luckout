@@ -20,6 +20,14 @@ _Avoid_: Face value, retail price
 The terms of one purchase: Voucher, Reference Price, Game Version, and Maximum Price. It uses the customer's Default Mode unless they pick another for that purchase; a Standard Purchase has no Game Version or Maximum Price.
 _Avoid_: Estimate, floating price
 
+**Cart**:
+Up to 15 Purchase Quotes a customer gathers and then confirms together, from the Web App or the Agent. Bitrefill's own cart holds 15, and so many cards are a Checkout Email's whole day.
+_Avoid_: Basket, bundle
+
+**Checkout**:
+The cards a customer confirmed together: one for Buy, a whole Cart otherwise. The contract admits them in one call, all or none, and Bitrefill gets one invoice and one Base payment for them. Each card stays its own purchase, with its own Draw, refund and Reclaim, and a card that is slow or can't be delivered doesn't hold up the others (ADR-0013).
+_Avoid_: Order (that's Bitrefill's), batch
+
 **Balance**:
 The customer's USDC held by the contract on their behalf; purchases debit it, Cashback and failed purchases credit it, and any unlocked amount can be withdrawn at any time.
 _Avoid_: Wallet, account credit, house funds

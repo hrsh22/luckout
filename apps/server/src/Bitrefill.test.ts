@@ -3,7 +3,7 @@ import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, matchOrders, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -43,10 +43,10 @@ const run = <A, E>(f: (b: Bitrefill["Service"]) => Effect.Effect<A, E>, env: Rec
 const liveBuy = { skip: !process.env.BITREFILL_LIVE_BUY && "set BITREFILL_LIVE_BUY=1 to spend a free test delivery" }
 test("test card is delivered with Redemption Data", liveBuy, async () => {
   const d = await run((b) =>
-    Effect.flatMap(b.order("test-gift-card-code", "10"), (o) =>
-      o._tag === "Ordered" ? b.delivery(o.invoiceId) : Effect.die("reason" in o ? o.reason : o._tag)))
-  assert.equal(d._tag, "Delivered")
-  assert.ok(d._tag === "Delivered" && typeof d.redemption.code === "string")
+    Effect.flatMap(b.order([{ id: "test-gift-card-code", value: "10" }]), (o) =>
+      o._tag === "Ordered" ? b.delivery(o.invoiceId, undefined, [{ id: "test-gift-card-code", value: "10" }]) : Effect.die("reason" in o ? o.reason : o._tag)))
+  assert.equal(d[0]!._tag, "Delivered")
+  assert.ok(d[0]!._tag === "Delivered" && typeof d[0]!.redemption.code === "string")
 })
 
 test("real vouchers are priced in USD from Bitrefill, and amounts under $0.50 aren't for sale", live, async () => {
@@ -88,7 +88,7 @@ test("a refusal from Bitrefill is a definite Refused; an answer we don't recogni
     })
   // No guest client (an empty value counts as unset), so the order goes out with the API key.
   const env = { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "" }
-  const order = () => run((b) => b.order("swiggy-money-india", "999999"), env)
+  const order = () => run((b) => b.order([{ id: "swiggy-money-india", value: "999999" }]), env)
   try {
     answer = () => new Response(JSON.stringify({ error: "Unknown package" }), { status: 400 })
     assert.equal((await order())._tag, "Refused", "an HTTP 4xx: the tool never ran")
@@ -280,9 +280,9 @@ test("a guest order Bitrefill rate-limits is an unknown to try again, never a re
     () => new Response("Too Many Requests", { status }),
     () => run((b) =>
       Effect.gen(function*() {
-        const limited = yield* b.order("amazon-us", "10", { email: "alice@example.com" }).pipe(Effect.flip)
+        const limited = yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" }).pipe(Effect.flip)
         status = 400
-        return { limited, refused: yield* b.order("amazon-us", "10", { email: "alice@example.com" }) }
+        return { limited, refused: yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" }) }
       }), guestEnv)
   )
   assert.equal(r.limited._tag, "BitrefillUnavailable")
@@ -330,18 +330,40 @@ test("a card's page gets Bitrefill's pitch, steps, terms and rating", async () =
   }
 })
 
-test("a guest's card is also emailed to their Checkout Email as a gift", async () => {
+test("a guest's cart is one order, every card also emailed to their Checkout Email as a gift", async () => {
   const sent: Array<Record<string, unknown>> = []
   await withGuestBitrefill(
     (_, args) => (sent.push(args), new Response("Bad Request", { status: 400 })),
-    () => run((b) => b.order("amazon-us", "10", { email: "alice+cards@example.com" }), guestEnv)
+    () => run((b) => b.order([{ id: "amazon-us", value: "10" }, { id: "swiggy-money-india", value: "50" }], { email: "alice+cards@example.com" }), guestEnv)
   )
+  assert.equal(sent.length, 1, "one invoice for the whole cart")
   assert.equal(sent[0]!.email, "alice+cards@example.com")
-  assert.deepEqual(sent[0]!.cart_items, [{
-    product_id: "amazon-us",
-    package_value: "10",
-    gift: { recipient_email: "alice+cards@example.com", recipient_name: "alice+cards", sender_name: "Luckout" }
-  }])
+  const gift = { recipient_email: "alice+cards@example.com", recipient_name: "alice+cards", sender_name: "Luckout" }
+  assert.deepEqual(sent[0]!.cart_items, [
+    { product_id: "amazon-us", package_value: "10", gift },
+    { product_id: "swiggy-money-india", package_value: "50", gift }
+  ])
+})
+
+test("each card's code is matched to its own order: by product and amount, in cart order, the same card twice in turn", async () => {
+  const cards = [{ id: "swiggy-money-india", value: "50" }, { id: "amazon-fresh-india", value: "50" }, { id: "swiggy-money-india", value: "50" }]
+  const order = (id: string, value: string, code?: string, status = "delivered") => ({
+    order_id: `o-${code ?? status}`,
+    status,
+    product: { id, name: id, value, currency: "INR" },
+    ...(code ? { redemption_info: { code } } : {})
+  })
+  // Bitrefill lists them in cart order; here they come back shuffled, and one was refunded.
+  const found = await withGuestBitrefill(
+    () => toolResult({ invoice_status: "complete", orders: [order("amazon-fresh-india", "50", "AMZ"), order("swiggy-money-india", "50", "SW1"), order("swiggy-money-india", "50", undefined, "refunded")] }),
+    () => run((b) => b.delivery("inv-1", "token-1", cards), guestEnv)
+  )
+  assert.deepEqual(found.map((d) => (d._tag === "Delivered" ? d.redemption.code : d._tag)), ["SW1", "AMZ", "Failed"])
+  // An order that names no product (REST) is taken by its place.
+  const rest: Array<{ readonly n: number; readonly product?: undefined }> = [{ n: 1 }, { n: 2 }, { n: 3 }]
+  assert.deepEqual(matchOrders(cards, rest).map((o) => o?.n), [1, 2, 3])
+  // An order for a card nobody asked for is left alone: that card stays pending, for a human.
+  assert.deepEqual(matchOrders([{ id: "a", value: "1" }], [{ product: { id: "b", value: "1" } }]), [undefined])
 })
 
 test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {
@@ -357,9 +379,9 @@ test("delivery polls from every guest purchase share one pace, leaving the login
       polled.push(Date.now())
       return toolResult({ invoice_status: "complete", orders: [{ order_id: "o-1", status: "delivered", redemption_info: { code: "ABC-123" } }] })
     },
-    () => run((b) => Effect.all([b.delivery("inv-1", "token-1"), b.delivery("inv-2", "token-2")], { concurrency: 2 }), guestEnv)
+    () => run((b) => Effect.all([b.delivery("inv-1", "token-1", [{ id: "amazon-us", value: "10" }]), b.delivery("inv-2", "token-2", [{ id: "amazon-us", value: "10" }])], { concurrency: 2 }), guestEnv)
   )
-  assert.deepEqual(delivered.map((d) => d._tag), ["Delivered", "Delivered"])
+  assert.deepEqual(delivered.map((d) => d[0]!._tag), ["Delivered", "Delivered"])
   assert.equal(polled.length, 2)
   assert.ok(polled[1]! - polled[0]! >= GUEST_POLL_GAP_MS - 100, `polled ${polled[1]! - polled[0]!} ms apart`)
 })

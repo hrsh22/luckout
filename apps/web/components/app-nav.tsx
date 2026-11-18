@@ -5,6 +5,7 @@ import { Money } from "@/components/money"
 import { NavShell } from "@/components/nav-shell"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
+import { useCart } from "@/lib/cart"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
 import { network } from "@/lib/near"
@@ -13,7 +14,7 @@ import { Menu } from "@base-ui/react/menu"
 import { ACTIVE_PHASES, arriving, useIsAdmin, useTransfers } from "@/lib/queries"
 import { usd } from "@/lib/format"
 import { solanaAddress, type Transfer, type TransferPhase } from "@luckout/api"
-import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, Wallet } from "lucide-react"
+import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, ShoppingCart, Wallet } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -31,7 +32,10 @@ export function AppNav() {
   return (
     <NavShell
       links={LINKS}
-      right={accountId
+      right={
+        <>
+          <CartLink />
+          {accountId
         ? (
           <>
             {account === undefined && accountError
@@ -61,7 +65,25 @@ export function AppNav() {
           </>
         )
         : ready && <SignInButton size="sm" />}
+        </>
+      }
     />
+  )
+}
+
+/** The Cart, once something is in it. */
+function CartLink() {
+  const n = useCart().length
+  if (n === 0) return null
+  return (
+    <Link
+      href="/cart"
+      aria-label={`Cart, ${n} ${n === 1 ? "card" : "cards"}`}
+      className="relative grid size-10 shrink-0 place-items-center rounded-full bg-soft transition-colors hover:bg-[#ebe9f3]"
+    >
+      <ShoppingCart size={18} aria-hidden="true" />
+      <span className="absolute -top-1 -right-1 grid h-5 min-w-5 place-items-center rounded-full bg-ink px-1 text-xs font-bold text-white">{n}</span>
+    </Link>
   )
 }
 

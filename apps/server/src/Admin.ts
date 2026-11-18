@@ -101,9 +101,10 @@ export class Admin extends Context.Service<Admin, {
           // Oldest first: they are the closest to the customer's Reclaim at 24 hours. `total` counts them all,
           // before the limit, so the panel can say how many it isn't showing.
           sql<Row & { total: number }>`
-            SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, count(*) OVER ()::int AS total FROM purchases
-            WHERE step IN ('stuck', 'waiting', 'restock') OR (step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')
-            ORDER BY created_at LIMIT ${ATTENTION_SHOWN}`,
+            SELECT p.id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, count(*) OVER ()::int AS total
+            FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+            WHERE p.step IN ('stuck', 'waiting', 'restock') OR (p.step IN ${sql.in(OPEN_STEPS)} AND p.created_at < now() - interval '15 minutes')
+            ORDER BY p.created_at LIMIT ${ATTENTION_SHOWN}`,
           credit.view,
           refills.status,
           sales.status,
@@ -221,10 +222,11 @@ export class Admin extends Context.Service<Admin, {
           settle_tx: { hash: string } | null
           updated_at: Date | string
         }>`
-          SELECT id, account_id, voucher_name, package_value, step, error, attempts, created_at, updated_at,
-                 requested_mode, admitted, reference_price, draw, invoice_id, pay_tx, pay_amount, admit_tx, settle_tx
-          FROM purchases ${id ? sql`WHERE id = ${id}` : accountId ? sql`WHERE account_id = ${accountId}` : sql``}
-          ORDER BY created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`.pipe(
+          SELECT p.id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, p.updated_at,
+                 p.requested_mode, p.admitted, p.reference_price, p.draw, p.invoice_id, c.pay_tx, c.pay_amount, p.admit_tx, p.settle_tx
+          FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+          ${id ? sql`WHERE p.id = ${id}` : accountId ? sql`WHERE p.account_id = ${accountId}` : sql``}
+          ORDER BY p.created_at DESC LIMIT ${ADMIN_LIST_LIMIT}`.pipe(
           Effect.map((rows) =>
             rows.map((r) => {
               const mode = r.admitted?.mode ?? r.requested_mode

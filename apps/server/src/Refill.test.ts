@@ -671,8 +671,8 @@ test("a refill for purchases already waiting may go past the ceiling: that credi
   const w = world({ credit: 450_000_000, treasuryUsdc: 1_000_000_000 })
   const v = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
-               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '600', 600000000, 600000000, 'waiting')`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '600', 600000000, 600000000, 'waiting')`
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     return yield* Effect.flatMap(Refill, (r) => r.request(undefined, "boss.testnet"))
   }))
@@ -849,8 +849,8 @@ test("an automatic refill waiting on money funds the purchase waiting for credit
   const w = world({ credit: 50_000_000, treasuryUsdc: 0, proceeds: 100_000_000, cap: 1_000_000_000 })
   const r = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
-               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     yield* Effect.flatMap(Refill, (r) => r.kick)
     yield* Effect.sleep("100 millis")
@@ -914,8 +914,8 @@ test("with guest checkout, a refill the treasury can't fund in full is cut to wh
   const w = world({ guest: true, walletUsdc: 30_000_000, treasuryUsdc: 0, proceeds: 80_000_000, cap: 1_000_000_000 })
   const r = await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
-               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '100', 100000000, 100000000, 'waiting')`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '100', 100000000, 100000000, 'waiting')`
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     yield* Effect.flatMap(Refill, (r) => r.kick)
     yield* Effect.sleep("100 millis")
@@ -947,8 +947,9 @@ test("with guest checkout, a refill 1Click reports finished ends only once the B
     yield* Effect.sleep("100 millis")
     const [count] = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM refills`
     // Meanwhile a $20 card is paid from the float, then the swap shows up.
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step, pay_amount, ordered_at)
-               VALUES ('a.test', 'k1', 'amazon-us', 'Amazon', '20', 20000000, 20000000, 'delivery', 20000000, now())`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step, pay_amount, ordered_at) VALUES ('a.test', 'delivery', 20000000, now()) RETURNING id)
+               INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step, ordered_at)
+               VALUES ((SELECT id FROM co), 'a.test', 'k1', 'amazon-us', 'Amazon', '20', 20000000, 20000000, 'delivery', now())`
     w.wallet.usdc += 70_000_000 - 20_000_000
     yield* due
     yield* refill.process
@@ -1057,8 +1058,8 @@ test("customers waiting while no refill can start is said out loud, with the rea
     const sql = yield* SqlClient.SqlClient
     const v = yield* refill.request(30_000_000, "boss.testnet")
     yield* settle(v.id) // stuck: 1Click reports the swap FAILED
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
-               VALUES ('big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '120', 120000000, 120000000, 'waiting')`
     yield* refill.kick
     yield* Effect.sleep("100 millis")
   }))
@@ -1103,8 +1104,8 @@ test("with guest checkout, a purchase waiting while the Base Float covers it rai
   const w = world({ guest: true, walletUsdc: 450_000_000, treasuryUsdc: 50_000_000 })
   await w.run(Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    yield* sql`INSERT INTO purchases (account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
-               VALUES ('small.test', 'k1', 'amazon-us', 'Amazon', '10', 10000000, 10000000, 'waiting')`
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'small.test', 'k1', 'amazon-us', 'Amazon', '10', 10000000, 10000000, 'waiting')`
     yield* Effect.flatMap(Credit, (c) => c.refresh)
     yield* Effect.flatMap(Refill, (r) => r.kick)
     yield* Effect.sleep("100 millis")

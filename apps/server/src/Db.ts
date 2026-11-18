@@ -27,7 +27,8 @@ const Client = Layer.unwrap(
   })
 )
 
-const migrations = Migrator.fromRecord({
+/** Every migration by name, in order. Exported so a test can stop before one and fill in the data it moves. */
+export const migrationSteps = {
   "0001_auth_and_purchases": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`CREATE TABLE auth_nonces (nonce TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL)`
@@ -307,8 +308,52 @@ const migrations = Migrator.fromRecord({
   "0024_swap_wallet": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN wallet TEXT CHECK (wallet IN ('near', 'evm', 'solana'))`
+  }),
+  // Carts (ADR-0013): the cards a customer confirms together are one checkout, with one admission, one invoice, one
+  // Base payment and one settlement each round; each card stays its own purchase. What the cards share moves to the
+  // checkout. Every purchase so far becomes a checkout of its own under the same id, so its sealed invoice token
+  // (bound to that id) still opens, and one saved in flight resumes where it was.
+  "0025_checkouts": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`CREATE TABLE checkouts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      account_id TEXT NOT NULL,
+      step TEXT NOT NULL,
+      error TEXT,
+      admit_tx JSONB,
+      settle_tx JSONB,
+      buyer TEXT CHECK (buyer IN ('guest', 'account')),
+      email_key TEXT,
+      invoice_id TEXT,
+      invoice_token TEXT,
+      invoice_at TIMESTAMPTZ,
+      pay_to TEXT,
+      pay_amount BIGINT,
+      pay_tx JSONB,
+      ordered_at TIMESTAMPTZ,
+      attempts INT NOT NULL DEFAULT 0,
+      next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+    yield* sql`INSERT INTO checkouts (id, account_id, step, error, admit_tx, settle_tx, buyer, email_key, invoice_id, invoice_token, invoice_at,
+                                      pay_to, pay_amount, pay_tx, ordered_at, attempts, next_attempt_at, created_at, updated_at)
+               SELECT id, account_id,
+                      CASE step WHEN 'confirm' THEN 'settle' WHEN 'fail' THEN 'settle' WHEN 'settled' THEN 'done' WHEN 'failed' THEN 'done' ELSE step END,
+                      error, admit_tx, CASE WHEN step IN ('confirm', 'fail') THEN settle_tx END, buyer, email_key, invoice_id, invoice_token, invoice_at,
+                      pay_to, pay_amount, pay_tx, ordered_at, attempts, next_attempt_at, created_at, updated_at
+               FROM purchases`
+    yield* sql`ALTER TABLE purchases ADD COLUMN checkout_id UUID REFERENCES checkouts (id), ADD COLUMN position INT NOT NULL DEFAULT 0`
+    yield* sql`UPDATE purchases SET checkout_id = id`
+    yield* sql`ALTER TABLE purchases ALTER COLUMN checkout_id SET NOT NULL`
+    yield* sql`ALTER TABLE purchases DROP COLUMN invoice_token, DROP COLUMN invoice_at, DROP COLUMN pay_to, DROP COLUMN pay_amount, DROP COLUMN pay_tx`
+    yield* sql`CREATE INDEX purchases_checkout ON purchases (checkout_id, position)`
+    // The reconciler's (Purchases.ts: CHECKOUT_OPEN_STEPS), the waiting checkouts', and the Base Float's payments.
+    yield* sql`CREATE INDEX checkouts_open ON checkouts (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'settle')`
+    yield* sql`CREATE INDEX checkouts_account ON checkouts (account_id, step)`
+    yield* sql`CREATE INDEX checkouts_ordered ON checkouts (ordered_at) WHERE ordered_at IS NOT NULL`
   })
-})
+}
+const migrations = Migrator.fromRecord(migrationSteps)
 
 const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
 
