@@ -71,3 +71,12 @@ export const maxTopUp = (a: Pick<TopUpAsset, "symbol" | "chain">, h: Holding) =>
   const gas = STABLE.has(a.symbol) ? 0 : a.chain === "eth" ? 3 : a.chain === "sol" ? Math.max(0.05, (h.usd / h.amount) * SOL_KEPT) : 0.05
   return Math.max(0, Math.floor((h.usd - gas) * 0.985 * 100) / 100)
 }
+
+/**
+ * Whether a transaction's blockhash has expired, so it can no longer land. Reown's RPC sometimes answers getBlockHeight
+ * with the slot, about 22 million ahead (5 of 6 calls on 2026-11-19), which made every Solana Top-Up look expired
+ * at its first check and offered a second send while the first was landing. A height that far past the last valid
+ * one is ignored; three minutes after sending decide instead (a blockhash lasts about one).
+ */
+export const blockhashExpired = (height: number, lastValid: number, sinceSentMs: number) =>
+  sinceSentMs > 180_000 || (height > lastValid && height - lastValid < 1_000)

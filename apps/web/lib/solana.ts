@@ -8,7 +8,7 @@
 import { solanaAccountId, solanaAddress } from "@luckout/api"
 import type { Provider } from "@reown/appkit-adapter-solana"
 import { load, projectId, TransferReverted } from "./evm"
-import type { ReownBalance } from "./holdings"
+import { blockhashExpired, type ReownBalance } from "./holdings"
 
 /** Solana mainnet, as AppKit and Reown's balance and RPC services name it. */
 export const SOLANA_CHAIN = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
@@ -136,6 +136,7 @@ export async function sendFromSolana(expected: string, o: { contract?: string | 
   tx.recentBlockhash = blockhash
   const signature = await provider.sendTransaction(tx, connection)
   onSent?.(signature)
+  const sentAt = Date.now()
   // Polled, not subscribed: Reown's RPC answers over HTTP only.
   for (;;) {
     const [status] = (await connection.getSignatureStatuses([signature])).value
@@ -143,7 +144,7 @@ export async function sendFromSolana(expected: string, o: { contract?: string | 
     if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return signature
     // Its blockhash expired unseen: it can never land now. Before saying nothing left the wallet, ask the ledger and
     // not only the RPC's recent statuses, which can miss a transfer that did land (staging, 2026-11-19).
-    if (!status && (await connection.getBlockHeight("confirmed")) > lastValidBlockHeight) {
+    if (!status && blockhashExpired(await connection.getBlockHeight("confirmed"), lastValidBlockHeight, Date.now() - sentAt)) {
       const [landed] = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value
       if (landed && !landed.err) return signature
       throw new TransferReverted()
