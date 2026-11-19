@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { matchHoldings, maxTopUp } from "./holdings.ts"
+import { blockhashExpired, matchHoldings, maxTopUp } from "./holdings.ts"
 
 // Shaped like Reown's balance lookup for the test wallet on Base (2026-11-12): the chain's own coin has no address key.
 const balances = [
@@ -44,4 +44,12 @@ test("Max leaves room for 1Click's spread, and gas when paying with the chain's 
   assert.equal(maxTopUp({ symbol: "ETH", chain: "eth" }, { amount: 0.001, usd: 2 }), 0, "Ethereum's gas would eat it")
   // The staging wallet: 0.025507 SOL at $75.12. Max keeps 0.001 SOL ($0.08), not $0.05.
   assert.equal(maxTopUp({ symbol: "SOL", chain: "sol" }, { amount: 0.025507, usd: 1.916 }), 1.81)
+})
+
+test("a Solana blockhash expires past its last valid height, but not on a height that is really a slot", () => {
+  // Reown, 2026-11-19: lastValidBlockHeight 449400615, getBlockHeight 471386206 (the slot) 4 s after sending.
+  assert.equal(blockhashExpired(471_386_206, 449_400_615, 4_000), false)
+  assert.equal(blockhashExpired(449_400_459, 449_400_607, 4_000), false, "still in its window")
+  assert.equal(blockhashExpired(449_400_620, 449_400_607, 70_000), true, "past it")
+  assert.equal(blockhashExpired(471_386_206, 449_400_615, 181_000), true, "three minutes decide when the height can't")
 })
