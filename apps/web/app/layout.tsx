@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next"
 import localFont from "next/font/local"
+import { preconnect } from "react-dom"
 import { VercelInsights } from "@/components/vercel-insights"
 import { siteUrl } from "@/lib/site"
 import "./globals.css"
@@ -35,6 +36,9 @@ export const metadata: Metadata = {
 export const viewport: Viewport = { themeColor: "#F2F1F8" }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // Every page asks the server for something once its script runs: the connection is ready by then. No
+  // crossOrigin, as the calls carry the session cookie.
+  if (process.env.NEXT_PUBLIC_API_URL) preconnect(process.env.NEXT_PUBLIC_API_URL)
   return (
     <html lang="en" data-scroll-behavior="smooth" className={`${general.variable} ${cabinet.variable}`}>
       <body className="min-h-dvh overflow-x-clip">

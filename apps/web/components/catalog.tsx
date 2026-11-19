@@ -4,7 +4,7 @@ import { GiftCard } from "@/components/gift-card"
 import { errorMessage } from "@/lib/api"
 import { COUNTRIES, countryName, flag } from "@/lib/countries"
 import { network } from "@/lib/near"
-import { rememberSummary, type ShopFilters, useBrowse, usePopular, viewedCards, voucherQuery } from "@/lib/queries"
+import { browseKey, popularKey, rememberSummary, type ShopFilters, useBrowse, usePopular, viewedCards, voucherQuery } from "@/lib/queries"
 import { CATEGORIES, type Category, type VoucherSummary } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { Search, X } from "lucide-react"
@@ -47,7 +47,12 @@ export function Catalog() {
     category: isCategory(params.get("category")) ? params.get("category") as Category : ""
   }))
   const [text, setText] = useState(filters.q)
-  const results = useBrowse(filters)
+  // Above the full list unless the customer is searching: what they opened lately, and the brands people
+  // buy most where they are. Testnet sells only test cards, so it has no popular ones.
+  const popularOn = network !== "testnet" && !filters.q
+  // Until the customer picks a country (or every country), the list is for the visitor's own.
+  const guessing = popularOn && !picked.current && !filters.country
+  const results = useBrowse(filters, guessing)
   const items = results.data?.pages.flatMap((p) => p.items) ?? []
 
   const update = (next: Partial<ShopFilters>) =>
@@ -87,22 +92,25 @@ export function Catalog() {
 
   const filtered = !!(filters.q || filters.country || filters.category)
 
-  // Above the full list unless the customer is searching: what they opened lately, and the brands people
-  // buy most where they are. Testnet sells only test cards, so it has no popular ones.
-  const popularOn = network !== "testnet" && !filters.q
   const popular = usePopular(filters, popularOn)
   // Not isLoading: it depends on fetching, which differs between the server render and the first client one.
   const popularPending = popularOn && popular.isPending
   const popularItems = popular.data?.items ?? []
   const near = popular.data?.country
-  // The visitor's own country, once known, unless they chose one (or every country) themselves.
+  // The visitor's own country, once known, unless they chose one (or every country) themselves. The list and the
+  // popular cards came back for it already, so they're kept as that country's: choosing it asks for nothing again.
+  const seen = results.data?.pages[0]?.country ?? near
+  const settled = !results.isPending && !results.isPlaceholderData && !popular.isPending && !popular.isPlaceholderData
+  const qc = useQueryClient()
   useEffect(() => {
-    if (near && !picked.current && !filters.country) {
-      picked.current = true
-      update({ country: near })
-    }
+    if (!guessing || !seen || !settled) return
+    picked.current = true
+    const mine = { ...filters, country: seen }
+    if (results.data?.pages[0]?.country === seen) qc.setQueryData(browseKey(mine), results.data)
+    if (near === seen) qc.setQueryData(popularKey(mine), popular.data)
+    update({ country: seen })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [near])
+  }, [seen, settled])
   // Read after mount: the server render has no browser storage.
   const [viewed, setViewed] = useState<Array<VoucherSummary>>([])
   useEffect(() => setViewed(viewedCards()), [])

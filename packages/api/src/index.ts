@@ -49,7 +49,9 @@ export class Voucher extends Schema.Class<Voucher>("Voucher")({
 /** One page of the catalog. `next` is the `start` of the following page; absent on the last. */
 export class CatalogPage extends Schema.Class<CatalogPage>("CatalogPage")({
   items: Schema.Array(VoucherSummary),
-  next: Schema.optional(Schema.Number)
+  next: Schema.optional(Schema.Number),
+  /** The country the page is for, when there is one: the one asked for, or the visitor's own (`near`). */
+  country: Schema.optional(Schema.String)
 }) {}
 
 /** Popular cards, most wanted first. `country` is the one they were picked for: the one asked for, or the visitor's own. */
@@ -323,12 +325,14 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
   }),
   /**
    * The whole catalog, a page at a time, filtered only by what the customer chose: a search, a
-   * country (its own cards plus worldwide ones), a category. Nothing chosen lists everything.
+   * country (its own cards plus worldwide ones), a category. Nothing chosen lists everything. `near`, with no
+   * country, is for the visitor's own when Cloudflare knows it, so the shop's first page needs no second ask.
    */
   HttpApiEndpoint.get("browse", "/browse", {
     query: {
       q: Schema.optional(Schema.String.check(Schema.isMaxLength(100))),
       country: Schema.optional(Schema.String.check(Schema.isPattern(/^[A-Z]{2}$/))),
+      near: Schema.optional(Schema.Literal("1")),
       category: Schema.optional(Schema.Literals(CATEGORIES)),
       start: Schema.optional(Schema.NumberFromString)
     },
