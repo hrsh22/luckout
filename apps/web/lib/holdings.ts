@@ -31,6 +31,14 @@ const CHAIN_IDS: Record<string, string> = {
 export const GAS_COIN: Record<string, string> = { eth: "ETH", base: "ETH", arb: "ETH", pol: "POL", bsc: "BNB", sol: "SOL" }
 
 /**
+ * Solana, in SOL: a token Top-Up also pays rent for the deposit address's token account (0.00149 SOL), and a wallet
+ * must keep 0.00065 SOL to stay open (both as of 2026-11-19), so less than this can't send a token at all.
+ */
+const SOL_FOR_TOKEN_SEND = 0.0022
+/** What a SOL Top-Up leaves in the wallet: the 0.00065 SOL it must keep, plus the fee, with room to spare. */
+const SOL_KEPT = 0.001
+
+/**
  * Each top-up token's holding in this wallet, by asset id, and the chains where it has some of the chain's own coin
  * to pay a transfer's fee. Balances only order and hint: a failed read just means none.
  */
@@ -45,7 +53,10 @@ export const matchHoldings = (assets: ReadonlyArray<TopUpAsset>, balances: Reado
     if (amount > 0) holdings.set(a.assetId, { amount, usd: b?.value ?? amount * (a.price ?? 0) })
   }
   const gas = new Set(
-    balances.filter((x) => !x.address && Number(x.quantity.numeric) > 0).map((x) => CHAIN_IDS[x.chainId]).filter((c): c is string => !!c)
+    balances
+      .filter((x) => !x.address && Number(x.quantity.numeric) > (CHAIN_IDS[x.chainId] === "sol" ? SOL_FOR_TOKEN_SEND : 0))
+      .map((x) => CHAIN_IDS[x.chainId])
+      .filter((c): c is string => !!c)
   )
   return { holdings, gas }
 }
@@ -56,6 +67,7 @@ const STABLE = new Set(["USDC", "USDT"])
  * something left for gas. Only a shortcut: the live quote says exactly what it costs.
  */
 export const maxTopUp = (a: Pick<TopUpAsset, "symbol" | "chain">, h: Holding) => {
-  const gas = STABLE.has(a.symbol) ? 0 : a.chain === "eth" ? 3 : 0.05
+  // SOL's reserve is kept in SOL: a flat $0.05 left Max a cent above what Solana requires (staging, 2026-11-19).
+  const gas = STABLE.has(a.symbol) ? 0 : a.chain === "eth" ? 3 : a.chain === "sol" ? Math.max(0.05, (h.usd / h.amount) * SOL_KEPT) : 0.05
   return Math.max(0, Math.floor((h.usd - gas) * 0.985 * 100) / 100)
 }

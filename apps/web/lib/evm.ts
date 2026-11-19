@@ -123,10 +123,10 @@ export class TransferReverted extends Error {
 
 /**
  * Sends `amount` (base units) of a token, or the chain's own coin without `contract`, from the wallet; gas on the
- * wallet. `onSent` runs once the wallet has sent it, before its chain confirms: from then on it may land, so the
- * caller must not offer to send it again unless this throws TransferReverted.
+ * wallet. `onSent` gets the hash once the wallet has sent it, before its chain confirms: from then on it may land, so
+ * the caller must not offer to send it again unless this throws TransferReverted.
  */
-export async function sendFromWallet(expected: string, o: { chain: string; contract?: string | undefined; to: string; amount: string }, onSent?: () => void) {
+export async function sendFromWallet(expected: string, o: { chain: string; contract?: string | undefined; to: string; amount: string }, onSent?: (hash: string) => void) {
   const { config, core, account } = await walletOn(expected)
   const chainId = EVM_CHAIN_IDS[o.chain]
   if (!chainId) throw new Error(`Luckout can't send from ${o.chain} with this wallet.`)
@@ -141,7 +141,7 @@ export async function sendFromWallet(expected: string, o: { chain: string; contr
       args: [o.to as `0x${string}`, BigInt(o.amount)]
     })
     : await core.sendTransaction(config, { account, chainId, to: o.to as `0x${string}`, value: BigInt(o.amount) })
-  onSent?.()
+  onSent?.(hash)
   const receipt = await core.waitForTransactionReceipt(config, { hash, chainId })
   if (receipt.status !== "success") throw new TransferReverted()
   return hash

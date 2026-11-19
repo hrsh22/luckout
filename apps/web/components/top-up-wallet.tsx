@@ -158,9 +158,13 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
       if (Date.now() > Date.parse(q.deadline)) throw new Error("This price has expired. Nothing was sent: top up again for a new one.")
       await signMoveIn(q)
       try {
-        const txHash = await (kind === "solana" ? sendFromSolana : sendFromWallet)(accountId, transfer, () => setSent(true))
-        // Kept with the Top-Up and passed to 1Click: it stays in sight even if 1Click is slow to see it.
-        void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+        // The transaction is kept with the Top-Up and passed to 1Click, so it stays in sight even if 1Click is slow to
+        // see it. Sent as soon as the wallet has sent it: waiting for the chain first lost it whenever that wait didn't
+        // finish (a slow RPC, a closed tab), as two of three real Solana Top-Ups showed on staging.
+        await (kind === "solana" ? sendFromSolana : sendFromWallet)(accountId, transfer, (txHash) => {
+          setSent(true)
+          void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
+        })
       } catch (e) {
         // Mined and reverted: nothing left the wallet, so they may send again.
         if (e instanceof TransferReverted) setSent(false)

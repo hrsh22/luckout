@@ -108,11 +108,11 @@ export async function solanaBalances(address: string, mints: ReadonlyArray<strin
 
 /**
  * Sends `amount` (base units) of a token (`contract` is its mint), or SOL without one, from the wallet; the fee, and
- * the rent for the deposit address's token account when it has none yet, on the wallet. `onSent` runs once the wallet
- * has sent it: from then on it may land, so the caller must not offer to send it again unless this throws
- * TransferReverted.
+ * the rent for the deposit address's token account when it has none yet, on the wallet. `onSent` gets the signature
+ * once the wallet has sent it: from then on it may land, so the caller must not offer to send it again unless this
+ * throws TransferReverted.
  */
-export async function sendFromSolana(expected: string, o: { contract?: string | undefined; decimals?: number | undefined; to: string; amount: string }, onSent?: () => void) {
+export async function sendFromSolana(expected: string, o: { contract?: string | undefined; decimals?: number | undefined; to: string; amount: string }, onSent?: (signature: string) => void) {
   const provider = await walletOn(expected)
   const { Connection, PublicKey, SystemProgram, Transaction } = await import("@solana/web3.js")
   const connection = new Connection(RPC, "confirmed")
@@ -135,14 +135,19 @@ export async function sendFromSolana(expected: string, o: { contract?: string | 
   tx.feePayer = from
   tx.recentBlockhash = blockhash
   const signature = await provider.sendTransaction(tx, connection)
-  onSent?.()
+  onSent?.(signature)
   // Polled, not subscribed: Reown's RPC answers over HTTP only.
   for (;;) {
     const [status] = (await connection.getSignatureStatuses([signature])).value
     if (status?.err) throw new TransferReverted()
     if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return signature
-    // Its blockhash expired unseen: it can never land, so nothing left the wallet.
-    if (!status && (await connection.getBlockHeight("confirmed")) > lastValidBlockHeight) throw new TransferReverted()
+    // Its blockhash expired unseen: it can never land now. Before saying nothing left the wallet, ask the ledger and
+    // not only the RPC's recent statuses, which can miss a transfer that did land (staging, 2026-11-19).
+    if (!status && (await connection.getBlockHeight("confirmed")) > lastValidBlockHeight) {
+      const [landed] = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value
+      if (landed && !landed.err) return signature
+      throw new TransferReverted()
+    }
     await new Promise((r) => setTimeout(r, 2000))
   }
 }
