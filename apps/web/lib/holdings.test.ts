@@ -34,10 +34,14 @@ test("a Solana wallet's holdings, read from Solana without dollar values, are va
   ])
   assert.deepEqual([...holdings].map(([id, h]) => [id, h.amount, h.usd]), [["sol-usdc", 12.5, 12.5], ["sol", 0.02, 3]], "the mint's case is kept by Solana and matched as is")
   assert.deepEqual([...gas], ["sol"])
+  // 0.0007 SOL (the test wallet after its Top-Ups) can't pay a token account's rent: no fee coin for a token send.
+  assert.deepEqual([...matchHoldings(assets, [{ symbol: "SOL", chainId: SOL, address: null, quantity: { numeric: "0.0007" } }]).gas], [])
 })
 
 test("Max leaves room for 1Click's spread, and gas when paying with the chain's own coin", () => {
   assert.equal(maxTopUp({ symbol: "USDC", chain: "base" }, { amount: 47.12, usd: 47.1 }), 46.39)
   assert.equal(maxTopUp({ symbol: "ETH", chain: "base" }, { amount: 0.01, usd: 20 }), 19.65)
   assert.equal(maxTopUp({ symbol: "ETH", chain: "eth" }, { amount: 0.001, usd: 2 }), 0, "Ethereum's gas would eat it")
+  // The staging wallet: 0.025507 SOL at $75.12. Max keeps 0.001 SOL ($0.08), not $0.05.
+  assert.equal(maxTopUp({ symbol: "SOL", chain: "sol" }, { amount: 0.025507, usd: 1.916 }), 1.81)
 })
