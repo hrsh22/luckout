@@ -17,16 +17,22 @@ export interface ShopFilters {
   readonly category: Category | ""
 }
 
-/** The catalog a page at a time; the server caches pages, so scrolling back is cheap. */
-export const useBrowse = (f: ShopFilters) =>
+export const browseKey = (f: ShopFilters, near = false) => ["browse", f.q.trim().toLowerCase(), f.country || (near ? "near" : ""), f.category]
+export const popularKey = (f: Pick<ShopFilters, "country" | "category">) => ["popular", f.country, f.category]
+
+/**
+ * The catalog a page at a time; the server caches pages, so scrolling back is cheap. `near`, with no country, asks
+ * for the visitor's own: the page says which it was.
+ */
+export const useBrowse = (f: ShopFilters, near = false) =>
   useInfiniteQuery({
-    queryKey: ["browse", f.q.trim().toLowerCase(), f.country, f.category],
+    queryKey: browseKey(f, near),
     queryFn: ({ pageParam }) =>
       api((c) =>
         c.catalog.browse({
           query: {
             ...(f.q.trim() ? { q: f.q.trim() } : {}),
-            ...(f.country ? { country: f.country } : {}),
+            ...(f.country ? { country: f.country } : near ? { near: "1" as const } : {}),
             ...(f.category ? { category: f.category } : {}),
             ...(pageParam ? { start: pageParam } : {})
           }
@@ -41,7 +47,7 @@ export const useBrowse = (f: ShopFilters) =>
 /** Popular cards for the chosen country, or for the visitor's own when none is chosen (the server knows it). */
 export const usePopular = (f: Pick<ShopFilters, "country" | "category">, enabled: boolean) =>
   useQuery({
-    queryKey: ["popular", f.country, f.category],
+    queryKey: popularKey(f),
     queryFn: () =>
       api((c) => c.catalog.popular({ query: { ...(f.country ? { country: f.country } : {}), ...(f.category ? { category: f.category } : {}) } })),
     enabled,

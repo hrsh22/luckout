@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
@@ -40,6 +40,12 @@ const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   })
 )
 
+/** Where Cloudflare says the visitor is ("XX" unknown, "T1" Tor). It only picks which cards to suggest. */
+const visitorCountry = Effect.gen(function*() {
+  const seen = (yield* HttpServerRequest.HttpServerRequest).headers["cf-ipcountry"]?.toUpperCase()
+  return seen && /^[A-Z]{2}$/.test(seen) && seen !== "XX" && seen !== "T1" ? seen : undefined
+})
+
 const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
@@ -53,12 +59,15 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
       }))
     return handlers.handleAll({
       search: ({ query }) => quiet(bitrefill.search(query.q)),
-      browse: ({ query }) => quiet(bitrefill.browse(query)),
+      browse: ({ query: { near, ...query } }) =>
+        Effect.gen(function*() {
+          const country = query.country ?? (near ? yield* visitorCountry : undefined)
+          const page = yield* quiet(bitrefill.browse({ ...query, ...(country ? { country } : {}) }))
+          return country ? new CatalogPage({ ...page, country }) : page
+        }),
       popular: ({ query }) =>
         Effect.gen(function*() {
-          // Cloudflare says where the visitor is ("XX" unknown, "T1" Tor). It only picks which cards to suggest.
-          const seen = (yield* HttpServerRequest.HttpServerRequest).headers["cf-ipcountry"]?.toUpperCase()
-          const country = query.country ?? (seen && /^[A-Z]{2}$/.test(seen) && seen !== "XX" && seen !== "T1" ? seen : undefined)
+          const country = query.country ?? (yield* visitorCountry)
           const items = yield* bitrefill.popular(country, query.category)
           return new PopularCards({ ...(country ? { country } : {}), items })
         }),
