@@ -62,7 +62,7 @@ export default async function DrawProof({ params, searchParams }: Props) {
           {paid === 0 ? "100% off" : `Paid ${usdUp(paid)} for`} a {usd(ref)} card
         </h1>
         <p className="text-lg text-ink-soft">
-          Purchase #{draw.purchase_id} by {draw.customer} on {version.name} (up to +{version.premium_bps / 100}%),{" "}
+          Purchase #{draw.purchase_id} by <span className="break-all">{draw.customer}</span> on {version.name} (up to +{version.premium_bps / 100}%),{" "}
           <LocalTime iso={time.toISOString()} options={{ dateStyle: "medium", timeStyle: "short" }} />.
         </p>
       </div>
