@@ -1,6 +1,6 @@
 import { Api } from "@luckout/api"
 import { Duration, Effect } from "effect"
-import { FetchHttpClient } from "effect/http"
+import { FetchHttpClient, HttpClient } from "effect/http"
 import { HttpApiClient } from "effect/http-api"
 
 export const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8787"
@@ -30,7 +30,10 @@ export const api = <A, E>(f: (c: Client) => Effect.Effect<A, E>, token?: string,
       Effect.flatMap(f),
       Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(new TimedOut()) }),
       Effect.provide(FetchHttpClient.layer),
-      Effect.provideService(FetchHttpClient.RequestInit, { credentials: "include" })
+      Effect.provideService(FetchHttpClient.RequestInit, { credentials: "include" }),
+      // No trace headers (traceparent, b3): they made every new address cost the browser a CORS preflight first,
+      // a whole extra round trip, and nothing here collects traces.
+      Effect.provideService(HttpClient.TracerPropagationEnabled, false)
     )
   ).catch((e: unknown) => {
     if (token && (e as { _tag?: string })?._tag === "Unauthorized") window.dispatchEvent(new Event(UNAUTHORIZED))
