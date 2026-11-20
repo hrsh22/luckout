@@ -121,6 +121,25 @@ export const setQuantity = (id: string, quantity: number) => write(withQuantity(
 export const setMode = (id: string, mode: Mode) => write(withMode(read(), id, mode))
 export const removeLine = (id: string) => write(read().filter((l) => l.id !== id))
 export const clearCart = () => write(EMPTY)
+
+// The Cart is kept per browser but belongs to one account: whoever signs in next as someone else starts empty.
+// A Cart made before signing in carries over to whoever signs in.
+const OWNER = "luckout.cart.owner"
+/** Called with whoever is signed in: the Cart empties if it was someone else's, and is theirs from now on. */
+export const claimCart = (accountId: string) => {
+  try {
+    const owner = localStorage.getItem(OWNER)
+    if (owner && owner !== accountId) clearCart()
+    localStorage.setItem(OWNER, accountId)
+  } catch {}
+}
+/** On signing out: the Cart empties and is no one's, so the next person on this computer never sees it. */
+export const releaseCart = () => {
+  clearCart()
+  try {
+    localStorage.removeItem(OWNER)
+  } catch {}
+}
 /** After a checkout: the copies it bought leave the Cart (others added meanwhile stay). */
 export const removeKeys = (keys: ReadonlyArray<string>) =>
   write(read().map((l) => ({ ...l, keys: l.keys.filter((k) => !keys.includes(k)) })).filter((l) => l.keys.length > 0))
