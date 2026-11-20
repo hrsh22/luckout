@@ -4,16 +4,16 @@ import { type Check, plainly, verify } from "@/lib/draw"
 import { loadDraw } from "@/lib/proof"
 import { useEffect, useState } from "react"
 
-/** Fetches the Draw from NEAR RPC in this browser and recomputes every step, without our server. */
-export function BrowserCheck({ tx }: { tx: string }) {
+/** Fetches the Draw from NEAR RPC in this browser and recomputes every step, without our server. `purchase` picks the Draw when the transaction settled a cart. */
+export function BrowserCheck({ tx, purchase }: { tx: string; purchase: number }) {
   const [checks, setChecks] = useState<Array<Check>>()
   const [error, setError] = useState<string>()
 
   useEffect(() => {
-    loadDraw(tx)
+    loadDraw(tx, purchase)
       .then((d) => verify(d.draw, d.version))
       .then(setChecks, (e) => setError(String(e?.message ?? e)))
-  }, [tx])
+  }, [tx, purchase])
 
   if (error) return <p role="alert" className="font-medium text-bad">Couldn't recompute this Draw: {error}</p>
   if (!checks) return <p className="skeleton rounded-2xl p-4 text-ink-soft" aria-live="polite">Fetching the transaction from NEAR and recomputing it in your browser…</p>

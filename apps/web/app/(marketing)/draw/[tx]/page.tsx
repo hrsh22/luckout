@@ -82,7 +82,7 @@ export default async function DrawProof({ params, searchParams }: Props) {
           <li>Roll = the first 8 bytes of the random value, modulo 10,000.</li>
           <li>The roll picks a row of the {version.name} table below. The Final Price is that share of the price, rounded up, never above what they paid up front; the rest comes back as cashback.</li>
         </ol>
-        <BrowserCheck tx={tx} />
+        <BrowserCheck tx={tx} purchase={Number(draw.purchase_id)} />
       </section>
 
       <section className="flex flex-col gap-3">
