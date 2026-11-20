@@ -50,7 +50,8 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
   const go = (s: Step) => {
     setDir(s > step ? 1 : -1)
     setStep(s)
-    top.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+    // Back up to the steps only when they've scrolled out of sight; never down, or on a phone the menu slides under the header.
+    if (top.current && top.current.getBoundingClientRect().top < 0) top.current.scrollIntoView({ behavior: "smooth", block: "start" })
   }
 
   // Signed in (here or before): move on, keeping any mode already chosen.

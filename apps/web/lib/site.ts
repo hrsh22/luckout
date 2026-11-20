@@ -14,10 +14,11 @@ export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
 
 export const testnet = network === "testnet"
 
-/** The free testnet demo, linked from the mainnet site. */
-export const TESTNET_SITE = "https://testnet.luckout.wtf"
-
-/** A Classic Draw from testnet: 40% back, so $7.20 for a $10 card ($4.80 of $12 back), linked from the landing page. */
-export const EXAMPLE_DRAW = "9ggLQCJyXjk4ThsDGMNwRmMDuFKvw79Uk6pNbFmedKdU"
-/** Its Draw Proof page. The transaction is on testnet, so the mainnet site links to the testnet site's page. */
-export const EXAMPLE_DRAW_HREF = testnet ? `/draw/${EXAMPLE_DRAW}` : `${TESTNET_SITE}/draw/${EXAMPLE_DRAW}`
+/**
+ * A Draw Proof to show, linked from the landing page, Fairness and the footer. Mainnet: a Jackpot Draw on
+ * app.luckout.near, $8.28 for an $11.03 card, on www.luckout.wtf (staging's contract doesn't have it).
+ * Testnet: a Classic Draw, $7.20 for a $10 card, on app.luckout.testnet.
+ */
+export const EXAMPLE_DRAW_HREF = testnet
+  ? "/draw/9ggLQCJyXjk4ThsDGMNwRmMDuFKvw79Uk6pNbFmedKdU"
+  : "https://www.luckout.wtf/draw/CyiYfQGS1HXFZk7CzRDj79picMQckQjPPd71q5B7ww3p"
