@@ -3,8 +3,9 @@
 import { GiftCard } from "@/components/gift-card"
 import { Money } from "@/components/money"
 import { Quantity } from "@/components/quantity"
-import { buttonVariants } from "@/components/ui/button"
-import { cartCount, cartRoom, cartUnits, closeCart, openCart, removeLine, setQuantity, useCart, useCartDrawer } from "@/lib/cart"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { Sheet } from "@/components/ui/sheet"
+import { cartCount, cartRoom, cartUnits, clearCart, closeCart, openCart, removeLine, setQuantity, useCart, useCartDrawer } from "@/lib/cart"
 import { pricedLines, totals, useCartQuote } from "@/lib/checkout"
 import { modeName } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
@@ -12,6 +13,7 @@ import { Dialog } from "@base-ui/react/dialog"
 import type { Mode } from "@luckout/api"
 import { Trash2, X } from "lucide-react"
 import Link from "next/link"
+import { useState } from "react"
 
 /** The Cart at a glance, from anywhere: what's in it, how many, the total, and the way to checkout. */
 export function CartDrawer() {
@@ -30,6 +32,7 @@ export function CartDrawer() {
             <Dialog.Title className="font-display text-[28px] leading-tight font-extrabold">
               Your cart{count > 0 && <span className="ml-2 align-middle text-base font-semibold text-muted">{count} {count === 1 ? "card" : "cards"}</span>}
             </Dialog.Title>
+            {count > 0 && <ClearCart className="ml-auto" />}
             <Dialog.Close className="-mr-2 grid size-10 shrink-0 place-items-center rounded-full text-muted transition-colors hover:bg-soft hover:text-ink" aria-label="Close">
               <X size={20} />
             </Dialog.Close>
@@ -80,6 +83,25 @@ export function CartDrawer() {
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
+  )
+}
+
+/** Empties the Cart in one go, after a yes. */
+export function ClearCart({ disabled, className = "" }: { disabled?: boolean; className?: string }) {
+  const [open, setOpen] = useState(false)
+  const count = cartCount(useCart())
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} disabled={disabled} className={`inline-flex h-10 items-center gap-1.5 rounded-full px-3 text-sm font-medium text-muted hover:bg-soft hover:text-bad disabled:opacity-45 ${className}`}>
+        <Trash2 size={16} />Clear cart
+      </button>
+      <Sheet open={open} onOpenChange={setOpen} title="Clear your cart?" description={`${count === 1 ? "The card" : `All ${count} cards`} will be taken out.`}>
+        <div className="flex flex-col gap-2">
+          <Button variant="danger" size="lg" onClick={() => (clearCart(), setOpen(false))}>Clear cart</Button>
+          <Button variant="ghost" onClick={() => setOpen(false)}>Keep them</Button>
+        </div>
+      </Sheet>
+    </>
   )
 }
 

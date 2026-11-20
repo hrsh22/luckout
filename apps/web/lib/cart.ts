@@ -120,6 +120,7 @@ export const addToCart = (card: CartCard, quantity = 1) => {
 export const setQuantity = (id: string, quantity: number) => write(withQuantity(read(), id, quantity))
 export const setMode = (id: string, mode: Mode) => write(withMode(read(), id, mode))
 export const removeLine = (id: string) => write(read().filter((l) => l.id !== id))
+export const clearCart = () => write(EMPTY)
 /** After a checkout: the copies it bought leave the Cart (others added meanwhile stay). */
 export const removeKeys = (keys: ReadonlyArray<string>) =>
   write(read().map((l) => ({ ...l, keys: l.keys.filter((k) => !keys.includes(k)) })).filter((l) => l.keys.length > 0))

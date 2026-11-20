@@ -1,5 +1,6 @@
 "use client"
 
+import { ClearCart } from "@/components/cart-drawer"
 import { GiftCard } from "@/components/gift-card"
 import { Money } from "@/components/money"
 import { Quantity } from "@/components/quantity"
@@ -35,9 +36,12 @@ export default function Cart() {
 
   return (
     <div className="flex flex-col gap-8">
-      <Link href="/shop" className="inline-flex items-center gap-2 self-start font-semibold text-muted hover:text-ink">
-        <ArrowLeft size={18} />Keep shopping
-      </Link>
+      <div className="flex items-center justify-between gap-4">
+        <Link href="/shop" className="inline-flex items-center gap-2 font-semibold text-muted hover:text-ink">
+          <ArrowLeft size={18} />Keep shopping
+        </Link>
+        {count > 0 && <ClearCart disabled={checkout.isPending} />}
+      </div>
       <div>
         <h1 className="font-display text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">Your cart</h1>
         <p className="mt-3 text-lg text-ink-soft">{count > 0 ? `${cards(count)}, bought in one go.` : `Up to ${MAX_CART} cards, bought in one go.`}</p>
