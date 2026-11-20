@@ -22,6 +22,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
 import { getAddress } from "viem"
 import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
+import { claimCart, releaseCart } from "./cart"
 import { connectEvm, disconnectWallets, evmAddress, evmChainId, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
 import { connectSolana, signSolana, solanaAccount, watchSolana } from "./solana"
@@ -206,6 +207,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       throw e
     }
   }, [accountId, token, intents])
+
+  // The Cart is this account's from now on; another account's Cart is emptied first.
+  useEffect(() => {
+    if (accountId) claimCart(accountId)
+  }, [accountId])
 
   // Restore the saved session only if the wallet is still on the same account.
   useEffect(() => {
@@ -415,6 +421,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const signOut = async () => {
     await endOnServer(current.current)
     clear()
+    releaseCart()
     await Promise.all([near().disconnect().catch(() => {}), disconnectWallets()])
   }
 
