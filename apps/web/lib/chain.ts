@@ -12,13 +12,22 @@ const rpcUrls = network === "mainnet"
 const historyUrls = [...rpcUrls, network === "mainnet" ? "https://archival-rpc.mainnet.fastnear.com" : "https://archival-rpc.testnet.fastnear.com"]
 export const explorer = (tx: string) => `https://${network === "testnet" ? "testnet." : ""}nearblocks.io/txns/${tx}`
 
+/** NEAR has no such transaction, or the hash can't be one: a page about it is a 404, not an outage. */
+export class NotOnChain extends Error {}
+
 async function rpc<T>(method: string, params: object, urls = rpcUrls): Promise<T> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params })
   let res: { result?: T & { error?: unknown }; error?: { code?: number; cause?: { name?: string } } } | undefined
-  for (const url of urls) {
+  /** Whether `res` is the last endpoint's answer: for history, the archival node, the only one that keeps it all. */
+  let last = false
+  for (const [i, url] of urls.entries()) {
     try {
       const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(10_000) })
-      res = r.ok ? await r.json() : res
+      // A 400 is NEAR refusing the request itself (a hash that can't be one), which every endpoint would say.
+      if (r.ok || r.status === 400) {
+        res = await r.json()
+        last = i === urls.length - 1
+      }
       // Rate limited (FastNEAR's -429) or pruned history is this endpoint's answer, not the chain's: try the next.
       if (res && res.error?.code !== -429 && !/^UNKNOWN_(TRANSACTION|BLOCK)$/.test(res.error?.cause?.name ?? "")) break
     } catch {}
@@ -27,12 +36,11 @@ async function rpc<T>(method: string, params: object, urls = rpcUrls): Promise<T
   const error = res.error ?? res.result?.error
   if (error) {
     // The raw reply stays on `cause` for debugging; people see plain words.
-    throw new Error(
-      res.error?.cause?.name === "UNKNOWN_TRANSACTION"
-        ? "NEAR has no record of this transaction. Check the link, or try again in a minute."
-        : "NEAR couldn't answer that just now. Try again in a moment.",
-      { cause: error }
-    )
+    const name = res.error?.cause?.name
+    if (method === "tx" && (name === "PARSE_ERROR" || (name === "UNKNOWN_TRANSACTION" && last))) {
+      throw new NotOnChain("NEAR has no record of this transaction. Check the link, or try again in a minute.", { cause: error })
+    }
+    throw new Error("NEAR couldn't answer that just now. Try again in a moment.", { cause: error })
   }
   return res.result as T
 }

@@ -347,10 +347,11 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
     },
     success: PopularCards
   }),
+  /** NotFound for a card Bitrefill doesn't sell; BitrefillUnavailable when its price can't be had right now. */
   HttpApiEndpoint.get("voucher", "/catalog/:id", {
     params: { id: Schema.String },
     success: Voucher,
-    error: BitrefillUnavailable
+    error: [BitrefillUnavailable, NotFound]
   }),
   /** The contract's quote for one package; `game` omitted means Normal. */
   HttpApiEndpoint.get("quote", "/quote", {

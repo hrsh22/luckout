@@ -12,7 +12,7 @@ import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
 import { Base } from "./Base.ts"
-import { Bitrefill } from "./Bitrefill.ts"
+import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
 import { edge } from "./Edge.ts"
@@ -73,7 +73,9 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
           return new PopularCards({ ...(country ? { country } : {}), items })
         }),
       voucher: ({ params }) =>
-        quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))),
+        quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))).pipe(
+          Effect.mapError((e) => (e.message === NO_SUCH_VOUCHER ? new NotFound() : e))
+        ),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game)),
       quoteCart: ({ payload }) => quiet(purchases.quoteCart(payload.items))
     })
