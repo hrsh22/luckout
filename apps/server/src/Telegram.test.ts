@@ -15,9 +15,10 @@ import {
   messageLimits,
   privateOnly,
   purchaseItems,
-  purchaseMessage,
+  purchaseLines,
   redeemLinkCode,
   replaceCheckoutEmail,
+  replyMessages,
   typedText,
   unlinkAccount
 } from "./Telegram.ts"
@@ -79,7 +80,7 @@ test("a link that replaces another chat says which, so that chat can be told", (
   })))
 
 test("each Telegram user gets so many messages a minute", () => {
-  const limits = messageLimits({ perMinute: 2, perDay: 100, unfundedPerDay: 100, botPerDay: 100 })
+  const limits = messageLimits({ perMinute: 2, perDay: 100, unfundedPerDay: 100, unfundedBotPerDay: 100 })
   const t = Date.UTC(2026, 10, 11, 12)
   assert.equal(limits.check(1, t), undefined)
   assert.equal(limits.check(1, t), undefined)
@@ -89,21 +90,30 @@ test("each Telegram user gets so many messages a minute", () => {
   assert.equal(limits.check(1, t + 61_000), undefined, "a new minute")
 })
 
-test("messages that reach the model: fewer a day for an account with no Balance, and a cap for the whole bot", () => {
-  const limits = messageLimits({ perMinute: 100, perDay: 3, unfundedPerDay: 1, botPerDay: 5 })
+test("messages that reach the model are counted per account, fewer with no Balance, so linking another Telegram account doesn't start over", () => {
+  const limits = messageLimits({ perMinute: 100, perDay: 3, unfundedPerDay: 1, unfundedBotPerDay: 100 })
   const t = Date.UTC(2026, 10, 11, 12)
-  assert.equal(limits.model(1, false, t), undefined)
-  assert.equal(limits.model(1, false, t), "day", "no Balance: one a day here")
-  assert.equal(limits.model(1, true, t), undefined, "once funded, the funded allowance counts")
-  assert.equal(limits.model(1, true, t), undefined)
-  assert.equal(limits.model(1, true, t), "day")
+  assert.equal(limits.model("alice.near", false, t), undefined)
+  // Alice re-links her wallet to a fresh Telegram account: the count is the account's, not the Telegram user's.
+  assert.equal(limits.model("alice.near", false, t), "day", "no Balance: one a day here, whichever Telegram account asks")
+  assert.equal(limits.model("bob.near", false, t), undefined, "another account has its own")
+  assert.equal(limits.model("alice.near", true, t), undefined, "once funded, the funded allowance counts")
+  assert.equal(limits.model("alice.near", true, t), undefined)
+  assert.equal(limits.model("alice.near", true, t), "day")
   limits.sweep(t + 61_000)
-  assert.equal(limits.model(1, true, t + 61_000), "day", "a sweep keeps today's count")
-  assert.equal(limits.model(2, true, t), undefined)
-  assert.equal(limits.model(3, true, t), undefined, "the bot's fifth today")
-  assert.equal(limits.model(4, true, t), "bot", "the whole bot is over today's cap")
-  assert.equal(limits.model(1, true, t + 86_400_000), undefined, "a new UTC day")
-  assert.equal(limits.model(4, true, t + 86_400_000), undefined)
+  assert.equal(limits.model("alice.near", true, t + 61_000), "day", "a sweep keeps today's count")
+  assert.equal(limits.model("alice.near", true, t + 86_400_000), undefined, "a new UTC day")
+})
+
+test("the whole bot's cap counts and stops only accounts with no Balance: a funded customer always gets through", () => {
+  const limits = messageLimits({ perMinute: 100, perDay: 100, unfundedPerDay: 100, unfundedBotPerDay: 2 })
+  const t = Date.UTC(2026, 10, 11, 12)
+  assert.equal(limits.model("a.near", false, t), undefined)
+  assert.equal(limits.model("rich.near", true, t), undefined, "funded messages don't use it up")
+  assert.equal(limits.model("b.near", false, t), undefined)
+  assert.equal(limits.model("c.near", false, t), "bot", "today's messages from accounts with no Balance are used up")
+  assert.equal(limits.model("rich.near", true, t), undefined, "a funded customer still gets through")
+  assert.equal(limits.model("c.near", false, t + 86_400_000), undefined, "a new UTC day")
 })
 
 test("the Buy line says where the card is emailed, when it needs an email", () => {
@@ -145,21 +155,42 @@ const card = (over: Partial<Pending> = {}): Pending => ({
   voucherId: "v", voucherName: "Swiggy", value: "500", currency: "INR", country: "IN", mode: "normal", requestedMode: "normal", maxPrice: 5_530_000, referencePrice: 5_530_000, luckyAmount: 0, ...over
 })
 
+const expired = "This offer expired. Ask again."
+const refusal = (tap: { held: unknown } | { refused: string; consumed: boolean }) => ("refused" in tap ? tap.refused : undefined)
+
 test("a button works once, only for the Telegram user it was made for, for 10 minutes, while they're still linked to that account", () => {
   const offers = makeOffers()
   const t = 1_000_000
   const offer = { offer: { cards: [card()] }, telegramUserId: 1, accountId: "alice.near", chatId: 101 }
   const a = offers.add(offer, t)
-  assert.equal(offers.take(a.id, 2, "alice.near", t), "This offer expired. Ask again.", "someone else's tap")
-  assert.equal(typeof offers.take(a.id, 1, "alice.near", t + 1), "object", "the customer's tap")
-  assert.equal(offers.take(a.id, 1, "alice.near", t + 2), "This offer expired. Ask again.", "a second tap buys nothing")
+  assert.equal(refusal(offers.take(a.id, 2, "buy", "alice.near", t)), expired, "someone else's tap")
+  assert.ok("held" in offers.take(a.id, 1, "buy", "alice.near", t + 1), "the customer's tap")
+  assert.equal(refusal(offers.take(a.id, 1, "buy", "alice.near", t + 2)), expired, "a second tap buys nothing")
   const b = offers.add(offer, t)
-  assert.equal(offers.take(b.id, 1, "alice.near", t + 10 * 60_000 + 1), "This offer expired. Ask again.", "past 10 minutes")
+  assert.equal(refusal(offers.take(b.id, 1, "buy", "alice.near", t + 10 * 60_000 + 1)), expired, "past 10 minutes")
   const c = offers.add(offer, t)
-  assert.equal(offers.take(c.id, 1, "bob.near", t), "This Telegram account is no longer linked to that wallet.")
-  assert.equal(offers.take(c.id, 1, "alice.near", t), "This offer expired. Ask again.", "refused once, gone")
+  assert.deepEqual(offers.take(c.id, 1, "buy", "bob.near", t), { refused: "This Telegram account is no longer linked to that wallet.", consumed: true })
+  assert.equal(refusal(offers.take(c.id, 1, "buy", "alice.near", t)), expired, "refused once, gone")
   const d = offers.add(offer, t)
-  assert.equal(offers.take(d.id, 1, undefined, t), "This Telegram account is no longer linked to that wallet.", "unlinked")
+  assert.equal(refusal(offers.take(d.id, 1, "buy", undefined, t)), "This Telegram account is no longer linked to that wallet.", "unlinked")
+})
+
+test("a tap counts for the offer's own kind: an email button can't complete a Buy, nor a Buy button change the email", () => {
+  const offers = makeOffers()
+  const buy = offers.add({ offer: { cards: [card()] }, telegramUserId: 1, accountId: "alice.near", chatId: 101 })
+  assert.equal(refusal(offers.take(buy.id, 1, "email", "alice.near")), expired)
+  assert.ok("held" in offers.take(buy.id, 1, "buy", "alice.near"), "its own button still works")
+  const email = offers.add({ offer: { email: { from: "me@example.com", to: "new@example.com" } }, telegramUserId: 1, accountId: "alice.near", chatId: 101 })
+  assert.equal(refusal(offers.take(email.id, 1, "buy", "alice.near")), expired)
+  assert.ok("held" in offers.take(email.id, 1, "email", "alice.near"))
+})
+
+test("Cancel works even once they're unlinked: it only takes the buttons off", () => {
+  const offers = makeOffers()
+  const a = offers.add({ offer: { cards: [card()] }, telegramUserId: 1, accountId: "alice.near", chatId: 101 })
+  assert.ok("held" in offers.take(a.id, 1, "cancel", undefined))
+  const b = offers.add({ offer: { email: { from: "me@example.com", to: "new@example.com" } }, telegramUserId: 1, accountId: "alice.near", chatId: 101 })
+  assert.ok("held" in offers.take(b.id, 1, "cancel", "bob.near"))
 })
 
 test("a new offer withdraws the same user's earlier ones, so their buttons can come off", () => {
@@ -169,9 +200,9 @@ test("a new offer withdraws the same user's earlier ones, so their buttons can c
   const other = offers.add({ offer: { cards: [card()] }, telegramUserId: 2, accountId: "bob.near", chatId: 202 })
   const second = offers.add({ offer: { cards: [card(), card()] }, telegramUserId: 1, accountId: "alice.near", chatId: 101 })
   assert.deepEqual(second.withdrawn.map((w) => [w.chatId, w.messageId]), [[101, 7]])
-  assert.equal(offers.take(first.id, 1, "alice.near"), "This offer expired. Ask again.", "the older cart can't be bought any more")
-  assert.equal(typeof offers.take(other.id, 2, "bob.near"), "object", "another user's offer stands")
-  assert.equal(typeof offers.take(second.id, 1, "alice.near"), "object")
+  assert.equal(refusal(offers.take(first.id, 1, "buy", "alice.near")), expired, "the older cart can't be bought any more")
+  assert.ok("held" in offers.take(other.id, 2, "buy", "bob.near"), "another user's offer stands")
+  assert.ok("held" in offers.take(second.id, 1, "buy", "alice.near"))
 })
 
 test("a Buy tap's purchases: each card at the maximum it showed, keyed by the button so a repeat buys nothing new", () => {
@@ -184,14 +215,15 @@ test("a Buy tap's purchases: each card at the maximum it showed, keyed by the bu
   assert.deepEqual(cart.map((p) => [p.mode, p.luckyAmount]), [["normal", undefined], [{ lucky: 1 }, 10_000_000], ["normal", undefined]], "a card going at Normal is bought at Normal")
 })
 
-const delivered = (n: number) =>
+const delivered = (n: number, redemption: Record<string, unknown> = {}) =>
   new Purchase({
     id: `p${n}`, voucherId: "amazon-us", voucherName: "Amazon", value: "25", status: "delivered", referencePrice: 25_000_000, createdAt: new Date(0).toISOString(),
-    redemption: { code: `CODE-${n}`, link: `https://example.com/redeem?token=${"x".repeat(200)}`, expirationTime: "2027-03-30T00:00:00.000Z" }
+    redemption: { code: `CODE-${n}`, link: `https://example.com/redeem?token=${"x".repeat(200)}`, expirationTime: "2027-03-30T00:00:00.000Z", ...redemption }
   })
+const noPreview = JSON.stringify({ link_preview_options: { is_disabled: true } })
 
 test("a delivered card's message: what they paid, the code, the link and the use-by date", () => {
-  const text = purchaseMessage(delivered(1), "https://luckout.test")
+  const text = purchaseLines(delivered(1), "https://luckout.test").join("\n")
   assert.match(text, /^Amazon 25 is yours\.\nYou paid \$25\.00\.\nCode: CODE-1\nLink: https:\/\/example\.com\/redeem/)
   assert.match(text, /Use it by 30 March 2027\.$/)
 })
@@ -199,24 +231,55 @@ test("a delivered card's message: what they paid, the code, the link and the use
 test("a big cart's codes go in as few messages as fit, none split, with link previews off", async () => {
   const sent: Array<{ text: string; other: object }> = []
   let notices = 0
-  const texts = Array.from({ length: 15 }, (_, i) => purchaseMessage(delivered(i), "https://luckout.test"))
-  assert.ok(texts.join("\n\n").length > 4096, "too long for one Telegram message")
-  await deliver(async (text, other) => void sent.push({ text, other }), texts, async () => void notices++)
+  const cards = Array.from({ length: 15 }, (_, i) => purchaseLines(delivered(i), "https://luckout.test"))
+  assert.ok(cards.map((c) => c.join("\n")).join("\n\n").length > 4096, "too long for one Telegram message")
+  await deliver(async (text, other) => void sent.push({ text, other }), cards, async () => void notices++)
   assert.ok(sent.length > 1 && sent.every((s) => s.text.length <= 4096))
-  assert.deepEqual(sent.flatMap((s) => s.text.split("\n\n")), texts, "every card, whole, in order")
-  assert.ok(sent.every((s) => JSON.stringify(s.other) === JSON.stringify({ link_preview_options: { is_disabled: true } })))
+  assert.deepEqual(sent.flatMap((s) => s.text.split("\n\n")), cards.map((c) => c.join("\n")), "every card, whole, in order")
+  assert.ok(sent.every((s) => JSON.stringify(s.other) === noPreview))
   assert.equal(notices, 0)
 })
 
-test("if Telegram won't take a delivery message, one short notice goes instead and nothing more is tried", async () => {
-  let tries = 0
+test("a message Telegram rejects doesn't stop the ones after it, and one notice goes at the end", async () => {
+  const events: Array<string> = []
+  const cards = Array.from({ length: 15 }, (_, i) => purchaseLines(delivered(i), "https://luckout.test"))
+  await deliver(async (text) => {
+    if (events.length === 0) {
+      events.push("rejected")
+      throw new GrammyError("Call to 'sendMessage' failed! (400: Bad Request)", { ok: false, error_code: 400, description: "Bad Request" }, "sendMessage", {})
+    }
+    events.push(text.includes("CODE-14") ? "last card sent" : "sent")
+  }, cards, async () => void events.push("notice"))
+  assert.equal(events[0], "rejected")
+  assert.deepEqual(events.slice(-2), ["last card sent", "notice"], "the rest still went, then one notice")
+  assert.equal(events.filter((e) => e === "notice").length, 1)
+})
+
+test("a card longer than one message has its free text split across messages; its code and link stay whole", async () => {
+  const sent: Array<string> = []
   let notices = 0
-  await deliver(async () => {
-    tries++
-    throw new GrammyError("Call to 'sendMessage' failed! (400: Bad Request: message is too long)", { ok: false, error_code: 400, description: "Bad Request: message is too long" }, "sendMessage", {})
-  }, ["Amazon 25 is yours.", "Swiggy 500 is yours."], async () => void notices++)
-  assert.equal(tries, 1)
-  assert.equal(notices, 1)
+  const other = Array.from({ length: 1500 }, (_, i) => `word${i}`).join(" ")
+  const lines = purchaseLines(delivered(1, { other }), "https://luckout.test")
+  await deliver(async (text) => void sent.push(text), [lines], async () => void notices++)
+  assert.equal(notices, 0)
+  assert.ok(sent.length > 1 && sent.every((t) => t.length <= 4096))
+  assert.ok(sent.some((t) => t.split("\n").includes("Code: CODE-1")), "the code on a line of its own, whole")
+  assert.ok(sent.some((t) => t.split("\n").includes(`Link: https://example.com/redeem?token=${"x".repeat(200)}`)), "the link whole")
+  assert.equal(sent.join(" ").replace(/\s+/g, " ").includes(other), true, "all of the free text, in order")
+})
+
+test("the Buy message fits Telegram: a long reply goes on its own, and the button's message always carries the code-written lines", () => {
+  const summary = buySummary([card(), card({ voucherName: "Amazon" })]).split("\n")
+  assert.deepEqual(replyMessages("Here they are, tap Buy.", summary), [`Here they are, tap Buy.\n\n${summary.join("\n")}`], "one message when it fits")
+  const reply = "word ".repeat(800).trim()
+  assert.deepEqual(replyMessages(reply, summary), [reply, summary.join("\n")], "too long together: the reply first, then every code-written line")
+  // Fifteen cards with very long names: even the code-written lines need two messages, and the button's ends with the total.
+  const many = buySummary(Array.from({ length: 15 }, (_, i) => card({ voucherName: `Gift card ${i} ${"with a very long name ".repeat(10)}` }))).split("\n")
+  const messages = replyMessages(reply, many)
+  assert.ok(messages.length > 2 && messages.every((m) => m.length <= 4096))
+  assert.ok(messages.at(-1)!.endsWith(many.at(-1)!), "the total is on the button's message")
+  assert.ok(many.every((line) => messages.some((m) => m.split("\n").includes(line))), "every code-written line, whole")
+  assert.deepEqual(replyMessages("", summary), [summary.join("\n")], "no reply, just the lines")
 })
 
 test("a tap on Change it saves the new Checkout Email, unless the one it replaces has changed since", async () => {
