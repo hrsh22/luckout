@@ -1101,6 +1101,35 @@ test("with guest checkout, what the admin is told names the Base Float, never Bi
   assert.equal(refused.message, "The Base Float is above the refill line.")
 })
 
+test("a refill that today's limit holds below what waiting purchases need says so as it starts, once, with the limit to raise", async () => {
+  // An empty Base Float, a $400 card waiting, and $300 of refills allowed a day.
+  const w = world({ guest: true, walletUsdc: 0, treasuryUsdc: 0, proceeds: 1_000_000_000, cap: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const credit = yield* Credit
+    const refill = yield* Refill
+    yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), dailyRefill: 300_000_000 }), "boss.testnet")
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '400', 400000000, 400000000, 'waiting')`
+    yield* credit.refresh
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    // The next plan, while that refill is still swapping, says nothing more.
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [row] = yield* sql<{ amount: string; step: string }>`SELECT amount::text AS amount, step FROM refills`
+    return row!
+  }))
+  assert.equal(Number(r.amount), 300_000_000, "as much as today's limit allows")
+  assert.notEqual(r.step, "done", "said before it lands, not after")
+  const short = w.alerts.filter((a) => a.includes("short of what waiting purchases need"))
+  assert.equal(short.length, 1, w.alerts.join("\n"))
+  assert.match(
+    short[0]!,
+    /^Refill \w{8}: Today's limit of \$300\.00 holds this refill to \$300\.00, \$100\.00 short of what waiting purchases need\. Raise "Refill at most, per day" in Admin → Base Float → Settings to at least \$400\.00, and a second refill covers the rest as soon as this one lands\. 1 purchase\(s\) worth \$400\.00 are waiting for the Base Float\.$/
+  )
+})
+
 test("with guest checkout, a purchase waiting while the Base Float covers it raises no alert", async () => {
   const w = world({ guest: true, walletUsdc: 450_000_000, treasuryUsdc: 50_000_000 })
   await w.run(Effect.gen(function*() {

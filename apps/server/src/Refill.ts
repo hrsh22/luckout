@@ -767,7 +767,14 @@ export class Refill extends Context.Service<Refill, {
               : `the ceiling. Raise it in ${section} → Settings.`
             return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)}: ${why}` }
           }
-          return { amount, why: c.waiting.total > 0 ? "waiting" : "target" }
+          // Today's limit held it below what waiting purchases need: said as it starts, not once it lands, when the
+          // next refill would only find the limit used up.
+          const need = c.waiting.total - free
+          const short = limit === left && need > amount
+            ? `Today's limit of ${usd(s.dailyRefill)} holds this refill to ${usd(amount)}, ${usd(need - amount)} short of what waiting purchases need. ` +
+              `Raise "Refill at most, per day" in ${section} → Settings to at least ${usd(cents(s.dailyRefill - left + need))}, and a second refill covers the rest as soon as this one lands.`
+            : undefined
+          return { amount, why: c.waiting.total > 0 ? "waiting" : "target", short }
         })
 
       /**
@@ -849,6 +856,8 @@ export class Refill extends Context.Service<Refill, {
         }
         const row = yield* start(s.amount, s.why, null)
         yield* Effect.log(`refill ${row.id} started: ${usd(s.amount)} (${s.why})`)
+        // On the row like any reason it waits for (the panel shows it), so it's said once for this refill.
+        if (s.short) yield* hold(row, s.short, `Refill ${row.id.slice(0, 8)}: ${s.short}`)
         yield* unusual
         yield* FiberSet.run(workflows, advance(row.id))
       })).pipe(Effect.catchCause((cause) => Effect.logError("refill planning failed", cause)))
