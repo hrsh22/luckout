@@ -200,15 +200,25 @@ export type CardDelivery =
   | { readonly _tag: "Pending" }
 
 /**
- * Each card's order in an invoice: the first one not yet taken with the card's product and amount. An order that
- * names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is the order Bitrefill keeps.
+ * Each card's order in an invoice. A card delivered in an earlier round (`orderId`, saved by Purchases) takes the order
+ * it holds, wherever Bitrefill lists it now, and no other. The rest take the first order left with the card's product
+ * and amount; an order that names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is
+ * the order Bitrefill keeps.
  */
-export const matchOrders = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined }>(
-  cards: ReadonlyArray<Card>,
+export const matchOrders = <
+  O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly order_id?: string; readonly id?: string }
+>(
+  cards: ReadonlyArray<Card & { readonly orderId?: string | undefined }>,
   orders: ReadonlyArray<O>
 ): Array<O | undefined> => {
   const taken = new Set<number>()
+  const held = cards.map((card) => {
+    const k = card.orderId === undefined ? -1 : orders.findIndex((o) => (o.order_id ?? o.id) === card.orderId)
+    if (k >= 0) taken.add(k)
+    return k
+  })
   return cards.map((card, i) => {
+    if (card.orderId !== undefined) return held[i]! >= 0 ? orders[held[i]!] : undefined
     let k = orders.findIndex((o, j) => !taken.has(j) && o.product?.id === card.id && (o.product.value === undefined || String(o.product.value) === card.value))
     if (k < 0 && !taken.has(i) && orders[i] && !orders[i].product) k = i
     if (k < 0) return undefined
