@@ -144,7 +144,7 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
               p.error !== undefined && ["Error", <span key="e" className="text-bad">{p.error}</span>],
               ["Attempts", p.attempts],
               p.invoiceId !== undefined && ["Bitrefill invoice", p.invoiceId],
-              p.payAmount !== undefined && ["Paid to Bitrefill", `${dollars(p.payAmount)} USDC from the Base Float`],
+              p.payAmount !== undefined && ["Paid to Bitrefill", `${dollars(p.payAmount)} USDC from the Base Float, for all of checkout ${p.checkoutId.slice(0, 8)}…`],
               p.payTx !== undefined && ["Base payment", <Ext key="b" href={basescan(`tx/${p.payTx}`)}>{p.payTx.slice(0, 12)}…</Ext>],
               p.admitTx !== undefined && ["Admit tx", <Ext key="x" href={explorer(p.admitTx)}>{p.admitTx.slice(0, 12)}…</Ext>],
               p.settleTx !== undefined && ["Settle tx", <Ext key="s" href={explorer(p.settleTx)}>{p.settleTx.slice(0, 12)}…</Ext>],

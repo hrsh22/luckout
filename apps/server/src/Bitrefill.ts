@@ -152,16 +152,18 @@ const GuestPurchase = Schema.Struct({
     payment_info: Schema.Struct({ address: Schema.String, altBasePrice: Schema.Number, contractAddress: Schema.String })
   })
 })
-/** A guest invoice as get-invoice-by-id reads it back. */
 /** What an order says it is: Bitrefill lists a cart's orders in cart order, each with its product and amount. */
 const OrderProduct = Schema.optional(Schema.Struct({ id: Schema.String, value: Schema.optional(Schema.Unknown) }))
+/** An order's Redemption Data: missing or null until it's delivered. One order's null must not fail its whole cart's read. */
+const RedemptionInfo = Schema.optional(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown)))
+/** A guest invoice as get-invoice-by-id reads it back. */
 const GuestInvoice = Schema.Struct({
   invoice_status: Schema.String,
   orders: Schema.Array(Schema.Struct({
     order_id: Schema.String,
     status: Schema.String,
     product: OrderProduct,
-    redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
+    redemption_info: RedemptionInfo
   }))
 })
 const Token = Schema.Struct({ access_token: Schema.String, expires_in: Schema.Number })
@@ -175,7 +177,7 @@ const Invoice = Schema.Struct({
   status: Schema.String,
   orders: Schema.Array(Schema.Struct({
     id: Schema.String,
-    redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
+    redemption_info: RedemptionInfo
   }))
 })
 const data = <A, I>(s: Schema.Codec<A, I>) => Schema.Struct({ data: s })
@@ -198,15 +200,25 @@ export type CardDelivery =
   | { readonly _tag: "Pending" }
 
 /**
- * Each card's order in an invoice: the first one not yet taken with the card's product and amount. An order that
- * names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is the order Bitrefill keeps.
+ * Each card's order in an invoice. A card delivered in an earlier round (`orderId`, saved by Purchases) takes the order
+ * it holds, wherever Bitrefill lists it now, and no other. The rest take the first order left with the card's product
+ * and amount; an order that names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is
+ * the order Bitrefill keeps.
  */
-export const matchOrders = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined }>(
-  cards: ReadonlyArray<Card>,
+export const matchOrders = <
+  O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly order_id?: string; readonly id?: string }
+>(
+  cards: ReadonlyArray<Card & { readonly orderId?: string | undefined }>,
   orders: ReadonlyArray<O>
 ): Array<O | undefined> => {
   const taken = new Set<number>()
+  const held = cards.map((card) => {
+    const k = card.orderId === undefined ? -1 : orders.findIndex((o) => (o.order_id ?? o.id) === card.orderId)
+    if (k >= 0) taken.add(k)
+    return k
+  })
   return cards.map((card, i) => {
+    if (card.orderId !== undefined) return held[i]! >= 0 ? orders[held[i]!] : undefined
     let k = orders.findIndex((o, j) => !taken.has(j) && o.product?.id === card.id && (o.product.value === undefined || String(o.product.value) === card.value))
     if (k < 0 && !taken.has(i) && orders[i] && !orders[i].product) k = i
     if (k < 0) return undefined
@@ -796,7 +808,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
        * Where each card is, from the invoice's orders: delivered with its code, failed (the order or the whole invoice
        * ended without one), or still pending. Nothing settled at all is an unknown, tried again later.
        */
-      const cardsIn = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined }>(
+      const cardsIn = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | null | undefined }>(
         invoiceId: string,
         cards: ReadonlyArray<Card>,
         orders: ReadonlyArray<O>,
@@ -813,7 +825,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           ? Effect.fail(unavailable(`invoice ${invoiceId} is still ${status}`))
           : Effect.succeed(found)
       }
-      const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
+      const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | null | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
         invoiceFailed || matchOrders(cards, orders).every((o) => !!o && (!!o.redemption_info || GUEST_FAILED.test(o.status ?? "")))
 
       // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.

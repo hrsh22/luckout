@@ -1,10 +1,11 @@
 "use client"
 
-import { CartQuoteRequest, NewCart, NewPurchase, type Quote } from "@luckout/api"
+import { CartQuoteRequest, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useRouter } from "next/navigation"
 import { api, TimedOut } from "./api"
 import type { CartCard } from "./cart"
+import { checkoutRequest } from "./checkout-terms.ts"
 import { useSession } from "./session"
 
 /** One card of a checkout, with the key that makes it one purchase however often the checkout is sent. */
@@ -32,13 +33,6 @@ export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) =>
     select: (q) => (q.length === units.length ? q : undefined)
   })
 
-/** What a cart quote adds up to: the prices, the Lucky extra on top, and the most any one card debits. */
-export const totals = (quotes: ReadonlyArray<Quote> | undefined) => {
-  const price = quotes?.reduce((s, q) => s + q.referencePrice, 0) ?? 0
-  const pay = quotes?.reduce((s, q) => s + q.maxPrice, 0) ?? 0
-  return { price, extra: pay - price, pay, largest: Math.max(0, ...(quotes ?? []).map((q) => q.maxPrice)) }
-}
-
 /**
  * Buys several cards as one checkout, exactly as each quote showed (its mode too, Normal when the reserve couldn't
  * cover a Lucky card), then shows the order. A checkout the server is still placing when the request times out is
@@ -50,18 +44,7 @@ export const useCheckout = (onBought?: (keys: ReadonlyArray<string>) => void) =>
   const router = useRouter()
   return useMutation({
     mutationFn: async (items: ReadonlyArray<Unit & { quote: Quote }>) => {
-      const payload = new NewCart({
-        items: items.map(({ line, key, quote: q }) =>
-          new NewPurchase({
-            voucherId: line.voucherId,
-            value: line.value,
-            mode: q.mode,
-            maxPrice: q.maxPrice,
-            ...(q.mode === "normal" ? {} : { luckyAmount: q.luckyAmount }),
-            idempotencyKey: key
-          })
-        )
-      })
+      const payload = checkoutRequest(items)
       return api((c) => c.purchases.createCart({ payload }), token, "150 seconds").catch((e) => {
         if (!(e instanceof TimedOut)) throw e
         return api((c) => c.purchases.createCart({ payload }), token)
@@ -77,25 +60,5 @@ export const useCheckout = (onBought?: (keys: ReadonlyArray<string>) => void) =>
       qc.invalidateQueries({ queryKey: ["checkout-email"] })
       qc.invalidateQueries({ queryKey: ["quote-cart"] })
     }
-  })
-}
-
-/**
- * Each Cart line with its copies' quotes (units are in line order): what the line costs in all and each, whether the
- * reserve put a Lucky copy at Normal, and the smallest part of a copy that still plays when it covers only some.
- */
-export const pricedLines = <L extends CartCard & { readonly keys: ReadonlyArray<string> }>(lines: ReadonlyArray<L>, quotes: ReadonlyArray<Quote> | undefined) => {
-  let at = 0
-  return lines.map((line) => {
-    const mine = quotes?.slice(at, at + line.keys.length)
-    at += line.keys.length
-    const total = mine?.reduce((s, q) => s + q.maxPrice, 0)
-    // "each" when every copy costs the same to the cent (what's shown), however the micro-USDC differ.
-    const cents = (q: Quote) => Math.ceil(q.maxPrice / 10_000)
-    const each = mine && mine.every((q) => cents(q) === cents(mine[0]!)) ? mine[0]!.maxPrice : undefined
-    const lucky = line.mode !== "normal"
-    const normal = !!mine && lucky && mine.some((q) => q.mode === "normal")
-    const part = mine?.filter((q) => q.luckyAmount > 0 && q.luckyAmount < q.referencePrice).map((q) => q.luckyAmount)
-    return { line, total, each, normal, plays: part && part.length > 0 ? Math.min(...part) : undefined }
   })
 }
