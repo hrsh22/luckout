@@ -7,7 +7,9 @@ test("a second wallet request while one is open is refused, and the next one aft
   let ran = 0
   let finish!: (ok: boolean) => void
   const first = oneAtATime(() => new Promise<boolean>((resolve) => (ran++, (finish = resolve))))
-  // Open: the second is refused without running, and says why instead of doing nothing.
+  // Open: the second is refused without running. One the app started by itself stays quiet; a tap says why
+  // instead of doing nothing.
+  assert.equal(await oneAtATime(async () => (ran++, true), false), false)
   assert.equal(toast.getToasts().length, 0)
   assert.equal(await oneAtATime(async () => (ran++, true)), false)
   assert.equal(ran, 1)

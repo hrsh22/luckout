@@ -322,8 +322,9 @@ export function ModeChip({ mode }: { mode: Purchase["mode"] }) {
 /** One line of history; open it for the code and the proof. */
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
-  // Delivered, or still on its way after the contract took its price: either way it has left the Balance.
-  const debited = p.status === "delivered" || ((p.status === "pending" || p.status === "waiting") && charged(p))
+  // Delivered, or still on its way after the contract took its price: either way it has left the Balance, but the
+  // second only for now (a card that can't be delivered returns it in full).
+  const onItsWay = (p.status === "pending" || p.status === "waiting") && charged(p)
   return (
     <li className="card overflow-hidden">
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
@@ -362,7 +363,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
                 <div><dt className="text-muted">Price</dt><dd className="font-semibold">{usd(p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usdUp(p.maxPrice ?? p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : drawPending(p) ? "Draw result pending" : "None"}</dd></div>
-                <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{debited ? usdUp(paid) : "Nothing"}</dd></div>
+                <div><dt className="text-muted">{onItsWay ? "Paid for now" : "You paid"}</dt><dd className="font-semibold">{p.status === "delivered" || onItsWay ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
               <SafetyNet p={p} />

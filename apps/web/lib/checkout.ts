@@ -8,9 +8,6 @@ import type { CartCard } from "./cart"
 import { checkoutRequest } from "./checkout-terms.ts"
 import { useSession } from "./session"
 
-// The pure parts, here too, where the Cart and the card page read them.
-export { pricedLines, totals } from "./checkout-terms.ts"
-
 /** One card of a checkout, with the key that makes it one purchase however often the checkout is sent. */
 export interface Unit {
   readonly line: CartCard

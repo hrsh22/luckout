@@ -4,6 +4,7 @@
 
 import { NewCart, NewPurchase, type Quote } from "@luckout/api"
 import { DEFAULT_LIMITS } from "@luckout/api/limits"
+import type { ContractAccount } from "./session.tsx"
 
 /** What a cart quote adds up to: the prices, the Lucky extra on top, and the most any one card debits. */
 export const totals = (quotes: ReadonlyArray<Quote> | undefined) => {
@@ -52,12 +53,7 @@ export const checkoutRequest = (items: ReadonlyArray<{ readonly line: { readonly
   new NewCart({ items: items.map(({ line, key, quote }) => purchaseRequest(line, key, quote)) })
 
 /** The customer's Spending Limits as the contract keeps them (micro-USDC strings; a limit that's off is u128::MAX). */
-export interface Limits {
-  readonly per_purchase_limit: string
-  readonly daily_limit: string
-  readonly day: number
-  readonly spent_today: string
-}
+type Limits = Pick<ContractAccount, "per_purchase_limit" | "daily_limit" | "day" | "spent_today">
 
 /**
  * Whether buying `need` in all, at most `largest` for any one card, passes the Spending Limits, as the contract checks

@@ -8,15 +8,19 @@ const alice: Saved = { accountId: "alice.near", wallet: "near", expiresAt: 2_000
 const bob: Saved = { accountId: "0xb0b", wallet: "evm", expiresAt: 2_000_000_000_000 }
 
 test("a saved session comes back only if the wallet is still on it, and a late answer never undoes a sign-in made meanwhile", () => {
-  assert.equal(restoreOutcome(alice, alice, false, "alice.near"), "restore")
-  assert.equal(restoreOutcome(alice, alice, false, "carol.near"), "end", "the wallet moved to another account")
-  assert.equal(restoreOutcome(alice, alice, false, undefined), "end", "the wallet is gone, or couldn't be asked")
+  const idle = { signedIn: false, signingIn: false }
+  assert.equal(restoreOutcome({ saved: alice, now: alice, walletAccount: "alice.near", ...idle }), "restore")
+  assert.equal(restoreOutcome({ saved: alice, now: alice, walletAccount: "carol.near", ...idle }), "end", "the wallet moved to another account")
+  assert.equal(restoreOutcome({ saved: alice, now: alice, walletAccount: undefined, ...idle }), "end", "the wallet is gone, or couldn't be asked")
   // The NEAR connector answered after 8 s, and the customer had signed in with another wallet by then.
-  assert.equal(restoreOutcome(alice, bob, false, "alice.near"), "keep", "Bob's newer session is neither replaced nor forgotten")
-  assert.equal(restoreOutcome(alice, alice, true, "alice.near"), "keep", "already signed in: nothing to restore")
-  assert.equal(restoreOutcome(undefined, bob, false, undefined), "keep", "nothing was saved at first, and Bob's sign-in since is kept")
-  assert.equal(restoreOutcome(alice, undefined, false, "alice.near"), "end", "signed out elsewhere meanwhile: not brought back")
-  assert.equal(restoreOutcome(undefined, undefined, false, undefined), "end")
+  assert.equal(restoreOutcome({ saved: alice, now: bob, walletAccount: "alice.near", ...idle }), "keep", "Bob's newer session is neither replaced nor forgotten")
+  assert.equal(restoreOutcome({ saved: alice, now: alice, walletAccount: "alice.near", signedIn: true, signingIn: false }), "keep", "already signed in: nothing to restore")
+  // Mid sign-in, the server may already have set the new session's cookie before it is saved here: ending the old
+  // session now would end that one.
+  assert.equal(restoreOutcome({ saved: alice, now: alice, walletAccount: "carol.near", signedIn: false, signingIn: true }), "keep", "a sign-in under way is left alone")
+  assert.equal(restoreOutcome({ saved: undefined, now: bob, walletAccount: undefined, ...idle }), "keep", "nothing was saved at first, and Bob's sign-in since is kept")
+  assert.equal(restoreOutcome({ saved: alice, now: undefined, walletAccount: "alice.near", ...idle }), "end", "signed out elsewhere meanwhile: not brought back")
+  assert.equal(restoreOutcome({ saved: undefined, now: undefined, walletAccount: undefined, ...idle }), "end")
 })
 
 test("an EVM or Solana wallet signs the contract call a NEAR wallet would send, as a NEAR Intents payload, and nothing else", () => {

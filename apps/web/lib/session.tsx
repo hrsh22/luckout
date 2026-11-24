@@ -142,6 +142,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   // never be shown to the next.
   const current = useRef<string | undefined>(undefined)
   current.current = accountId
+  // A sign-in under way, from the wallet's first prompt until it's saved and shown: see the restore below.
+  const signingIn = useRef(false)
   const wallet = session?.wallet
   const intents = wallet === "evm" || wallet === "solana"
   const qc = useQueryClient()
@@ -202,7 +204,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
     // Decided when the wallet answers, which may come after the customer has signed in again (see below).
     const settle = (id: string | undefined) => {
-      const outcome = restoreOutcome(saved, load(), current.current !== undefined, id)
+      const outcome = restoreOutcome({ saved, now: load(), walletAccount: id, signedIn: current.current !== undefined, signingIn: signingIn.current })
       if (outcome === "restore" && saved) setSession({ accountId: saved.accountId, token: nameOf(saved), wallet: saved.wallet })
       if (outcome === "end") {
         void endOnServer(saved?.accountId)
@@ -212,7 +214,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     connected.then(settle, () => settle(undefined)).finally(() => setReady(true))
     // The NEAR connector loads its wallet list from elsewhere first. If that hangs, the page must not: Sign in
     // appears anyway (an EVM or Solana wallet doesn't need it), and a late answer still restores the session above,
-    // unless the customer has signed in meanwhile.
+    // unless the customer has signed in, or started to, meanwhile.
     const waited = setTimeout(() => setReady(true), 8000)
     return () => clearTimeout(waited)
   }, [])
@@ -307,6 +309,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const signIn = async (kind: Wallet = "near") => {
     setSignInError(undefined)
     setSigning("wallet")
+    signingIn.current = true
     try {
       const s = await (kind === "evm" ? signInEvm() : kind === "solana" ? signInSolana() : signInNear())
       try {
@@ -341,6 +344,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       setSignInError(problem)
       return problem
     } finally {
+      signingIn.current = false
       setSigning(undefined)
     }
   }

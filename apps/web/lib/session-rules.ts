@@ -30,12 +30,19 @@ export const nameOf = (s: Saved) => `${s.accountId}:${s.expiresAt}`
 /**
  * What the check of the session saved at page load does once the wallet answers (`walletAccount`): restore it, end
  * it (the wallet left it behind), or keep out of the way. The answer can come late (the NEAR connector may take
- * longer than the page waits), after the customer has signed in again, perhaps with another wallet: that sign-in,
- * now saved (`now`) and signed in, must be neither replaced nor forgotten.
+ * longer than the page waits), after the customer has started signing in again, perhaps with another wallet. That
+ * sign-in must be neither replaced nor undone: once saved (`now`) or signed in, and also while it's under way
+ * (`signingIn`), since the server may already have set its cookie, which ending the old session would drop.
  */
-export const restoreOutcome = (saved: Saved | undefined, now: Saved | undefined, signedIn: boolean, walletAccount: string | undefined): "restore" | "end" | "keep" =>
-  signedIn || (now !== undefined && (saved === undefined || nameOf(now) !== nameOf(saved)))
+export const restoreOutcome = (o: {
+  saved: Saved | undefined
+  now: Saved | undefined
+  walletAccount: string | undefined
+  signedIn: boolean
+  signingIn: boolean
+}): "restore" | "end" | "keep" =>
+  o.signedIn || o.signingIn || (o.now !== undefined && (o.saved === undefined || nameOf(o.now) !== nameOf(o.saved)))
     ? "keep"
-    : saved !== undefined && now !== undefined && saved.accountId === walletAccount
+    : o.saved !== undefined && o.now !== undefined && o.saved.accountId === o.walletAccount
     ? "restore"
     : "end"

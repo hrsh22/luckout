@@ -13,8 +13,8 @@ import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
-import { pricedLines, totals, useCartQuote, useCheckout } from "@/lib/checkout"
-import { purchaseRequest, spendingCheck } from "@/lib/checkout-terms"
+import { useCartQuote, useCheckout } from "@/lib/checkout"
+import { pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
 import { Quantity } from "@/components/quantity"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
@@ -437,7 +437,7 @@ type Copies = { readonly line: { readonly keys: ReadonlyArray<string> }; readonl
  */
 export function CopiesNote({ priced: { line, normal, plays } }: { priced: Copies }) {
   const many = line.keys.length > 1
-  if (normal) return <p className="text-sm text-warn">The cashback reserve is full right now, so {many ? "some of these are" : "this one is"} bought at the normal price.</p>
+  if (normal) return <p className="text-sm text-warn">The Cashback Reserve is used up right now, so {many ? "some of these are" : "this one is"} bought at the normal price.</p>
   if (plays === undefined) return null
   return (
     <p className="text-sm text-muted">
