@@ -13,7 +13,7 @@ The Monitor alerts when a purchase reaches `stuck`, or is still unfinished after
 
 ```sh
 ssh luckout-milesvm
-psql -h 127.0.0.1 -U luckout luckout -c "SELECT id, account_id, step, error, invoice_id, pay_tx->>'hash' AS base_payment, contract_purchase_id, attempts, created_at FROM purchases WHERE step NOT IN ('settled', 'failed', 'rejected') ORDER BY created_at"
+psql -h 127.0.0.1 -U luckout luckout -c "SELECT p.id, p.checkout_id, p.step, c.step AS checkout_step, p.error, p.account_id, c.invoice_id, c.pay_tx->>'hash' AS base_payment, c.pay_tx->>'nonce' AS base_nonce, p.contract_purchase_id, c.attempts, p.created_at FROM purchases p JOIN checkouts c ON c.id = p.checkout_id WHERE p.step NOT IN ('settled', 'failed', 'rejected') ORDER BY p.created_at"
 ```
 
 Then check both sides before changing anything:
@@ -41,7 +41,16 @@ Then check both sides before changing anything:
 Restart a purchase by setting its step and clearing the backoff, for example:
 
 ```sql
-UPDATE purchases SET step = 'delivery', invoice_id = '<id>', attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute' WHERE id = '<uuid>' AND step = 'stuck';
+-- The server runs checkouts, not cards: move the checkout and its cards together, in one transaction, or nothing resumes.
+-- Each card goes to its own step; the checkout to 'settle' if any card is at 'confirm' or 'fail', else to the cards' step.
+-- Credit model, with an invoice found by hand: also SET invoice_id = '<invoice>' in both statements (delivery asks
+-- Bitrefill only about the cards that carry the checkout's invoice).
+BEGIN;
+UPDATE purchases SET step = 'delivery', error = NULL, updated_at = now()
+  WHERE checkout_id = '<checkout_id>' AND step = 'stuck';
+UPDATE checkouts SET step = 'delivery', error = NULL, attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute'
+  WHERE id = '<checkout_id>' AND step = 'stuck';
+COMMIT;
 ```
 
 Never set `admit` or `ordering` by hand: those can debit or buy again. With guest checkout, never set `ordering` or `fail` while the purchase has a Base payment that hasn't failed (reverted, or lost its nonce to a mined transaction): a new invoice would be paid on top of it, or the customer refunded for a card that still arrives.
@@ -131,7 +140,11 @@ To restore a broken or lost database (`<db>` and `<role>` are the site's, as in 
 4. **Keep the site's `.env` as it is.** Redemption Data, Checkout Emails and Bitrefill logins are sealed with its `REDEMPTION_KEY`: a dump restored under another key can't be read, so the key's backup matters as much as the dump. The database also records its network and contract, so only this site's server starts on it.
 5. **Park what could buy again.** Once the server starts it resumes every open purchase, and one restored at `waiting`, `admit`, `ordering`, `restock` or `pay` may have been bought and paid for after the dump: the contract hands back the existing purchase for an order id it has seen, and the server then orders and pays a new invoice. Park those first, as the site user:
    ```sh
-   psql -h 127.0.0.1 -U <role> -d <db> -c "UPDATE purchases SET step = 'stuck', error = 'Restored from a dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock', 'pay')"
+   # The server resumes checkouts, not cards: both are parked, in one transaction, so a parked checkout is never
+   # admitted, ordered or paid again (and Retry now refuses it). A dump from before migration 0025 has no checkouts
+   # table, so this errors and parks nothing: run only its first UPDATE (purchases), and 0025 carries `stuck` over
+   # to the checkouts it makes when the server starts.
+   psql -h 127.0.0.1 -U <role> -d <db> -v ON_ERROR_STOP=1 -c "UPDATE purchases SET step = 'stuck', error = 'Restored from a dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock', 'pay'); UPDATE checkouts SET step = 'stuck', error = 'Restored from a dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock', 'pay')"
    ```
    Those at `delivery`, `confirm` or `fail` are safe to resume: they only ask Bitrefill about their own invoice, or settle on chain, where the contract closes a purchase only once. Check the parked ones like the purchases in the last step.
 6. **Start it:** `pm2 start luckout-api`. It runs any migration newer than the dump; `/health` should answer 204.

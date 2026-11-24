@@ -1,6 +1,13 @@
+import { Effect, Layer } from "effect"
+import { HttpRouter } from "effect/http"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { drawEvent, respond, type Tool, ToolError } from "./Mcp.ts"
+import { Bitrefill } from "./Bitrefill.ts"
+import { drawEvent, McpRoute, respond, type Tool, ToolError } from "./Mcp.ts"
+import { Near } from "./Near.ts"
+import { Purchases } from "./Purchases.ts"
+import { Telegram } from "./Telegram.ts"
+import { fakeBitrefill, fakeNear } from "./testing.ts"
 
 const tools: Array<Tool> = [
   { name: "echo", description: "", inputSchema: { type: "object" }, run: async (args) => args },
@@ -48,4 +55,40 @@ test("only our contract's successful receipts can carry a Draw", () => {
   assert.equal(drawEvent([receipt("evil.near"), receipt("app.luckout.near")], "app.luckout.near")?.purchase_id, 10)
   assert.equal(drawEvent([receipt("evil.near")], "app.luckout.near"), undefined)
   assert.equal(drawEvent([receipt("app.luckout.near", { Failure: {} })], "app.luckout.near"), undefined)
+})
+
+test("verify_draw tells a transaction NEAR has no record of from NEAR not answering", async () => {
+  const realFetch = globalThis.fetch
+  // The archival node, faked: whatever `archival` answers.
+  let archival = () => new Response("")
+  globalThis.fetch = (async () => archival()) as typeof fetch
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    McpRoute.pipe(Layer.provide([
+      Layer.succeed(Bitrefill, fakeBitrefill()),
+      Layer.succeed(Near, fakeNear({ view: <A>() => Effect.succeed({ operator: "server.test" } as A) })),
+      Layer.succeed(Purchases, {} as Purchases["Service"]),
+      Layer.succeed(Telegram, {} as Telegram["Service"])
+    ])),
+    { disableLogger: true }
+  )
+  const verify = async () => {
+    const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "verify_draw", arguments: { tx_hash: "4HWu4u4VAKfZZgezdYYLBYctgTdTuWbFEJ5wW6xPoSV2" } } }
+    const res = await handler(new Request("http://luckout.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(call) }))
+    return (await res.json() as { result: { content: Array<{ text: string }> } }).result.content[0]!.text
+  }
+  const rpcError = (cause: string, status = 200) => () => Response.json({ jsonrpc: "2.0", id: 1, error: { name: "HANDLER_ERROR", cause: { name: cause } } }, { status })
+  try {
+    archival = rpcError("UNKNOWN_TRANSACTION")
+    assert.equal(await verify(), "NEAR has no record of that transaction.")
+    // A hash that can't be one.
+    archival = rpcError("PARSE_ERROR", 400)
+    assert.equal(await verify(), "NEAR has no record of that transaction.")
+    archival = () => new Response("Bad Gateway", { status: 502 })
+    assert.match(await verify(), /isn't answering/)
+    archival = rpcError("TIMEOUT_ERROR")
+    assert.match(await verify(), /isn't answering/)
+  } finally {
+    globalThis.fetch = realFetch
+    await dispose()
+  }
 })

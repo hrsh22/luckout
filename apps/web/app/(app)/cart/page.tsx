@@ -5,11 +5,12 @@ import { GiftCard } from "@/components/gift-card"
 import { Money } from "@/components/money"
 import { Quantity } from "@/components/quantity"
 import { Button, buttonVariants } from "@/components/ui/button"
-import { BuyButton, JumpToBuy } from "@/components/voucher-page"
+import { BuyButton, CopiesNote, JumpToBuy } from "@/components/voucher-page"
 import { errorMessage } from "@/lib/api"
 import { cartCount, cartRoom, cartUnits, removeKeys, removeLine, setMode, setQuantity, useCart } from "@/lib/cart"
-import { pricedLines, totals, useCartQuote, useCheckout } from "@/lib/checkout"
-import { cartCents, usd, usdCents, usdUp } from "@/lib/format"
+import { useCartQuote, useCheckout } from "@/lib/checkout"
+import { pricedLines, totals } from "@/lib/checkout-terms"
+import { cartCents, usdCents, usdUp } from "@/lib/format"
 import { MODES, modeSlug } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { MAX_CART } from "@luckout/api"
@@ -107,12 +108,7 @@ export default function Cart() {
                         <Trash2 size={16} />Remove
                       </button>
                     </div>
-                    {normal && <p className="text-sm text-warn">The Cashback Reserve is used up right now, so {line.keys.length > 1 ? "some of these are" : "this one is"} bought at the normal price.</p>}
-                    {!normal && plays !== undefined && (
-                      <p className="text-sm text-muted">
-                        Cashback is capped right now: {line.keys.length > 1 ? `at least ${usd(plays)} of each plays` : `${usd(plays)} of it plays`}, the rest is at the normal price.
-                      </p>
-                    )}
+                    <CopiesNote priced={{ line, normal, plays }} />
                   </div>
                 </li>
               ))}

@@ -12,7 +12,7 @@ import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
 import { Base } from "./Base.ts"
-import { Bitrefill } from "./Bitrefill.ts"
+import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
 import { edge } from "./Edge.ts"
@@ -47,7 +47,7 @@ const visitorCountry = Effect.gen(function*() {
   return seen && /^[A-Z]{2}$/.test(seen) && seen !== "XX" && seen !== "T1" ? seen : undefined
 })
 
-const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
+export const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
     const purchases = yield* Purchases
@@ -73,7 +73,9 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
           return new PopularCards({ ...(country ? { country } : {}), items })
         }),
       voucher: ({ params }) =>
-        quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))),
+        quiet(Effect.zipWith(bitrefill.voucher(params.id, { page: true }), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))).pipe(
+          Effect.mapError((e) => (e.message === NO_SUCH_VOUCHER ? new NotFound() : e))
+        ),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game)),
       quoteCart: ({ payload }) => quiet(purchases.quoteCart(payload.items))
     })
@@ -293,4 +295,5 @@ const Server = Layer.unwrap(
   })
 )
 
-Layer.launch(Server).pipe(NodeRuntime.runMain)
+// Run as `node src/main.ts` (pm2, pnpm start/dev); a test that imports the handlers starts nothing.
+if (import.meta.main) Layer.launch(Server).pipe(NodeRuntime.runMain)
