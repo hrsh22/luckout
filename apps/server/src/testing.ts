@@ -12,6 +12,7 @@ export const fakeNear = (overrides: Partial<Near["Service"]> = {}) =>
     contractId: "app.test",
     usdcId: "usdc.test",
     operatorId: "server.test",
+    operatorPublicKey: undefined,
     relayerId: undefined,
     treasuryId: undefined,
     intentsId: "intents.test",

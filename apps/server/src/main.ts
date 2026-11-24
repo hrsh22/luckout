@@ -18,7 +18,7 @@ import { DbLive } from "./Db.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { Near, Network, otherNetworkAccounts } from "./Near.ts"
+import { checkOperatorKey, Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
@@ -281,6 +281,8 @@ const Server = Layer.unwrap(
     if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
     const mixed = otherNetworkAccounts(yield* Network, process.env)
     if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)
+    // Before the database is touched, so a server refused here runs no migration and the previous release still fits it.
+    yield* checkOperatorKey.pipe(Effect.provide(Near.layer))
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)
