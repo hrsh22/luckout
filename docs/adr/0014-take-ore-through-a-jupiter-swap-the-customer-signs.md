@@ -30,4 +30,4 @@ Rejected for now:
 - **A deposit address for ORE sent from an exchange.** Luckout would hold the customer's ORE until it swaps it, and refund it when the price moves. That needs its own decision.
 - **Letting the swap deliver to 1Click without a minimum out.** The customer couldn't know the most it costs.
 
-**Amended 2026-11-25 (outcome check).** The server's simulation check also refuses a transaction that lowers any other token account the swap touches or sets a delegate or close authority on one, and it holds the priority fee within its limit.
+**Amended 2026-11-25 (outcome check).** The server's simulation check covers every token account of the wallet that the swap is given, not only its ORE and USDC: it refuses a transaction that lowers any of their balances, closes one, gives one another owner, or changes who besides the owner may spend from or close it (a delegate or a close authority). The priority fee is held within its limit (0.0002 SOL) by lowering Jupiter's priority price where needed.
