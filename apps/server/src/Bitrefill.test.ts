@@ -366,6 +366,87 @@ test("each card's code is matched to its own order: by product and amount, in ca
   assert.deepEqual(matchOrders([{ id: "a", value: "1" }], [{ product: { id: "b", value: "1" } }]), [undefined])
 })
 
+test("an order whose Redemption Data is null doesn't hold up the codes of the rest of its cart", async () => {
+  const cards = [{ id: "amazon-us", value: "10" }, { id: "steam-usa", value: "20" }, { id: "netflix-us", value: "25" }]
+  const found = await withGuestBitrefill(
+    () =>
+      toolResult({
+        invoice_status: "complete",
+        orders: [
+          { order_id: "o-1", status: "delivered", product: { id: "amazon-us", value: "10" }, redemption_info: { code: "AMZ" } },
+          { order_id: "o-2", status: "refunded", product: { id: "steam-usa", value: "20" }, redemption_info: null },
+          { order_id: "o-3", status: "delivered", product: { id: "netflix-us", value: "25" }, redemption_info: { code: "NFX" } }
+        ]
+      }),
+    () => run((b) => b.delivery("inv-1", "token-1", cards), guestEnv)
+  )
+  assert.deepEqual(found.map((d) => (d._tag === "Delivered" ? d.redemption.code : d._tag)), ["AMZ", "Failed", "NFX"])
+})
+
+test("a guest invoice is refused unless it asks for USDC on Base, to a well-formed address, a usable amount", async () => {
+  const invoice = (payment: Record<string, unknown>) => () =>
+    toolResult({
+      response: {
+        invoice_id: "inv-1",
+        invoice_access_token: "token-1",
+        payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 10_000_000, contractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", ...payment }
+      }
+    })
+  const order = (payment: Record<string, unknown>) =>
+    withGuestBitrefill(invoice(payment), () => run((b) => b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" }), guestEnv))
+  assert.deepEqual(await order({}), { _tag: "Invoiced", invoiceId: "inv-1", accessToken: "token-1", payTo: `0x${"ab".repeat(20)}`, amount: 10_000_000 })
+  const refused = async (payment: Record<string, unknown>, why: RegExp) => {
+    const o = await order(payment)
+    assert.equal(o._tag, "Refused", JSON.stringify(payment))
+    assert.match("reason" in o ? o.reason : "", why)
+  }
+  // USDC on another chain (Ethereum's), or another token on Base.
+  await refused({ contractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }, /not USDC on Base/)
+  await refused({ address: "0x1234" }, /malformed address/)
+  await refused({ address: `0x${"ab".repeat(20)} ` }, /malformed address/)
+  await refused({ altBasePrice: 0 }, /no usable amount/)
+  await refused({ altBasePrice: -5 }, /no usable amount/)
+  await refused({ altBasePrice: 1.5 }, /no usable amount/)
+  await refused({ altBasePrice: 2 ** 53 }, /no usable amount/)
+})
+
+test("a guest login Bitrefill stops taking (401) is renewed once and the call made again; a second 401 is a refusal", async () => {
+  const logins: Array<string> = []
+  const used: Array<string> = []
+  let refuseAll = false
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (String(url).endsWith("/oauth/mcp/token")) {
+      logins.push(`login-${logins.length + 1}`)
+      return Response.json({ access_token: logins.at(-1), expires_in: 21_600 })
+    }
+    // Only the MCP calls: the catalog copy that starts with the service reads elsewhere.
+    if (!String(url).endsWith("/mcp")) return new Response("Not Found", { status: 404 })
+    const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "") ?? ""
+    used.push(token)
+    // The first login stops working (as when Bitrefill ends it early); the second works, until everything is refused.
+    if (refuseAll || token === "login-1") return new Response("invalid_token", { status: 401 })
+    return toolResult({ response: { invoice_id: "inv-1", invoice_access_token: "t", payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 1, contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" } } })
+  }) as typeof fetch
+  try {
+    const r = await run((b) =>
+      Effect.gen(function*() {
+        const renewed = yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" })
+        const usedBefore = used.length
+        refuseAll = true
+        const refused = yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" })
+        return { renewed, refused, triesAfter: used.length - usedBefore }
+      }), guestEnv)
+    assert.equal(r.renewed._tag, "Invoiced")
+    assert.deepEqual(used.slice(0, 2), ["login-1", "login-2"], "the same call, once more, on a fresh login")
+    assert.equal(r.refused._tag, "Refused")
+    assert.equal(r.triesAfter, 2, "renewed once, never in a loop")
+    assert.deepEqual(logins, ["login-1", "login-2", "login-3"])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {
   // The rule itself: never sooner than the gap after the last poll allowed, and at once when it has been quiet.
   assert.equal(nextGuestPoll(0, 1_000_000), 1_000_000)
