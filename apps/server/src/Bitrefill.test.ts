@@ -364,6 +364,12 @@ test("each card's code is matched to its own order: by product and amount, in ca
   assert.deepEqual(matchOrders(cards, rest).map((o) => o?.n), [1, 2, 3])
   // An order for a card nobody asked for is left alone: that card stays pending, for a human.
   assert.deepEqual(matchOrders([{ id: "a", value: "1" }], [{ product: { id: "b", value: "1" } }]), [undefined])
+  // A card delivered in an earlier round takes the order it holds first, wherever Bitrefill lists it now, and the
+  // other copy is matched among the orders left; one whose order isn't listed takes no other.
+  const listed = [{ order_id: "o-2", product: { id: "swiggy-money-india", value: "50" } }, { order_id: "o-1", product: { id: "swiggy-money-india", value: "50" } }]
+  const sw = { id: "swiggy-money-india", value: "50" }
+  assert.deepEqual(matchOrders([{ ...sw, orderId: "o-1" }, sw], listed).map((o) => o?.order_id), ["o-1", "o-2"])
+  assert.deepEqual(matchOrders([{ ...sw, orderId: "o-9" }, sw], listed).map((o) => o?.order_id), [undefined, "o-2"])
 })
 
 test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {

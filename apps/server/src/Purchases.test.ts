@@ -3,6 +3,7 @@ import { ConfigProvider, Effect, Exit, Fiber, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type PaymentStatus, type SignedPayment } from "./Base.ts"
@@ -1453,15 +1454,14 @@ test("the same cart sent twice at once is one checkout, returned to both", async
   assert.equal(w.calls.filter((c) => c === "purchase").length, 10, "admitted once")
 })
 
-test("a card is never given an order another card of its checkout already has, however Bitrefill lists them", async () => {
-  // Two copies of one card. In the second round Bitrefill lists the orders the other way round, so the copy still on
-  // its way is matched to the order the first copy got.
+test("a copy keeps its own order and the other copy gets the other, even once Bitrefill lists them the other way for good", async () => {
+  // Two copies of one card: the first arrives at once; from the second round on Bitrefill lists the orders reversed.
   const w = world({
     real: true,
     guest: true,
     credit: 100_000_000,
     deliveries: [["Delivered", "Pending"], ["Delivered", "Pending"], ["Delivered", "Delivered"]],
-    listed: [[0, 1], [1, 0], [0, 1]]
+    listed: [[0, 1], [1, 0], [1, 0]]
   })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com")
@@ -1469,12 +1469,39 @@ test("a card is never given an order another card of its checkout already has, h
     const first = yield* Effect.forEach(placed, (p) => settled(p.id))
     yield* reconcilePass
     yield* Effect.forEach(placed, (p) => settled(p.id))
-    return { placed, first, cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
+    return { first, cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
   }))
-  assert.deepEqual(r.first, ["settled", "delivery"], "left waiting rather than given the first copy's code")
-  assert.deepEqual(r.cards.map((p) => p.redemption?.code), ["ABC-123", "ABC-124"])
-  assert.equal(w.alerts.filter((a) => a.includes(`purchase ${r.placed[1]!.id}`) && /already has/.test(a)).length, 1)
+  assert.deepEqual(r.first, ["settled", "delivery"], "the second copy still on its way, never given the first copy's order")
+  assert.deepEqual(r.cards.map((p) => p.redemption?.code), ["ABC-123", "ABC-124"], "each its own order's code")
+  assert.deepEqual(w.alerts.filter((a) => /already has/.test(a)), [], "nothing for a human to untangle")
   assert.deepEqual(w.settled, [{ delivered: [7], failed: [] }, { delivered: [8], failed: [] }])
+})
+
+test("cards sent back to delivery by the runbook's restart take their own orders again, and settle", async () => {
+  // Both cards have their codes, but NEAR doesn't take the settlement for six hours of retries.
+  const w = world({ real: true, guest: true, credit: 100_000_000, confirm: "down" })
+  const restart = /Restart a purchase[^]*?```sql\n([^]*?)```/.exec(readFileSync(new URL("../../../deploy/RUNBOOK.md", import.meta.url), "utf8"))![1]!
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(2))
+    yield* Effect.forEach(placed, (p) => settled(p.id))
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    const stuck = yield* Effect.forEach(placed, (p) => Effect.map(rowOf(p.id), (row) => row.step))
+    // NEAR is back, and an operator runs the restart block as the runbook shows it.
+    w.setConfirm("ok")
+    const [{ checkout_id }] = (yield* sql<{ checkout_id: string }>`SELECT checkout_id FROM purchases LIMIT 1`) as [{ checkout_id: string }]
+    const statements = restart.replace(/--.*$/gm, "").replaceAll("<checkout_id>", checkout_id).split(";").map((x) => x.trim())
+    yield* sql.withTransaction(Effect.forEach(statements.filter((x) => x && !/^(BEGIN|COMMIT)$/i.test(x)), (x) => sql.unsafe(x)))
+    yield* reconcilePass
+    return { stuck, after: yield* Effect.forEach(placed, (p) => settled(p.id)), cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
+  }))
+  assert.deepEqual(r.stuck, ["stuck", "stuck"])
+  assert.deepEqual(r.after, ["settled", "settled"])
+  assert.deepEqual(r.cards.map((p) => p.redemption?.code), ["ABC-123", "ABC-124"])
+  assert.deepEqual(w.alerts.filter((a) => /already has/.test(a)), [], "a card may always take the order it already holds")
+  assert.equal(w.paid.length, 1, "never paid again")
 })
 
 test("a card whose price rose since it was confirmed is refused before anything is signed; a drop buys at the lower price", async () => {

@@ -248,7 +248,9 @@ const admittedAt = (co: CheckoutRow, cards: ReadonlyArray<Row>) => {
 const overdue = (co: CheckoutRow, cards: ReadonlyArray<Row>, waitMinutes: number) =>
   Date.now() - time(co.created_at) > waitMinutes * 60_000 || Date.now() > admittedAt(co, cards) + DAY_MS - RECLAIM_MARGIN_MS
 const total = (cards: ReadonlyArray<Row>) => cards.reduce((s, c) => s + Number(c.reference_price), 0)
-const cardsOf = (cards: ReadonlyArray<Row>): Array<Card> => cards.map((c) => ({ id: c.voucher_id, value: c.package_value }))
+/** Each card as Bitrefill is asked about it; one delivered before carries the order it holds (matchOrders). */
+const cardsOf = (cards: ReadonlyArray<Row>): Array<Card> =>
+  cards.map((c) => ({ id: c.voucher_id, value: c.package_value, ...(c.order_id ? { orderId: c.order_id } : {}) }))
 
 /**
  * A Lucky Buy delivered onchain whose draw event we never saw (say, the customer re-ran the Draw):
@@ -602,22 +604,20 @@ export class Purchases extends Context.Service<Purchases, {
               const each: Array<readonly [Row, Record<string, unknown> & { step: Step }]> = []
               const undelivered: Array<string> = []
               const blank: Array<string> = []
-              // Each card keeps the order it was delivered from. One matched to an order another card of the checkout
-              // already holds (Bitrefill listed the orders in another order this round) waits as still on its way, so
-              // a code never goes to two cards.
-              // ponytail: a card Bitrefill keeps listing out of place waits until the retries run out, for a human;
-              // re-match it to an order no card holds if that's ever seen.
-              const held = new Set(invoiced.flatMap((c) => (c.order_id ? [c.order_id] : [])))
+              // Each card keeps the order it was delivered from, and is asked about with it, so it takes that order again
+              // however Bitrefill lists them (matchOrders). Should a card still come back with an order another card of
+              // the checkout holds, it waits as still on its way: a code never goes to two cards. Its own it may always take.
+              const holder = new Map(invoiced.flatMap((c) => (c.order_id ? [[c.order_id, c.id] as const] : [])))
               const misplaced: Array<string> = []
               for (const [i, c] of invoiced.entries()) {
                 const d = found[i]!
                 if (c.step !== "delivery") continue
-                if (d._tag === "Delivered" && held.has(d.orderId)) {
+                if (d._tag === "Delivered" && (holder.get(d.orderId) ?? c.id) !== c.id) {
                   misplaced.push(`purchase ${c.id} (order ${d.orderId})`)
                   continue
                 }
                 if (d._tag === "Delivered") {
-                  held.add(d.orderId)
+                  holder.set(d.orderId, c.id)
                   each.push([c, { step: "confirm", redemption: seal(c.id, d.redemption), use_by: useByOf(d.redemption), order_id: d.orderId }])
                   const shown = redemptionFields(d.redemption)
                   if (shown.secrets.length === 0 && !shown.link) blank.push(`purchase ${c.id}`)
