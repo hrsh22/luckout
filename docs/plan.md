@@ -1,5 +1,7 @@
 # Luckout build plan
 
+> Historical: the hackathon build plan as of 14 November 2026. For how Luckout works today, read the [README](../README.md).
+
 **Goal:** win the NEAR Hackathon. Development ends **14 Nov 2026, 23:59 UTC**; results by 18 Nov.
 **Team:** Rishikesh and Claude.
 **Pitch deck:** https://claude.ai/artifact/2kQWqUsQnR9KLU2h44qvG8 (private until shared).
