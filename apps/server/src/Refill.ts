@@ -770,9 +770,12 @@ export class Refill extends Context.Service<Refill, {
           // Today's limit held it below what waiting purchases need: said as it starts, not once it lands, when the
           // next refill would only find the limit used up.
           const need = c.waiting.total - free
+          // The limit to suggest leaves room for the rest, and for at least the smallest refill: a second refill for
+          // less is never sent.
+          const enough = cents(s.dailyRefill - left + amount + Math.max(need - amount, MIN_REFILL))
           const short = limit === left && need > amount
             ? `Today's limit of ${usd(s.dailyRefill)} holds this refill to ${usd(amount)}, ${usd(need - amount)} short of what waiting purchases need. ` +
-              `Raise "Refill at most, per day" in ${section} → Settings to at least ${usd(cents(s.dailyRefill - left + need))}, and a second refill covers the rest as soon as this one lands.`
+              `Raise "Refill at most, per day" in ${section} → Settings to at least ${usd(enough)}, and a second refill covers the rest as soon as this one lands.`
             : undefined
           return { amount, why: c.waiting.total > 0 ? "waiting" : "target", short }
         })

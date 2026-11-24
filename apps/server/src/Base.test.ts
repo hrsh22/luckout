@@ -1,4 +1,4 @@
-import { Clock, ConfigProvider, Effect, Fiber, Layer } from "effect"
+import { Clock, ConfigProvider, Deferred, Effect, Fiber, Layer } from "effect"
 import { TestClock } from "effect/testing"
 import { baseEncode } from "near-api-js"
 import assert from "node:assert/strict"
@@ -9,7 +9,6 @@ import { decodeFunctionData, erc20Abi, type Hex, parseTransaction, recoverTransa
 import { privateKeyToAccount, sign } from "viem/accounts"
 import { Alerts } from "./Alerts.ts"
 import { Base, BASE_USDC, GAS_RESERVE, type SignedPayment } from "./Base.ts"
-import { BASE_GAS_ALERT } from "./Monitor.ts"
 import { Near, type Outcome } from "./Near.ts"
 import { fakeNear } from "./testing.ts"
 
@@ -57,7 +56,9 @@ interface Chain {
 
 const world = async <A>(
   chain: Chain,
-  body: (w: { sent: Array<Hex>; signed: () => number; log: Array<string>; alerts: Array<string> }) => Effect.Effect<A, unknown, Base>
+  body: (w: { sent: Array<Hex>; signed: () => number; log: Array<string>; alerts: Array<string> }) => Effect.Effect<A, unknown, Base>,
+  /** How delivering an admin alert behaves before it's recorded (Telegram can be slow); at once when left out. */
+  deliver: Effect.Effect<void> = Effect.void
 ) => {
   const sent: Array<Hex> = []
   const log: Array<string> = []
@@ -125,7 +126,7 @@ const world = async <A>(
   })
   const layer = Base.layer.pipe(
     Layer.provide(Layer.succeed(Near, near)),
-    Layer.provide(Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))),
+    Layer.provide(Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.andThen(deliver, Effect.sync(() => void alerts.push(t))), customer: () => Effect.succeed(true) }))),
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({
       env: { NEAR_NETWORK: "mainnet", BASE_RPC_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
     })))
@@ -177,16 +178,14 @@ test("a payment may pay far more per gas than today's fee, so a fee spike can't 
   const fees = (baseFee: bigint) =>
     world({ pending: 7, latest: 7, baseFee, receipt: (hash) => receipt(hash) }, (w) =>
       Effect.map(overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, null, () => Effect.void, NO_DEADLINE))), () => parseTransaction(w.sent[0]!)))
-  // Base's usual fee, about 0.01 gwei: the ceiling is 0.5 gwei, fifty times that, at no cost (only base fee and tip are paid).
-  const quiet = await fees(10_000_000n)
+  // Base's minimum base fee, 0.005 gwei: the ceiling is 0.5 gwei, at no cost (only the base fee and the tip are paid).
+  const quiet = await fees(5_000_000n)
   assert.equal(quiet.maxFeePerGas, 500_000_000n)
   assert.equal(quiet.maxPriorityFeePerGas, 1n, "the tip is today's")
   // Already at 1 gwei: twice viem's estimate (1.2 × the base fee, plus the tip), above the ceiling.
   assert.equal((await fees(1_000_000_000n)).maxFeePerGas, 2_400_000_002n)
-  // The node takes a payment only from a wallet holding its gas limit at that ceiling: 0.00005 ETH. The Monitor's
-  // low-ETH alert comes while the wallet still holds two of those.
+  // The node takes a payment only from a wallet holding its gas limit at that ceiling: 0.00005 ETH.
   assert.equal(GAS_RESERVE, 50_000_000_000_000n)
-  assert.ok(BASE_GAS_ALERT >= 2n * GAS_RESERVE)
 })
 
 test("a saved payment is sent again as the same bytes and never signed again while its nonce is still its own", async () => {
@@ -268,6 +267,32 @@ test("a saved payment is replaced only when its nonce was taken, its receipt sta
   assert.equal(s.status, "success")
   assert.equal(s.resigned, 0)
   assert.equal(s.sent, 1)
+})
+
+test("a slow alert about a payment signed again never holds the wallet: the next payment goes out meanwhile", async () => {
+  // Telegram doesn't answer until the test lets it.
+  const telegram = Deferred.makeUnsafe<void>()
+  let alerting = false
+  const lost: Chain = { pending: 8, latest: 8, sendError: "nonce too low", receipt: () => undefined, known: () => false }
+  const r = await world(lost, (w) =>
+    Effect.gen(function*() {
+      const saved = yield* savedPayment(7)
+      lost.receipt = (hash) => (hash === saved.hash ? undefined : receipt(hash))
+      const again = yield* Effect.forkChild(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.void, NO_DEADLINE)))
+      // The saved payment is watched for half a minute before it's signed again and the admin told.
+      for (let i = 0; i < 200 && !alerting; i++) {
+        yield* Effect.promise(() => new Promise((done) => setTimeout(done, 10)))
+        yield* TestClock.adjust("2 seconds")
+      }
+      // Another purchase pays while that alert is still on its way.
+      const next = yield* Effect.forkChild(Base.use((b) => b.pay(BITREFILL, 5_000_000, null, () => Effect.void, NO_DEADLINE)))
+      for (let i = 0; i < 100 && next.pollUnsafe() === undefined; i++) yield* Effect.promise(() => new Promise((done) => setTimeout(done, 10)))
+      const nextDone = next.pollUnsafe() !== undefined
+      yield* Deferred.succeed(telegram, undefined)
+      return { nextDone, next: yield* Fiber.join(next), again: yield* Fiber.join(again), sent: w.sent.length, alerts: w.alerts }
+    }), Effect.andThen(Effect.sync(() => void (alerting = true)), Deferred.await(telegram)))
+  assert.ok(r.nextDone, "the next payment didn't wait for Telegram")
+  assert.deepEqual([r.next, r.again, r.sent, r.alerts.length], ["success", "success", 3, 1], "sent: the old payment, its replacement, the next one")
 })
 
 test("a saved payment whose nonce is still its own is never signed again, even when no receipt shows up", async () => {

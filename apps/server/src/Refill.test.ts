@@ -1130,6 +1130,35 @@ test("a refill that today's limit holds below what waiting purchases need says s
   )
 })
 
+test("a daily limit short by less than the smallest refill suggests one that lets the next refill go through", async () => {
+  // A $305 card waiting and $300 a day: the first refill leaves it $5 short, but a $5 refill is too small to send.
+  const w = world({ guest: true, walletUsdc: 0, treasuryUsdc: 0, proceeds: 1_000_000_000, cap: 1_000_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const credit = yield* Credit
+    const refill = yield* Refill
+    yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), dailyRefill: 300_000_000 }), "boss.testnet")
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, max_debit, step)
+               VALUES ((SELECT id FROM co), 'big.test', 'k1', 'amazon-us', 'Amazon', '305', 305000000, 305000000, 'waiting')`
+    yield* credit.refresh
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [first] = yield* sql<{ id: string }>`SELECT id FROM refills`
+    const landed = yield* drive(first!.id)
+    // The admin raises the limit to what the alert suggested.
+    const suggested = w.alerts.map((a) => /to at least \$(\d+)\.(\d\d)/.exec(a)).find((m) => m)
+    yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), dailyRefill: Number(suggested![1]) * 1_000_000 + Number(suggested![2]) * 10_000 }), "boss.testnet")
+    yield* refill.kick
+    yield* Effect.sleep("100 millis")
+    const [second] = yield* sql<{ amount: string }>`SELECT amount::text AS amount FROM refills WHERE id <> ${first!.id}`
+    return { landed: landed.step, suggested: suggested![0], second: second ? Number(second.amount) : 0 }
+  }))
+  assert.equal(r.landed, "done", "the first refill brought $300")
+  assert.equal(r.suggested, "to at least $310.00", "room for the smallest refill, not just the $5 missing")
+  assert.ok(w.alerts.some((a) => a.includes("$5.00 short of what waiting purchases need")), w.alerts.join("\n"))
+  assert.equal(r.second, MIN_REFILL, "the second refill goes through")
+})
+
 test("with guest checkout, a purchase waiting while the Base Float covers it raises no alert", async () => {
   const w = world({ guest: true, walletUsdc: 450_000_000, treasuryUsdc: 50_000_000 })
   await w.run(Effect.gen(function*() {
