@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { dollars, limitsText, safeLink, tokenAmount, toMicro, toYocto, typedAmount, usd, usdDown, usdUp } from "./format.ts"
+import { cartCents, centsUp, dollars, limitsText, receivedAmount, safeLink, shownOutcomes, tokenAmount, toMicro, toYocto, typedAmount, usd, usdDown, usdUp } from "./format.ts"
+import { type ModeInfo, MODES, pricedOutcomes, simpleQuote } from "./modes.ts"
 
 test("token amounts read at a sensible precision, rounded the safe way", () => {
   assert.equal(tokenAmount("1.0663783", "USDC", "up"), "1.07", "what you send: never less than leaves the wallet")
@@ -96,4 +97,97 @@ test("NEAR typed by an admin becomes exact yoctoNEAR, and anything else is refus
   assert.equal(toYocto("0.0000000000000000000000001"), undefined)
   for (const bad of ["", ".5", "1,5", "1.2.3", "-1", "abc"]) assert.equal(toYocto(bad), undefined, bad)
   assert.equal(toYocto("12345678901234567890"), 12345678901234567890n * 10n ** 24n, "no floating point, however large")
+})
+
+const [, lite, classic, jackpot] = MODES as [ModeInfo, ModeInfo, ModeInfo, ModeInfo]
+
+test("cents round up with integers only, like every price", () => {
+  assert.equal(centsUp(5_520_001), 553)
+  assert.equal(centsUp(5_520_000), 552)
+  assert.equal(centsUp(1), 1)
+  assert.equal(centsUp(0), 0)
+  assert.equal(centsUp(Number.MAX_SAFE_INTEGER), 900_719_925_475, "no floating point, however large")
+})
+
+test("the outcome list adds up, never promises more Cashback than comes back, and rows that read the same are one", () => {
+  // Jackpot on a $57.56 card while the Cashback Cap ($0.059999) lets only cents of it play: every exact amount has a
+  // fraction of a cent. Shown each on its own, two rows read "you pay $57.56" with different Cashback.
+  const q = simpleQuote(jackpot, 57_560_000, { free: 1_000_000_000, max_cashback: 59_999 })
+  const rows = shownOutcomes(q.maxPrice, pricedOutcomes(jackpot, q))
+  const now = centsUp(q.maxPrice)
+  assert.equal(now, 5_758, "pay now: $57.58")
+  for (const r of rows) assert.equal(now - r.cashback, r.price, `${now} - ${r.cashback} is ${r.price}`)
+  assert.equal(rows.reduce((s, r) => s + r.chanceBps, 0), 10_000, "merged rows keep every chance")
+  assert.deepEqual(rows.map((r) => [r.price, r.cashback, r.chanceBps]), [[5_758, 0, 4_400], [5_756, 2, 4_600], [5_753, 5, 1_000]], "$0.059999 back reads $0.05")
+
+  // Lite on a $0.56 card, the same way: 10% back is $0.006, under a cent, so it reads as no Cashback.
+  const l = simpleQuote(lite, 560_000, { free: 1_000_000_000, max_cashback: 59_999 })
+  assert.deepEqual(shownOutcomes(l.maxPrice, pricedOutcomes(lite, l)).map((r) => [r.price, r.cashback, r.chanceBps]), [[57, 0, 9_500], [56, 1, 300], [55, 2, 100], [52, 5, 100]])
+})
+
+test("100% off keeps its own row at no price, whatever the cents of what was paid", () => {
+  // Lite on a $0.56 card with the whole price playing: pay $0.616 now (shown $0.62), all of it back.
+  const q = simpleQuote(lite, 560_000, { free: 1_000_000_000_000, max_cashback: 1_000_000_000_000 })
+  const free = shownOutcomes(q.maxPrice, pricedOutcomes(lite, q)).at(-1)!
+  assert.deepEqual([free.free, free.price, free.cashback], [true, 0, 61], "the Cashback itself still rounds down")
+})
+
+test("a whole-price outcome list in whole cents: one row per slab, its percentage kept", () => {
+  const q = simpleQuote(classic, 20_000_000, { free: 1_000_000_000_000, max_cashback: 1_000_000_000_000 })
+  assert.deepEqual(shownOutcomes(q.maxPrice, pricedOutcomes(classic, q)).map((r) => [r.price, r.cashback, r.pct, r.samePct, r.chanceBps]), [
+    [2_400, 0, 0, true, 6_000],
+    [1_920, 480, 20, true, 2_400],
+    [1_680, 720, 30, true, 700],
+    [1_440, 960, 40, true, 400],
+    [1_200, 1_200, 50, true, 300],
+    [0, 2_400, 100, true, 200]
+  ])
+})
+
+test("whatever the price and reserve, no shown price is below the real one and no shown Cashback above it", () => {
+  for (let i = 0; i < 5_000; i++) {
+    const m = [lite, classic, jackpot][i % 3]!
+    const reference = 1 + Math.floor(Math.random() * 200_000_000)
+    const reserve = { free: Math.floor(Math.random() * 2_000_000_000), max_cashback: Math.floor(Math.random() * (i % 2 ? 100_000 : 60_000_000)) }
+    const q = simpleQuote(m, reference, reserve)
+    const outcomes = pricedOutcomes(m, q)
+    const rows = shownOutcomes(q.maxPrice, outcomes)
+    const now = centsUp(q.maxPrice)
+    const at = `${m.name} ${reference} ${JSON.stringify(reserve)}`
+    assert.equal(new Set(rows.map((r) => r.price)).size, rows.length, `no two rows read the same: ${at}`)
+    assert.equal(rows.reduce((s, r) => s + r.chanceBps, 0), 10_000, at)
+    for (const r of rows) if (!r.free) assert.equal(now - r.cashback, r.price, `adds up: ${at}`)
+    for (const o of outcomes) {
+      const back = q.maxPrice - o.price
+      const r = rows.find((x) => (o.price === 0 ? x.free : !x.free && x.price === now - Math.floor(back / 10_000)))
+      assert.ok(r, `every outcome has its row: ${at}`)
+      assert.ok(r.price * 10_000 >= o.price, `shown price ${r.price}c not below ${o.price}: ${at}`)
+      assert.ok(r.cashback * 10_000 <= back, `shown Cashback ${r.cashback}c not above ${back}: ${at}`)
+    }
+  }
+})
+
+test("cart lines add up to the total shown, and 'each' shows only where it multiplies out", () => {
+  // From staging: 2 Lite Swiggy at $0.565, 2 Jackpot Steam at $1.5125, 1 Classic Myntra at $2.815; $6.97 in all.
+  const lines = cartCents([{ total: 1_130_000, count: 2, each: 565_000 }, { total: 3_025_000, count: 2, each: 1_512_500 }, { total: 2_815_000, count: 1 }])
+  assert.equal(lines.reduce((s, l) => s + l.cents, 0), centsUp(1_130_000 + 3_025_000 + 2_815_000), "the lines sum to the $6.97 shown")
+  assert.deepEqual(lines.map((l) => l.cents), [113, 302, 282], "each line within a cent of its exact amount")
+  assert.deepEqual(lines.map((l) => l.each), [undefined, undefined, undefined], "2 x $0.57 isn't $1.13, so no 'each'")
+
+  const even = cartCents([{ total: 1_120_000, count: 2, each: 560_000 }, { total: 2_810_000, count: 1 }])
+  assert.deepEqual(even.map((l) => [l.cents, l.each]), [[112, 56], [281, undefined]], "2 x $0.56 is $1.12: 'each' is shown")
+
+  for (let i = 0; i < 2_000; i++) {
+    const totals = Array.from({ length: 1 + (i % 15) }, () => Math.floor(Math.random() * 200_000_000))
+    const cents = cartCents(totals.map((total) => ({ total, count: 1 }))).map((l) => l.cents)
+    assert.equal(cents.reduce((s, c) => s + c, 0), centsUp(totals.reduce((s, t) => s + t, 0)), String(totals))
+    cents.forEach((c, j) => assert.ok(c === centsUp(totals[j]!) || c === centsUp(totals[j]!) - 1, String(totals)))
+  }
+})
+
+test("what arrives below a stablecoin's cent says so instead of reading 0.00", () => {
+  assert.equal(receivedAmount("0.007697", "USDC"), "under 0.01")
+  assert.equal(receivedAmount("0.997398", "USDC"), "0.99", "never more than arrives")
+  assert.equal(receivedAmount("0.000530123456789", "ETH"), "0.000530123")
+  assert.equal(receivedAmount("0", "USDC"), "0")
 })

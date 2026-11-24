@@ -16,10 +16,10 @@ import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
 import { useCartQuote, useCheckout } from "@/lib/checkout"
 import { pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
 import { Quantity } from "@/components/quantity"
-import { api, errorMessage, TimedOut } from "@/lib/api"
+import { api, errorMessage, isNotFound, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
-import { usd, usdUp } from "@/lib/format"
-import { modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { usd, usdDown, usdUp } from "@/lib/format"
+import { modeInfo, modeName, modeSlug, playable, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
 import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
@@ -30,7 +30,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft, CalendarClock, ChevronDown, ShoppingCart, Star, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
-import { useParams, useRouter, useSearchParams } from "next/navigation"
+import { notFound, useParams, useRouter, useSearchParams } from "next/navigation"
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react"
 
 /** Back to the results this card came from, not just the empty shop. */
@@ -76,9 +76,14 @@ function Voucher() {
   const pkg = packages.find((p) => p.value === value)
   // openingMode only returns modes this build knows, so this is never undefined.
   const info = modeInfo(mode)!
+  const reserve = useReserve()
+  // Priced at once from the same tables and reserve the contract uses. A Lucky mode that can't pay a cent of Cashback on
+  // this card right now (playable) is quoted and bought at Normal, as the Cart does, and the receipt says why.
+  const local = pkg && (info.premiumBps === 0 || reserve !== undefined) ? playable({ mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) }) : undefined
+  const played: Mode = local?.mode ?? mode
   const [round, setRound] = useState(0)
   // A fresh key per choice: double clicks and retries return the same purchase instead of buying twice.
-  const idempotencyKey = useMemo(() => crypto.randomUUID(), [id, value, modeSlug(mode), round]) // eslint-disable-line react-hooks/exhaustive-deps
+  const idempotencyKey = useMemo(() => crypto.randomUUID(), [id, value, modeSlug(mode), modeSlug(played), round]) // eslint-disable-line react-hooks/exhaustive-deps
   const buy = useMutation({
     mutationFn: async (q: Quote) => {
       // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice
@@ -111,13 +116,17 @@ function Voucher() {
   const copies = card && many ? pricedLines([{ ...card, keys }], cartQuote)[0] : undefined
   const live = usePolledPurchase(buy.data, token)
   // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
-  const quote = useQuote(id, value, mode, !live && !buy.isPending)
-  const reserve = useReserve()
-  // Shown at once from the same tables and reserve the contract uses; the server's quote replaces it in a moment.
-  const shown: Quote | undefined = quote.data ??
-    (pkg && (info.premiumBps === 0 || reserve !== undefined) ? { mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) } : undefined)
+  const quote = useQuote(id, value, played, !live && !buy.isPending)
+  // The server's quote replaces the local one in a moment, under the same rule (its reserve may be fresher).
+  const served = quote.data && playable(quote.data)
+  const shown: Quote | undefined = served ?? local
+  /** The mode asked for can't play on this card right now: this purchase is Normal, and the receipt says so. */
+  const fellBack = info.premiumBps > 0 && shown?.mode === "normal"
+  const shownInfo = fellBack ? modeInfo("normal")! : info
   const panel = useRef<HTMLElement>(null)
 
+  // A card id Bitrefill doesn't sell (a mistyped or old link) is the not-found page; an outage gets "try again" below.
+  if (isNotFound(voucher.error)) notFound()
   if (voucher.error && !look) {
     return (
       <div className="card flex flex-col items-start gap-3 p-8">
@@ -212,7 +221,7 @@ function Voucher() {
               <p className="mt-1 text-ink-soft">Pay the price, or add a little for a chance at cashback.</p>
               {unknownDefault && <p className="mt-1 text-sm text-muted">Your default mode isn't offered on this page yet, so it opens on Normal.</p>}
             </div>
-            <ModePicker value={mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
+            <ModePicker value={fellBack ? "normal" : mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
           </section>
 
           {(voucher.data?.howToRedeem || voucher.data?.terms) && (
@@ -229,16 +238,16 @@ function Voucher() {
             {live
               ? <PurchaseResult key="result" p={live} onAgain={() => (buy.reset(), setRound((r) => r + 1))} />
               : buy.isPending || checkout.isPending
-              ? <Buying key="buying" mode={mode} name={look?.name ?? ""} value={value ?? ""} count={quantity} />
+              ? <Buying key="buying" mode={shown?.mode ?? mode} name={look?.name ?? ""} value={value ?? ""} count={quantity} />
               : (
                 <motion.div key="receipt" exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.15 }}>
                   <Receipt
                     shown={shown}
                     exact={!!quote.data && (!many || !!cartQuote)}
-                    info={info}
+                    info={shownInfo}
                     count={quantity}
                     total={many ? cartQuote && totals(cartQuote).pay : undefined}
-                    copies={copies}
+                    copies={copies ?? (fellBack ? { line: { keys: [idempotencyKey] }, normal: true, plays: undefined } : undefined)}
                     error={buy.error
                       ? errorMessage(buy.error)
                       : checkout.error
@@ -291,8 +300,8 @@ function Voucher() {
                       : (
                         <BuyButton
                           need={shown.maxPrice}
-                          label={quote.data && `Buy for ${usdUp(quote.data.maxPrice)}`}
-                          onBuy={() => quote.data && buy.mutate(quote.data)}
+                          label={served && `Buy for ${usdUp(served.maxPrice)}`}
+                          onBuy={() => served && buy.mutate(served)}
                         />
                       ))}
                     {shown && card && <AddToCart card={card} quantity={quantity} />}
@@ -303,7 +312,7 @@ function Voucher() {
         </aside>
       </div>
       {shown && !live && !buy.isPending && !checkout.isPending && (
-        <JumpToBuy panel={panel} name={many ? `${quantity} × ${info.name}` : info.name} amount={many && cartQuote ? totals(cartQuote).pay : shown.maxPrice * quantity} />
+        <JumpToBuy panel={panel} name={many ? `${quantity} × ${info.name}` : shownInfo.name} amount={many && cartQuote ? totals(cartQuote).pay : shown.maxPrice * quantity} />
       )}
     </div>
   )
@@ -394,7 +403,7 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
         {differ
           ? (
             <div className="mt-2 flex flex-col gap-1">
-              <p className="text-[15px] font-semibold text-ink">{count} cards.</p>
+              {count > 1 && <p className="text-[15px] font-semibold text-ink">{count} cards.</p>}
               <CopiesNote priced={differ} />
             </div>
           )
@@ -402,7 +411,7 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
             <p className="mt-2 text-[15px] text-ink-soft">
               {count > 1 && <span className="font-semibold text-ink">{count} cards. Each: </span>}
               {lucky
-                ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
+                ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usdDown(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
                 : `${count > 1 ? "exactly" : "Exactly"} the price. No Draw, no cashback.`}
             </p>
           )}
@@ -419,7 +428,7 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
           {shown.luckyAmount < shown.referencePrice && (
             <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Cashback is capped at {usd(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
+              Cashback is capped at {usdDown(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
             </p>
           )}
         </div>

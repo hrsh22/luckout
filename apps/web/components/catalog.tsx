@@ -136,7 +136,8 @@ export function Catalog() {
               className="field !h-16 !rounded-full !pr-14 !pl-14 !text-lg shadow-card"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder="Search a brand, like Amazon or Steam"
+              // Short enough to show whole on a 360px phone.
+              placeholder="Find a brand, like Amazon"
               aria-label="Search gift cards"
             />
             {text && (

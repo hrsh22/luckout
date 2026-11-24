@@ -8,6 +8,7 @@ import { Sheet } from "@/components/ui/sheet"
 import { cartCount, cartRoom, cartUnits, clearCart, closeCart, openCart, removeLine, setQuantity, useCart, useCartDrawer } from "@/lib/cart"
 import { useCartQuote } from "@/lib/checkout"
 import { pricedLines, totals } from "@/lib/checkout-terms"
+import { cartCents } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { Dialog } from "@base-ui/react/dialog"
@@ -23,14 +24,18 @@ export function CartDrawer() {
   const quotes = useCartQuote(cartUnits(lines), open).data
   const count = cartCount(lines)
   const room = cartRoom(lines)
+  const priced = pricedLines(lines, quotes)
+  // In cents that add up to what you pay.
+  const shown = quotes ? cartCents(priced.map((l) => ({ total: l.total ?? 0, count: l.line.keys.length }))) : undefined
   return (
     <Dialog.Root open={open} onOpenChange={(o) => (o ? openCart() : closeCart())}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-40 bg-ink/35 backdrop-blur-[6px] transition-opacity duration-200 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <Dialog.Popup className="fixed inset-x-0 bottom-0 z-50 flex max-h-[88dvh] flex-col rounded-t-[2rem] bg-white shadow-pop outline-none transition-[translate] duration-300 ease-[cubic-bezier(.2,.9,.25,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full sm:inset-y-3 sm:right-3 sm:left-auto sm:max-h-none sm:w-[420px] sm:rounded-[2rem] sm:data-[ending-style]:translate-x-[110%] sm:data-[ending-style]:translate-y-0 sm:data-[starting-style]:translate-x-[110%] sm:data-[starting-style]:translate-y-0">
           <div className="mx-auto mt-3 h-1.5 w-10 shrink-0 rounded-full bg-line sm:hidden" aria-hidden="true" />
-          <div className="flex items-center justify-between gap-4 px-6 pt-4 sm:pt-6">
-            <Dialog.Title className="font-display text-[28px] leading-tight font-extrabold">
+          {/* One line on a 390px phone: the title, its count and Clear cart don't wrap. */}
+          <div className="flex items-center justify-between gap-2 px-6 pt-4 sm:gap-4 sm:pt-6">
+            <Dialog.Title className="font-display text-2xl leading-tight font-extrabold whitespace-nowrap sm:text-[28px]">
               Your cart{count > 0 && <span className="ml-2 align-middle text-base font-semibold text-muted">{count} {count === 1 ? "card" : "cards"}</span>}
             </Dialog.Title>
             {count > 0 && <ClearCart className="ml-auto" />}
@@ -49,7 +54,7 @@ export function CartDrawer() {
             : (
               <>
                 <ul className="scroll-soft mt-4 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3">
-                  {pricedLines(lines, quotes).map(({ line, total }) => (
+                  {priced.map(({ line }, i) => (
                     <li key={line.id} className={`flex items-center gap-3 rounded-3xl p-3 transition-colors ${line.id === justAdded ? "bg-gold-soft/60" : ""}`}>
                       <GiftCard v={line} className="w-16 shrink-0" notch={5} />
                       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -62,7 +67,7 @@ export function CartDrawer() {
                         <Quantity size="sm" className="self-start" label={`Quantity of ${line.name} ${line.value}`} value={line.keys.length} max={line.keys.length + room} onChange={(n) => setQuantity(line.id, n)} />
                       </div>
                       <div className="flex flex-col items-end gap-2">
-                        <p className="font-semibold tabular-nums">{total === undefined ? <span className="skeleton block h-5 w-12 rounded-full" /> : <Money micro={total} up />}</p>
+                        <p className="font-semibold tabular-nums">{shown ? <Money micro={shown[i]!.cents * 10_000} up /> : <span className="skeleton block h-5 w-12 rounded-full" />}</p>
                         <button type="button" onClick={() => removeLine(line.id)} aria-label={`Remove ${line.name} ${line.value}`} className="grid size-8 place-items-center rounded-full text-muted hover:bg-soft hover:text-bad">
                           <Trash2 size={16} />
                         </button>
@@ -93,7 +98,7 @@ export function ClearCart({ disabled, className = "" }: { disabled?: boolean; cl
   const count = cartCount(useCart())
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} disabled={disabled} className={`inline-flex h-10 items-center gap-1.5 rounded-full px-3 text-sm font-medium text-muted hover:bg-soft hover:text-bad disabled:opacity-45 ${className}`}>
+      <button type="button" onClick={() => setOpen(true)} disabled={disabled} className={`inline-flex h-10 items-center gap-1.5 rounded-full px-3 text-sm font-medium whitespace-nowrap text-muted hover:bg-soft hover:text-bad disabled:opacity-45 ${className}`}>
         <Trash2 size={16} />Clear cart
       </button>
       <Sheet open={open} onOpenChange={setOpen} title="Clear your cart?" description={`${count === 1 ? "The card" : `All ${count} cards`} will be taken out.`}>

@@ -200,6 +200,8 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
     }, () => {})
   }, [open, outward, token, wallet])
   const destination = assets.find((a) => a.assetId === to)
+  // A swap to another chain starts at $1: no quick pick offers less than can be sent.
+  const least = destination ? 1_000_000 : 1
 
   return (
     <Sheet
@@ -219,7 +221,7 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
           label="Amount to withdraw in USDC"
           value={amount}
           onChange={setAmount}
-          picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }]}
+          picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }].filter((p) => p.micro >= least)}
         />
         {outward && (
           <div className="flex flex-col gap-2 text-sm">
@@ -231,7 +233,7 @@ export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenCha
         <Button
           size="lg"
           loading={busy}
-          disabled={busy || !(micro > 0) || micro > balance || (!!destination && micro < 1_000_000)}
+          disabled={busy || !(micro >= least) || micro > balance}
           onClick={async () => {
             setBusy(true)
             if (await (destination ? actions.withdrawTo(micro, destination) : actions.withdraw(micro))) onOpenChange(false)

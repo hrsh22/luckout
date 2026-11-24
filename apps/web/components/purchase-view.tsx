@@ -19,6 +19,9 @@ import Link from "next/link"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
+/** "50 INR": the Face Value with its currency, when the purchase kept it (older ones didn't). */
+const faceValue = (p: Purchase) => (p.currency ? `${p.value} ${p.currency}` : p.value)
+
 /**
  * Follows a purchase until it settles, starting from what the buy returned, so the page never shows a stale
  * "in progress". A failed check is tried again at the next interval: one network error must not leave a
@@ -81,7 +84,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
           ["--notch-y" as string]: "68%"
         }}
       >
-        <p className={`pill ${refunded ? "!bg-soft" : ""}`}>{p.voucherName}, {p.value}</p>
+        <p className={`pill ${refunded ? "!bg-soft" : ""}`}>{p.voucherName}, {faceValue(p)}</p>
         <h2 className="font-display mt-4 text-5xl leading-none font-extrabold">{headline(p)}</h2>
         {p.status === "delivered" && (
           <p className="mt-2 text-[17px] opacity-85">
@@ -330,7 +333,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
         <GiftCard v={{ name: p.voucherName, image: p.image, background: p.background }} notch={6} className="h-12 w-[76px] shrink-0 rounded-xl text-[8px]" />
         <span className="min-w-0 flex-1">
-          <span className="line-clamp-2 font-semibold break-words">{p.voucherName}, {p.value}</span>
+          <span className="line-clamp-2 font-semibold break-words">{p.voucherName}, {faceValue(p)}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
             <ModeChip mode={p.mode} />
             {new Date(p.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}

@@ -10,7 +10,7 @@ import { errorMessage } from "@/lib/api"
 import { cartCount, cartRoom, cartUnits, removeKeys, removeLine, setMode, setQuantity, useCart } from "@/lib/cart"
 import { useCartQuote, useCheckout } from "@/lib/checkout"
 import { pricedLines, totals } from "@/lib/checkout-terms"
-import { usd, usdUp } from "@/lib/format"
+import { cartCents, usdCents, usdUp } from "@/lib/format"
 import { MODES, modeSlug } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { MAX_CART } from "@luckout/api"
@@ -34,6 +34,10 @@ export default function Cart() {
   const room = cartRoom(lines)
   const summary = useRef<HTMLElement>(null)
   const cards = (n: number) => `${n} ${n === 1 ? "card" : "cards"}`
+  const priced = pricedLines(lines, q)
+  // In cents that add up to what you pay now: the lines, and the summary's price and Lucky extra.
+  const shown = q ? cartCents(priced.map((l) => ({ total: l.total ?? 0, count: l.line.keys.length, each: l.each }))) : undefined
+  const [priceCents, extraCents] = cartCents([{ total: t.price, count: 1 }, { total: t.extra, count: 1 }]).map((l) => l.cents)
 
   return (
     <div className="flex flex-col gap-8">
@@ -59,7 +63,7 @@ export default function Cart() {
         : (
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start">
             <ul className="flex flex-col gap-3">
-              {pricedLines(lines, q).map(({ line, total, each, normal, plays }) => (
+              {priced.map(({ line, normal, plays }, i) => (
                 <li key={line.id} className="card flex gap-4 p-4 sm:p-5">
                   <Link href={`/shop/${encodeURIComponent(line.voucherId)}?value=${encodeURIComponent(line.value)}&mode=${modeSlug(line.mode)}`} className="w-20 shrink-0 sm:w-28">
                     <GiftCard v={line} notch={6} />
@@ -71,8 +75,8 @@ export default function Cart() {
                         <p className="mt-1 text-sm text-ink-soft">{line.value} {line.currency}</p>
                       </div>
                       <div className="text-right">
-                        <p className="font-display text-xl font-extrabold">{total === undefined ? <span className="skeleton inline-block h-6 w-16 rounded-full" /> : <Money micro={total} up />}</p>
-                        {line.keys.length > 1 && each !== undefined && <p className="text-sm whitespace-nowrap text-muted">{usdUp(each)} each</p>}
+                        <p className="font-display text-xl font-extrabold">{shown ? <Money micro={shown[i]!.cents * 10_000} up /> : <span className="skeleton inline-block h-6 w-16 rounded-full" />}</p>
+                        {shown?.[i]?.each !== undefined && <p className="text-sm whitespace-nowrap text-muted">{usdCents(shown[i]!.each!)} each</p>}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -115,12 +119,12 @@ export default function Cart() {
               <dl className="flex flex-col gap-2 text-[15px]">
                 <div className="flex justify-between gap-3">
                   <dt className="text-ink-soft">{cards(count)}</dt>
-                  <dd className="tabular-nums">{q ? usd(t.price) : <span className="skeleton inline-block h-4 w-14 rounded-full" />}</dd>
+                  <dd className="tabular-nums">{q ? usdCents(priceCents!) : <span className="skeleton inline-block h-4 w-14 rounded-full" />}</dd>
                 </div>
                 {q && t.extra > 0 && (
                   <div className="flex justify-between gap-3">
                     <dt className="text-ink-soft">For a chance at cashback</dt>
-                    <dd className="tabular-nums">+{usdUp(t.extra)}</dd>
+                    <dd className="tabular-nums">+{usdCents(extraCents!)}</dd>
                   </div>
                 )}
                 <div className="mt-2 flex items-baseline justify-between gap-3 border-t border-line pt-3">

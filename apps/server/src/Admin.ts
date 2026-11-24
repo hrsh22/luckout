@@ -209,6 +209,7 @@ export class Admin extends Context.Service<Admin, {
       const purchaseList = (accountId?: string, id?: string) =>
         sql<Row & {
           checkout_id: string
+          currency: string | null
           requested_mode: AdminPurchase["mode"] | null
           admitted: { mode: AdminPurchase["mode"]; max_price: string } | null
           reference_price: string | number
@@ -220,7 +221,7 @@ export class Admin extends Context.Service<Admin, {
           settle_tx: { hash: string } | null
           updated_at: Date | string
         }>`
-          SELECT p.id, p.checkout_id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, p.updated_at,
+          SELECT p.id, p.checkout_id, p.account_id, p.voucher_name, p.package_value, p.currency, p.step, p.error, c.attempts, p.created_at, p.updated_at,
                  p.requested_mode, p.admitted, p.reference_price, p.draw, p.invoice_id, c.pay_tx, c.pay_amount, p.admit_tx, p.settle_tx
           FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
           ${id ? sql`WHERE p.id = ${id}` : accountId ? sql`WHERE p.account_id = ${accountId}` : sql``}
@@ -236,6 +237,7 @@ export class Admin extends Context.Service<Admin, {
                 accountId: r.account_id,
                 voucherName: r.voucher_name,
                 value: r.package_value,
+                ...(r.currency ? { currency: r.currency } : {}),
                 step: r.step,
                 ...(mode ? { mode } : {}),
                 referencePrice: Number(r.reference_price),

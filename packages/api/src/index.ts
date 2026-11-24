@@ -903,6 +903,8 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   accountId: Schema.String,
   voucherName: Schema.String,
   value: Schema.String,
+  /** The currency `value` is in, as on Purchase; missing on purchases made before it was kept. */
+  currency: Schema.optional(Schema.String),
   step: Schema.String,
   mode: Schema.optional(Mode),
   referencePrice: MicroUsdc,
