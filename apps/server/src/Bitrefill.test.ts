@@ -1,9 +1,10 @@
 import { ConfigProvider, Context, Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
+import { TestClock } from "effect/testing"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, matchOrders, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, matchOrders, nextGuestPoll, NO_SUCH_VOUCHER, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -325,6 +326,111 @@ test("a card's page gets Bitrefill's pitch, steps, terms and rating", async () =
     assert.equal(swiggy.terms, "# Validity\n12 months.")
     assert.deepEqual(swiggy.rating, { value: 5, count: 132 })
     assert.equal(other.name, "other-card")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("prices on pages and in quotes: fresh while lookups are free, the last one we had when they're used up; made-up ids answer 404 for 3 a minute, then busy", async () => {
+  const looked: Array<string> = []
+  let price = "10.00"
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input))
+    // A search finds a card our catalog copy doesn't have; the copy itself can't be read, so it stays as saved below.
+    if (url.pathname === "/v2/products/search") {
+      return Response.json({ meta: {}, data: [{ id: "phone-pin", name: "Phone PIN", country_code: "US", currency: "USD", recipient_type: "none" }] })
+    }
+    if (url.pathname !== "/mcp") return new Response("", { status: 500 })
+    const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
+    looked.push(id)
+    // Bitrefill's words for a product it doesn't have.
+    if (id.startsWith("made-up")) {
+      return new Response(`data: ${JSON.stringify({ result: { isError: true, content: [{ text: `Product '${id}' was not found.` }] } })}\n`, { status: 200 })
+    }
+    return toolResult({ id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: price, payment_currency: "USD" }] })
+  }) as typeof fetch
+  const cards = Array.from({ length: 12 }, (_, i) => `card-${i}`)
+  try {
+    const r = await Effect.runPromise(
+      Effect.gen(function*() {
+        const sql = yield* SqlClient.SqlClient
+        const copy = Object.fromEntries(["amazon-us", ...cards].map((id) => [id, {}]))
+        yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('card_logos', ${JSON.stringify(copy)}::jsonb, 'server')`
+        const b = Context.get(yield* Layer.build(Bitrefill.layer), Bitrefill)
+        const usd = (v: { packages: ReadonlyArray<{ priceMicroUsdc: number }> }) => v.packages[0]?.priceMicroUsdc
+        // The card's page; a quote (what the customer confirms) asks without options, as Purchases does; then Buy.
+        const page = (id: string) => b.voucher(id, { page: true }).pipe(Effect.map(usd))
+        const quote = (id: string) => b.voucher(id).pipe(Effect.map(usd))
+        const buy = (id: string) => b.voucher(id, { purchase: true }).pipe(Effect.map(usd))
+        const refused = (id: string) => b.voucher(id, { page: true }).pipe(Effect.flip, Effect.map((e) => e.message))
+
+        // Minute 0.
+        const first = yield* page("amazon-us")
+        // Made-up ids: Bitrefill is asked about 3 a minute, from their own budget (404); the rest are busy, unasked.
+        const madeUp = yield* Effect.forEach([0, 1, 2, 3, 4], (i) => refused(`made-up-${i}`))
+        // A card a search showed counts as listed, though the copy doesn't have it.
+        yield* b.search("pin")
+        const pin = yield* page("phone-pin")
+        // So browsing still has all 12 of its lookups: amazon-us, phone-pin and ten more.
+        for (const id of cards.slice(0, 10)) yield* page(id)
+        // A card never priced can't be shown without a lookup...
+        const cold = yield* refused("card-10")
+        // ...but a purchase still gets its price: browsing can't use the last 8. A price from this minute is reused.
+        const bought = yield* buy("card-10")
+        yield* buy("card-0")
+        yield* quote("amazon-us")
+        const lookedFirst = [...looked]
+
+        // Five minutes on, an ordinary minute, and Bitrefill's price has moved. The page still shows the one we had, with
+        // no lookup; a quote and Buy each take one at most a minute old, as before.
+        yield* TestClock.adjust("5 minutes")
+        price = "10.50"
+        const later = yield* page("amazon-us")
+        const quoted = yield* quote("amazon-us")
+        const repriced = yield* buy("card-0")
+        const lookedOrdinary = looked.length
+
+        // Eleven minutes in, a busy minute, and the price has gone up again. Open pages refresh their quotes: once
+        // 8 have, the rest show the last price we had instead of failing...
+        yield* TestClock.adjust("6 minutes")
+        price = "11.00"
+        for (const id of cards.slice(1, 9)) yield* quote(id)
+        const staleQuote = yield* quote("card-9")
+        // ...and so does a page whose price is past its 10 minutes...
+        const stalePage = yield* page("phone-pin")
+        // ...while a card never priced still loads: 4 of browsing's 12 are kept for first views.
+        const firstView = yield* page("card-11")
+        // Buy prices it live, and the next quote shows that price.
+        const buying = yield* buy("card-9")
+        const after = yield* quote("card-9")
+        return { first, madeUp, pin, cold, bought, lookedFirst, later, quoted, repriced, lookedOrdinary, staleQuote, stalePage, firstView, buying, after }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(DbMemory),
+        Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(TestClock.layer())
+      )
+    )
+    assert.equal(r.first, 10_000_000)
+    assert.deepEqual(r.madeUp.slice(0, 3), [NO_SUCH_VOUCHER, NO_SUCH_VOUCHER, NO_SUCH_VOUCHER], "Bitrefill doesn't have them: the page answers 404")
+    assert.ok(r.madeUp.slice(3).every((m) => /busy/.test(m)), r.madeUp.join(" | "))
+    assert.equal(r.lookedFirst.filter((id) => id.startsWith("made-up")).length, 3, "made-up ids never cost more than their own 3")
+    assert.equal(r.pin, 10_000_000)
+    assert.match(r.cold, /busy/)
+    assert.equal(r.bought, 10_000_000)
+    assert.equal(r.lookedFirst.length, 16, "amazon-us, 3 made-up, phone-pin, 10 cards, the new card's purchase")
+    assert.equal(r.later, 10_000_000, "a page shows a price up to 10 minutes old")
+    assert.equal(r.quoted, 10_500_000, "a quote takes a price at most a minute old while lookups are free")
+    assert.equal(r.repriced, 10_500_000, "so does Buy")
+    assert.equal(r.lookedOrdinary, 18)
+    assert.equal(r.staleQuote, 10_000_000, "the last price, not an error")
+    assert.equal(r.stalePage, 10_000_000)
+    assert.equal(r.firstView, 11_000_000)
+    assert.equal(r.buying, 11_000_000)
+    assert.equal(r.after, 11_000_000)
+    assert.equal(looked.length, 18 + 8 + 1 + 1, "the 8 refreshes, the first view, the purchase")
   } finally {
     globalThis.fetch = realFetch
   }

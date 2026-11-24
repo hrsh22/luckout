@@ -1,5 +1,5 @@
 import type { DrawEvent, GameVersion } from "./draw"
-import { contractId, txEvents, view } from "./chain"
+import { contractId, NotOnChain, txEvents, view } from "./chain"
 
 /** A NEAR transaction hash: base58, 32 bytes. */
 export const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/
@@ -16,7 +16,7 @@ export async function loadDraw(tx: string, purchaseId?: number) {
   const { events, time } = await txEvents(tx, config.operator)
   const draw = events.find((e) => e.event === "draw" && (purchaseId === undefined || Number((e.data[0] as DrawEvent).purchase_id) === purchaseId))
     ?.data[0] as DrawEvent | undefined
-  if (!draw) throw new Error("This transaction has no Draw")
+  if (!draw) throw new NotOnChain("This transaction has no Draw")
   const versions = await view<Array<GameVersion>>(contractId, "get_game_versions")
   const version = versions[draw.game_version]
   if (!version) throw new Error(`Unknown Game Version ${draw.game_version}`)

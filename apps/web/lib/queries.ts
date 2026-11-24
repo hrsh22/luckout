@@ -91,8 +91,9 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     enabled: !!value && active,
     // The reserve and Bitrefill's price move: while the page is in sight the quote is renewed as it goes stale, and
     // at once on coming back to the tab, so Buy sends the terms on screen, not ones from minutes ago.
-    // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s (the server caches Bitrefill's
-    // price for a minute); refetch on the Buy click instead if RPC load ever matters.
+    // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s and one Bitrefill price lookup a
+    // minute (the server reuses a quote's price for up to a minute, or its last one, up to an hour old, while lookups
+    // are busy); refetch on the Buy click instead if RPC load ever matters.
     staleTime: 20_000,
     refetchInterval: 20_000,
     refetchOnWindowFocus: true
