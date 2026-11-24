@@ -33,3 +33,12 @@ test("a real quote is sent without asking again only when it is the price that w
   assert.equal(pricedAsShown(quote, { ...quote, symbol: "ETH", amountInFormatted: "0.006" }), false)
   assert.equal(pricedAsShown(quote, { ...quote, chain: "arb" }), false)
 })
+
+test("a swap-paid Top-Up is never sent as a transfer, and is sent without asking again only at the exact amount shown, or less", () => {
+  const ore = { symbol: "ORE", chain: "sol", contract: "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp", decimals: 11 }
+  const q = { ...quote, symbol: "ORE", chain: "sol", amountIn: "7054703313", amountInFormatted: "0.07054703313", swap: true }
+  assert.throws(() => transferFor(ore, q), /paid through a swap/, "ORE sent to 1Click's USDC deposit address would be lost")
+  assert.equal(pricedAsShown(q, q), true)
+  assert.equal(pricedAsShown(q, { ...q, amountInFormatted: "0.07" }), true, "less is fine")
+  assert.equal(pricedAsShown(q, { ...q, amountInFormatted: "0.07054703314" }), false, "any more: ask again")
+})

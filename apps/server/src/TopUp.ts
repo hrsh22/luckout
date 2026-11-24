@@ -3,6 +3,7 @@ import {
   HeldToken,
   SendBackQuote,
   type SignedIntent,
+  SwapTx,
   solanaAddress,
   TopUpAsset,
   TopUpQuote,
@@ -22,6 +23,7 @@ import { Alerts } from "./Alerts.ts"
 import { Near, Network } from "./Near.ts"
 import { echoProblem, OneClick, type QuoteRequest, type SwapDetails } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
+import { SOL_USDC_ASSET, Swap, swapAssetId, type SwapTransaction, swapTokenByMint, swapTokenOf } from "./Swap.ts"
 
 // Top-ups (ADR-0001): a NEAR Intents 1Click swap from any supported chain that lands native
 // USDC in the customer's own NEAR account; one deposit then moves it into their Balance.
@@ -38,6 +40,10 @@ import { Relay } from "./Relay.ts"
 //
 // A Solana account is named like a NEAR implicit one, so the kind of wallet comes from the session, and each swap
 // keeps the kind it was quoted for (`wallet`; rows from before it are read from the account's name).
+//
+// A token 1Click doesn't take, like ORE, is paid through a swap (ADR-0014, Swap.ts): the row is 1Click's side, USDC
+// on Solana, and its paid_* columns say what the customer's own transaction swaps into it. That transaction is built
+// for their Solana wallet when they sign in with one, or for whichever wallet scans its Solana Pay code.
 
 export const MAINNET_USDC = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
 export const NEAR_USDC_ASSET = `nep141:${MAINNET_USDC}`
@@ -45,6 +51,12 @@ const SYMBOLS = new Set(["USDC", "USDT", "ETH", "BTC", "SOL", "wNEAR"])
 const CHAINS = new Set(["eth", "arb", "base", "sol", "btc", "pol", "bsc", "near"])
 /** Chains an EVM wallet can withdraw to: its own address works on each. */
 const EVM_CHAINS = new Set(["eth", "arb", "base", "pol", "bsc"])
+/** USDC on Base: where an EVM wallet's change from a swap-paid Top-Up (ADR-0014), USDC on Solana, goes. */
+const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
+/** An EVM wallet paying through a Solana Pay code has no address on Solana: 1Click's change lands there as USDC on Solana. */
+const evmChange = (wallet: Wallet, assetId: string) => wallet === "evm" && assetId === SOL_USDC_ASSET
+/** A swap's transaction can land up to about 90 seconds after it's built: none is built closer than this to the deadline. */
+const SWAP_DEADLINE_MARGIN_MS = 2 * 60_000
 /** The chains a wallet signing through NEAR Intents has its own address on. */
 const HOME_CHAINS: Record<Wallet, ReadonlySet<string>> = { near: new Set(), evm: EVM_CHAINS, solana: new Set(["sol"]) }
 /** That wallet's address on its own chains: an EVM account is its address; a Solana account is its key in hex. */
@@ -120,8 +132,15 @@ export interface SwapRow {
   /** A send-back: the held token and all of it (base units) it takes from their NEAR Intents account. */
   readonly origin_asset: string | null
   readonly origin_amount: string | null
-  /** The customer's transfer to the deposit address, when the app sent it. */
+  /** The customer's transfer to the deposit address, when the app sent it (or we found it, for a swap-paid Top-Up). */
   readonly deposit_tx: string | null
+  /** A swap-paid Top-Up (ADR-0014): the token the customer's transaction swaps into this USDC, and exactly how much. */
+  readonly paid_symbol?: string | null
+  readonly paid_mint?: string | null
+  readonly paid_amount?: string | null
+  readonly paid_raw?: string | null
+  /** Base units of amount_in: the USDC the swap's transaction sends on to 1Click. */
+  readonly amount_in_raw?: string | null
   readonly told: ReadonlyArray<string>
   readonly created_at: Date | string
 }
@@ -165,7 +184,9 @@ const explorerOf = (depositAddress: string) => `https://explorer.near-intents.or
 export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; text: string } | undefined => {
   const phase = phaseOf(r)
   const amount = usd(Number(r.usdc))
-  const from = `${r.amount_in ? tokenAmount(r.amount_in, r.symbol ?? "", "up") : ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
+  const leg = `${r.amount_in ? tokenAmount(r.amount_in, r.symbol ?? "", "up") : ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
+  // A swap-paid Top-Up's USDC came from the customer's own swap: what they paid with is said too.
+  const from = r.paid_symbol ? `${leg}, from ${r.paid_amount} ${r.paid_symbol}` : leg
   const refundPlace = refundsToWallet(r) ? walletOn(r.chain) : "your NEAR Intents account"
   if (r.direction === "in") {
     if (phase === "incomplete") {
@@ -224,6 +245,10 @@ export class TopUp extends Context.Service<TopUp, {
   /** `wallet`: how the customer signed in (by default, read from the account's name). */
   quote(accountId: string, originAsset: string, usdc: number, dry?: boolean, wallet?: Wallet): Effect.Effect<TopUpQuote, TopUpUnavailable>
   status(accountId: string, depositAddress: string): Effect.Effect<TopUpStatus, TopUpUnavailable>
+  /** Solana wallets, a swap-paid Top-Up (ADR-0014): the transaction that pays it, for their own wallet to sign. */
+  swapTx(accountId: string, depositAddress: string, wallet?: Wallet): Effect.Effect<SwapTx, TopUpUnavailable>
+  /** Solana Pay (ADR-0014): the same transaction for whichever Solana wallet scanned the Top-Up's code, and what it shows. */
+  solanaPay(depositAddress: string, payer: string): Effect.Effect<{ readonly transaction: string; readonly message: string }, TopUpUnavailable>
   /** The app paid this Top-Up from the customer's wallet: keeps the transaction and passes it to 1Click. */
   sent(accountId: string, depositAddress: string, txHash: string): Effect.Effect<void, TopUpUnavailable>
   /** EVM and Solana wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
@@ -249,6 +274,7 @@ export class TopUp extends Context.Service<TopUp, {
       const near = yield* Near
       const relay = yield* Relay
       const alerts = yield* Alerts
+      const swaps = yield* Swap
       const mainnet = (yield* Network) === "mainnet"
       const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
       const fail = (message: string) => new TopUpUnavailable({ message })
@@ -270,11 +296,16 @@ export class TopUp extends Context.Service<TopUp, {
         ),
         Effect.mapError(unavailable)
       )
+      /** The tokens taken through a swap (ADR-0014): on Solana, never withdrawn to or sent back as. */
+      const swapAssets = swaps.tokens.pipe(Effect.map((ts) =>
+        ts.map((t) => new TopUpAsset({ assetId: swapAssetId(t), symbol: t.symbol, chain: "sol", contract: t.mint, decimals: t.decimals, price: t.price, swap: true }))
+      ))
 
       const quote = Effect.fn("TopUp.quote")(function*(accountId: string, originAsset: string, usdc: number, dry = false, wallet: Wallet = walletOf(accountId)) {
         if (!mainnet && !dry) return yield* fail("Top-ups from other chains run on mainnet. On testnet, use the test USDC faucet.")
         if (!Number.isInteger(usdc) || usdc < 1_000_000 || usdc > 2_000_000_000) return yield* fail("Top up between 1 and 2,000 USDC")
-        const asset = (yield* assets).find((t) => t.assetId === originAsset)
+        const swapToken = swapTokenOf(originAsset)
+        const asset = (yield* (swapToken ? swapAssets : assets)).find((t) => t.assetId === originAsset)
         if (!asset) return yield* fail("That token isn't supported for top-ups")
         const home = refundsToWallet({ direction: "in", account_id: accountId, chain: asset.chain, wallet })
         const deadline = refundsBegin()
@@ -282,7 +313,8 @@ export class TopUp extends Context.Service<TopUp, {
           dry,
           swapType: "EXACT_OUTPUT",
           slippageTolerance: 100,
-          originAsset,
+          // A swap-paid token reaches 1Click as USDC on Solana, from the customer's own transaction.
+          originAsset: swapToken ? SOL_USDC_ASSET : originAsset,
           destinationAsset: NEAR_USDC_ASSET,
           amount: String(usdc),
           recipient: accountId,
@@ -299,22 +331,30 @@ export class TopUp extends Context.Service<TopUp, {
         // A price check (dry) creates nothing to pay into, so it's only checked when 1Click echoes it.
         const problem = echo || !dry ? echoProblem(echo, asked) : undefined
         if (problem) return yield* fail(`${problem}. Try again.`)
+        // Swap-paid: exactly how much of the token the customer's transaction swaps for the USDC 1Click needs.
+        const spend = swapToken ? yield* swaps.size(swapToken, BigInt(q.amountIn), !dry).pipe(Effect.mapError(unavailable)) : undefined
+        const paid = swapToken && spend !== undefined
+          ? { symbol: swapToken.symbol, mint: swapToken.mint, raw: String(spend), amount: formatUnits(spend, swapToken.decimals) }
+          : undefined
         // Every Top-Up is recorded, so the customer can always see where their money is, even after leaving.
         if (!dry) {
-          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, wallet, direction, usdc, symbol, chain, amount_in, deposit_memo, deadline, time_estimate)
-                     VALUES (${q.depositAddress!}, ${accountId}, ${wallet}, 'in', ${Number(q.amountOut)}, ${asset.symbol}, ${asset.chain}, ${q.amountInFormatted},
-                             ${q.depositMemo ?? null}, ${deadline}, ${q.timeEstimate})`.pipe(Effect.orDie)
+          yield* sql`INSERT INTO intents_swaps (deposit_address, account_id, wallet, direction, usdc, symbol, chain, amount_in, amount_in_raw, deposit_memo,
+                                                deadline, time_estimate, paid_symbol, paid_mint, paid_amount, paid_raw)
+                     VALUES (${q.depositAddress!}, ${accountId}, ${wallet}, 'in', ${Number(q.amountOut)}, ${paid ? "USDC" : asset.symbol}, ${asset.chain},
+                             ${q.amountInFormatted}, ${q.amountIn}, ${q.depositMemo ?? null}, ${deadline}, ${q.timeEstimate},
+                             ${paid?.symbol ?? null}, ${paid?.mint ?? null}, ${paid?.amount ?? null}, ${paid?.raw ?? null})`.pipe(Effect.orDie)
         }
         return new TopUpQuote({
           depositAddress: q.depositAddress ?? "",
           ...(q.depositMemo ? { depositMemo: q.depositMemo } : {}),
-          amountIn: q.amountIn,
-          amountInFormatted: q.amountInFormatted,
+          amountIn: paid?.raw ?? q.amountIn,
+          amountInFormatted: paid?.amount ?? q.amountInFormatted,
           symbol: asset.symbol,
           chain: asset.chain,
           usdcOut: Number(q.amountOut),
           timeEstimateSeconds: q.timeEstimate,
-          deadline: deadline.toISOString()
+          deadline: deadline.toISOString(),
+          ...(paid ? { swap: true } : {})
         })
       })
 
@@ -392,10 +432,59 @@ export class TopUp extends Context.Service<TopUp, {
         // unpaid quotes are capped) and sends a handful of admin alerts (capped too). Check it on chain ourselves if
         // that's ever abused.
         if (!/^(0x)?[0-9a-fA-F]{64}$|^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(txHash)) return yield* fail("That isn't a transaction hash")
+        // Not for a swap-paid Top-Up: a sent swap may still fail or never land, and its customer must be able to send
+        // another. Its payment is recorded once the tracking pass finds it on chain.
         const [row] = yield* sql`UPDATE intents_swaps SET deposit_tx = ${txHash}
                                  WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction = 'in' AND deposit_tx IS NULL
+                                   AND paid_mint IS NULL
                                  RETURNING 1`.pipe(Effect.orDie)
         if (row) yield* oneClick.submitDeposit({ txHash, depositAddress })
+      })
+
+      /**
+       * The swap transactions handed out, by deposit address. A wallet asking again within seconds (a Solana Pay wallet
+       * often does) gets the same one; another wallet gets none while one may still land, so a quote is paid once even
+       * if 1Click were to close its USDC account between two payments. ponytail: in memory, one process (ADR-0006).
+       */
+      const handedOut = new Map<string, { payer: string; tx: SwapTransaction; at: number }>()
+      /** A swap-paid Top-Up's transaction for `payer`, while its quote is unpaid and open. */
+      const swapTransaction = (r: SwapRow | undefined, payer: string) =>
+        Effect.gen(function*() {
+          if (!r || r.direction !== "in" || !r.paid_mint || !r.paid_raw || !r.amount_in_raw) return yield* fail("No Top-Up is paid that way")
+          if (r.deposit_tx || (r.status !== null && r.status !== "PENDING_DEPOSIT")) return yield* fail("This Top-Up is already paid.")
+          if (!(Date.now() < (ms(r.deadline) ?? 0) - SWAP_DEADLINE_MARGIN_MS)) {
+            return yield* fail("This price has expired, or is about to. Nothing was sent: top up again for a new one.")
+          }
+          const token = swapTokenByMint(r.paid_mint)
+          if (!token) return yield* fail("That token isn't taken for top-ups any more. Nothing was sent.")
+          const now = Date.now()
+          for (const [address, h] of handedOut) if (now - h.at > 120_000) handedOut.delete(address)
+          const last = handedOut.get(r.deposit_address)
+          if (last && last.payer !== payer && now - last.at < 90_000) {
+            return yield* fail("Another wallet is paying this Top-Up right now. If that doesn't go through, try again in a minute.")
+          }
+          if (last && last.payer === payer && now - last.at < 15_000) return last.tx
+          const tx = yield* swaps.transaction({ token, payer, depositAddress: r.deposit_address, need: BigInt(r.amount_in_raw), spend: BigInt(r.paid_raw) }).pipe(
+            Effect.mapError(unavailable)
+          )
+          handedOut.set(r.deposit_address, { payer, tx, at: Date.now() })
+          return tx
+        })
+      const swapRow = (depositAddress: string) =>
+        sql<SwapRow>`SELECT * FROM intents_swaps WHERE deposit_address = ${depositAddress}`.pipe(Effect.orDie, Effect.map((rs) => rs[0]))
+
+      const swapTx = Effect.fn("TopUp.swapTx")(function*(accountId: string, depositAddress: string, wallet: Wallet = walletOf(accountId)) {
+        if (wallet !== "solana") return yield* fail("Pay from a Solana wallet: scan the code with Phantom, Solflare or Backpack.")
+        const r = yield* swapRow(depositAddress)
+        const tx = yield* swapTransaction(r?.account_id === accountId ? r : undefined, solanaAddress(accountId))
+        return new SwapTx(tx)
+      })
+
+      // Anyone holding the link may ask: it only ever builds a transaction that pays this Top-Up from their own wallet.
+      const solanaPay = Effect.fn("TopUp.solanaPay")(function*(depositAddress: string, payer: string) {
+        const r = yield* swapRow(depositAddress)
+        const tx = yield* swapTransaction(r, payer)
+        return { transaction: tx.transaction, message: `Luckout: a ${usd(Number(r!.usdc))} Top-Up for ${r!.paid_amount} ${r!.paid_symbol}` }
       })
 
       const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number, wallet: Wallet = walletOf(accountId)) {
@@ -497,6 +586,15 @@ export class TopUp extends Context.Service<TopUp, {
       // Follows one swap: 1Click's latest, the move-in when it lands, and the customer's Telegram notice, once each.
       const track = (row: SwapRow) =>
         Effect.gen(function*() {
+          // A swap-paid Top-Up may be paid by a transaction the app never hears of (a Solana Pay code, a closed tab):
+          // it's looked for on chain, so it stays in sight like one the app sent.
+          if (row.paid_mint && row.amount_in_raw && !row.deposit_tx && (row.status === null || row.status === "PENDING_DEPOSIT")) {
+            const paidBy = yield* swaps.paidBy(row.deposit_address, BigInt(row.amount_in_raw))
+            const [claimed] = paidBy
+              ? yield* sql`UPDATE intents_swaps SET deposit_tx = ${paidBy} WHERE deposit_address = ${row.deposit_address} AND deposit_tx IS NULL RETURNING 1`.pipe(Effect.orDie)
+              : []
+            if (claimed) yield* oneClick.submitDeposit({ txHash: paidBy!, depositAddress: row.deposit_address })
+          }
           const d = yield* oneClick.details(row.deposit_address).pipe(Effect.option)
           if (d._tag === "None") return
           const changed = d.value.status !== row.status
@@ -596,6 +694,7 @@ export class TopUp extends Context.Service<TopUp, {
                 symbol: r.symbol ?? "USDC",
                 chain: r.chain ?? "",
                 ...(r.amount_in ? { amountIn: r.amount_in } : {}),
+                ...(r.paid_symbol ? { paidWith: `${r.paid_amount} ${r.paid_symbol}` } : {}),
                 ...(r.amount_out ? { amountOut: r.amount_out } : {}),
                 ...(r.deposited ? { deposited: r.deposited } : {}),
                 ...(r.deposit_tx ? { depositTx: r.deposit_tx } : {}),
@@ -632,7 +731,8 @@ export class TopUp extends Context.Service<TopUp, {
             // ponytail: tokens 1Click doesn't list are skipped; nothing Luckout sends a customer is one of them.
             if (raw === 0n || !t || t.decimals === undefined) return []
             // An EVM or Solana wallet takes it as it is, on its own chain; a NEAR wallet as USDC (its NEAR USDC there: near-intents.org).
-            const sendable = mainnet && (intents ? HOME_CHAINS[wallet].has(t.blockchain) : id !== nearUsdc)
+            // An EVM wallet's change on Solana (a swap-paid Top-Up's, ADR-0014) goes to it as USDC on Base.
+            const sendable = mainnet && (intents ? HOME_CHAINS[wallet].has(t.blockchain) || evmChange(wallet, id) : id !== nearUsdc)
             return [{ assetId: id, symbol: t.symbol, chain: t.blockchain, raw, amount: formatUnits(raw, t.decimals), sendable }]
           })
         })
@@ -646,7 +746,11 @@ export class TopUp extends Context.Service<TopUp, {
       const sendBack = Effect.fn("TopUp.sendBack")(function*(accountId: string, assetId: string, wallet: Wallet = walletOf(accountId)) {
         const h = (yield* holdings(accountId, wallet).pipe(Effect.mapError(unavailable))).find((x) => x.assetId === assetId)
         if (!h?.sendable) return yield* fail("There's none of that to send to your wallet.")
-        const to = wallet !== "near" ? { asset: assetId, symbol: h.symbol, chain: h.chain } : { asset: `nep141:${near.usdcId}`, symbol: "USDC", chain: "near" }
+        const to = wallet === "near"
+          ? { asset: `nep141:${near.usdcId}`, symbol: "USDC", chain: "near" }
+          : evmChange(wallet, assetId)
+          ? { asset: BASE_USDC_ASSET, symbol: "USDC", chain: "base" }
+          : { asset: assetId, symbol: h.symbol, chain: h.chain }
         const deadline = refundsBegin()
         const asked: QuoteRequest = {
           dry: false,
@@ -682,12 +786,14 @@ export class TopUp extends Context.Service<TopUp, {
       })
 
       return TopUp.of({
-        assets,
+        assets: Effect.zipWith(assets, swapAssets, (a, b) => [...a, ...b]),
         // A price check (dry) creates nothing, so only real quotes count against the account's cap.
         quote: (accountId, originAsset, usdc, dry = false, wallet = walletOf(accountId)) =>
           dry ? quote(accountId, originAsset, usdc, true, wallet) : capped(accountId, quote(accountId, originAsset, usdc, false, wallet)),
         status,
         sent,
+        swapTx,
+        solanaPay,
         move,
         faucet,
         transfers,

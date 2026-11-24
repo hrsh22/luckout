@@ -153,6 +153,15 @@ Staging has them first. Production gets them later, in this order:
 
 Nothing else to configure: no new environment variables, Solana wallets use the same Reown project and allowed domains as EVM wallets (one AppKit modal), and their intents go through the existing relayer and its caps.
 
+## ORE Top-Ups (ADR-0014)
+
+A Solana token 1Click doesn't take (ORE) is paid through a Jupiter swap that Luckout builds and the customer's wallet signs. Two server settings:
+
+- `JUPITER_API_KEY`: a key from portal.jup.ag. Staging and production each have their own. Without one, ORE isn't offered.
+- `SOLANA_RPC_URL`: where the server simulates each swap before handing it out, and finds payments made by scanning a code. It defaults to the public `https://api.mainnet-beta.solana.com`, which is enough for staging. Production should use its own (Helius, for example). Never use Reown's: it answers `getBlockHeight` with the slot.
+
+Solana Pay wallets call `/solana-pay/<deposit address>` on the API's own domain. nginx already passes every path to the server, so nothing changes there. No contract change. Migration 0026 adds nullable `paid_*` columns to `intents_swaps`, so going back to an earlier commit stays safe.
+
 When something goes wrong with a purchase, see [RUNBOOK.md](RUNBOOK.md).
 
 ## Logs

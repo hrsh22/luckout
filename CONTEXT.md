@@ -33,7 +33,7 @@ The customer's USDC held by the contract on their behalf; purchases debit it, Ca
 _Avoid_: Wallet, account credit, house funds
 
 **Top-Up**:
-Moving value from any supported chain into a customer's Balance through a NEAR Intents swap followed by a deposit.
+Moving value from any supported chain into a customer's Balance through a NEAR Intents swap followed by a deposit. A token NEAR Intents doesn't take (ORE) first goes through a Jupiter swap, in a transaction the customer's own Solana wallet signs (ADR-0014).
 _Avoid_: Payment, bridge
 
 **Intents Account**:

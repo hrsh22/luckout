@@ -2,7 +2,7 @@
 
 import { AmountField } from "@/components/amount-field"
 import { chainLabel, sortAssets, TokenPicker } from "@/components/token-picker"
-import { DepositAddress, OnItsWay, stepOf, TopUpSteps, topUpAmount, topUpPicks, TopUpPreview, useTopUpPreview } from "@/components/top-up"
+import { DepositAddress, OnItsWay, SolanaPayCode, stepOf, TopUpSteps, topUpAmount, topUpPicks, TopUpPreview, useTopUpPreview } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
@@ -12,7 +12,7 @@ import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { pendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
-import { sendFromSolana } from "@/lib/solana"
+import { sendFromSolana, sendSolanaTransaction } from "@/lib/solana"
 import { pricedAsShown, transferFor } from "@/lib/top-up-quote"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
@@ -25,6 +25,9 @@ const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
  * An EVM or Solana wallet's Top-Up (ADR-0011): 1Click swaps the token into exact USDC in the customer's own NEAR
  * Intents account, and the intent they sign before sending moves it into Luckout once it lands. The
  * transfer on their own chain is the only fee they pay.
+ *
+ * A token 1Click doesn't take (ORE, ADR-0014) is paid through a swap Luckout builds: a Solana wallet signs it here,
+ * and any wallet can pay it by scanning its Solana Pay code instead.
  */
 export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
   const { accountId, token, refresh, signIntent, wallet } = useSession()
@@ -50,7 +53,8 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
   useEffect(() => {
     if (!token) return
     api((c) => c.topup.assets(), token).then((all) => {
-      const mine = sortAssets(all.filter((a) => walletChain(kind, a.chain)))
+      // Swap-paid tokens too: an EVM wallet pays them by scanning a code with a Solana wallet.
+      const mine = sortAssets(all.filter((a) => walletChain(kind, a.chain) || a.swap))
       setAssets(mine)
       setAssetId(mine[0]?.assetId ?? "")
     }, (e) => setError(errorMessage(e)))
@@ -81,8 +85,12 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
   const noGas = !!asset?.contract && !!gas && !gas.has(asset.chain)
   const nothingCovers = !!holdings && !!assets && micro >= 1_000_000 && !assets.some((a) => covers(a.assetId))
   const where = asset ? chainLabel(asset.chain) : ""
+  /** A swap-paid token this wallet can't sign for (it isn't a Solana wallet): it's paid by scanning a code. */
+  const scanOnly = !!asset?.swap && kind !== "solana"
   /** Why this wallet can't pay this from here, in one line; undefined when it can. */
-  const blocked = nothingCovers
+  const blocked = scanOnly
+    ? `${asset.symbol} is paid from a Solana wallet: you'll scan a code with it.`
+    : nothingCovers
     ? `This wallet doesn't hold ${usd(micro)} on any chain we take.`
     : short
     ? `This wallet has ${held ? `only ${held.amount.toLocaleString("en-US", { maximumSignificantDigits: 5 })}` : "no"} ${asset?.symbol} on ${where}.`
@@ -151,8 +159,10 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
   }
   const sendNow = ({ quote: q, asset: a }: NonNullable<typeof quoted>) =>
     step("send", async () => {
-      // Checked before anything is signed: a quote and a token that don't belong together are never sent.
-      const transfer = transferFor(a, q)
+      // Checked before anything is signed: a quote and a token that don't belong together are never sent (and a
+      // swap-paid one never as a transfer).
+      const transfer = a.swap ? undefined : transferFor(a, q)
+      if (a.swap && kind !== "solana") throw new Error("Pay this from a Solana wallet: scan its code.")
       // Checked here too, not only by hiding the button: with the approval declined nothing polls, so the page may not
       // have re-rendered since the deadline passed, and a transfer to an expired deposit address isn't swapped as quoted.
       if (Date.now() > Date.parse(q.deadline)) throw new Error("This price has expired. Nothing was sent: top up again for a new one.")
@@ -161,13 +171,25 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
         // The transaction is kept with the Top-Up and passed to 1Click, so it stays in sight even if 1Click is slow to
         // see it. Sent as soon as the wallet has sent it: waiting for the chain first lost it whenever that wait didn't
         // finish (a slow RPC, a closed tab), as two of three real Solana Top-Ups showed on staging.
-        await (kind === "solana" ? sendFromSolana : sendFromWallet)(accountId, transfer, (txHash) => {
+        const onSent = (txHash: string) => {
           setSent(true)
           void api((c) => c.topup.sent({ payload: { depositAddress: q.depositAddress, txHash } }), token).catch(() => {})
-        })
+        }
+        if (transfer) await (kind === "solana" ? sendFromSolana : sendFromWallet)(accountId, transfer, onSent)
+        else {
+          // Built and simulated by Luckout just now, for this wallet; the wallet shows the swap before it's approved.
+          const tx = await api((c) => c.topup.swapTx({ payload: { depositAddress: q.depositAddress } }), token)
+          await sendSolanaTransaction(accountId, tx, onSent)
+        }
       } catch (e) {
         // Mined and reverted: nothing left the wallet, so they may send again.
-        if (e instanceof TransferReverted) setSent(false)
+        if (e instanceof TransferReverted) {
+          setSent(false)
+          // A swap fails whole when the price moved past its room before it landed: only Solana's fee was spent.
+          if (a.swap) {
+            throw new Error(`The swap didn't go through: ${a.symbol}'s price moved past what this swap allowed before it landed, or it took too long. Only Solana's network fee left your wallet. Send it again; if the price has moved too far, you'll be asked for a new Top-Up.`)
+          }
+        }
         throw e
       }
     })
@@ -217,7 +239,7 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
         {blocked
           ? (
             <Button size="lg" loading={busy === "quote"} disabled={!!busy || !assetId || !(micro >= 1_000_000)} onClick={sendElsewhere}>
-              Send it from an exchange or another wallet
+              {asset?.swap ? "Pay from a Solana wallet" : "Send it from an exchange or another wallet"}
             </Button>
           )
           : (
@@ -233,7 +255,7 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
                     if (pricedAsShown(p, next.quote)) await sendNow(next)
                   })}
               >
-                {p ? `Send ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
+                {p ? `${p.swap ? "Swap" : "Send"} ${tokenAmount(p.amountInFormatted, p.symbol, "up")} ${p.symbol} on ${chainLabel(p.chain)}` : "Getting the price"}
               </Button>
               <button
                 type="button"
@@ -241,7 +263,7 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
                 className="self-center text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline disabled:opacity-45"
                 onClick={sendElsewhere}
               >
-                Send it from an exchange or another wallet instead
+                {asset?.swap ? "Pay from another Solana wallet instead" : "Send it from an exchange or another wallet instead"}
               </button>
             </>
           )}
@@ -263,12 +285,27 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
               ? (
                 // Sent from an exchange or another wallet: the address is the point, not something to unfold.
                 <div className="flex flex-col gap-3">
-                  <p>
-                    Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> before{" "}
-                    {new Date(quote.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} to this address, and get <b>{usd(quote.usdcOut)}</b>{" "}
-                    in Luckout. A little more is fine: 1Click sends the extra back.
-                  </p>
-                  <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
+                  {quote.swap
+                    ? (
+                      <>
+                        <p>
+                          Pay from a Solana wallet before {new Date(quote.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: it swaps{" "}
+                          <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> and you get <b>{usd(quote.usdcOut)}</b> in Luckout. Any USDC
+                          beyond that stays in that wallet.
+                        </p>
+                        <SolanaPayCode depositAddress={quote.depositAddress} />
+                      </>
+                    )
+                    : (
+                      <>
+                        <p>
+                          Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> before{" "}
+                          {new Date(quote.deadline).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} to this address, and get <b>{usd(quote.usdcOut)}</b>{" "}
+                          in Luckout. A little more is fine: 1Click sends the extra back.
+                        </p>
+                        <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
+                      </>
+                    )}
                   {signed
                     ? <p className="font-medium text-good">Approved: it goes straight into your balance when it arrives.</p>
                     : !(status && DONE.has(status.status)) && (
@@ -288,8 +325,9 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
               : (
                 <>
                   <p>
-                    Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get <b>{usd(quote.usdcOut)}</b> in
-                    Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's fee; Luckout pays the rest.
+                    {quote.swap ? "Swap" : "Send"} <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> and get{" "}
+                    <b>{usd(quote.usdcOut)}</b> in Luckout, about {Math.ceil(quote.timeEstimateSeconds / 60)} min after it confirms. Your wallet pays that chain's
+                    fee; Luckout pays the rest.{quote.swap ? " Any USDC beyond what this needs stays in your wallet." : ""}
                   </p>
                   {!sent && !expired && (
                     <>
@@ -297,7 +335,7 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
                         Send from your wallet
                       </Button>
                       <button type="button" disabled={!!busy} className="self-start text-sm font-semibold text-muted underline-offset-4 hover:text-ink hover:underline" onClick={() => (setManual(true), approve())}>
-                        Send it from an exchange or another wallet instead
+                        {quote.swap ? "Pay from another Solana wallet instead" : "Send it from an exchange or another wallet instead"}
                       </button>
                     </>
                   )}

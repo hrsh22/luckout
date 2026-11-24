@@ -468,7 +468,12 @@ export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   contract: Schema.optional(Schema.String),
   decimals: Schema.optional(Schema.Number),
   /** 1Click's price in USD, for showing what a wallet's holding is worth. */
-  price: Schema.optional(Schema.Number)
+  price: Schema.optional(Schema.Number),
+  /**
+   * Paid through a swap Luckout builds (ADR-0014): a Solana wallet signs one transaction that swaps it into the USDC
+   * 1Click needs, from the app or by scanning a Solana Pay code. Never sent to a deposit address as it is.
+   */
+  swap: Schema.optional(Schema.Boolean)
 }) {}
 
 export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
@@ -482,7 +487,20 @@ export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
   /** USDC (micro) that lands in the customer's NEAR account, or their NEAR Intents account for an EVM wallet. */
   usdcOut: MicroUsdc,
   timeEstimateSeconds: Schema.Number,
-  deadline: Schema.String
+  deadline: Schema.String,
+  /**
+   * A swap-paid token (TopUpAsset.swap): `amountIn` is exactly what the swap takes. `depositAddress` names the Top-Up
+   * but takes only USDC: never show it as somewhere to send the token.
+   */
+  swap: Schema.optional(Schema.Boolean)
+}) {}
+
+/** A swap-paid Top-Up's transaction (ADR-0014), built and simulated by Luckout, for the customer's Solana wallet to sign and send. */
+export class SwapTx extends Schema.Class<SwapTx>("SwapTx")({
+  /** Base64 of the unsigned v0 transaction. */
+  transaction: Schema.String,
+  /** Past this block height it can never land. */
+  lastValidBlockHeight: Schema.Number
 }) {}
 
 /** Where an EVM customer's money leaves for (ADR-0011): send `usdcIn` from their NEAR Intents account to `depositAddress`. */
@@ -550,6 +568,8 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   chain: Schema.String,
   /** What the customer sends, formatted (a Top-Up). */
   amountIn: Schema.optional(Schema.String),
+  /** A Top-Up paid with a swap (ADR-0014): what the customer swapped, e.g. "0.0705 ORE". symbol/amountIn are then USDC on Solana. */
+  paidWith: Schema.optional(Schema.String),
   /** What arrives on the other chain, formatted (a withdrawal). */
   amountOut: Schema.optional(Schema.String),
   /** What 1Click has received so far, formatted (a Top-Up short of its amount). */
@@ -597,6 +617,12 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.post("move", "/topup/move", {
     payload: Schema.Struct({ depositAddress: Schema.String, signed: SignedIntent }),
     success: HttpApiSchema.NoContent,
+    error: TopUpUnavailable
+  }),
+  /** Solana wallets, a swap-paid Top-Up (ADR-0014): the transaction that pays it, for their wallet to sign and send. */
+  HttpApiEndpoint.post("swapTx", "/topup/swap-tx", {
+    payload: Schema.Struct({ depositAddress: Schema.String }),
+    success: SwapTx,
     error: TopUpUnavailable
   }),
   /** The app paid this Top-Up from the customer's wallet: its transaction, kept and passed on to 1Click. */

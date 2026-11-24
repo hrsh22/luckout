@@ -16,6 +16,8 @@
     "@electric-sql/pglite": "0.5.15",
     "@luckout/api": "workspace:*",
     "@phala/dcap-qvl": "0.7.1",
+    "@solana/spl-token": "0.4.14",
+    "@solana/web3.js": "1.98.4",
     "@toon-format/toon": "4.4.0",
     "borsh": "2.0.0",
     "effect": "4.1.2",

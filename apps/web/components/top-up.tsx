@@ -5,7 +5,7 @@ import { Qr } from "@/components/qr"
 import { chainLabel, sortAssets, TokenMark, TokenPicker } from "@/components/token-picker"
 import { Button } from "@/components/ui/button"
 import { depositCall, useWalletActions } from "@/lib/actions"
-import { api, errorMessage } from "@/lib/api"
+import { api, apiUrl, errorMessage } from "@/lib/api"
 import { dollars, tokenAmount, toMicro, usd, usdUp } from "@/lib/format"
 import { usdcId, view } from "@/lib/near"
 import { pendingMode } from "@/lib/onboarding"
@@ -58,12 +58,17 @@ export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | und
     <div className={`flex flex-col gap-1 rounded-2xl bg-soft px-4 py-3 transition-opacity ${stale ? "opacity-60" : ""}`} aria-live="polite">
       <p className="flex items-center gap-2">
         <TokenMark symbol={q.symbol} chain={q.chain} size={22} />
-        <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
+        {q.swap
+          // A swap takes exactly this: Luckout builds it, and the chain holds it to the USDC it must give.
+          ? <span>You swap <b>{tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
+          : <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>}
       </p>
       <p className="text-sm text-muted">
         Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee:{" "}
         {/* A token sent on Solana also opens the deposit address's account for that token, which the sender pays for. */}
-        {q.chain === "sol" && q.symbol !== "SOL" ? "about 0.002 SOL, with the deposit address's token account" : FEES[q.chain] ?? "set by your wallet"}
+        {q.swap
+          ? "under 0.005 SOL, with the token accounts it opens"
+          : q.chain === "sol" && q.symbol !== "SOL" ? "about 0.002 SOL, with the deposit address's token account" : FEES[q.chain] ?? "set by your wallet"}
       </p>
       {warning && <p className="text-sm font-medium text-warn">{warning}</p>}
     </div>
@@ -81,6 +86,23 @@ export function DepositAddress({ address, memo }: { address: string; memo?: stri
         <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(address).then(() => toast.success("Address copied"))}>
           <Copy />Copy address
         </Button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A swap-paid Top-Up (ADR-0014): a Solana Pay code. A Solana wallet that scans it (or opens the link on a phone) gets
+ * the transaction that pays this Top-Up from that wallet, and shows the swap before it's approved.
+ */
+export function SolanaPayCode({ depositAddress }: { depositAddress: string }) {
+  const link = `solana:${apiUrl}/solana-pay/${depositAddress}`
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      <Qr value={link} size={136} label="Solana Pay code that pays this Top-Up" />
+      <div className="flex min-w-0 flex-col gap-2">
+        <p>Scan it with Phantom, Solflare or Backpack. Your wallet shows the swap before you approve it.</p>
+        <a href={link} className="self-start text-sm font-semibold underline underline-offset-4">Open in a wallet on this device</a>
       </div>
     </div>
   )
@@ -179,6 +201,7 @@ export function TopUp({ onDone, onContinue, need }: { onDone?: (ok: boolean) => 
   })
   const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
   const [asset, setAsset] = useState("")
+  const swap = !!assets?.find((a) => a.assetId === asset)?.swap
   const [amount, setAmount] = useState(() => topUpAmount(need))
   const preview = useTopUpPreview(token, asset, toMicro(amount))
   const [quote, setQuote] = useState<TopUpQuote>()
@@ -251,22 +274,36 @@ export function TopUp({ onDone, onContinue, need }: { onDone?: (ok: boolean) => 
             // Recorded on the server now: it shows under "Money on its way" even if this page closes.
             void qc.invalidateQueries({ queryKey: ["transfers"] })
           })}>
-            Get deposit address
+            {swap ? "Get the code to scan" : "Get deposit address"}
           </Button>
         </div>
       )}
 
       {quote && (
         <div className="flex flex-col gap-2 rounded-[1.5rem] bg-soft p-5 text-sm">
-          <p>
-            Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> to this address. A little
-            more is fine: 1Click sends the extra back.
-          </p>
-          <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
+          {quote.swap
+            ? (
+              <>
+                <p>
+                  Pay from a Solana wallet: it swaps <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> into the USDC this
+                  Top-Up needs, in one transaction you approve. Any USDC beyond that stays in that wallet.
+                </p>
+                <SolanaPayCode depositAddress={quote.depositAddress} />
+              </>
+            )
+            : (
+              <>
+                <p>
+                  Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> to this address. A little
+                  more is fine: 1Click sends the extra back.
+                </p>
+                <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
+              </>
+            )}
           <p className="text-muted">
-            {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your transfer
-            confirms. Send before {new Date(quote.deadline).toLocaleTimeString()}. If anything goes wrong, 1Click refunds it to your
-            NEAR Intents account, and the Wallet page sends it on to your wallet.
+            {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your{" "}
+            {quote.swap ? "swap" : "transfer"} confirms. {quote.swap ? "Pay" : "Send"} before {new Date(quote.deadline).toLocaleTimeString()}. If anything
+            goes wrong, 1Click refunds it to your NEAR Intents account, and the Wallet page sends it on to your wallet.
           </p>
           {status === "REFUNDED" || status === "FAILED"
             ? <p className="font-medium text-warn">It didn't go through: 1Click sent it back to your NEAR Intents account. Wallet sends it on to your wallet.</p>
