@@ -96,23 +96,73 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
     assert.equal(o.credit.refillsAvailable, false)
   })))
 
-test("Retry now only touches purchases NEAR can safely repeat", () =>
+/** A checkout at `step` with its cards, each `[id, step, error]`, as the reconciler and giveUp leave them. */
+const checkout = (step: string, cards: ReadonlyArray<readonly [string, string, string | null]>) =>
+  Effect.flatMap(SqlClient.SqlClient, (sql) =>
+    Effect.gen(function*() {
+      const [co] = yield* sql<{ id: string }>`
+        INSERT INTO checkouts (account_id, step, attempts, next_attempt_at, invoice_id) VALUES ('alice.testnet', ${step}, 5, now() + interval '1 hour', 'inv-1') RETURNING id`
+      for (const [i, [id, cardStep, error]] of cards.entries()) {
+        yield* sql`INSERT INTO purchases (checkout_id, position, id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, error, invoice_id)
+                   VALUES (${co!.id}, ${i}, ${id}, 'alice.testnet', ${id}, 'Test Card', 'test-card', '10', 10000000, ${cardStep}, ${error}, 'inv-1')`
+      }
+      return co!.id
+    })
+  )
+
+test("Retry now moves the checkout the reconciler runs, with its cards, and only where repeating is safe", () =>
   run(Effect.gen(function*() {
     const admin = yield* Admin
     const sql = yield* SqlClient.SqlClient
-    const open = "00000000-0000-4000-8000-000000000011"
-    const confirm = "00000000-0000-4000-8000-000000000012"
-    const ordering = "00000000-0000-4000-8000-000000000013"
-    yield* purchase(open, "delivery", "Bitrefill still delivering")
-    yield* purchase(confirm, "stuck", "Gave up after 12 attempts at confirm: NEAR timed out")
-    yield* purchase(ordering, "stuck", "Bitrefill order outcome unknown; check the Bitrefill account")
-    yield* admin.retry(open, "boss.testnet")
-    yield* admin.retry(confirm, "boss.testnet")
-    const refused = yield* admin.retry(ordering, "boss.testnet").pipe(Effect.flip)
-    assert.equal(refused._tag, "PurchaseInvalid")
-    const rows = yield* sql<{ id: string; step: string; attempts: number }>`SELECT id, step, attempts FROM purchases WHERE id IN (${open}, ${confirm}, ${ordering}) ORDER BY id`
-    assert.deepEqual(rows.map((r) => [r.step, r.attempts]), [["delivery", 0], ["confirm", 0], ["stuck", 0]])
-    assert.match(alerts.at(-1) ?? "", new RegExp(`boss\\.testnet retried purchase ${confirm} at confirm`))
+    const id = (n: number) => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, "0")}`
+    const steps = (co: string) =>
+      Effect.all([
+        sql<{ step: string; attempts: number; due: boolean; error: string | null }>`
+          SELECT step, attempts, next_attempt_at <= now() AND updated_at < now() - interval '30 seconds' AS due, error FROM checkouts WHERE id = ${co}`.pipe(
+          Effect.map((r) => r[0]!)
+        ),
+        sql<{ step: string }>`SELECT step FROM purchases WHERE checkout_id = ${co} ORDER BY position`.pipe(Effect.map((r) => r.map((c) => c.step)))
+      ])
+
+    // Still running, with a backoff: due on the next pass, cards untouched.
+    const open = yield* checkout("delivery", [[id(21), "delivery", null]])
+    yield* admin.retry(id(21), "boss.testnet")
+    const [openCo, openCards] = yield* steps(open)
+    assert.deepEqual([openCo.step, openCo.attempts, openCo.due], ["delivery", 0, true])
+    assert.deepEqual(openCards, ["delivery"])
+
+    // Gave up at settle: the delivered card goes back to confirm, the failed one to fail, the slow one to delivery.
+    const gaveUp = yield* checkout("stuck", [
+      [id(22), "stuck", "Gave up after 12 attempts at confirm: send: timed out"],
+      [id(23), "stuck", "Gave up after 12 attempts at fail: send: timed out"],
+      [id(24), "stuck", "Gave up after 12 attempts at delivery: send: timed out"]
+    ])
+    yield* admin.retry(id(24), "boss.testnet")
+    const [gaveUpCo, gaveUpCards] = yield* steps(gaveUp)
+    assert.deepEqual([gaveUpCo.step, gaveUpCo.attempts, gaveUpCo.due, gaveUpCo.error], ["settle", 0, true, null])
+    assert.deepEqual(gaveUpCards, ["confirm", "fail", "delivery"])
+    assert.match(alerts.at(-1) ?? "", new RegExp(`boss\\.testnet retried purchase ${id(24)} at delivery`))
+
+    // Gave up asking Bitrefill only: back to delivery.
+    const slow = yield* checkout("stuck", [[id(25), "stuck", "Gave up after 12 attempts at delivery: invoice inv-1 is still pending"]])
+    yield* admin.retry(id(25), "boss.testnet")
+    assert.deepEqual((yield* steps(slow)).map((x) => (Array.isArray(x) ? x : x.step)), ["delivery", ["delivery"]])
+
+    // Where going again could pay or order twice, or nobody knows what happened: a human looks.
+    const pay = yield* checkout("stuck", [[id(26), "stuck", "Gave up after 12 attempts at pay: Base nonce: fetch failed"]])
+    const unknown = yield* checkout("stuck", [[id(27), "stuck", "Bitrefill order outcome unknown; check the Bitrefill account"]])
+    for (const n of [26, 27]) {
+      const refused = yield* admin.retry(id(n), "boss.testnet").pipe(Effect.flip)
+      assert.match(refused.message, /needs a manual check/)
+    }
+    assert.deepEqual((yield* steps(pay))[1], ["stuck"])
+    assert.deepEqual((yield* steps(unknown))[1], ["stuck"])
+
+    // The panel offers Retry now exactly where it works, and labels a payment as the checkout's.
+    const attention = (yield* admin.overview).purchases.attention
+    assert.deepEqual(attention.filter((a) => [id(26), id(27)].includes(a.id)).map((a) => a.retryable), [false, false])
+    const [listed] = yield* admin.purchases(undefined, id(22))
+    assert.equal(listed!.checkoutId, gaveUp)
   })))
 
 test("the published API spec leaves the admin endpoints out", () => {

@@ -2837,3 +2837,324 @@ fn the_contracts_own_key_cant_run_a_carts_draws() {
         .build());
     c.on_draw_many(ids);
 }
+
+#[test]
+fn a_cart_checks_the_per_purchase_limit_card_by_card() {
+    // New accounts: 200 USDC a purchase. Each 150 USDC card is within it, though the cart is 300.
+    let mut c = setup(0, 500 * USDC);
+    as_(operator());
+    c.purchase_many(
+        alice(),
+        vec![
+            item(150 * USDC, Mode::Normal, "a"),
+            item(150 * USDC, Mode::Normal, "b"),
+        ],
+    );
+    assert_eq!(balance(&c), 200 * USDC);
+}
+
+#[test]
+#[should_panic(expected = "Over the per-purchase spending limit")]
+fn a_cart_is_refused_whole_when_one_cards_maximum_price_passes_the_per_purchase_limit() {
+    // The Jackpot card's Reference Price (195 USDC) is within 200; its Maximum Price, with the Risk Premium
+    // on its Lucky Amount, is not.
+    let mut c = setup(500 * USDC, 1_000 * USDC);
+    as_(operator());
+    c.purchase_many(
+        alice(),
+        vec![
+            item(150 * USDC, Mode::Normal, "a"),
+            item(195 * USDC, Mode::Lucky(2), "b"),
+        ],
+    );
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_settle_naming_a_card_both_delivered_and_failed_is_refused_whole() {
+    // A Lucky card: delivering it leaves it Drawing, which failing must not take for still open.
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(alice(), vec![item(10 * USDC, Mode::Lucky(1), "a")]);
+    let _ = c.settle(ids.clone(), ids);
+}
+
+#[test]
+fn a_cart_the_reserve_runs_out_on_quotes_the_rest_normal_and_admits_them_so() {
+    // 100 base units of Free Reserve and a 50% share: each Lite card plays what the cards before it left, until
+    // there is too little for any Lucky Amount and the rest come back Normal, at the Reference Price.
+    let mut c = setup(100, 100 * USDC);
+    set_cap(&mut c, None, Some(5_000));
+    let quotes = c.quote_many(
+        (0..MAX_CART)
+            .map(|_| QuoteItem {
+                reference_price: U128(USDC),
+                mode: Mode::Lucky(0),
+            })
+            .collect(),
+    );
+    let played: Vec<(Mode, u128, u128)> = quotes
+        .iter()
+        .map(|q| (q.mode, q.lucky_amount.0, q.max_price.0))
+        .collect();
+    // Free Reserve left before each card: 100, 55, 31, 18, 10, 6, 4, then 3, which covers no Lucky Amount.
+    let mut expected: Vec<(Mode, u128, u128)> =
+        [(45, 5), (24, 3), (13, 2), (8, 1), (4, 1), (2, 1), (1, 1)]
+            .iter()
+            .map(|&(lucky, premium)| (Mode::Lucky(0), lucky, USDC + premium))
+            .collect();
+    expected.resize(MAX_CART, (Mode::Normal, 0, USDC));
+    assert_eq!(played, expected);
+    // Admitted as quoted, Normal cards included.
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        quotes
+            .iter()
+            .enumerate()
+            .map(|(i, q)| CartItem {
+                reference_price: q.reference_price,
+                mode: Some(q.mode),
+                order_id: format!("t{i}"),
+                max_debit: q.max_price,
+                lucky_amount: matches!(q.mode, Mode::Lucky(_)).then_some(q.lucky_amount),
+            })
+            .collect(),
+    );
+    let admitted: Vec<(Mode, u128, u128)> = ids
+        .iter()
+        .map(|id| {
+            let p = c.get_purchase(*id).unwrap();
+            (p.mode, p.lucky_amount.0, p.max_price.0)
+        })
+        .collect();
+    assert_eq!(admitted, expected);
+    assert_eq!(c.get_reserve().free.0, 3);
+}
+
+#[test]
+#[should_panic(expected = "Purchase is already closed")]
+fn a_settle_delivering_a_reclaimed_card_is_refused_whole() {
+    let mut c = setup(500 * USDC, 100 * USDC);
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        vec![
+            item(10 * USDC, Mode::Lucky(1), "a"),
+            item(USDC, Mode::Normal, "b"),
+        ],
+    );
+    call(alice(), DAY + RECLAIM_AFTER_NS, [0; 32], 0);
+    c.reclaim(ids[0]);
+    as_(operator());
+    let _ = c.settle(ids, vec![]);
+}
+
+fn bob() -> AccountId {
+    id("bob.near")
+}
+
+/// The purchase ids the call just made scheduled for its Draws' callback, `on_draw_many` (none if it scheduled none).
+fn scheduled_draws() -> Vec<u64> {
+    sent_with_gas()
+        .into_iter()
+        .filter(|(method, ..)| method == "on_draw_many")
+        .flat_map(|(_, args, _)| {
+            near_sdk::serde_json::from_value::<Vec<u64>>(args["purchase_ids"].clone()).unwrap()
+        })
+        .collect()
+}
+
+/// `settle` scheduled a Draw for every Drawing card, and for nothing else (naming one twice is harmless).
+fn assert_scheduled_for(scheduled: &[u64], drawing: &[u64]) {
+    let (mut s, mut d) = (scheduled.to_vec(), drawing.to_vec());
+    s.sort();
+    s.dedup();
+    d.sort();
+    assert_eq!(s, d, "the Draws settle scheduled");
+}
+
+/// Carts drawn at random from a fixed seed, admitted as the server admits them (each card at the Lucky Amount and
+/// Maximum Price `quote_many` gave it) and settled every way at once: delivered, failed, reclaimed, a Lucky card named
+/// twice, a Draw callback that failed and is settled again, and a customer's retry that gets to a Draw before the
+/// cart's callback. The Draws run from the ids `settle` scheduled. After every step each USDC is accounted for: the
+/// Balances, Free and Locked Reserve, Proceeds, and what open purchases still hold (a Pending card its Maximum Price; a
+/// Drawing one its Risk Premium, as its Reference Price is already Proceeds).
+#[test]
+fn every_usdc_is_accounted_for_however_carts_are_settled() {
+    let reserve = 800 * USDC;
+    let deposit = 50_000 * USDC;
+    let mut c = setup(reserve, deposit);
+    as_(usdc());
+    let _ = c.ft_on_transfer(bob(), U128(deposit), "".into());
+    let mut held = reserve + 2 * deposit;
+    for who in [alice(), bob()] {
+        call(who, DAY, [0; 32], 1);
+        c.set_limits(U128(u128::MAX), U128(u128::MAX));
+    }
+    // A small share-only Cashback Cap, so most Lucky cards play what the Free Reserve the cards before them left.
+    set_cap(&mut c, None, Some(500));
+    let mut all: Vec<u64> = vec![];
+    // Lucky cards the reserve covered only in part (the sequential reserve), and how often each other path ran.
+    let (mut partial, mut reclaimed, mut twice, mut resettled, mut retried) = (0, 0, 0, 0, 0);
+    // Only purchases not yet closed hold money of their own, so only they are summed.
+    let mut open: Vec<u64> = vec![];
+    let check = |c: &Contract, open: &mut Vec<u64>, held: u128| {
+        open.retain(|id| {
+            matches!(
+                c.get_purchase(*id).unwrap().status,
+                Status::Pending | Status::Drawing
+            )
+        });
+        let (mut owed, mut locked) = (0, 0);
+        for id in open.iter() {
+            let p = c.get_purchase(*id).unwrap();
+            owed += match p.status {
+                Status::Pending => p.max_price.0,
+                _ => p.max_price.0 - p.reference_price.0,
+            };
+            locked += p.locked.0;
+        }
+        let balances =
+            c.get_account(alice()).unwrap().balance.0 + c.get_account(bob()).unwrap().balance.0;
+        assert_eq!(c.locked_reserve, locked);
+        assert_eq!(
+            balances + c.free_reserve + c.locked_reserve + c.proceeds + owed,
+            held
+        );
+    };
+
+    for round in 0..80u64 {
+        let seed = env::sha256_array(&round.to_le_bytes());
+        let who = if round % 2 == 0 { alice() } else { bob() };
+        let wanted: Vec<QuoteItem> = (0..1 + seed[1] as usize % MAX_CART)
+            .map(|i| QuoteItem {
+                reference_price: U128((1 + seed[(i + 2) % 32] as u128 % 120) * USDC / 2),
+                mode: match seed[(i + 5) % 32] % 4 {
+                    0 => Mode::Normal,
+                    k => Mode::Lucky(k as u32 - 1),
+                },
+            })
+            .collect();
+        let quotes = c.quote_many(wanted);
+        // A Lucky card the reserve couldn't cover would come back Normal and be confirmed as that. The reserve never
+        // runs that low here: a_cart_the_reserve_runs_out_on_quotes_the_rest_normal_and_admits_them_so covers it.
+        let items: Vec<CartItem> = quotes
+            .iter()
+            .enumerate()
+            .map(|(i, q)| CartItem {
+                reference_price: q.reference_price,
+                mode: Some(q.mode),
+                order_id: format!("r{round}-{i}"),
+                max_debit: q.max_price,
+                lucky_amount: matches!(q.mode, Mode::Lucky(_)).then_some(q.lucky_amount),
+            })
+            .collect();
+        call(operator(), DAY, seed, 0);
+        let ids = c.purchase_many(who.clone(), items);
+        for (q, id) in quotes.iter().zip(&ids) {
+            let p = c.get_purchase(*id).unwrap();
+            assert_eq!(
+                (p.mode, p.lucky_amount.0, p.max_price.0),
+                (q.mode, q.lucky_amount.0, q.max_price.0),
+                "the quote is what's admitted"
+            );
+            partial += (p.mode != Mode::Normal && p.lucky_amount.0 < p.reference_price.0) as u64;
+        }
+        all.extend(&ids);
+        open.extend(&ids);
+        check(&c, &mut open, held);
+
+        let (mut delivered, mut failed) = (vec![], vec![]);
+        for (i, &id) in ids.iter().enumerate() {
+            match seed[(i + 11) % 32] % 6 {
+                0 => {
+                    call(who.clone(), DAY + RECLAIM_AFTER_NS, seed, 0);
+                    c.reclaim(id);
+                    reclaimed += 1;
+                }
+                1 | 2 => failed.push(id),
+                _ => delivered.push(id),
+            }
+        }
+        let lucky =
+            |c: &Contract, id: u64| matches!(c.get_purchase(id).unwrap().mode, Mode::Lucky(_));
+        if let Some(&again) = delivered.iter().find(|&&id| lucky(&c, id)) {
+            if delivered.len() + failed.len() < MAX_CART {
+                delivered.push(again);
+                twice += 1;
+            }
+        }
+        check(&c, &mut open, held);
+        if delivered.is_empty() && failed.is_empty() {
+            continue;
+        }
+        call(operator(), DAY, seed, 0);
+        let _ = c.settle(delivered.clone(), failed.clone());
+        let mut scheduled = scheduled_draws();
+        check(&c, &mut open, held);
+        let drawing: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|&id| c.get_purchase(id).unwrap().status == Status::Drawing)
+            .collect();
+        assert_scheduled_for(&scheduled, &drawing);
+        if !drawing.is_empty() {
+            match round % 3 {
+                0 => {
+                    // That callback never ran (say, out of gas): the next settle schedules the Draws again.
+                    call(operator(), DAY, seed, 0);
+                    let _ = c.settle(drawing.clone(), vec![]);
+                    scheduled = scheduled_draws();
+                    assert_scheduled_for(&scheduled, &drawing);
+                    resettled += 1;
+                    check(&c, &mut open, held);
+                }
+                1 => {
+                    // The customer's retry got to one Draw first; the cart's callback leaves it as it is.
+                    call(who.clone(), DAY, seed, 0);
+                    let _ = c.retry_draw(drawing[0]);
+                    call(contract(), DAY, env::sha256_array(&seed), 0);
+                    c.on_draw(drawing[0]);
+                    retried += 1;
+                    check(&c, &mut open, held);
+                }
+                _ => {}
+            }
+            call(contract(), DAY, seed, 0);
+            c.on_draw_many(scheduled);
+            check(&c, &mut open, held);
+        }
+        assert!(open.is_empty(), "every card of round {round} is closed");
+
+        if round % 5 == 4 {
+            let amount = c.get_account(who.clone()).unwrap().balance.0 / 50;
+            call(who.clone(), DAY, seed, 1);
+            let _ = c.withdraw(U128(amount));
+            call(contract(), DAY, seed, 0);
+            c.on_send(Payout::Customer(who.clone()), U128(amount), Ok(()));
+            held -= amount;
+            check(&c, &mut open, held);
+        }
+    }
+
+    assert!(open.is_empty());
+    assert_eq!(c.locked_reserve, 0);
+    let mut drawn = 0;
+    for id in all {
+        let p = c.get_purchase(id).unwrap();
+        if matches!(p.mode, Mode::Lucky(_)) && p.status == Status::Delivered {
+            drawn += 1;
+            assert!(p.cashback.0 <= p.max_price.0 - p.reference_price.0 + p.locked.0);
+        }
+    }
+    // Each delivered Lucky card was drawn exactly once, however often it was named.
+    assert_eq!(c.lucky_settled, drawn);
+    let ran = [drawn, partial, reclaimed, twice, resettled, retried];
+    assert!(
+        ran.iter()
+            .zip([100, 100, 20, 20, 10, 10])
+            .all(|(&n, least)| n >= least),
+        "Draws, partly covered cards, reclaims, cards named twice, re-settles, retries: {ran:?}"
+    );
+}

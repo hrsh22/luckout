@@ -4,7 +4,7 @@ import { SqlClient } from "effect/sql"
 import { actions, teraToGas } from "near-api-js"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
-import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
+import { Base, type BasePayment, BaseUnavailable, GAS_RESERVE } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, floatOf, MIN_REFILL, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
@@ -72,8 +72,6 @@ const STUCK_WATCH = "5 minutes"
 const ALERT_AFTER_ATTEMPTS = 5
 /** The treasury needs a little NEAR to sign refills: at least what NEAR asks up front for its heaviest call. */
 const TREASURY_MIN_GAS = upfront(TREASURY_GAS)
-/** The Base wallet needs a little ETH to pay (a USDC transfer costs well under a cent on Base). */
-export const BASE_MIN_GAS = 20_000_000_000_000n // 0.00002 ETH
 const EXPLORER = "https://explorer.near-intents.org/transactions/"
 
 export const OPEN_REFILL_STEPS = ["fund", "quote", "send", "swapping", "invoice", "pay", "crediting"]
@@ -390,7 +388,8 @@ export class Refill extends Context.Service<Refill, {
                 return yield* hold(row, "The treasury needs a little NEAR for gas.", `The treasury ${near.treasuryId} is out of NEAR for gas; send it 0.1 NEAR in Admin → Gas.`)
               }
               const w = yield* base.balances
-              if (w.eth < BASE_MIN_GAS) {
+              // What the node wants on hand to take a payment at the fee ceiling, though a transfer costs well under a cent.
+              if (w.eth < GAS_RESERVE) {
                 const wallet = yield* base.address
                 return yield* hold(row, "The Base wallet needs a little ETH for gas.", `The Base wallet ${wallet} is out of ETH for gas; send it about $1 of ETH on Base.`)
               }
@@ -768,7 +767,17 @@ export class Refill extends Context.Service<Refill, {
               : `the ceiling. Raise it in ${section} → Settings.`
             return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)}: ${why}` }
           }
-          return { amount, why: c.waiting.total > 0 ? "waiting" : "target" }
+          // Today's limit held it below what waiting purchases need: said as it starts, not once it lands, when the
+          // next refill would only find the limit used up.
+          const need = c.waiting.total - free
+          // The limit to suggest leaves room for the rest, and for at least the smallest refill: a second refill for
+          // less is never sent.
+          const enough = cents(s.dailyRefill - left + amount + Math.max(need - amount, MIN_REFILL))
+          const short = limit === left && need > amount
+            ? `Today's limit of ${usd(s.dailyRefill)} holds this refill to ${usd(amount)}, ${usd(need - amount)} short of what waiting purchases need. ` +
+              `Raise "Refill at most, per day" in ${section} → Settings to at least ${usd(enough)}, and a second refill covers the rest as soon as this one lands.`
+            : undefined
+          return { amount, why: c.waiting.total > 0 ? "waiting" : "target", short }
         })
 
       /**
@@ -850,6 +859,8 @@ export class Refill extends Context.Service<Refill, {
         }
         const row = yield* start(s.amount, s.why, null)
         yield* Effect.log(`refill ${row.id} started: ${usd(s.amount)} (${s.why})`)
+        // On the row like any reason it waits for (the panel shows it), so it's said once for this refill.
+        if (s.short) yield* hold(row, s.short, `Refill ${row.id.slice(0, 8)}: ${s.short}`)
         yield* unusual
         yield* FiberSet.run(workflows, advance(row.id))
       })).pipe(Effect.catchCause((cause) => Effect.logError("refill planning failed", cause)))

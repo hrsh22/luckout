@@ -6,7 +6,7 @@ import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, settingsProblem } from "./Credit.ts"
 import { BASE_GAS_ALERT, GAS_ALERT, spendable } from "./Monitor.ts"
 import { Near, Network } from "./Near.ts"
-import { OPEN_STEPS } from "./Purchases.ts"
+import { GUEST_COUNTED_AT, OPEN_STEPS, retryPurchase, retryStep } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
@@ -17,8 +17,6 @@ import { Sales } from "./Sales.ts"
 
 /** Bitrefill's purchase cap on our account, per day across all products (deploy/RUNBOOK.md). */
 const BITREFILL_DAILY_CAP = 15
-/** A purchase that gave up at a step NEAR can safely repeat: confirm and fail are idempotent onchain. */
-const GAVE_UP_AT = /^Gave up after \d+ attempts at (confirm|fail):/
 /** Customers on the users list: each costs one contract view per load. */
 const USERS_SHOWN = ADMIN_LIST_LIMIT
 /** Purchases the overview lists as needing attention; the count of all of them comes with it. */
@@ -34,9 +32,6 @@ interface Row {
   attempts: number
   created_at: Date | string
 }
-
-const retryStep = (r: Pick<Row, "step" | "error">) =>
-  OPEN_STEPS.includes(r.step) ? r.step : r.step === "stuck" ? GAVE_UP_AT.exec(r.error ?? "")?.[1] : undefined
 
 export class Admin extends Context.Service<Admin, {
   isAdmin(accountId: string): boolean
@@ -71,6 +66,7 @@ export class Admin extends Context.Service<Admin, {
         (yield* Config.String("ADMIN_ACCOUNTS").pipe(Config.withDefault(""))).split(",").map((a) => a.trim()).filter(Boolean)
       )
 
+      const counted = sql.literal(GUEST_COUNTED_AT)
       const overview = Effect.gen(function*() {
         const gasOf = (role: keyof typeof GAS_ALERT, accountId: string | undefined) =>
           accountId
@@ -100,8 +96,9 @@ export class Admin extends Context.Service<Admin, {
             FROM purchases WHERE created_at > now() - interval '1 day'`,
           // Oldest first: they are the closest to the customer's Reclaim at 24 hours. `total` counts them all,
           // before the limit, so the panel can say how many it isn't showing.
-          sql<Row & { total: number }>`
-            SELECT p.id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, count(*) OVER ()::int AS total
+          sql<Row & { checkout_step: string; total: number }>`
+            SELECT p.id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, c.step AS checkout_step,
+                   count(*) OVER ()::int AS total
             FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
             WHERE p.step IN ('stuck', 'waiting', 'restock') OR (p.step IN ${sql.in(OPEN_STEPS)} AND p.created_at < now() - interval '15 minutes')
             ORDER BY p.created_at LIMIT ${ATTENTION_SHOWN}`,
@@ -114,11 +111,11 @@ export class Admin extends Context.Service<Admin, {
             SELECT (SELECT count(*)::int FROM checkout_emails) AS emails, (SELECT count(*)::int FROM bitrefill_connections) AS connected,
                    COALESCE(max(orders), 0)::int AS orders, COALESCE(max(daily), 0)::text AS daily, COALESCE(max(monthly), 0)::text AS monthly
             FROM (
-              SELECT count(*) FILTER (WHERE created_at > now() - interval '1 day') AS orders,
-                     COALESCE(sum(reference_price) FILTER (WHERE created_at > now() - interval '1 day'), 0) AS daily,
-                     sum(reference_price) AS monthly
+              SELECT count(*) FILTER (WHERE ${counted} > now() - interval '1 day') AS orders,
+                     COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '1 day'), 0) AS daily,
+                     COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '30 days'), 0) AS monthly
               FROM purchases
-              WHERE email_key IS NOT NULL AND created_at > now() - interval '30 days'
+              WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
                 AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)
               GROUP BY email_key) per_email`
         ], { concurrency: "unbounded" })
@@ -169,7 +166,7 @@ export class Admin extends Context.Service<Admin, {
                 ...(r.error ? { error: r.error } : {}),
                 attempts: r.attempts,
                 createdAt: new Date(r.created_at).toISOString(),
-                retryable: retryStep(r) !== undefined
+                retryable: retryStep(r, r.checkout_step) !== undefined
               })
             ),
             attentionTotal: attention[0]?.total ?? 0
@@ -211,6 +208,7 @@ export class Admin extends Context.Service<Admin, {
 
       const purchaseList = (accountId?: string, id?: string) =>
         sql<Row & {
+          checkout_id: string
           requested_mode: AdminPurchase["mode"] | null
           admitted: { mode: AdminPurchase["mode"]; max_price: string } | null
           reference_price: string | number
@@ -222,7 +220,7 @@ export class Admin extends Context.Service<Admin, {
           settle_tx: { hash: string } | null
           updated_at: Date | string
         }>`
-          SELECT p.id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, p.updated_at,
+          SELECT p.id, p.checkout_id, p.account_id, p.voucher_name, p.package_value, p.step, p.error, c.attempts, p.created_at, p.updated_at,
                  p.requested_mode, p.admitted, p.reference_price, p.draw, p.invoice_id, c.pay_tx, c.pay_amount, p.admit_tx, p.settle_tx
           FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
           ${id ? sql`WHERE p.id = ${id}` : accountId ? sql`WHERE p.account_id = ${accountId}` : sql``}
@@ -234,6 +232,7 @@ export class Admin extends Context.Service<Admin, {
               const paid = r.draw ? Number(r.draw.final_price) : r.step === "settled" ? Number(r.admitted?.max_price ?? r.reference_price) : undefined
               return new AdminPurchase({
                 id: r.id,
+                checkoutId: r.checkout_id,
                 accountId: r.account_id,
                 voucherName: r.voucher_name,
                 value: r.package_value,
@@ -330,17 +329,12 @@ export class Admin extends Context.Service<Admin, {
           )
         )
 
+      // The checkout is what the reconciler runs, so Retry now moves it with its cards (Purchases.ts: retryPurchase).
       const retry = (id: string, by: string) =>
-        Effect.gen(function*() {
-          const [row] = yield* sql<Pick<Row, "step" | "error">>`SELECT step, error FROM purchases WHERE id = ${id}`
-          if (!row) return yield* new PurchaseInvalid({ message: "No such purchase." })
-          const step = retryStep(row)
-          if (!step) return yield* new PurchaseInvalid({ message: "This one needs a manual check. See deploy/RUNBOOK.md." })
-          // updated_at in the past lets the reconciler pick it up on its next pass (it skips rows touched in the last 30s).
-          yield* sql`UPDATE purchases SET step = ${step}, error = NULL, attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute'
-                     WHERE id = ${id} AND step = ${row.step}`
-          yield* alerts.admin(`${by} retried purchase ${id} at ${step}`)
-        }).pipe(Effect.catchTag("SqlError", Effect.die))
+        retryPurchase(id).pipe(
+          Effect.flatMap((at) => alerts.admin(`${by} retried purchase ${id} at ${at}`)),
+          Effect.provideService(SqlClient.SqlClient, sql)
+        )
 
       const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
       // As for the relayer: only the fields sent change, and the check runs on what would be saved.

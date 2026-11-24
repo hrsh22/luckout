@@ -1,7 +1,8 @@
 import { Config, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/sql"
+import { formatEther } from "viem"
 import { Alerts } from "./Alerts.ts"
-import { Base } from "./Base.ts"
+import { Base, GAS_RESERVE } from "./Base.ts"
 import { Near, Network, OPERATOR_GAS, RELAY_GAS, TREASURY_GAS, upfront } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 
@@ -23,8 +24,11 @@ export const GAS_ALERT = {
   contract: NEAR * PERCENT / 100n
 } as const
 const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
-/** The Base wallet's ETH (wei): about 150 Bitrefill payments' worth of gas. */
-export const BASE_GAS_ALERT = 100_000_000_000_000n // 0.0001 ETH
+/**
+ * The Base wallet's ETH (wei): twice what Base's node wants on hand before it takes a payment (GAS_RESERVE, plus the
+ * payment's L1 fee), so the alert comes while payments still go out. Each one spends far less than that.
+ */
+export const BASE_GAS_ALERT = 2n * GAS_RESERVE
 /** Accounts the contract isn't known to hold money for that the solvency check asks about each round, in turn. */
 const UNSEEN_PER_ROUND = 50
 
@@ -132,7 +136,10 @@ export const Monitor = Layer.effectDiscard(
       // A Base RPC hiccup only skips this check.
       const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
       if (w && w[1].eth < BASE_GAS_ALERT) {
-        yield* alerts.admin(`the Base wallet ${w[0]} has under 0.0001 ETH left for gas; Base payments to Bitrefill stop when it runs out (send about $1 of ETH on Base)`)
+        yield* alerts.admin(
+          `the Base wallet ${w[0]} has under ${formatEther(BASE_GAS_ALERT)} ETH left for gas; Base payments to Bitrefill stop once it holds under ` +
+            `${formatEther(GAS_RESERVE)} ETH plus a payment's L1 fee, what Base's node wants on hand to take one (send about $1 of ETH on Base)`
+        )
       }
     })
 

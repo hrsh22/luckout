@@ -1,6 +1,6 @@
 import { BrowserCheck } from "@/components/browser-check"
 import { LocalTime } from "@/components/local-time"
-import { contractId, explorer } from "@/lib/chain"
+import { contractId, explorer, NotOnChain } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackPct } from "@/lib/modes"
 import { loadDraw, TX_HASH } from "@/lib/proof"
@@ -21,7 +21,8 @@ const purchaseOf = async (searchParams: Props["searchParams"]) => {
 // Once per request: generateMetadata and the page share it (RPC POSTs aren't memoized like GET fetches).
 const load = cache(async (tx: string, purchase: number | undefined) => {
   if (!TX_HASH.test(tx)) notFound()
-  return loadDraw(tx, purchase).catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }))
+  // No such transaction or Draw is a 404; NEAR not answering keeps the page, with its words.
+  return loadDraw(tx, purchase).catch((e: unknown) => (e instanceof NotOnChain ? notFound() : { error: String((e as Error)?.message ?? e) }))
 })
 
 export async function generateMetadata({ params, searchParams }: Props): Promise<Metadata> {
