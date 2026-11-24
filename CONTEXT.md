@@ -45,7 +45,7 @@ Moving money that 1Click returned to a customer's Intents Account (a refund or a
 _Avoid_: Withdrawal (that's from the Balance), refund
 
 **Intents Account**:
-A customer's own account in NEAR Intents, named after their EVM address or their Solana key (in hex) and controlled only by that key; an EVM or Solana wallet's Top-Ups pass through it and its withdrawals return to it, and Luckout moves money out of it only with the customer's signature.
+A customer's own account in NEAR Intents, controlled only by their own key: a NEAR wallet's is its NEAR account, and an EVM or Solana wallet's is named after its EVM address or Solana key (in hex). An EVM or Solana wallet's Top-Ups pass through it and its withdrawals return to it, 1Click's refunds and change can land in it for any wallet, and Luckout moves money out of it only with the customer's signature.
 _Avoid_: Deposit address, wallet, sub-account
 
 **Agent**:
@@ -77,7 +77,7 @@ The USDC in the Base Wallet that pays each card's Bitrefill invoice; kept betwee
 _Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
 **Checkout Email**:
-The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 cards and $500 in any 24 hours, $1,000 in any 30 days) count per customer, Bitrefill emails each card's code and receipt there, and Bitrefill can reach them about a bad code. A throwaway one is fine.
+The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) count per customer, and Luckout counts them per card over the last 24 hours and 30 days; Bitrefill emails each card's code and receipt there, and Bitrefill can reach them about a bad code. A throwaway one is fine.
 _Avoid_: Login, account email
 
 **Bitrefill Connection**:
@@ -85,7 +85,7 @@ A customer's own Bitrefill account, logged in from our site, that their cards ar
 _Avoid_: Linked account, Bitrefill login (that's the act of connecting)
 
 **Relayer**:
-The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings, Reclaims, Draw reruns, Send-Backs, and an EVM or Solana wallet's signed NEAR Intents payloads) and pays their network fee, within a daily number of free relays, so customers need no NEAR; it can only send what the customer signed.
+The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings, Reclaims, Draw reruns, Send-Backs, and an EVM or Solana wallet's signed NEAR Intents payloads) and pays their network fee, within a number of free actions in any 24 hours, so customers need no NEAR; it can only send what the customer signed.
 _Avoid_: Paymaster, gas station, sponsor
 
 **Spending Limit**:
@@ -105,7 +105,7 @@ The promise that every successfully completed Lucky Buy delivers the exact Vouch
 _Avoid_: Principal protection, no-loss guarantee
 
 **Use-By Date**:
-The expiry date shown on a Voucher's page: the one on the last card of that Voucher delivered through Luckout in the last 60 days, since cards come in batches. It is a guide, not a promise for the next card.
+The expiry date of the most recently bought card of that Voucher in the last 60 days, shown on the Voucher's page and on the Agent's Buy line as a guide, since cards come in batches; it is not a promise for the next card. On a delivered card, "Use it by" is that card's own date.
 _Avoid_: Expiry guarantee, validity
 
 **Redemption Data**:

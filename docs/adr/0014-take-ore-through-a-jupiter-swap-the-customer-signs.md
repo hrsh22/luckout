@@ -29,3 +29,5 @@ Rejected for now:
 
 - **A deposit address for ORE sent from an exchange.** Luckout would hold the customer's ORE until it swaps it, and refund it when the price moves. That needs its own decision.
 - **Letting the swap deliver to 1Click without a minimum out.** The customer couldn't know the most it costs.
+
+**Amended 2026-11-25 (outcome check).** The server's simulation check also refuses a transaction that lowers any other token account the swap touches or sets a delegate or close authority on one, and it holds the priority fee within its limit.

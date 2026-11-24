@@ -11,3 +11,5 @@ Redemption Data never enters the model's context: the purchase tools return name
 Rejected: letting the model buy directly under a per-purchase cap (a prompt injection could still spend up to the cap without the customer's knowledge), and confirming by typing "yes" (the model, or text it was shown, could produce the same words).
 
 **Amended 2026-11-25 (Checkout Email).** Bitrefill emails each guest card's code to the Checkout Email as well as the receipt, so the address on the Confirm line is where the cards go too.
+
+**Amended 2026-11-25 (replacing a Checkout Email).** Replacing a saved Checkout Email through the Agent needs the customer's tap on a button that shows both the old and the new address, and a new offer withdraws the customer's earlier ones.
