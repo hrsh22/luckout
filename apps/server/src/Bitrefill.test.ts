@@ -1,9 +1,10 @@
 import { ConfigProvider, Context, Effect, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
+import { TestClock } from "effect/testing"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, matchOrders, nextGuestPoll, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
+import { Bitrefill, GUEST_POLL_GAP_MS, isTestMerchant, matchOrders, nextGuestPoll, NO_SUCH_VOUCHER, ORDER_LIMIT, orderRoom, pickPopular, popularBrands, readableText, regionsFor, usdToMicro } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 
 test("USD strings convert to micro-USDC exactly", () => {
@@ -330,6 +331,111 @@ test("a card's page gets Bitrefill's pitch, steps, terms and rating", async () =
   }
 })
 
+test("prices on pages and in quotes: fresh while lookups are free, the last one we had when they're used up; made-up ids answer 404 for 3 a minute, then busy", async () => {
+  const looked: Array<string> = []
+  let price = "10.00"
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input))
+    // A search finds a card our catalog copy doesn't have; the copy itself can't be read, so it stays as saved below.
+    if (url.pathname === "/v2/products/search") {
+      return Response.json({ meta: {}, data: [{ id: "phone-pin", name: "Phone PIN", country_code: "US", currency: "USD", recipient_type: "none" }] })
+    }
+    if (url.pathname !== "/mcp") return new Response("", { status: 500 })
+    const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
+    looked.push(id)
+    // Bitrefill's words for a product it doesn't have.
+    if (id.startsWith("made-up")) {
+      return new Response(`data: ${JSON.stringify({ result: { isError: true, content: [{ text: `Product '${id}' was not found.` }] } })}\n`, { status: 200 })
+    }
+    return toolResult({ id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: price, payment_currency: "USD" }] })
+  }) as typeof fetch
+  const cards = Array.from({ length: 12 }, (_, i) => `card-${i}`)
+  try {
+    const r = await Effect.runPromise(
+      Effect.gen(function*() {
+        const sql = yield* SqlClient.SqlClient
+        const copy = Object.fromEntries(["amazon-us", ...cards].map((id) => [id, {}]))
+        yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('card_logos', ${JSON.stringify(copy)}::jsonb, 'server')`
+        const b = Context.get(yield* Layer.build(Bitrefill.layer), Bitrefill)
+        const usd = (v: { packages: ReadonlyArray<{ priceMicroUsdc: number }> }) => v.packages[0]?.priceMicroUsdc
+        // The card's page; a quote (what the customer confirms) asks without options, as Purchases does; then Buy.
+        const page = (id: string) => b.voucher(id, { page: true }).pipe(Effect.map(usd))
+        const quote = (id: string) => b.voucher(id).pipe(Effect.map(usd))
+        const buy = (id: string) => b.voucher(id, { purchase: true }).pipe(Effect.map(usd))
+        const refused = (id: string) => b.voucher(id, { page: true }).pipe(Effect.flip, Effect.map((e) => e.message))
+
+        // Minute 0.
+        const first = yield* page("amazon-us")
+        // Made-up ids: Bitrefill is asked about 3 a minute, from their own budget (404); the rest are busy, unasked.
+        const madeUp = yield* Effect.forEach([0, 1, 2, 3, 4], (i) => refused(`made-up-${i}`))
+        // A card a search showed counts as listed, though the copy doesn't have it.
+        yield* b.search("pin")
+        const pin = yield* page("phone-pin")
+        // So browsing still has all 12 of its lookups: amazon-us, phone-pin and ten more.
+        for (const id of cards.slice(0, 10)) yield* page(id)
+        // A card never priced can't be shown without a lookup...
+        const cold = yield* refused("card-10")
+        // ...but a purchase still gets its price: browsing can't use the last 8. A price from this minute is reused.
+        const bought = yield* buy("card-10")
+        yield* buy("card-0")
+        yield* quote("amazon-us")
+        const lookedFirst = [...looked]
+
+        // Five minutes on, an ordinary minute, and Bitrefill's price has moved. The page still shows the one we had, with
+        // no lookup; a quote and Buy each take one at most a minute old, as before.
+        yield* TestClock.adjust("5 minutes")
+        price = "10.50"
+        const later = yield* page("amazon-us")
+        const quoted = yield* quote("amazon-us")
+        const repriced = yield* buy("card-0")
+        const lookedOrdinary = looked.length
+
+        // Eleven minutes in, a busy minute, and the price has gone up again. Open pages refresh their quotes: once
+        // 8 have, the rest show the last price we had instead of failing...
+        yield* TestClock.adjust("6 minutes")
+        price = "11.00"
+        for (const id of cards.slice(1, 9)) yield* quote(id)
+        const staleQuote = yield* quote("card-9")
+        // ...and so does a page whose price is past its 10 minutes...
+        const stalePage = yield* page("phone-pin")
+        // ...while a card never priced still loads: 4 of browsing's 12 are kept for first views.
+        const firstView = yield* page("card-11")
+        // Buy prices it live, and the next quote shows that price.
+        const buying = yield* buy("card-9")
+        const after = yield* quote("card-9")
+        return { first, madeUp, pin, cold, bought, lookedFirst, later, quoted, repriced, lookedOrdinary, staleQuote, stalePage, firstView, buying, after }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(DbMemory),
+        Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(TestClock.layer())
+      )
+    )
+    assert.equal(r.first, 10_000_000)
+    assert.deepEqual(r.madeUp.slice(0, 3), [NO_SUCH_VOUCHER, NO_SUCH_VOUCHER, NO_SUCH_VOUCHER], "Bitrefill doesn't have them: the page answers 404")
+    assert.ok(r.madeUp.slice(3).every((m) => /busy/.test(m)), r.madeUp.join(" | "))
+    assert.equal(r.lookedFirst.filter((id) => id.startsWith("made-up")).length, 3, "made-up ids never cost more than their own 3")
+    assert.equal(r.pin, 10_000_000)
+    assert.match(r.cold, /busy/)
+    assert.equal(r.bought, 10_000_000)
+    assert.equal(r.lookedFirst.length, 16, "amazon-us, 3 made-up, phone-pin, 10 cards, the new card's purchase")
+    assert.equal(r.later, 10_000_000, "a page shows a price up to 10 minutes old")
+    assert.equal(r.quoted, 10_500_000, "a quote takes a price at most a minute old while lookups are free")
+    assert.equal(r.repriced, 10_500_000, "so does Buy")
+    assert.equal(r.lookedOrdinary, 18)
+    assert.equal(r.staleQuote, 10_000_000, "the last price, not an error")
+    assert.equal(r.stalePage, 10_000_000)
+    assert.equal(r.firstView, 11_000_000)
+    assert.equal(r.buying, 11_000_000)
+    assert.equal(r.after, 11_000_000)
+    assert.equal(looked.length, 18 + 8 + 1 + 1, "the 8 refreshes, the first view, the purchase")
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test("a guest's cart is one order, every card also emailed to their Checkout Email as a gift", async () => {
   const sent: Array<Record<string, unknown>> = []
   await withGuestBitrefill(
@@ -364,6 +470,93 @@ test("each card's code is matched to its own order: by product and amount, in ca
   assert.deepEqual(matchOrders(cards, rest).map((o) => o?.n), [1, 2, 3])
   // An order for a card nobody asked for is left alone: that card stays pending, for a human.
   assert.deepEqual(matchOrders([{ id: "a", value: "1" }], [{ product: { id: "b", value: "1" } }]), [undefined])
+  // A card delivered in an earlier round takes the order it holds first, wherever Bitrefill lists it now, and the
+  // other copy is matched among the orders left; one whose order isn't listed takes no other.
+  const listed = [{ order_id: "o-2", product: { id: "swiggy-money-india", value: "50" } }, { order_id: "o-1", product: { id: "swiggy-money-india", value: "50" } }]
+  const sw = { id: "swiggy-money-india", value: "50" }
+  assert.deepEqual(matchOrders([{ ...sw, orderId: "o-1" }, sw], listed).map((o) => o?.order_id), ["o-1", "o-2"])
+  assert.deepEqual(matchOrders([{ ...sw, orderId: "o-9" }, sw], listed).map((o) => o?.order_id), [undefined, "o-2"])
+})
+
+test("an order whose Redemption Data is null doesn't hold up the codes of the rest of its cart", async () => {
+  const cards = [{ id: "amazon-us", value: "10" }, { id: "steam-usa", value: "20" }, { id: "netflix-us", value: "25" }]
+  const found = await withGuestBitrefill(
+    () =>
+      toolResult({
+        invoice_status: "complete",
+        orders: [
+          { order_id: "o-1", status: "delivered", product: { id: "amazon-us", value: "10" }, redemption_info: { code: "AMZ" } },
+          { order_id: "o-2", status: "refunded", product: { id: "steam-usa", value: "20" }, redemption_info: null },
+          { order_id: "o-3", status: "delivered", product: { id: "netflix-us", value: "25" }, redemption_info: { code: "NFX" } }
+        ]
+      }),
+    () => run((b) => b.delivery("inv-1", "token-1", cards), guestEnv)
+  )
+  assert.deepEqual(found.map((d) => (d._tag === "Delivered" ? d.redemption.code : d._tag)), ["AMZ", "Failed", "NFX"])
+})
+
+test("a guest invoice is refused unless it asks for USDC on Base, to a well-formed address, a usable amount", async () => {
+  const invoice = (payment: Record<string, unknown>) => () =>
+    toolResult({
+      response: {
+        invoice_id: "inv-1",
+        invoice_access_token: "token-1",
+        payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 10_000_000, contractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", ...payment }
+      }
+    })
+  const order = (payment: Record<string, unknown>) =>
+    withGuestBitrefill(invoice(payment), () => run((b) => b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" }), guestEnv))
+  assert.deepEqual(await order({}), { _tag: "Invoiced", invoiceId: "inv-1", accessToken: "token-1", payTo: `0x${"ab".repeat(20)}`, amount: 10_000_000 })
+  const refused = async (payment: Record<string, unknown>, why: RegExp) => {
+    const o = await order(payment)
+    assert.equal(o._tag, "Refused", JSON.stringify(payment))
+    assert.match("reason" in o ? o.reason : "", why)
+  }
+  // USDC on another chain (Ethereum's), or another token on Base.
+  await refused({ contractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }, /not USDC on Base/)
+  await refused({ address: "0x1234" }, /malformed address/)
+  await refused({ address: `0x${"ab".repeat(20)} ` }, /malformed address/)
+  await refused({ altBasePrice: 0 }, /no usable amount/)
+  await refused({ altBasePrice: -5 }, /no usable amount/)
+  await refused({ altBasePrice: 1.5 }, /no usable amount/)
+  await refused({ altBasePrice: 2 ** 53 }, /no usable amount/)
+})
+
+test("a guest login Bitrefill stops taking (401) is renewed once and the call made again; a second 401 is a refusal", async () => {
+  const logins: Array<string> = []
+  const used: Array<string> = []
+  let refuseAll = false
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (String(url).endsWith("/oauth/mcp/token")) {
+      logins.push(`login-${logins.length + 1}`)
+      return Response.json({ access_token: logins.at(-1), expires_in: 21_600 })
+    }
+    // Only the MCP calls: the catalog copy that starts with the service reads elsewhere.
+    if (!String(url).endsWith("/mcp")) return new Response("Not Found", { status: 404 })
+    const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "") ?? ""
+    used.push(token)
+    // The first login stops working (as when Bitrefill ends it early); the second works, until everything is refused.
+    if (refuseAll || token === "login-1") return new Response("invalid_token", { status: 401 })
+    return toolResult({ response: { invoice_id: "inv-1", invoice_access_token: "t", payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 1, contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" } } })
+  }) as typeof fetch
+  try {
+    const r = await run((b) =>
+      Effect.gen(function*() {
+        const renewed = yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" })
+        const usedBefore = used.length
+        refuseAll = true
+        const refused = yield* b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" })
+        return { renewed, refused, triesAfter: used.length - usedBefore }
+      }), guestEnv)
+    assert.equal(r.renewed._tag, "Invoiced")
+    assert.deepEqual(used.slice(0, 2), ["login-1", "login-2"], "the same call, once more, on a fresh login")
+    assert.equal(r.refused._tag, "Refused")
+    assert.equal(r.triesAfter, 2, "renewed once, never in a loop")
+    assert.deepEqual(logins, ["login-1", "login-2", "login-3"])
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 test("delivery polls from every guest purchase share one pace, leaving the login's other calls for orders", async () => {

@@ -7,8 +7,8 @@
 
 import { solanaAccountId, solanaAddress } from "@luckout/api"
 import type { Provider } from "@reown/appkit-adapter-solana"
-import { load, projectId, TransferReverted } from "./evm"
-import { blockhashExpired, type ReownBalance } from "./holdings"
+import { load, projectId, TransferReverted } from "./evm.ts"
+import { blockhashExpired, type ReownBalance } from "./holdings.ts"
 
 /** Solana mainnet, as AppKit and Reown's balance and RPC services name it. */
 export const SOLANA_CHAIN = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
@@ -155,8 +155,15 @@ export async function sendSolanaTransaction(expected: string, built: { transacti
   return landed(connection, signature, built.lastValidBlockHeight)
 }
 
-/** Follows a sent transaction until it confirms (its signature), or throws TransferReverted once it can never land. */
-async function landed(connection: import("@solana/web3.js").Connection, signature: string, lastValidBlockHeight: number) {
+/**
+ * Follows a sent transaction until it confirms (its signature), or throws TransferReverted once it can never land:
+ * only then may the customer be offered to send it again.
+ */
+export async function landed(
+  connection: Pick<import("@solana/web3.js").Connection, "getSignatureStatuses" | "getBlockHeight">,
+  signature: string,
+  lastValidBlockHeight: number
+) {
   const sentAt = Date.now()
   // Polled, not subscribed: Reown's RPC answers over HTTP only.
   for (;;) {

@@ -359,6 +359,17 @@ export const migrationSteps = {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN paid_symbol TEXT, ADD COLUMN paid_mint TEXT, ADD COLUMN paid_amount TEXT,
                ADD COLUMN paid_raw TEXT, ADD COLUMN amount_in_raw TEXT`
+  }),
+  // A guest checkout keeps the Checkout Email it was placed under (sealed, bound to the checkout), so one that waits
+  // for the float is ordered with the email the customer confirmed. Older checkouts have none and use the current one.
+  // `retell`: a notice Telegram didn't take, sent again by the reconciler (as intents_swaps.retell).
+  // A card keeps the invoice order it was delivered from (`order_id`), so no other card of its checkout takes the same
+  // one, and its voucher's currency (`currency`), so its value can be shown as "50 INR". Older cards have neither.
+  "0027_checkout_email_order_currency": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE checkouts ADD COLUMN email TEXT, ADD COLUMN retell BOOLEAN NOT NULL DEFAULT false`
+    yield* sql`CREATE INDEX checkouts_retell ON checkouts (updated_at) WHERE retell`
+    yield* sql`ALTER TABLE purchases ADD COLUMN order_id TEXT, ADD COLUMN currency TEXT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

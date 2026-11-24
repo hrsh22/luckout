@@ -1,8 +1,22 @@
 import { Clock, Config, Context, Data, Effect, Layer, Option, Redacted, Schedule, Semaphore } from "effect"
 import { actions, baseDecode, teraToGas } from "near-api-js"
-import { createPublicClient, encodeFunctionData, erc20Abi, getAddress, type Hex, http, isAddress, keccak256, recoverAddress, serializeTransaction, TransactionReceiptNotFoundError } from "viem"
+import {
+  createPublicClient,
+  encodeFunctionData,
+  erc20Abi,
+  getAddress,
+  type Hex,
+  http,
+  isAddress,
+  keccak256,
+  recoverAddress,
+  serializeTransaction,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError
+} from "viem"
 import { publicKeyToAddress } from "viem/accounts"
 import { base, baseSepolia } from "viem/chains"
+import { Alerts } from "./Alerts.ts"
 import { ContractRejected, Near, NearUnavailable, Network } from "./Near.ts"
 
 // Our wallet on Base (ADR-0009, amended 2026-11-10). Refills swap into it, and only once the USDC is
@@ -20,6 +34,18 @@ export const SIGNER = { mainnet: "v1.signer", testnet: "v1.signer-prod.testnet" 
 const PATH = "evm"
 /** A USDC transfer uses about 60k gas; the limit only caps it. */
 const TRANSFER_GAS = 100_000n
+/**
+ * The most a payment offers per gas: 0.5 gwei, a hundred times Base's minimum base fee, so a fee spike can't leave it
+ * unmined while its invoice runs out. Under EIP-1559 a transaction pays only the block's base fee plus its tip, never
+ * its ceiling, so a high ceiling costs nothing extra while fees are normal. Base's fee parameters (minimum base fee,
+ * how fast the base fee may climb) are on docs.base.org/chain/fees, and change several times a year. The node takes a
+ * payment only from a wallet holding its gas limit at this ceiling (GAS_RESERVE), plus its L1 fee.
+ */
+// ponytail: a fixed ceiling; a spike past 0.5 gwei still holds a payment until fees fall. Replacing it with the same
+// nonce at a higher fee lifts that, provided every hash signed for the nonce is watched and any of them mined counts as paid.
+const FEE_CEILING = 500_000_000n
+/** The ETH (wei) the Base Wallet must hold before the node takes a payment from it: 0.00005 ETH, L1 fee aside. */
+export const GAS_RESERVE = TRANSFER_GAS * FEE_CEILING
 
 /** A USDC payment from the wallet. Its nonce and fees are fixed before it's signed, so signing it again can only replace it, never pay twice. */
 export interface BasePayment {
@@ -71,6 +97,7 @@ export class Base extends Context.Service<Base, {
     Base,
     Effect.gen(function*() {
       const near = yield* Near
+      const alerts = yield* Alerts
       const network = yield* Network
       const url = yield* Config.Redacted("BASE_RPC_URL").pipe(
         Config.option,
@@ -121,12 +148,13 @@ export class Base extends Context.Service<Base, {
             call("nonce", () => client!.getTransactionCount({ address: a, blockTag: "pending" })),
             call("fees", () => client!.estimateFeesPerGas())
           ])
-          // Twice today's fee: Base fees are fractions of a cent, and a payment must not sit unmined.
+          // Up to the ceiling, so a spike can't strand it; a payment signed mid-spike keeps twice today's fee.
+          const twice = fees.maxFeePerGas * 2n
           return {
             to: getAddress(to),
             amount: String(amount),
             nonce,
-            maxFeePerGas: String(fees.maxFeePerGas * 2n),
+            maxFeePerGas: String(twice > FEE_CEILING ? twice : FEE_CEILING),
             maxPriorityFeePerGas: String(fees.maxPriorityFeePerGas)
           } satisfies BasePayment
         })
@@ -175,6 +203,10 @@ export class Base extends Context.Service<Base, {
           Effect.map((r): PaymentStatus => (r === null ? "pending" : r.status === "success" ? "success" : "reverted"))
         )
 
+      /** Whether the node knows a transaction by its hash, waiting or mined. Like `status`, only "not found" means no. */
+      const knows = (hash: Hex) =>
+        call("transaction", () => client!.getTransaction({ hash }).then(() => true, (e) => (e instanceof TransactionNotFoundError ? false : Promise.reject(e))))
+
       const send = (p: BasePayment & { raw: Hex; hash: Hex }) =>
         call("send", () => client!.sendRawTransaction({ serializedTransaction: p.raw })).pipe(
           // Already sent, or already mined: the receipt says which.
@@ -187,8 +219,18 @@ export class Base extends Context.Service<Base, {
         status(p.hash).pipe(Effect.repeat({ schedule: Schedule.spaced("2 seconds"), until: (s) => s !== "pending", times: 15 }))
 
       const lock = yield* Semaphore.make(1)
-      const pay = (to: Hex, amount: number, saved: SignedPayment | null, save: (p: SignedPayment) => Effect.Effect<void>, sendBefore: number) =>
-        lock.withPermits(1)(Effect.gen(function*() {
+      const pay = (to: Hex, amount: number, saved: SignedPayment | null, save: (p: SignedPayment) => Effect.Effect<void>, sendBefore: number) => {
+        /** The payment signed again in place of the saved one, if it came to that: the admin hears once the wallet is free. */
+        let replaced: SignedPayment | undefined
+        const tell = Effect.suspend(() =>
+          saved && replaced
+            ? alerts.admin(
+              `Base payment ${saved.hash} (nonce ${saved.nonce}) lost its nonce to another of the Base Wallet's transactions and the node doesn't know it, ` +
+                `so ${(amount / 1e6).toFixed(2)} USDC to ${to} was signed again as ${replaced.hash}. Check on basescan that only one of them went through.`
+            )
+            : Effect.void
+        )
+        return lock.withPermits(1)(Effect.gen(function*() {
           // Decided here, holding the lock, right before sending: a caller can wait on the lock past its deadline,
           // and a saved payment is watched for half a minute before it may be replaced.
           const late = Effect.map(Clock.currentTimeMillis, (now) => now >= sendBefore)
@@ -203,13 +245,21 @@ export class Base extends Context.Service<Base, {
             const latest = yield* Effect.flatMap(address, (a) => call("nonce", () => client!.getTransactionCount({ address: a, blockTag: "latest" })))
             const again = yield* mined(saved)
             if (again !== "pending" || latest <= saved.nonce || (yield* late)) return again
+            // A node's receipts can lag its blocks: one that still knows the payment by its hash (mined, or waiting) says
+            // it isn't lost, whatever the receipt lookup says.
+            // ponytail: the nonce, the receipt and the hash lookup all come from one RPC provider, so one that is wrong about
+            // all three can still have an invoice paid twice. Asking Bitrefill that the invoice is still unpaid first lifts that.
+            if (yield* knows(saved.hash)) return "pending"
             yield* Effect.logWarning(`Base payment ${saved.hash} lost its nonce ${saved.nonce} to another transaction; paying again`)
           }
           const p = yield* sign(yield* prepare(to, amount))
           yield* save(p)
+          // Only a payment whose nonce was lost gets this far with one saved: signing again is rare enough to tell someone.
+          if (saved) replaced = p
           yield* send(p)
           return yield* mined(p)
-        }))
+        })).pipe(Effect.ensuring(tell))
+      }
 
       return Base.of({ configured, address, balances, prepare, sign, send, status, pay })
     })
