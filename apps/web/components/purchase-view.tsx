@@ -4,13 +4,14 @@ import { GiftCard } from "@/components/gift-card"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { safeLink, usd, usdUp } from "@/lib/format"
+import { usd, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
 import { purchasePollMs } from "@/lib/purchase-poll"
-import { type Purchase, redemptionFields } from "@luckout/api"
+import { redemptionShown } from "@/lib/redemption"
+import type { Purchase } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
@@ -34,13 +35,12 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
   }).data
 }
 
-const redemption = (p: Purchase) => {
-  const r = redemptionFields(p.redemption)
-  // Bitrefill's expiry date, when the card has one.
-  const expires = r.expires && !Number.isNaN(Date.parse(r.expires)) ? new Date(r.expires) : undefined
-  const link = safeLink(r.link)
-  return { ...r, link, expires, any: r.secrets.length > 0 || !!link }
-}
+/**
+ * The contract admitted it, so its price has left the Balance. A card waiting for our gift card supply may have been
+ * admitted already (the server's restock): then it can't be cancelled, and if it can't be delivered the full amount
+ * returns to the Balance.
+ */
+export const charged = (p: Purchase) => p.contractPurchaseId !== undefined
 
 /** A delivered Lucky Buy whose Draw isn't recorded yet. */
 const drawPending = (p: Purchase) => p.status === "delivered" && !p.draw && typeof p.mode === "object"
@@ -69,7 +69,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
   const below = p.draw && p.draw.finalPrice < p.referencePrice
   const pal = modePalette(p.mode)
-  const r = redemption(p)
+  const r = redemptionShown(p.redemption)
   const refunded = p.status === "failed" || p.status === "rejected"
   return (
     <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ type: "spring", stiffness: 260, damping: 26 }} className="flex flex-col gap-4">
@@ -90,7 +90,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
           </p>
         )}
         {p.status === "pending" && <Progress />}
-        {p.status === "waiting" && <Waiting id={p.id} />}
+        {p.status === "waiting" && <Waiting p={p} />}
         {p.error && <p className="mt-2 text-[15px] opacity-85">{p.error}</p>}
         {p.draw && (
           <>
@@ -137,6 +137,8 @@ export function Progress() {
 
 const WAITING_TEXT =
   "We're topping up our gift card supply for this one: usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then."
+const CHARGED_WAITING_TEXT =
+  "Paid from your balance. We're topping up our gift card supply for this one: usually a few minutes, longer for big cards. If it can't be delivered, the full amount returns to your balance."
 
 /** Cancels a purchase still waiting for credit; nothing was charged. The page's polling shows the result. */
 function CancelWaiting({ id }: { id: string }) {
@@ -161,10 +163,10 @@ function CancelWaiting({ id }: { id: string }) {
 }
 
 /**
- * We're topping up our Bitrefill credit for this card (ADR-0009): usually minutes, longer for a big
- * card. The customer is charged only once it's ready, and can cancel until then.
+ * We're topping up our gift card supply for this card: usually minutes, longer for a big card. Not yet admitted, the
+ * customer is charged only once it's ready and can cancel until then; already admitted, it's paid and goes on by itself.
  */
-function Waiting({ id }: { id: string }) {
+function Waiting({ p }: { p: Purchase }) {
   return (
     <div className="mt-4 flex flex-col gap-2">
       <div className="relative h-1.5 overflow-hidden rounded-full bg-white/50">
@@ -174,8 +176,8 @@ function Waiting({ id }: { id: string }) {
           transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
         />
       </div>
-      <p className="text-[15px] opacity-85">{WAITING_TEXT}</p>
-      <CancelWaiting id={id} />
+      <p className="text-[15px] opacity-85">{charged(p) ? CHARGED_WAITING_TEXT : WAITING_TEXT}</p>
+      {!charged(p) && <CancelWaiting id={p.id} />}
     </div>
   )
 }
@@ -235,7 +237,7 @@ function SafetyNet({ p }: { p: Purchase }) {
 }
 
 export function CodeBlock({ p }: { p: Purchase }) {
-  const r = redemption(p)
+  const r = redemptionShown(p.redemption)
   return (
     <div className="card flex flex-col gap-3 p-5">
       {r.secrets.map((f, i) => <Secret key={i} label={f.label} value={f.value} />)}
@@ -320,6 +322,8 @@ export function ModeChip({ mode }: { mode: Purchase["mode"] }) {
 /** One line of history; open it for the code and the proof. */
 export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
+  // Delivered, or still on its way after the contract took its price: either way it has left the Balance.
+  const debited = p.status === "delivered" || ((p.status === "pending" || p.status === "waiting") && charged(p))
   return (
     <li className="card overflow-hidden">
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
@@ -358,18 +362,18 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
                 <div><dt className="text-muted">Price</dt><dd className="font-semibold">{usd(p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usdUp(p.maxPrice ?? p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : drawPending(p) ? "Draw result pending" : "None"}</dd></div>
-                <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{p.status === "delivered" ? usdUp(paid) : "Nothing"}</dd></div>
+                <div><dt className="text-muted">You paid</dt><dd className="font-semibold">{debited ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
               <SafetyNet p={p} />
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code, usually within a minute. This updates by itself.</p>}
               {p.status === "waiting" && (
                 <>
-                  <p className="text-sm text-muted">{WAITING_TEXT}</p>
-                  <CancelWaiting id={p.id} />
+                  <p className="text-sm text-muted">{charged(p) ? CHARGED_WAITING_TEXT : WAITING_TEXT}</p>
+                  {!charged(p) && <CancelWaiting id={p.id} />}
                 </>
               )}
-              {redemption(p).any ? <CodeBlock p={p} /> : null}
+              {redemptionShown(p.redemption).any ? <CodeBlock p={p} /> : null}
               {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (
                 <a href={explorer(p.settleTx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start`}>
                   Delivery transaction<ExternalLink />

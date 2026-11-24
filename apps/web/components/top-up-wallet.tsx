@@ -7,13 +7,13 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { GAS_COIN, maxTopUp, useWalletHoldings } from "@/lib/balances"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { sendFromWallet, TransferReverted, walletChain } from "@/lib/evm"
+import { sendFromWallet, walletChain } from "@/lib/evm"
 import { tokenAmount, toMicro, usd } from "@/lib/format"
 import { contractId, usdcId } from "@/lib/near"
 import { pendingMode } from "@/lib/onboarding"
 import { useSession } from "@/lib/session"
 import { sendFromSolana, sendSolanaTransaction } from "@/lib/solana"
-import { pricedAsShown, transferFor } from "@/lib/top-up-quote"
+import { afterSendFailed, pricedAsShown, transferFor } from "@/lib/top-up-quote"
 import { moveInIntent, type TopUpAsset, type TopUpQuote, TopUpStatus } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
 import { useEffect, useMemo, useRef, useState } from "react"
@@ -182,15 +182,10 @@ export function TopUpWallet({ onDone, onContinue, need }: { onDone?: (ok: boolea
           await sendSolanaTransaction(accountId, tx, onSent)
         }
       } catch (e) {
-        // Mined and reverted: nothing left the wallet, so they may send again.
-        if (e instanceof TransferReverted) {
-          setSent(false)
-          // A swap fails whole when the price moved past its room before it landed: only Solana's fee was spent.
-          if (a.swap) {
-            throw new Error(`The swap didn't go through: ${a.symbol}'s price moved past what this swap allowed before it landed, or it took too long. Only Solana's network fee left your wallet. Send it again; if the price has moved too far, you'll be asked for a new Top-Up.`)
-          }
-        }
-        throw e
+        // Mined and reverted: nothing left the wallet, so they may send again. Anything else may still land.
+        const failed = afterSendFailed(e, a)
+        if (failed.sendAgain) setSent(false)
+        throw failed.error
       }
     })
   /**

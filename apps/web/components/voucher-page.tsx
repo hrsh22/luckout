@@ -13,7 +13,8 @@ import { ReopensAt } from "@/components/shop-banner"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
-import { totals, useCartQuote, useCheckout } from "@/lib/checkout"
+import { pricedLines, totals, useCartQuote, useCheckout } from "@/lib/checkout"
+import { purchaseRequest, spendingCheck } from "@/lib/checkout-terms"
 import { Quantity } from "@/components/quantity"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
@@ -24,7 +25,7 @@ import { modePalette } from "@/lib/palette"
 import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { openingAmount, openingMode } from "@/lib/voucher-choice"
-import { DEFAULT_LIMITS, MAX_CART, type Mode, NewPurchase, type Quote } from "@luckout/api"
+import { MAX_CART, type Mode, type Quote } from "@luckout/api"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft, CalendarClock, ChevronDown, ShoppingCart, Star, Zap } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
@@ -82,14 +83,7 @@ function Voucher() {
     mutationFn: async (q: Quote) => {
       // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice
       // or to play a Lucky Amount other than the one shown.
-      const payload = new NewPurchase({
-        voucherId: id,
-        value: value!,
-        mode: q.mode,
-        maxPrice: q.maxPrice,
-        ...(q.mode === "normal" ? {} : { luckyAmount: q.luckyAmount }),
-        idempotencyKey
-      })
+      const payload = purchaseRequest({ voucherId: id, value: value! }, idempotencyKey, q)
       return api((c) => c.purchases.create({ payload }), token, "150 seconds").catch((e) => {
         if (!(e instanceof TimedOut)) throw e
         // Still running on the server: the same key returns the same purchase, then we follow it.
@@ -113,6 +107,8 @@ function Voucher() {
   const units = card && many ? keys.map((key) => ({ line: card, key })) : []
   const checkout = useCheckout()
   const cartQuote = useCartQuote(units, many && !checkout.isPending).data
+  // The copies as the Cart shows a line: the reserve may put some at Normal, or let only part of each play.
+  const copies = card && many ? pricedLines([{ ...card, keys }], cartQuote)[0] : undefined
   const live = usePolledPurchase(buy.data, token)
   // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
   const quote = useQuote(id, value, mode, !live && !buy.isPending)
@@ -242,6 +238,7 @@ function Voucher() {
                     info={info}
                     count={quantity}
                     total={many ? cartQuote && totals(cartQuote).pay : undefined}
+                    copies={copies}
                     error={buy.error
                       ? errorMessage(buy.error)
                       : checkout.error
@@ -352,13 +349,15 @@ function Details({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function Receipt({ shown, exact, info, count = 1, total, error, retry, children }: {
+function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, children }: {
   shown: Quote | undefined
   exact: boolean
   info: NonNullable<ReturnType<typeof modeInfo>>
   /** How many of the card; the price shown is for all of them (`total`, from the cart's own quote, once it's in). */
   count?: number
   total?: number | undefined
+  /** Several copies, priced as a Cart line: whether the reserve put some at Normal or let only part of each play. */
+  copies?: Copies | undefined
   error?: string | undefined
   /** Asks for the price again; absent when there's nothing to price. */
   retry?: { run: () => void; busy: boolean } | undefined
@@ -377,6 +376,8 @@ function Receipt({ shown, exact, info, count = 1, total, error, retry, children 
     )
   }
   const lucky = shown.luckyAmount > 0
+  // "Each" holds only while every copy plays in full; otherwise the Cart's note says what the reserve did to them.
+  const differ = copies && (copies.normal || copies.plays !== undefined) ? copies : undefined
   const outcomes = pricedOutcomes(info, shown)
   const best = outcomes[outcomes.length - 1]!
   return (
@@ -390,12 +391,21 @@ function Receipt({ shown, exact, info, count = 1, total, error, retry, children 
       <div>
         <p className="text-ink-soft">{lucky ? "You pay now" : "You pay"}</p>
         <p className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={total ?? shown.maxPrice * count} up /></p>
-        <p className="mt-2 text-[15px] text-ink-soft">
-          {count > 1 && <span className="font-semibold text-ink">{count} cards. Each: </span>}
-          {lucky
-            ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
-            : `${count > 1 ? "exactly" : "Exactly"} the price. No Draw, no cashback.`}
-        </p>
+        {differ
+          ? (
+            <div className="mt-2 flex flex-col gap-1">
+              <p className="text-[15px] font-semibold text-ink">{count} cards.</p>
+              <CopiesNote priced={differ} />
+            </div>
+          )
+          : (
+            <p className="mt-2 text-[15px] text-ink-soft">
+              {count > 1 && <span className="font-semibold text-ink">{count} cards. Each: </span>}
+              {lucky
+                ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
+                : `${count > 1 ? "exactly" : "Exactly"} the price. No Draw, no cashback.`}
+            </p>
+          )}
       </div>
       {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
       {/* The action sits right under the price, so a laptop screen shows both; every outcome follows below it. */}
@@ -415,6 +425,24 @@ function Receipt({ shown, exact, info, count = 1, total, error, retry, children 
         </div>
       )}
     </div>
+  )
+}
+
+/** A line as pricedLines gives it: its copies, and what the reserve did to them. */
+type Copies = { readonly line: { readonly keys: ReadonlyArray<string> }; readonly normal: boolean; readonly plays: number | undefined }
+
+/**
+ * What the reserve does to a line's copies right now, in the same words on the card page and in the Cart: some bought
+ * at the normal price, or only part of each playing.
+ */
+export function CopiesNote({ priced: { line, normal, plays } }: { priced: Copies }) {
+  const many = line.keys.length > 1
+  if (normal) return <p className="text-sm text-warn">The cashback reserve is full right now, so {many ? "some of these are" : "this one is"} bought at the normal price.</p>
+  if (plays === undefined) return null
+  return (
+    <p className="text-sm text-muted">
+      Cashback is capped right now: {many ? `at least ${usd(plays)} of each plays` : `${usd(plays)} of it plays`}, the rest is at the normal price.
+    </p>
   )
 }
 
@@ -478,14 +506,8 @@ function BuyAction({ need, largest = need, label, onBuy, onAdd }: {
   }
   if (account === undefined) return <span className="skeleton h-14 rounded-full" />
   const balance = Number(account?.balance ?? 0)
-  const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
-  // A limit that's off is u128::MAX, so it's never "over" and never shown in dollars here.
-  const overPer = !!account && largest > Number(account.per_purchase_limit)
-  const overDay = !!account && today + need > Number(account.daily_limit)
-  // Up to the new defaults, or what this purchase needs (to the whole dollar) if that's more; the other limit stays as it is.
-  const raised = (floor: number, needed: number) => String(Math.max(floor, Math.ceil(needed / 1e6) * 1e6))
-  const per = overPer ? raised(DEFAULT_LIMITS.perPurchase, largest) : account?.per_purchase_limit
-  const daily = overDay ? raised(DEFAULT_LIMITS.daily, today + need) : account?.daily_limit
+  // Before the first deposit there's no account, and so no limit in the way yet.
+  const { today, overPer, overDay, per, daily } = account ? spendingCheck(account, need, largest) : { today: 0, overPer: false, overDay: false, per: undefined, daily: undefined }
 
   if (balance < need) {
     return <Button size="lg" variant="gold" onClick={() => onAdd(need - balance)}>Add {usdUp(need - balance)} to buy</Button>

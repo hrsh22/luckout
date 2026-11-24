@@ -1,13 +1,10 @@
 "use client"
 
 import {
-  type AuthAction,
-  authCallIntent,
   evmSignInMessage,
   intentPayload,
   intentSignature,
   type Mode,
-  moveInIntent,
   SignedChallenge,
   SignedEvmChallenge,
   type SignedIntent,
@@ -25,6 +22,7 @@ import { api, cancelled, errorMessage, TimedOut, UNAUTHORIZED } from "./api"
 import { claimCart, releaseCart } from "./cart"
 import { connectEvm, disconnectWallets, evmAddress, evmChainId, signText, watchEvm } from "./evm"
 import { type Call, canSignForRelay, contractId, intentsId, intentsUsdc, near, nearBalance, send as walletSend, signForRelay, usdcId, view } from "./near"
+import { asIntent, nameOf, restoreOutcome, type Saved } from "./session-rules.ts"
 import { connectSolana, signSolana, solanaAccount, watchSolana } from "./solana"
 
 /** The customer's state in the contract (all amounts micro-USDC strings). */
@@ -100,27 +98,8 @@ const readAccount = (id: string, intents: boolean) =>
 const relayable = (token: string, intents: boolean) =>
   Promise.all([intents || canSignForRelay(), api((c) => c.relay.status(), token).then((s) => s.available, () => false)]).then(([a, b]) => a && b)
 
-/** The contract calls an EVM or Solana wallet makes through NEAR Intents (ADR-0011), from the calls a NEAR wallet would sign. */
-const AUTH_METHODS = new Set(["withdraw", "set_default_mode", "set_limits", "reclaim", "retry_draw"])
-const asIntent = (account: string, c: Call) => {
-  if (c.receiverId === contractId && AUTH_METHODS.has(c.method)) return authCallIntent(contractId, { [c.method]: c.args } as AuthAction)
-  const args = c.args as { receiver_id?: string; amount?: string; msg?: string }
-  // A deposit (depositCall), with the Default Mode a first one may carry.
-  const mode = args.msg?.startsWith("{") ? (JSON.parse(args.msg) as { mode?: Mode }).mode : undefined
-  if (c.receiverId === usdcId && c.method === "ft_transfer_call" && args.receiver_id === contractId && (args.msg === "" || mode !== undefined)) {
-    return moveInIntent({ usdcId, contractId, account, amount: String(args.amount), mode })
-  }
-  throw new Error("This wallet can't do that here.")
-}
 const SessionContext = createContext<Session | null>(null)
 
-/** What is saved of a session: who, with which kind of wallet, and until when. The token never reaches the page (an HttpOnly cookie). */
-interface Saved {
-  accountId: string
-  wallet: Wallet
-  expiresAt: number
-}
-const nameOf = (s: Saved) => `${s.accountId}:${s.expiresAt}`
 const load = (): Saved | undefined => {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE) ?? "null")
@@ -221,16 +200,19 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       : saved?.wallet === "solana"
       ? solanaAccount()
       : near().getConnectedWallet().then(({ accounts }) => accounts[0]?.accountId)
-    const leftBehind = () => {
-      void endOnServer(saved?.accountId)
-      forget()
+    // Decided when the wallet answers, which may come after the customer has signed in again (see below).
+    const settle = (id: string | undefined) => {
+      const outcome = restoreOutcome(saved, load(), current.current !== undefined, id)
+      if (outcome === "restore" && saved) setSession({ accountId: saved.accountId, token: nameOf(saved), wallet: saved.wallet })
+      if (outcome === "end") {
+        void endOnServer(saved?.accountId)
+        forget()
+      }
     }
-    connected.then((id) => {
-      if (saved && saved.accountId === id) setSession({ accountId: saved.accountId, token: nameOf(saved), wallet: saved.wallet })
-      else leftBehind()
-    }, leftBehind).finally(() => setReady(true))
+    connected.then(settle, () => settle(undefined)).finally(() => setReady(true))
     // The NEAR connector loads its wallet list from elsewhere first. If that hangs, the page must not: Sign in
-    // appears anyway (an EVM or Solana wallet doesn't need it), and a late answer still restores the session above.
+    // appears anyway (an EVM or Solana wallet doesn't need it), and a late answer still restores the session above,
+    // unless the customer has signed in meanwhile.
     const waited = setTimeout(() => setReady(true), 8000)
     return () => clearTimeout(waited)
   }, [])

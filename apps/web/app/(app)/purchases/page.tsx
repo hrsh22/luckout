@@ -1,6 +1,6 @@
 "use client"
 
-import { PurchaseRow } from "@/components/purchase-view"
+import { charged, PurchaseRow } from "@/components/purchase-view"
 import { SignInCard } from "@/components/sign-in-card"
 import { buttonVariants } from "@/components/ui/button"
 import { errorMessage } from "@/lib/api"
@@ -109,7 +109,10 @@ function Order({ cards, open, setOpen }: { cards: ReadonlyArray<Purchase>; open:
             {done
               ? ready < cards.length ? "Any card that couldn't be delivered went back to your balance in full." : "Open a card for its code."
               : waiting
-              ? "We're topping up our gift card supply first; you're only charged once it's ready."
+              // A checkout's cards wait together: all already paid (admitted), or none yet.
+              ? cards.some((p) => p.status === "waiting" && charged(p))
+                ? "We're topping up our gift card supply first. Any card that can't be delivered returns its full amount to your balance."
+                : "We're topping up our gift card supply first; you're only charged once it's ready."
               : "Codes show up here as each card arrives, usually within a minute."}
           </p>
         </div>

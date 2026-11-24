@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { pricedAsShown, transferFor } from "./top-up-quote.ts"
+import { TransferReverted } from "./evm.ts"
+import { afterSendFailed, pricedAsShown, transferFor } from "./top-up-quote.ts"
 
 const usdcBase = { symbol: "USDC", chain: "base", contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }
 const ethBase = { symbol: "ETH", chain: "base" }
@@ -41,4 +42,18 @@ test("a swap-paid Top-Up is never sent as a transfer, and is sent without asking
   assert.equal(pricedAsShown(q, q), true)
   assert.equal(pricedAsShown(q, { ...q, amountInFormatted: "0.07" }), true, "less is fine")
   assert.equal(pricedAsShown(q, { ...q, amountInFormatted: "0.07054703314" }), false, "any more: ask again")
+})
+
+test("once the wallet has sent it, Send comes back only for a transfer mined and reverted: anything else may still land", () => {
+  const usdc = { symbol: "USDC" }
+  const reverted = new TransferReverted()
+  assert.deepEqual(afterSendFailed(reverted, usdc), { sendAgain: true, error: reverted })
+  // A swap that reverted spent only Solana's fee, and says so.
+  const swap = afterSendFailed(reverted, { symbol: "ORE", swap: true })
+  assert.equal(swap.sendAgain, true)
+  assert.match((swap.error as Error).message, /didn't go through.*Only Solana's network fee left your wallet/)
+  // Waiting for the receipt timed out, or the wallet lost its connection after sending: it may land, so no second send.
+  const timeout = new Error("Timed out while waiting for transaction with hash 0xabc to be confirmed.")
+  assert.deepEqual(afterSendFailed(timeout, usdc), { sendAgain: false, error: timeout })
+  assert.deepEqual(afterSendFailed(timeout, { symbol: "ORE", swap: true }), { sendAgain: false, error: timeout })
 })
