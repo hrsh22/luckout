@@ -1,7 +1,7 @@
 "use client"
 
 import { OddsBar } from "@/components/odds"
-import { centsUp, usdCents, usdUp } from "@/lib/format"
+import { shownCashbackBps, shownOutcomes, usdCents, usdUp } from "@/lib/format"
 import { cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { useReserve } from "@/lib/queries"
@@ -37,13 +37,15 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
         const example = price ?? 20_000_000
         const quote = m.premiumBps === 0 || reserve !== undefined ? simpleQuote(m, example, reserve) : undefined
         const outcomes = quote && pricedOutcomes(m, quote)
+        // As the card's outcome list shows them: the chance and the best Cashback read from these, like the bar.
+        const rows = quote && outcomes && shownOutcomes(quote.maxPrice, outcomes)
+        const best = rows?.at(-1)
+        // No Cashback a cent can show: the Cashback Reserve is used up for now (the contract takes no Lucky Buy then).
+        const usedUp = m.premiumBps > 0 && best?.cashback === 0
         // When only part of the price plays (a small Cashback Reserve), the extra is less than the mode's
         // percentage of the price: say what it really is.
         const extra = quote && quote.luckyAmount < example ? `+${usdUp(quote.maxPrice - example)}` : `+${m.premiumBps / 100}%`
-        const best = outcomes?.at(-1)
-        // The best cashback in the cents the card's outcome list shows: what's left of the price you pay now.
-        const bestBack = best && quote ? centsUp(quote.maxPrice) - centsUp(best.price) : 0
-        const chance = cashbackChanceBps(m) / 100
+        const chance = (rows ? shownCashbackBps(rows) : cashbackChanceBps(m)) / 100
         return (
           <motion.button
             key={m.name}
@@ -76,30 +78,29 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
             <span className={`mt-1 text-[15px] ${selected ? "opacity-80" : "text-ink-soft"}`}>
               {m.premiumBps === 0
                 ? price ? `Pay ${usdUp(example)}, exactly the price` : "Exactly the price, no Draw"
+                : usedUp
+                ? "No cashback right now: the Cashback Reserve is used up."
                 : price && quote ? `Pay ${usdUp(quote.maxPrice)} now, ${extra}` : `${extra} up front`}
             </span>
             <span className={`mt-auto ${compact ? "pt-2" : "pt-4"}`}>
               {m.premiumBps === 0
                 ? <span className={`text-sm ${selected ? "opacity-80" : "text-muted"}`}>No cashback, no surprises.</span>
-                : (
+                : !usedUp && (
                   <>
                     {outcomes ? <OddsBar outcomes={outcomes} className="h-2" /> : <span className="skeleton block h-2 rounded-full" />}
                     <span className={`mt-2 block text-sm ${selected ? "opacity-85" : "text-muted"}`}>
-                      {!best
-                        ? <><b className="font-semibold">{chance}%</b> get cashback</>
-                        : bestBack === 0
-                        ? "No cashback right now: the Cashback Reserve is used up."
-                        : (
-                          <>
-                            <b className="font-semibold">{chance}%</b> get cashback, up to{" "}
-                            {best.price === 0
-                              ? `all ${usdCents(bestBack)}`
-                              : price || bestBack < 100
-                              ? usdCents(bestBack)
-                              : `$${Math.floor(bestBack / 100)}`}
-                            {price ? "" : " on a $20 card"}
-                          </>
-                        )}
+                      <b className="font-semibold">{chance}%</b> get cashback
+                      {best && (
+                        <>
+                          , up to{" "}
+                          {best.free
+                            ? price ? "all of it" : `all ${usdCents(best.cashback)}`
+                            : price || best.cashback < 100
+                            ? usdCents(best.cashback)
+                            : `$${Math.floor(best.cashback / 100)}`}
+                          {price ? "" : " on a $20 card"}
+                        </>
+                      )}
                     </span>
                   </>
                 )}

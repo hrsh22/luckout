@@ -15,34 +15,47 @@ export const usdUp = (micro: number | string) => usdCents(centsUp(Number(micro))
 /** A balance, rounded down to the cent: never show more than is there (prices round up, so the two add up). */
 export const usdDown = (micro: number | string) => fmt.format(Math.floor(Number(micro) / 10_000) / 100)
 
-/** One row of a Lucky Buy's outcome list as shown, in whole cents. `samePct`: every outcome in it has `pct`. */
+/** micro-USDC (never negative) → whole cents, rounded down, in integers only. */
+const centsDown = (micro: number) => (micro - (micro % 10_000)) / 10_000
+
+/**
+ * One row of a Lucky Buy's outcome list as shown, in whole cents. `samePct`: every outcome in it has `pct`. `free`: 100%
+ * off, where everything paid comes back (its `price` is 0, whatever the cents of what was paid).
+ */
 export interface ShownOutcome {
   price: number
   cashback: number
   pct: number
   samePct: boolean
   chanceBps: number
+  free: boolean
 }
 
 /**
- * The outcome list in whole cents that add up: "you pay" rounds up like every price, and the cashback is what's left of
- * the Maximum Price shown, so pay now minus cashback is always what you pay (never more cashback than comes back).
- * Outcomes that land on the same cent read the same, so they're one row with their chances summed. Input is ordered
- * most expensive first, as pricedOutcomes gives it; so is the result.
+ * The outcome list in whole cents that never promises more than happens: the Cashback rounds down to the cent, so it's
+ * never more than is credited, and "you pay" is the price paid now (rounded up, as charged) minus that Cashback, so every
+ * row adds up and no price reads below what it is. Outcomes that read the same are one row with their chances summed;
+ * a Cashback under a cent joins "No cashback". 100% off keeps its own row. Input is ordered most expensive first, as
+ * pricedOutcomes gives it; so is the result. Shown wherever outcomes are: the list, the bar and a tile's chance.
  */
 export const shownOutcomes = (maxPrice: number, outcomes: ReadonlyArray<{ price: number; pct: number; chanceBps: number }>) => {
   const now = centsUp(maxPrice)
   const rows: Array<ShownOutcome> = []
   for (const o of outcomes) {
-    const price = centsUp(o.price)
-    const same = rows.find((r) => r.price === price)
+    const free = o.price === 0
+    const cashback = centsDown(maxPrice - o.price)
+    const price = free ? 0 : now - cashback
+    const same = rows.find((r) => r.free === free && r.price === price)
     if (same) {
       same.chanceBps += o.chanceBps
       same.samePct &&= same.pct === o.pct
-    } else rows.push({ price, cashback: now - price, pct: o.pct, samePct: true, chanceBps: o.chanceBps })
+    } else rows.push({ price, cashback, pct: o.pct, samePct: true, chanceBps: o.chanceBps, free })
   }
   return rows
 }
+
+/** The chance, in basis points, of a Cashback as the outcome list shows it: one under a cent isn't one. */
+export const shownCashbackBps = (rows: ReadonlyArray<ShownOutcome>) => rows.reduce((s, r) => s + (r.cashback > 0 ? r.chanceBps : 0), 0)
 
 /**
  * Cart lines in whole cents that add up to the cart's total shown (rounded up): each line is its exact amount rounded

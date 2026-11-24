@@ -39,11 +39,12 @@ export function BrowserCheck({ tx, purchase }: { tx: string; purchase: number })
           <tbody>
             {checks.map((c) => (
               <tr key={c.label} className="border-b border-line align-top last:border-0">
-                <td className="p-3 sm:p-4">{c.label}</td>
+                <td className="p-3 wrap-anywhere sm:p-4">{c.label}</td>
+                {/* The cell clips, so nothing spills into the next column: the raw value shortens, its plain reading wraps. */}
                 {[c.expected, c.recomputed].map((v, i) => (
-                  <td key={i} className="p-3 tabular-nums sm:p-4" title={v}>
+                  <td key={i} className="overflow-hidden p-3 tabular-nums sm:p-4" title={v}>
                     <span className="block truncate">{v}</span>
-                    {c.unit && <span className="block text-muted">{plainly(v, c.unit)}</span>}
+                    {c.unit && <span className="block text-muted wrap-anywhere">{plainly(v, c.unit)}</span>}
                   </td>
                 ))}
                 <td className="p-3 sm:p-4">{c.ok ? "✓" : "✗"}</td>

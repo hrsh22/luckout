@@ -109,35 +109,62 @@ test("cents round up with integers only, like every price", () => {
   assert.equal(centsUp(Number.MAX_SAFE_INTEGER), 900_719_925_475, "no floating point, however large")
 })
 
-test("the outcome list adds up: pay now minus the cashback is what you pay, and rows that read the same are one", () => {
+test("the outcome list adds up, never promises more Cashback than comes back, and rows that read the same are one", () => {
   // Jackpot on a $57.56 card while the Cashback Cap ($0.059999) lets only cents of it play: every exact amount has a
-  // fraction of a cent. Shown each on its own, two rows read "you pay $57.56" with different cashback.
+  // fraction of a cent. Shown each on its own, two rows read "you pay $57.56" with different Cashback.
   const q = simpleQuote(jackpot, 57_560_000, { free: 1_000_000_000, max_cashback: 59_999 })
   const rows = shownOutcomes(q.maxPrice, pricedOutcomes(jackpot, q))
   const now = centsUp(q.maxPrice)
   assert.equal(now, 5_758, "pay now: $57.58")
   for (const r of rows) assert.equal(now - r.cashback, r.price, `${now} - ${r.cashback} is ${r.price}`)
-  assert.equal(new Set(rows.map((r) => r.price)).size, rows.length, "no two rows read the same")
   assert.equal(rows.reduce((s, r) => s + r.chanceBps, 0), 10_000, "merged rows keep every chance")
-  assert.deepEqual(rows.map((r) => [r.price, r.cashback, r.chanceBps]), [[5_758, 0, 4_400], [5_756, 2, 4_600], [5_753, 5, 1_000]])
+  assert.deepEqual(rows.map((r) => [r.price, r.cashback, r.chanceBps]), [[5_758, 0, 4_400], [5_756, 2, 4_600], [5_753, 5, 1_000]], "$0.059999 back reads $0.05")
 
-  // Lite on a $0.56 card, the same way: 10% and 20% back both end at $0.56.
+  // Lite on a $0.56 card, the same way: 10% back is $0.006, under a cent, so it reads as no Cashback.
   const l = simpleQuote(lite, 560_000, { free: 1_000_000_000, max_cashback: 59_999 })
-  const lr = shownOutcomes(l.maxPrice, pricedOutcomes(lite, l))
-  for (const r of lr) assert.equal(centsUp(l.maxPrice) - r.cashback, r.price)
-  assert.equal(new Set(lr.map((r) => r.price)).size, lr.length)
+  assert.deepEqual(shownOutcomes(l.maxPrice, pricedOutcomes(lite, l)).map((r) => [r.price, r.cashback, r.chanceBps]), [[57, 0, 9_500], [56, 1, 300], [55, 2, 100], [52, 5, 100]])
 })
 
-test("a whole-price outcome list is unchanged: exact cents, one row per slab, its percentage kept", () => {
+test("100% off keeps its own row at no price, whatever the cents of what was paid", () => {
+  // Lite on a $0.56 card with the whole price playing: pay $0.616 now (shown $0.62), all of it back.
+  const q = simpleQuote(lite, 560_000, { free: 1_000_000_000_000, max_cashback: 1_000_000_000_000 })
+  const free = shownOutcomes(q.maxPrice, pricedOutcomes(lite, q)).at(-1)!
+  assert.deepEqual([free.free, free.price, free.cashback], [true, 0, 61], "the Cashback itself still rounds down")
+})
+
+test("a whole-price outcome list in whole cents: one row per slab, its percentage kept", () => {
   const q = simpleQuote(classic, 20_000_000, { free: 1_000_000_000_000, max_cashback: 1_000_000_000_000 })
-  assert.deepEqual(shownOutcomes(q.maxPrice, pricedOutcomes(classic, q)).map((r) => [r.price, r.cashback, r.pct, r.chanceBps]), [
-    [2_400, 0, 0, 6_000],
-    [1_920, 480, 20, 2_400],
-    [1_680, 720, 30, 700],
-    [1_440, 960, 40, 400],
-    [1_200, 1_200, 50, 300],
-    [0, 2_400, 100, 200]
+  assert.deepEqual(shownOutcomes(q.maxPrice, pricedOutcomes(classic, q)).map((r) => [r.price, r.cashback, r.pct, r.samePct, r.chanceBps]), [
+    [2_400, 0, 0, true, 6_000],
+    [1_920, 480, 20, true, 2_400],
+    [1_680, 720, 30, true, 700],
+    [1_440, 960, 40, true, 400],
+    [1_200, 1_200, 50, true, 300],
+    [0, 2_400, 100, true, 200]
   ])
+})
+
+test("whatever the price and reserve, no shown price is below the real one and no shown Cashback above it", () => {
+  for (let i = 0; i < 5_000; i++) {
+    const m = [lite, classic, jackpot][i % 3]!
+    const reference = 1 + Math.floor(Math.random() * 200_000_000)
+    const reserve = { free: Math.floor(Math.random() * 2_000_000_000), max_cashback: Math.floor(Math.random() * (i % 2 ? 100_000 : 60_000_000)) }
+    const q = simpleQuote(m, reference, reserve)
+    const outcomes = pricedOutcomes(m, q)
+    const rows = shownOutcomes(q.maxPrice, outcomes)
+    const now = centsUp(q.maxPrice)
+    const at = `${m.name} ${reference} ${JSON.stringify(reserve)}`
+    assert.equal(new Set(rows.map((r) => r.price)).size, rows.length, `no two rows read the same: ${at}`)
+    assert.equal(rows.reduce((s, r) => s + r.chanceBps, 0), 10_000, at)
+    for (const r of rows) if (!r.free) assert.equal(now - r.cashback, r.price, `adds up: ${at}`)
+    for (const o of outcomes) {
+      const back = q.maxPrice - o.price
+      const r = rows.find((x) => (o.price === 0 ? x.free : !x.free && x.price === now - Math.floor(back / 10_000)))
+      assert.ok(r, `every outcome has its row: ${at}`)
+      assert.ok(r.price * 10_000 >= o.price, `shown price ${r.price}c not below ${o.price}: ${at}`)
+      assert.ok(r.cashback * 10_000 <= back, `shown Cashback ${r.cashback}c not above ${back}: ${at}`)
+    }
+  }
 })
 
 test("cart lines add up to the total shown, and 'each' shows only where it multiplies out", () => {

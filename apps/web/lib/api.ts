@@ -48,10 +48,9 @@ export const cancelled = (e: unknown) => BACKED_OUT.test(String((e as { message?
 
 /**
  * The server says the thing asked for doesn't exist (a card id Bitrefill doesn't sell): a missing page, not an outage
- * to try again. A declared NotFound, or a 404 the endpoint doesn't declare (HttpApiClient's HttpClientError).
+ * to try again. Only the API's declared NotFound means that.
  */
-export const isNotFound = (e: unknown) =>
-  (e as { _tag?: string } | null)?._tag === "NotFound" || (e as { response?: { status?: number } } | null)?.response?.status === 404
+export const isNotFound = (e: unknown) => (e as { _tag?: string } | null)?._tag === "NotFound"
 
 /** The server's own message for a failed call, when it sent one. */
 export const errorMessage = (e: unknown) => {
