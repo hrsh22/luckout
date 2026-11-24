@@ -245,14 +245,18 @@ export interface Balances {
  * Why a simulated swap mustn't be signed, or undefined: the deposit address gets exactly `need` USDC; the wallet
  * spends exactly `spend` of its token, no USDC of its own, none of any other token it holds, and at most
  * MAX_SOL_SPENT of its SOL; nobody new may spend from or close any of its accounts (a delegate leaves today's
- * balances as they are and empties them later); and every token account of the wallet's that's left is still its own
- * (one the swap opens for it included).
+ * balances as they are and empties them later); and every token account of the wallet's is still there and still its
+ * own (one the transaction opens for it included).
  */
 export const outcomeProblem = (before: Balances, after: Balances, expect: { need: bigint; spend: bigint; payer: string }) => {
   if (after.deposit - before.deposit !== expect.need) return "The swap wouldn't deliver exactly the USDC this Top-Up needs. Nothing was sent: try again."
   if (before.token - after.token !== expect.spend) return "The swap wouldn't take exactly the amount shown. Nothing was sent: try again."
   if (after.usdc < before.usdc) return "The swap would take USDC from your wallet. Nothing was sent: try again."
   if (after.others.some((b, i) => b < (before.others[i] ?? 0n))) return "The swap would take another token from your wallet. Nothing was sent: try again."
+  // Closing one, even empty, sends its rent wherever the swap says.
+  if (after.owners.some((o, i) => o === undefined && before.owners[i] !== undefined)) {
+    return "The swap would close one of your wallet's token accounts. Nothing was sent: try again."
+  }
   if (after.owners.some((o) => o !== undefined && o !== expect.payer)) return "The swap would hand one of your wallet's token accounts to someone else. Nothing was sent: try again."
   if (after.authorities.some((a, i) => a !== before.authorities[i])) return "The swap would let someone else spend from your wallet. Nothing was sent: try again."
   if (before.lamports - after.lamports > MAX_SOL_SPENT) return "The swap would cost more SOL in fees than expected. Nothing was sent: try again in a minute."
@@ -477,12 +481,16 @@ export class Swap extends Context.Service<Swap, {
         // The wallet's other token accounts the swap is handed (one of a token it routes through, say) are watched
         // too: an instruction reaches no account it isn't handed, and the swap may pass through those, never leave
         // them lower. Read-only ones as well: whether an account is writable is decided for the whole transaction, so
-        // another instruction (opening that account, a no-op) can make it writable for the swap too.
+        // another instruction (opening that account, a no-op) can make it writable for the swap too. And one that
+        // Jupiter's setup opens for the wallet in this transaction: it must end up the wallet's alone, or what the wallet
+        // is sent in that token later lands where someone else can take it.
         const handed = [...new Set(jupiter.swap.keys.map((k) => k.pubkey.toBase58()))]
           .filter((k) => !watched.some((w) => w.toBase58() === k))
           .map((k) => new PublicKey(k))
         const found = handed.length === 0 ? [] : yield* solana("swap accounts", () => connection.getMultipleAccountsInfo(handed, "confirmed"))
-        const others = handed.flatMap((key, i) => (heldBy(found[i], payer) ? [{ key, before: found[i] }] : []))
+        // jupiterProblem let through only the Associated Token program's opening of the wallet's own accounts: the second key.
+        const opened = new Set(jupiter.setup.map((i) => i.keys[1]?.pubkey.toBase58()))
+        const others = handed.flatMap((key, i) => (heldBy(found[i], payer) || (!found[i] && opened.has(key.toBase58())) ? [{ key, before: found[i] }] : []))
         const instructions = [
           ...ourBudget(jupiter.budget),
           ...jupiter.setup,

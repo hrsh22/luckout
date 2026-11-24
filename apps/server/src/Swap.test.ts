@@ -107,7 +107,8 @@ test("a simulated swap is signed only if it pays exactly the USDC needed, takes 
   const expect = { need: 5_000_000n, spend: 7_000_000_000n, payer: "Payer" }
   assert.equal(outcomeProblem(before, after, expect), undefined)
   assert.equal(outcomeProblem(before, { ...after, others: [41n] }, expect), undefined, "a token it routes through may come out ahead")
-  assert.equal(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", undefined] }, expect), undefined, "an account emptied and closed is caught by its balance")
+  assert.match(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", undefined] }, expect)!, /close one of your wallet's token accounts/, "closing it sends its rent elsewhere")
+  assert.match(outcomeProblem(before, { ...after, token: 0n, owners: [undefined, "Payer", "Payer"] }, { ...expect, spend: 9_000_000_000n })!, /close/, "the token's own, spent whole")
   assert.match(outcomeProblem(before, { ...after, owners: ["Mallory", "Payer", "Payer"] }, expect)!, /to someone else/)
   assert.match(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", "Mallory"] }, expect)!, /to someone else/)
   assert.match(outcomeProblem(before, { ...after, deposit: 4_999_999n }, expect)!, /exactly the USDC/)
@@ -356,6 +357,56 @@ test("a swap that hands one of the wallet's token accounts to someone else is re
   // No USDC account yet: Jupiter's setup opens the wallet's, owned by the wallet; the deposit address's is 1Click's.
   const { [WALLET_USDC.toBase58()]: _, ...noUsdc } = BEFORE
   await fake({ before: noUsdc, simulations: [{ after: { ...HONEST, [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, OUT - NEED) } }] }).build()
+})
+
+/** Jupiter's swap, given one more account of the wallet's (`extra`) besides its token, its USDC and a pool's vault. */
+const swapWith = (extra: PublicKey, isWritable = true) =>
+  asJson(new TransactionInstruction({
+    programId: new PublicKey(JUPITER_PROGRAM),
+    keys: [
+      { pubkey: PAYER, isSigner: true, isWritable: false },
+      { pubkey: SOURCE, isSigner: false, isWritable: true },
+      { pubkey: WALLET_USDC, isSigner: false, isWritable: true },
+      { pubkey: extra, isSigner: false, isWritable },
+      { pubkey: VAULT, isSigner: false, isWritable: true }
+    ],
+    data: Buffer.from([7, 7, 7])
+  }))
+/** The chain as an honest swap leaves it, but with `account` gone. */
+const without = (account: PublicKey, chain: Record<string, Held> = HONEST) => Object.fromEntries(Object.entries(chain).filter(([k]) => k !== account.toBase58()))
+
+test("a swap that closes one of the wallet's token accounts is refused, empty or spent whole: its rent would go elsewhere", async () => {
+  const mint = Keypair.generate().publicKey
+  const empty = getAssociatedTokenAddressSync(mint, PAYER)
+  const closesEmpty = fake({
+    instructions: { ...INSTRUCTIONS, swapInstruction: swapWith(empty) },
+    before: { ...BEFORE, [empty.toBase58()]: tokenAt(mint, PAYER, 0n) },
+    simulations: [{ after: without(empty) }]
+  })
+  assert.match(await closesEmpty.refusal(), /close one of your wallet's token accounts/)
+  // All of its ORE swapped, and its ORE account closed with it.
+  const spend = 10_000_000_000n
+  const out = (spend * 70n * 997n) / 100_000_000n
+  const closesSource = fake({ simulations: [{ after: { ...without(SOURCE), [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, 300n + out - NEED) } }] })
+  assert.match(await closesSource.refusal({ spend }), /close one of your wallet's token accounts/)
+})
+
+test("a token account Jupiter's setup opens for the wallet and hands to the swap is watched: it must end up the wallet's alone", async () => {
+  const mint = Keypair.generate().publicKey
+  const opened = getAssociatedTokenAddressSync(mint, PAYER)
+  const thief = Keypair.generate().publicKey
+  const instructions = {
+    ...INSTRUCTIONS,
+    setupInstructions: [...INSTRUCTIONS.setupInstructions, asJson(createAssociatedTokenAccountIdempotentInstruction(PAYER, opened, PAYER, mint))],
+    swapInstruction: swapWith(opened)
+  }
+  const leaves = (held: Held) => fake({ instructions, simulations: [{ after: { ...HONEST, [opened.toBase58()]: held } }] })
+  const owner = leaves(tokenAt(mint, thief, 0n))
+  assert.match(await owner.refusal(), /to someone else/)
+  assert.ok(((owner.to("simulateTransaction")[0]!.params as Array<any>)[1].accounts.addresses as Array<string>).includes(opened.toBase58()))
+  assert.match(await leaves(tokenAt(mint, PAYER, 0n, thief)).refusal(), /someone else spend/)
+  // Opened for the wallet and left as it should be: built.
+  await leaves(tokenAt(mint, PAYER, 0n)).build()
 })
 
 test("a refusal that comes before Jupiter is asked says so, so trying again costs the quote nothing", async () => {
