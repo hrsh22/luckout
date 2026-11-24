@@ -96,6 +96,21 @@ test("the callback refuses a state that's altered or expired, a reply not from B
   assert.equal(connected, false)
 })
 
+test("two orders renewing one customer's login at once take turns: one refresh, both get the new token, still connected", async () => {
+  // The first access token lasts a minute, so both need it renewed; a refresh token works once.
+  const oauth = fakeBitrefillOAuth(60)
+  const r = await run(oauth, Effect.gen(function*() {
+    const connect = yield* Connect
+    const state = new URL(yield* connect.url("alice.test")).searchParams.get("state")!
+    yield* connect.finish("alice.test", "the-code", state)
+    const tokens = yield* Effect.all([connect.token("alice.test"), connect.token("alice.test")], { concurrency: 2 })
+    return { tokens, connected: yield* connect.connected("alice.test") }
+  }))
+  assert.deepEqual(r.tokens, ["access-2", "access-2"])
+  assert.equal(oauth.grants("refresh_token").length, 1, "the second waited and found the renewed token")
+  assert.equal(r.connected, true, "never taken for a lapsed login")
+})
+
 test("disconnecting revokes the login at Bitrefill and forgets it", async () => {
   const oauth = fakeBitrefillOAuth()
   const r = await run(oauth, Effect.gen(function*() {
