@@ -100,14 +100,19 @@ test("from Jupiter, only a compute budget, opening the wallet's own token accoun
 })
 
 test("a simulated swap is signed only if it pays exactly the USDC needed, takes exactly the token shown, and no more SOL than fees and rent", () => {
-  const before: Balances = { lamports: 10_000_000n, token: 9_000_000_000n, usdc: 300n, deposit: 0n, others: [40n], authorities: ["- -", "- -", "- -", "- -"] }
-  const after: Balances = { lamports: 7_900_000n, token: 2_000_000_000n, usdc: 25_300n, deposit: 5_000_000n, others: [40n], authorities: ["- -", "- -", "- -", "- -"] }
-  const expect = { need: 5_000_000n, spend: 7_000_000_000n }
+  const authorities = ["- -", "- -", "- -", "- -"]
+  // The wallet's own token accounts (its token, its USDC, the other one): its USDC account is opened by the swap.
+  const before: Balances = { lamports: 10_000_000n, token: 9_000_000_000n, usdc: 0n, deposit: 0n, others: [40n], authorities, owners: ["Payer", undefined, "Payer"] }
+  const after: Balances = { lamports: 7_900_000n, token: 2_000_000_000n, usdc: 25_000n, deposit: 5_000_000n, others: [40n], authorities, owners: ["Payer", "Payer", "Payer"] }
+  const expect = { need: 5_000_000n, spend: 7_000_000_000n, payer: "Payer" }
   assert.equal(outcomeProblem(before, after, expect), undefined)
   assert.equal(outcomeProblem(before, { ...after, others: [41n] }, expect), undefined, "a token it routes through may come out ahead")
+  assert.equal(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", undefined] }, expect), undefined, "an account emptied and closed is caught by its balance")
+  assert.match(outcomeProblem(before, { ...after, owners: ["Mallory", "Payer", "Payer"] }, expect)!, /to someone else/)
+  assert.match(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", "Mallory"] }, expect)!, /to someone else/)
   assert.match(outcomeProblem(before, { ...after, deposit: 4_999_999n }, expect)!, /exactly the USDC/)
   assert.match(outcomeProblem(before, { ...after, token: 1_999_999_999n }, expect)!, /exactly the amount shown/)
-  assert.match(outcomeProblem(before, { ...after, usdc: 299n }, expect)!, /take USDC from your wallet/)
+  assert.match(outcomeProblem({ ...before, usdc: 300n }, { ...after, usdc: 299n }, expect)!, /take USDC from your wallet/)
   assert.match(outcomeProblem(before, { ...after, others: [39n] }, expect)!, /another token/)
   assert.match(outcomeProblem(before, { ...after, authorities: ["- -", "Mallory -", "- -", "- -"] }, expect)!, /someone else spend/)
   assert.match(outcomeProblem(before, { ...after, lamports: 4_999_999n }, expect)!, /more SOL/)
@@ -194,11 +199,17 @@ const fake = (o: {
   simulations?: Array<{ after?: Record<string, Held>; err?: object; logs?: Array<string> }>
   /** Quote calls answered "busy" before Jupiter answers. */
   busy?: number
+  /** Price calls answered "busy" before Jupiter answers. */
+  busyPrice?: number
+  /** The chain before the swap (BEFORE by default). */
+  before?: Record<string, Held>
   /** Payments to the deposit address's USDC account, oldest first. */
   seen?: Array<Seen>
 } = {}) => {
   const calls: Array<{ to: string; params?: unknown }> = []
   let busy = o.busy ?? 0
+  let busyPrice = o.busyPrice ?? 0
+  const chain = o.before ?? BEFORE
   let simulated = 0
   const reply = (res: ServerResponse, status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body))
   const rpcAccount = (a: Held | undefined) =>
@@ -207,7 +218,10 @@ const fake = (o: {
     let body = ""
     req.on("data", (c) => (body += c)).on("end", () => {
       const url = new URL(req.url ?? "/", "http://fake")
-      if (url.pathname === "/price/v3") return calls.push({ to: "price" }), reply(res, 200, { [ORE.mint]: { usdPrice: 70 } })
+      if (url.pathname === "/price/v3") {
+        calls.push({ to: "price" })
+        return busyPrice-- > 0 ? reply(res, 429, { error: "Rate limit exceeded" }) : reply(res, 200, { [ORE.mint]: { usdPrice: 70 } })
+      }
       if (url.pathname === "/swap/v1/quote") {
         const p = Object.fromEntries(url.searchParams)
         calls.push({ to: "quote", params: p })
@@ -227,7 +241,7 @@ const fake = (o: {
       const context = { slot: 100 }
       switch (method) {
         case "getMultipleAccounts":
-          return ok({ context, value: (params[0] as Array<string>).map((k) => rpcAccount(BEFORE[k])) })
+          return ok({ context, value: (params[0] as Array<string>).map((k) => rpcAccount(chain[k])) })
         case "getLatestBlockhash":
           return ok({ context, value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1_150 } })
         case "simulateTransaction": {
@@ -267,8 +281,10 @@ const fake = (o: {
     ))
   const order = { token: ORE, payer: PAYER.toBase58(), depositAddress: DEPOSIT.toBase58(), need: NEED, spend: SPEND, retryBusy: false }
   const build = (o: Partial<typeof order> = {}) => run((s) => s.transaction({ ...order, ...o }))
-  const refusal = (o: Partial<typeof order> = {}) => run((s) => Effect.flip(s.transaction({ ...order, ...o }))).then((e) => e.message)
-  return { calls, run, build, refusal, to: (what: string) => calls.filter((c) => c.to === what) }
+  const refused = (o: Partial<typeof order> = {}) => run((s) => Effect.flip(s.transaction({ ...order, ...o })))
+  const refusal = (o: Partial<typeof order> = {}) => refused(o).then((e) => e.message)
+  const jupiter = () => calls.filter((c) => ["price", "quote", "swap-instructions"].includes(c.to)).length
+  return { calls, run, build, refused, refusal, jupiter, to: (what: string) => calls.filter((c) => c.to === what) }
 }
 
 const decoded = (base64: string) => {
@@ -309,6 +325,55 @@ test("a simulation that takes more than it says is refused: short USDC, another 
   assert.match(await leaves({ [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, 10_000_000_000n - SPEND, Keypair.generate().publicKey) }), /someone else spend/)
 })
 
+test("a wallet token account the swap is given read-only is watched too: another instruction may make it writable for the whole transaction", async () => {
+  const mint = Keypair.generate().publicKey
+  const other = getAssociatedTokenAddressSync(mint, PAYER)
+  const swap = new TransactionInstruction({
+    programId: new PublicKey(JUPITER_PROGRAM),
+    keys: [PAYER, SOURCE, WALLET_USDC, other, VAULT].map((pubkey, i) => ({ pubkey, isSigner: i === 0, isWritable: i > 0 && pubkey !== other })),
+    data: Buffer.from([7, 7, 7])
+  })
+  // Opening its account (a no-op, it exists) makes it writable for every instruction, the swap's included.
+  const instructions = {
+    ...INSTRUCTIONS,
+    setupInstructions: [...INSTRUCTIONS.setupInstructions, asJson(createAssociatedTokenAccountIdempotentInstruction(PAYER, other, PAYER, mint))],
+    swapInstruction: asJson(swap)
+  }
+  const f = fake({
+    instructions,
+    before: { ...BEFORE, [other.toBase58()]: tokenAt(mint, PAYER, 1_000n) },
+    simulations: [{ after: { ...HONEST, [other.toBase58()]: tokenAt(mint, PAYER, 0n) } }]
+  })
+  assert.match(await f.refusal(), /another token/)
+  assert.ok(((f.to("simulateTransaction")[0]!.params as Array<any>)[1].accounts.addresses as Array<string>).includes(other.toBase58()))
+})
+
+test("a swap that hands one of the wallet's token accounts to someone else is refused; an account it opens for the wallet passes", async () => {
+  const thief = Keypair.generate().publicKey
+  const handed = (account: PublicKey, held: Held) => fake({ simulations: [{ after: { ...HONEST, [account.toBase58()]: held } }] }).refusal()
+  assert.match(await handed(SOURCE, tokenAt(new PublicKey(ORE.mint), thief, 10_000_000_000n - SPEND)), /to someone else/)
+  assert.match(await handed(HELD, tokenAt(VAULT, thief, 1_000n)), /to someone else/)
+  // No USDC account yet: Jupiter's setup opens the wallet's, owned by the wallet; the deposit address's is 1Click's.
+  const { [WALLET_USDC.toBase58()]: _, ...noUsdc } = BEFORE
+  await fake({ before: noUsdc, simulations: [{ after: { ...HONEST, [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, OUT - NEED) } }] }).build()
+})
+
+test("a refusal that comes before Jupiter is asked says so, so trying again costs the quote nothing", async () => {
+  const early = async (f: ReturnType<typeof fake>, o: { payer?: string } = {}) => {
+    const e = await f.refused(o)
+    return [e.early === true, f.jupiter(), e.message] as const
+  }
+  const short = await early(fake({ before: { ...BEFORE, [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, SPEND - 1n) } }))
+  assert.deepEqual(short.slice(0, 2), [true, 0])
+  assert.match(short[2], /doesn't hold/)
+  const paid = await early(fake({ before: { ...BEFORE, [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, 0n) } }))
+  assert.deepEqual(paid.slice(0, 2), [true, 0])
+  assert.deepEqual((await early(fake(), { payer: "not-a-key" })).slice(0, 2), [true, 0])
+  // One that Jupiter and a simulation were asked for isn't.
+  const late = await fake({ simulations: [{ after: { ...HONEST, [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, NEED - 1n) } }] }).refused()
+  assert.notEqual(late.early, true)
+})
+
 test("a priority price over our ceiling is lowered, so the whole priority fee stays within it whatever Jupiter answers", async () => {
   const greedy = [ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10n ** 12n })].map(asJson)
   const ixs = decoded((await fake({ instructions: { ...INSTRUCTIONS, computeBudgetInstructions: greedy } }).build()).transaction)
@@ -336,6 +401,9 @@ test("a busy Jupiter is told at once to a request anyone can make, and asked aga
   const anyone = fake({ busy: 1 })
   assert.match(await anyone.refusal({ retryBusy: false }), /Jupiter is busy/)
   assert.equal(anyone.to("quote").length, 1, "one call to Jupiter, not five")
+  const price = fake({ busyPrice: 1 })
+  assert.match(await price.refusal({ retryBusy: false }), /Jupiter is busy/)
+  assert.equal(price.to("price").length, 1, "its price either")
   const customer = fake({ busy: 1 })
   await customer.build({ retryBusy: true })
   assert.equal(customer.to("quote").length, 2)

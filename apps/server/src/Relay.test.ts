@@ -31,7 +31,10 @@ const purchase = (purchases: Record<number, string> | undefined, args: Record<st
   const customer = purchases?.[Number(args?.purchase_id)]
   return customer ? { customer } : null
 }
-const alertsInto = (into: Array<string> = []) => Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void into.push(t)), customer: () => Effect.succeed(true) }))
+/** Admin alerts land in `into`; "hang" never finishes sending one, like a Telegram that doesn't answer. */
+const alertsInto = (into: Array<string> | "hang" = []) =>
+  Layer.succeed(Alerts, Alerts.of({ admin: (t) => (into === "hang" ? Effect.never : Effect.sync(() => void into.push(t))), customer: () => Effect.succeed(true) }))
+const NEAR_DOWN = new NearUnavailable({ message: "view: fetch failed" })
 
 const delegate = (
   receiverId: string,
@@ -110,7 +113,9 @@ const world = (o: {
   account?: { balance: string } | null
   /** Purchases on the contract, by id: whose each is. */
   purchases?: Record<number, string>
-  alerts?: Array<string>
+  alerts?: Array<string> | "hang"
+  /** NEAR's RPC doesn't answer the reads before a relay. */
+  nearDown?: boolean
 } = {}) => {
   const relayed: Array<string> = []
   const resumed: Array<string> = []
@@ -142,7 +147,9 @@ const world = (o: {
         ? Effect.fail(new TxExpired({ hash: signed.hash }))
         : Effect.sync(() => (resumed.push(signed.hash), outcome(signed.hash))),
     accessKey: (_, publicKey) =>
-      Effect.succeed(publicKey === key.getPublicKey().toString() ? { nonce: o.nonce ?? 10n, fullAccess: o.fullAccess ?? true } : undefined),
+      o.nearDown
+        ? Effect.fail(NEAR_DOWN)
+        : Effect.succeed(publicKey === key.getPublicKey().toString() ? { nonce: o.nonce ?? 10n, fullAccess: o.fullAccess ?? true } : undefined),
     height: Effect.succeed(500n)
   })
   const layer = Relay.layer.pipe(Layer.provide([Layer.succeed(Near, near), alertsInto(o.alerts)]), Layer.provideMerge(DbMemory))
@@ -264,6 +271,7 @@ const intentWorld = (o: {
   purchases?: Record<number, string>
   lostOnce?: boolean
   broke?: boolean
+  nearDown?: boolean
 } = {}) => {
   const sent: Array<{ receiver: string; method: string; args: unknown }> = []
   const near = fakeNear({
@@ -272,7 +280,7 @@ const intentWorld = (o: {
     intentsId: INTENTS,
     relayerId: "relayer.test",
     view: <A>(method: string, args?: Record<string, unknown>) =>
-      Effect.succeed((
+      o.nearDown ? Effect.fail(NEAR_DOWN) : Effect.succeed((
         method === "is_nonce_used"
           ? (o.nonceUsed ?? false)
           : method === "mt_balance_of"
@@ -494,6 +502,7 @@ test("once the free relays for everyone are used up, an admin hears it once, not
     yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 1 }), "admin.testnet")
     const everyone = [(yield* Effect.flip(w.send(withdraw({ nonce: 13n }))))._tag, (yield* Effect.flip(w.send(withdraw({ nonce: 14n }))))._tag]
     const others = yield* relay.available("bob.testnet")
+    yield* Effect.sleep("20 millis") // the alert goes on its own fiber
     return { own, afterOwn, everyone, others }
   }))
   assert.deepEqual(r, { own: "RelayUnavailable", afterOwn: 0, everyone: ["RelayUnavailable", "RelayUnavailable"], others: false })
@@ -542,6 +551,33 @@ test("a Top-Up's move-in whose relayer transaction expired unsent is sent again 
   assert.match(r.first, /didn't answer in time/, "the message TopUp keeps a move-in waiting on")
   assert.equal(r.second, "tx-2")
   assert.equal(w.sent.length, 2)
+})
+
+test("telling an admin that everyone's free relays are used never holds up a relay: the alert goes on its own", async () => {
+  const w = world({ alerts: "hang" })
+  const r = await w.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 1 }), "admin.testnet"))
+    yield* w.send(withdraw({ nonce: 11n }))
+    // Each would wait on the alert (and the next relay on it, behind the one-at-a-time lock) if it were sent in line.
+    const refused = (nonce: bigint) => Effect.flip(w.send(withdraw({ nonce }))).pipe(Effect.timeout("2 seconds"), Effect.map((e) => e._tag))
+    return [yield* refused(12n), yield* refused(13n)]
+  }))
+  assert.deepEqual(r, ["RelayUnavailable", "RelayUnavailable"])
+})
+
+test("NEAR not answering a read before the relay says nothing was sent, not that it may still go through", async () => {
+  const delegated = world({ nearDown: true })
+  const a = await delegated.tag(delegated.send(withdraw()))
+  const intents = intentWorld({ nearDown: true })
+  const b = await intents.tag(intents.send(await signIntent(moveIn()), false))
+  for (const e of [a, b]) {
+    assert.equal(e._tag, "RelayFailed")
+    assert.match(e.message, /nothing was sent/)
+    assert.doesNotMatch(e.message, /may still go through/)
+    // What TopUp keeps a Top-Up's move-in waiting on, to try again next pass.
+    assert.match(e.message, /didn't answer/)
+  }
+  assert.deepEqual([delegated.relayed, intents.sent], [[], []])
 })
 
 test("NEAR refusing the relayer for want of NEAR is 'can't pay right now', not 'NEAR didn't answer': nothing ran", async () => {

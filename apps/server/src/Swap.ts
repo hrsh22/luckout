@@ -75,7 +75,20 @@ export const JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 /** Compute for our own two instructions (opening the deposit's USDC account, the transfer): Jupiter's limit counts only its own. */
 const OUR_UNITS = 60_000
 
-export class SwapUnavailable extends Data.TaggedError("SwapUnavailable")<{ readonly message: string; readonly busy?: boolean }> {}
+/**
+ * `busy`: Jupiter's rate limit, worth asking again in a few seconds. `early`: refused before Jupiter was asked or
+ * anything simulated (a wallet without the token, a Top-Up already paid), so trying again costs nothing.
+ */
+export class SwapUnavailable extends Data.TaggedError("SwapUnavailable")<{ readonly message: string; readonly busy?: boolean; readonly early?: boolean }> {}
+
+/** Whether `address` is a Solana wallet: a key on the curve, which can sign (an account a program owns can't). */
+export const isWallet = (address: string) => {
+  try {
+    return PublicKey.isOnCurve(new PublicKey(address).toBytes())
+  } catch {
+    return false
+  }
+}
 
 const JupiterQuote = Schema.Struct({
   inputMint: Schema.String,
@@ -215,7 +228,8 @@ const heldBy = (a: ({ owner: PublicKey } & NonNullable<Account>) | null | undefi
 
 /**
  * The wallet's SOL (lamports), its token, its USDC, and the deposit address's USDC; the balances of the wallet's
- * other token accounts the swap is handed; and who may spend or close each token account, besides its owner.
+ * other token accounts the swap is handed; who may spend or close each token account, besides its owner; and the
+ * owner of each of the wallet's own token accounts (undefined where there's none).
  */
 export interface Balances {
   readonly lamports: bigint
@@ -224,19 +238,22 @@ export interface Balances {
   readonly deposit: bigint
   readonly others: ReadonlyArray<bigint>
   readonly authorities: ReadonlyArray<string>
+  readonly owners: ReadonlyArray<string | undefined>
 }
 
 /**
  * Why a simulated swap mustn't be signed, or undefined: the deposit address gets exactly `need` USDC; the wallet
  * spends exactly `spend` of its token, no USDC of its own, none of any other token it holds, and at most
- * MAX_SOL_SPENT of its SOL; and nobody new may spend from or close any of its accounts (a delegate leaves today's
- * balances as they are and empties them later).
+ * MAX_SOL_SPENT of its SOL; nobody new may spend from or close any of its accounts (a delegate leaves today's
+ * balances as they are and empties them later); and every token account of the wallet's that's left is still its own
+ * (one the swap opens for it included).
  */
-export const outcomeProblem = (before: Balances, after: Balances, expect: { need: bigint; spend: bigint }) => {
+export const outcomeProblem = (before: Balances, after: Balances, expect: { need: bigint; spend: bigint; payer: string }) => {
   if (after.deposit - before.deposit !== expect.need) return "The swap wouldn't deliver exactly the USDC this Top-Up needs. Nothing was sent: try again."
   if (before.token - after.token !== expect.spend) return "The swap wouldn't take exactly the amount shown. Nothing was sent: try again."
   if (after.usdc < before.usdc) return "The swap would take USDC from your wallet. Nothing was sent: try again."
   if (after.others.some((b, i) => b < (before.others[i] ?? 0n))) return "The swap would take another token from your wallet. Nothing was sent: try again."
+  if (after.owners.some((o) => o !== undefined && o !== expect.payer)) return "The swap would hand one of your wallet's token accounts to someone else. Nothing was sent: try again."
   if (after.authorities.some((a, i) => a !== before.authorities[i])) return "The swap would let someone else spend from your wallet. Nothing was sent: try again."
   if (before.lamports - after.lamports > MAX_SOL_SPENT) return "The swap would cost more SOL in fees than expected. Nothing was sent: try again in a minute."
   return undefined
@@ -311,15 +328,15 @@ export class Swap extends Context.Service<Swap, {
       // window before the customer hears it, unless `retryBusy` is false (a request anyone can make: asking again
       // would only spend more of the key's calls on it).
       // What went wrong underneath is logged, never told: the Solana Pay route answers anyone.
-      const wrap = <A, E, R>(e: Effect.Effect<A, E, R>, retryBusy = true) =>
-        e.pipe(
-          Effect.catch((err) =>
-            err instanceof SwapUnavailable
-              ? Effect.fail(err)
-              : Effect.logWarning("Jupiter unavailable", err).pipe(Effect.andThen(Effect.fail(fail("Jupiter didn't answer. Nothing was sent: try again in a minute."))))
-          ),
-          Effect.retry({ times: retryBusy ? 4 : 0, schedule: Schedule.spaced("2500 millis"), while: (err) => err.busy === true })
-        )
+      const told = <A, E, R>(e: Effect.Effect<A, E, R>): Effect.Effect<A, SwapUnavailable, R> =>
+        e.pipe(Effect.catch((err) =>
+          err instanceof SwapUnavailable
+            ? Effect.fail(err)
+            : Effect.logWarning("Jupiter unavailable", err).pipe(Effect.andThen(Effect.fail(fail("Jupiter didn't answer. Nothing was sent: try again in a minute."))))
+        ))
+      const patiently = (retryBusy: boolean) => <A, R>(e: Effect.Effect<A, SwapUnavailable, R>) =>
+        e.pipe(Effect.retry({ times: retryBusy ? 4 : 0, schedule: Schedule.spaced("2500 millis"), while: (err) => err.busy === true }))
+      const wrap = <A, E, R>(e: Effect.Effect<A, E, R>, retryBusy = true) => told(e).pipe(patiently(retryBusy))
       const solana = <A>(what: string, f: () => Promise<A>) =>
         Effect.tryPromise({ try: f, catch: (e) => e }).pipe(
           Effect.catch((e) =>
@@ -329,7 +346,7 @@ export class Swap extends Context.Service<Swap, {
 
       const prices = yield* Cache.makeWith(
         (_: "all") =>
-          wrap(
+          told(
             http.get("/price/v3", { urlParams: { ids: SWAP_TOKENS.map((t) => t.mint).join(",") } }).pipe(
               Effect.flatMap(read(Schema.Record(Schema.String, Schema.Struct({ usdPrice: Schema.Number }))))
             )
@@ -337,8 +354,9 @@ export class Swap extends Context.Service<Swap, {
         // Short: the price is also what a swap is checked against. A failure isn't kept: the next ask tries again.
         { capacity: 1, timeToLive: (exit) => (Exit.isSuccess(exit) ? "15 seconds" : "1 second") }
       )
-      const priceOf = (t: SwapToken) =>
-        Cache.get(prices, "all").pipe(Effect.flatMap((p) => {
+      // Asked again when busy by whoever asks, as each caller allows: the cache is shared.
+      const priceOf = (t: SwapToken, retryBusy = true) =>
+        Cache.get(prices, "all").pipe(patiently(retryBusy), Effect.flatMap((p) => {
           const usd = p[t.mint]?.usdPrice
           return usd && usd > 0 ? Effect.succeed(usd) : Effect.fail(fail(`Jupiter has no price for ${t.symbol} right now.`))
         }))
@@ -403,9 +421,11 @@ export class Swap extends Context.Service<Swap, {
        * simulation (a market whose quote was already stale) comes back as the markets to leave out next time.
        */
       const attempt = (o: Order, exclude: ReadonlyArray<string>) => Effect.gen(function*() {
-        const payer = yield* Effect.try({ try: () => new PublicKey(o.payer), catch: () => fail("That isn't a Solana wallet address.") })
-        if (!PublicKey.isOnCurve(payer.toBytes())) return yield* fail("That isn't a Solana wallet address.")
-        const owner = yield* Effect.try({ try: () => new PublicKey(o.depositAddress), catch: () => fail("This Top-Up has no Solana deposit address.") })
+        // Refusals up to the first call to Jupiter are `early`: they cost nothing, so a quote's caller may try again.
+        const early = (message: string) => new SwapUnavailable({ message, early: true })
+        if (!isWallet(o.payer)) return yield* early("That isn't a Solana wallet address.")
+        const payer = new PublicKey(o.payer)
+        const owner = yield* Effect.try({ try: () => new PublicKey(o.depositAddress), catch: () => early("This Top-Up has no Solana deposit address.") })
         const usdcMint = new PublicKey(SOL_USDC_MINT)
         const source = getAssociatedTokenAddressSync(new PublicKey(o.token.mint), payer)
         const walletUsdc = getAssociatedTokenAddressSync(usdcMint, payer)
@@ -414,15 +434,17 @@ export class Swap extends Context.Service<Swap, {
         // The chain first, before any call to Jupiter: a wallet without the token, or a Top-Up already being paid, ends
         // here. These balances are also what the simulation's are compared with.
         const watched = [payer, source, walletUsdc, depositUsdc]
-        const { context, value: before } = yield* solana("balances", () => connection.getMultipleAccountsInfoAndContext(watched, "confirmed"))
+        const { context, value: before } = yield* solana("balances", () => connection.getMultipleAccountsInfoAndContext(watched, "confirmed")).pipe(
+          Effect.mapError((e) => early(e.message))
+        )
         if (tokenBalance(before[1]) < o.spend) {
-          return yield* fail(`This wallet doesn't hold the ${formatUnits(o.spend, o.token.decimals)} ${o.token.symbol} this Top-Up swaps. Nothing was sent.`)
+          return yield* early(`This wallet doesn't hold the ${formatUnits(o.spend, o.token.decimals)} ${o.token.symbol} this Top-Up swaps. Nothing was sent.`)
         }
-        if (before[3]) return yield* fail("This Top-Up is already paid, or a payment for it is on its way. Nothing more was sent.")
+        if (before[3]) return yield* early("This Top-Up is already paid, or a payment for it is on its way. Nothing more was sent.")
 
         // A fresh route for exactly the amount shown, its minimum out covering the USDC needed: our usual room when
         // the price allows it, a little less when it has moved a little, and none at all past that.
-        const usdPrice = yield* priceOf(o.token)
+        const usdPrice = yield* priceOf(o.token, o.retryBusy)
         let { q, raw } = yield* quote(o.token, o.spend, SLIPPAGE_BPS, exclude, o.retryBusy)
         const bps = slippageFor(BigInt(q.outAmount), o.need)
         if (bps === undefined) return yield* fail(moved(o.token.symbol))
@@ -454,8 +476,9 @@ export class Swap extends Context.Service<Swap, {
         if (refused) return yield* fail(refused)
         // The wallet's other token accounts the swap is handed (one of a token it routes through, say) are watched
         // too: an instruction reaches no account it isn't handed, and the swap may pass through those, never leave
-        // them lower.
-        const handed = [...new Set(jupiter.swap.keys.filter((k) => k.isWritable).map((k) => k.pubkey.toBase58()))]
+        // them lower. Read-only ones as well: whether an account is writable is decided for the whole transaction, so
+        // another instruction (opening that account, a no-op) can make it writable for the swap too.
+        const handed = [...new Set(jupiter.swap.keys.map((k) => k.pubkey.toBase58()))]
           .filter((k) => !watched.some((w) => w.toBase58() === k))
           .map((k) => new PublicKey(k))
         const found = handed.length === 0 ? [] : yield* solana("swap accounts", () => connection.getMultipleAccountsInfo(handed, "confirmed"))
@@ -504,9 +527,11 @@ export class Swap extends Context.Service<Swap, {
           usdc: tokenBalance(list[2]),
           deposit: tokenBalance(list[3]),
           others: others.map((_, i) => tokenBalance(list[4 + i])),
-          authorities: list.slice(1, 4 + others.length).map(authorities)
+          authorities: list.slice(1, 4 + others.length).map(authorities),
+          // The wallet's own: its token, its USDC and the others; not the deposit address's.
+          owners: [list[1], list[2], ...list.slice(4, 4 + others.length)].map((a) => tokenAccount(a)?.owner.toBase58())
         })
-        const wrong = outcomeProblem(balances([...before, ...others.map((x) => x.before)]), balances(after), { need: o.need, spend: o.spend })
+        const wrong = outcomeProblem(balances([...before, ...others.map((x) => x.before)]), balances(after), { need: o.need, spend: o.spend, payer: payer.toBase58() })
         if (wrong) return yield* fail(wrong)
         return { transaction: Buffer.from(bytes).toString("base64"), lastValidBlockHeight }
       })
@@ -515,7 +540,10 @@ export class Swap extends Context.Service<Swap, {
         if (Option.isNone(key)) return yield* fail(`${o.token.symbol} isn't taken here.`)
         const first = yield* attempt(o, [])
         if (!("retryWithout" in first)) return first
-        const second = yield* attempt(o, first.retryWithout)
+        // Jupiter was asked on the first try, so nothing the second refuses is `early`.
+        const second = yield* attempt(o, first.retryWithout).pipe(
+          Effect.mapError((e) => (e.early ? new SwapUnavailable({ message: e.message, ...(e.busy ? { busy: true } : {}) }) : e))
+        )
         if ("retryWithout" in second) return yield* fail(moved(o.token.symbol))
         return second
       })
