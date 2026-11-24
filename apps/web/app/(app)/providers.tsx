@@ -22,7 +22,8 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
         </SessionProvider>
       </MotionConfig>
       <Toaster
-        position="bottom-center"
+        // Top: sheets rise from the bottom on phones and keep their main button there, so a toast below would cover it.
+        position="top-center"
         toastOptions={{ className: "!rounded-2xl !font-sans !text-[15px] !shadow-[0_24px_50px_-30px_rgb(22_18_43/0.6)]" }}
       />
     </QueryClientProvider>
