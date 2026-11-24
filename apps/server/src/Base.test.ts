@@ -7,7 +7,9 @@ import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { decodeFunctionData, erc20Abi, type Hex, parseTransaction, recoverTransactionAddress } from "viem"
 import { privateKeyToAccount, sign } from "viem/accounts"
-import { Base, BASE_USDC, type SignedPayment } from "./Base.ts"
+import { Alerts } from "./Alerts.ts"
+import { Base, BASE_USDC, GAS_RESERVE, type SignedPayment } from "./Base.ts"
+import { BASE_GAS_ALERT } from "./Monitor.ts"
 import { Near, type Outcome } from "./Near.ts"
 import { fakeNear } from "./testing.ts"
 
@@ -47,11 +49,19 @@ interface Chain {
   receipt: (hash: string, asked: number) => ReturnType<typeof receipt> | undefined
   /** Any request is answered with this HTTP status instead. */
   http?: number
+  /** The latest block's base fee (wei): 1 gwei unless a test says otherwise. */
+  baseFee?: bigint
+  /** Whether the node knows a transaction by its hash (waiting, or mined); unknown when left out. */
+  known?: (hash: string) => boolean
 }
 
-const world = async <A>(chain: Chain, body: (w: { sent: Array<Hex>; signed: () => number; log: Array<string> }) => Effect.Effect<A, unknown, Base>) => {
+const world = async <A>(
+  chain: Chain,
+  body: (w: { sent: Array<Hex>; signed: () => number; log: Array<string>; alerts: Array<string> }) => Effect.Effect<A, unknown, Base>
+) => {
   const sent: Array<Hex> = []
   const log: Array<string> = []
+  const alerts: Array<string> = []
   const asked = new Map<string, number>()
   let signed = 0
   const answer = (method: string, params: Array<unknown>): unknown => {
@@ -61,7 +71,7 @@ const world = async <A>(chain: Chain, body: (w: { sent: Array<Hex>; signed: () =
       case "eth_getTransactionCount":
         return `0x${(params[1] === "pending" ? chain.pending : chain.latest).toString(16)}`
       case "eth_getBlockByNumber":
-        return { number: "0x10", hash: `0x${"ab".repeat(32)}`, baseFeePerGas: "0x3b9aca00", timestamp: "0x1", gasLimit: "0x1", gasUsed: "0x0", transactions: [] }
+        return { number: "0x10", hash: `0x${"ab".repeat(32)}`, baseFeePerGas: `0x${(chain.baseFee ?? 1_000_000_000n).toString(16)}`, timestamp: "0x1", gasLimit: "0x1", gasUsed: "0x0", transactions: [] }
       case "eth_maxPriorityFeePerGas":
         return "0x1"
       case "eth_sendRawTransaction": {
@@ -74,6 +84,12 @@ const world = async <A>(chain: Chain, body: (w: { sent: Array<Hex>; signed: () =
         const hash = params[0] as string
         asked.set(hash, (asked.get(hash) ?? 0) + 1)
         return chain.receipt(hash, asked.get(hash)!) ?? null
+      }
+      case "eth_getTransactionByHash": {
+        const hash = params[0] as string
+        return chain.known?.(hash)
+          ? { hash, nonce: "0x7", from: wallet.address, to: BASE_USDC.mainnet, input: "0x", value: "0x0", gas: "0x186a0", type: "0x2", blockHash: null, blockNumber: null }
+          : null
       }
       default:
         throw new Error(`the faked Base node wasn't expecting ${method}`)
@@ -109,12 +125,13 @@ const world = async <A>(chain: Chain, body: (w: { sent: Array<Hex>; signed: () =
   })
   const layer = Base.layer.pipe(
     Layer.provide(Layer.succeed(Near, near)),
+    Layer.provide(Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))),
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({
       env: { NEAR_NETWORK: "mainnet", BASE_RPC_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
     })))
   )
   try {
-    return await Effect.runPromise(body({ sent, signed: () => signed, log }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer())))
+    return await Effect.runPromise(body({ sent, signed: () => signed, log, alerts }).pipe(Effect.provide(layer), Effect.provide(TestClock.layer())))
   } finally {
     server.close()
     server.closeAllConnections()
@@ -156,6 +173,22 @@ test("a new payment is the wallet's own USDC transfer, saved before it is sent, 
   assert.equal(await recoverTransactionAddress({ serializedTransaction: r.sent[0] as `0x02${string}` }), wallet.address, "signed by the wallet")
 })
 
+test("a payment may pay far more per gas than today's fee, so a fee spike can't leave it unmined; one signed mid-spike keeps twice the estimate", async () => {
+  const fees = (baseFee: bigint) =>
+    world({ pending: 7, latest: 7, baseFee, receipt: (hash) => receipt(hash) }, (w) =>
+      Effect.map(overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, null, () => Effect.void, NO_DEADLINE))), () => parseTransaction(w.sent[0]!)))
+  // Base's usual fee, about 0.01 gwei: the ceiling is 0.5 gwei, fifty times that, at no cost (only base fee and tip are paid).
+  const quiet = await fees(10_000_000n)
+  assert.equal(quiet.maxFeePerGas, 500_000_000n)
+  assert.equal(quiet.maxPriorityFeePerGas, 1n, "the tip is today's")
+  // Already at 1 gwei: twice viem's estimate (1.2 × the base fee, plus the tip), above the ceiling.
+  assert.equal((await fees(1_000_000_000n)).maxFeePerGas, 2_400_000_002n)
+  // The node takes a payment only from a wallet holding its gas limit at that ceiling: 0.00005 ETH. The Monitor's
+  // low-ETH alert comes while the wallet still holds two of those.
+  assert.equal(GAS_RESERVE, 50_000_000_000_000n)
+  assert.ok(BASE_GAS_ALERT >= 2n * GAS_RESERVE)
+})
+
 test("a saved payment is sent again as the same bytes and never signed again while its nonce is still its own", async () => {
   // The node already has it ("already known"); its receipt shows up on the third look.
   const chain: Chain = { pending: 8, latest: 7, sendError: "already known", receipt: (hash, asked) => (asked >= 3 ? receipt(hash) : undefined) }
@@ -189,9 +222,9 @@ test("only the node saying there is no receipt means not mined; a failing node s
   assert.equal((down as { _tag?: string })._tag, "BaseUnavailable")
 })
 
-test("a saved payment is replaced only when its nonce was taken and its receipt stays absent for half a minute", async () => {
+test("a saved payment is replaced only when its nonce was taken, its receipt stays absent for half a minute, and the node doesn't know it", async () => {
   // Another transaction of the wallet's took nonce 7 (latest is 8), and the saved payment never gets a receipt.
-  const lost: Chain = { pending: 8, latest: 8, sendError: "nonce too low", receipt: (_hash, _asked) => undefined }
+  const lost: Chain = { pending: 8, latest: 8, sendError: "nonce too low", receipt: (_hash, _asked) => undefined, known: () => false }
   const r = await world(lost, (w) =>
     Effect.gen(function*() {
       const saved = yield* savedPayment(7)
@@ -199,13 +232,28 @@ test("a saved payment is replaced only when its nonce was taken and its receipt 
       lost.receipt = (hash) => (hash === saved.hash ? undefined : receipt(hash))
       const replaced: Array<SignedPayment> = []
       const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, (p) => Effect.sync(() => void replaced.push(p)), NO_DEADLINE)))
-      return { status, replaced, sent: w.sent, old: saved }
+      return { status, replaced, sent: w.sent, old: saved, alerts: w.alerts }
     }))
   assert.equal(r.status, "success")
   assert.equal(r.replaced.length, 1, "one new payment was signed and saved")
   assert.equal(r.replaced[0]!.nonce, 8, "on a fresh nonce")
   assert.notEqual(r.replaced[0]!.hash, r.old.hash)
   assert.deepEqual(r.sent, [r.old.raw, r.replaced[0]!.raw])
+  assert.equal(r.alerts.length, 1, "an admin hears of every payment signed again")
+  assert.ok(r.alerts[0]!.includes(r.old.hash) && r.alerts[0]!.includes(r.replaced[0]!.hash), r.alerts[0])
+
+  // The same, but the node still knows the saved payment by its hash (mined, its receipt not indexed yet): it
+  // isn't lost, and paying again would pay the invoice twice.
+  const indexing: Chain = { pending: 8, latest: 8, sendError: "nonce too low", receipt: () => undefined, known: () => false }
+  const k = await world(indexing, (w) =>
+    Effect.gen(function*() {
+      const saved = yield* savedPayment(7)
+      indexing.known = (hash) => hash === saved.hash
+      const before = w.signed()
+      const status = yield* overTime(Base.use((b) => b.pay(BITREFILL, 10_000_000, saved, () => Effect.die("must not sign a second payment"), NO_DEADLINE)))
+      return { status, resigned: w.signed() - before, sent: w.sent.length, alerts: w.alerts }
+    }))
+  assert.deepEqual(k, { status: "pending", resigned: 0, sent: 1, alerts: [] })
 
   // The same, but the node is only slow to show the receipt (it appears on the sixth look, about 10 seconds
   // in): the payment was ours all along, and paying again would pay the invoice twice.

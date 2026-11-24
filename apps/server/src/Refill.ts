@@ -4,7 +4,7 @@ import { SqlClient } from "effect/sql"
 import { actions, teraToGas } from "near-api-js"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
-import { Base, type BasePayment, BaseUnavailable } from "./Base.ts"
+import { Base, type BasePayment, BaseUnavailable, GAS_RESERVE } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Credit, floatOf, MIN_REFILL, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
@@ -72,8 +72,6 @@ const STUCK_WATCH = "5 minutes"
 const ALERT_AFTER_ATTEMPTS = 5
 /** The treasury needs a little NEAR to sign refills: at least what NEAR asks up front for its heaviest call. */
 const TREASURY_MIN_GAS = upfront(TREASURY_GAS)
-/** The Base wallet needs a little ETH to pay (a USDC transfer costs well under a cent on Base). */
-export const BASE_MIN_GAS = 20_000_000_000_000n // 0.00002 ETH
 const EXPLORER = "https://explorer.near-intents.org/transactions/"
 
 export const OPEN_REFILL_STEPS = ["fund", "quote", "send", "swapping", "invoice", "pay", "crediting"]
@@ -390,7 +388,8 @@ export class Refill extends Context.Service<Refill, {
                 return yield* hold(row, "The treasury needs a little NEAR for gas.", `The treasury ${near.treasuryId} is out of NEAR for gas; send it 0.1 NEAR in Admin → Gas.`)
               }
               const w = yield* base.balances
-              if (w.eth < BASE_MIN_GAS) {
+              // What the node wants on hand to take a payment at the fee ceiling, though a transfer costs well under a cent.
+              if (w.eth < GAS_RESERVE) {
                 const wallet = yield* base.address
                 return yield* hold(row, "The Base wallet needs a little ETH for gas.", `The Base wallet ${wallet} is out of ETH for gas; send it about $1 of ETH on Base.`)
               }

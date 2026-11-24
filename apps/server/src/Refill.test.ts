@@ -6,7 +6,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
-import { Base, BaseUnavailable, type PaymentStatus } from "./Base.ts"
+import { Base, BaseUnavailable, GAS_RESERVE, type PaymentStatus } from "./Base.ts"
 import { Bitrefill, type DepositState } from "./Bitrefill.ts"
 import { Credit, CREDIT_DEFAULTS, levels, MIN_REFILL } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
@@ -322,7 +322,8 @@ test("a wallet holding part of it swaps only the rest, at least $2", async () =>
 })
 
 test("a Base wallet out of gas holds the refill before anything is quoted", async () => {
-  const w = world({ treasuryUsdc: 50_000_000, walletEth: 0n })
+  // Short of what the node wants on hand to take a payment at the fee ceiling, though not empty.
+  const w = world({ treasuryUsdc: 50_000_000, walletEth: GAS_RESERVE - 1n })
   const r = await w.run(Effect.flatMap(Effect.flatMap(Refill, (r) => r.request(30_000_000, "boss.testnet")), (v) => settle(v.id)))
   assert.equal(r.step, "fund")
   assert.match(r.error ?? "", /ETH for gas/)
