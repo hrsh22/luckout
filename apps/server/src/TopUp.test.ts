@@ -1,19 +1,24 @@
-import { ConfigProvider, Effect } from "effect"
+import { NodeHttpServer } from "@effect/platform-node"
+import { ConfigProvider, Effect, Fiber } from "effect"
+import { HttpRouter } from "effect/http"
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { createServer } from "node:http"
+import type { AddressInfo } from "node:net"
+import { mock, test } from "node:test"
+import { Keypair } from "@solana/web3.js"
 import { Layer } from "effect"
 import { DbMemory } from "./Db.ts"
 import { Near } from "./Near.ts"
 import { echoProblem, OneClick, type QuoteRequest } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
 import { fakeNear } from "./testing.ts"
-import { intentPayload, intentSignature, moveInIntent, solanaAddress } from "@luckout/api"
+import { intentPayload, intentSignature, moveInIntent, RelayFailed, solanaAddress } from "@luckout/api"
 import { SqlClient } from "effect/sql"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { Alerts } from "./Alerts.ts"
-import { SOL_USDC_ASSET, Swap, swapAssetId, SWAP_TOKENS } from "./Swap.ts"
-import { isLate, noticeFor, phaseOf, refundsToWallet, type SwapRow, TopUp } from "./TopUp.ts"
+import { SOL_USDC_ASSET, Swap, swapAssetId, SWAP_TOKENS, SwapUnavailable } from "./Swap.ts"
+import { isLate, noticeFor, phaseOf, refundsToWallet, SolanaPayRoute, type SwapRow, TopUp } from "./TopUp.ts"
 import type { SwapDetails } from "./OneClick.ts"
 
 // Live dry-run quotes against 1Click mainnet (no funds move, no key needed).
@@ -339,6 +344,52 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
   assert.deepEqual([byAddress.refunded!.phase, byAddress.refunded!.refunded, byAddress.refunded!.detail], ["refunded", "2.5", "Deposit came in after the deadline"])
   assert.match(byAddress.refunded!.explorer, /explorer\.near-intents\.org\/transactions\/refunded$/)
   assert.deepEqual(result.near.map((x) => [x.depositAddress, x.phase, x.deposited]), [["short", "incomplete", "0.15"], ["nearIn", "in-wallet", undefined]])
+})
+
+test("a landed Top-Up's move-in that NEAR didn't answer for waits and goes on a later pass, whether or not it was sent", async () => {
+  const tries: Array<string> = []
+  const answers = ["NEAR didn't answer, so nothing was sent. Try again in a minute.", "NEAR didn't answer in time. It may still go through, so check your balance before trying again."]
+  const oneClick = Layer.succeed(OneClick, OneClick.of({
+    tokens: Effect.succeed([]),
+    quote: () => Effect.die("quote was not expected"),
+    status: () => Effect.succeed("SUCCESS"),
+    details: () => Effect.succeed({ status: "SUCCESS" }),
+    submitDeposit: () => Effect.void
+  }))
+  const relay = Layer.succeed(Relay, Relay.of({
+    available: () => Effect.succeed(true),
+    send: () => Effect.die("relay.send was not expected"),
+    sendIntent: () => Effect.suspend(() => {
+      const message = answers[tries.length]
+      tries.push(message ?? "sent")
+      return message ? Effect.fail(new RelayFailed({ message })) : Effect.succeed({ hash: "tx" })
+    }),
+    settings: Effect.die("relay.settings was not expected"),
+    configure: () => Effect.die("relay.configure was not expected")
+  }))
+  const signed = {
+    standard: "erc191",
+    payload: intentPayload({
+      signer: EVM, intentsId: "intents.test", deadline: new Date(Date.now() + 3_600_000), nonce: randomBytes(32).toString("base64"),
+      intents: [moveInIntent({ usdcId: "usdc.test", contractId: "app.test", account: EVM, amount: "2500000" })]
+    }),
+    signature: "x"
+  }
+  const moves = await Effect.runPromise(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const t = yield* TopUp
+    yield* Effect.sleep("100 millis") // the start-up pass is done
+    yield* sql`INSERT INTO intents_swaps ${sql.insert({ deposit_address: "landed", account_id: EVM, direction: "in", usdc: 2_500_000, move: "waiting" })}`
+    yield* sql`UPDATE intents_swaps SET move_in = ${JSON.stringify(signed)}::jsonb`
+    const moves: Array<string | null> = []
+    for (let i = 0; i < 3; i++) {
+      yield* t.trackNow
+      moves.push((yield* sql<{ move: string | null }>`SELECT move FROM intents_swaps`)[0]!.move)
+    }
+    return moves
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), relay, noAlerts, DbMemory, noSwaps))))))
+  assert.deepEqual(moves, ["waiting", "waiting", "moved"])
+  assert.equal(tries.length, 3)
 })
 
 test("what 1Click sent back in the token paid with is listed, so no change or refund is out of sight", async () => {
@@ -749,7 +800,7 @@ test("paid Top-Ups 1Click hasn't seen reach the admin one by one only up to a ha
 test("an ORE Top-Up: 1Click is quoted for USDC on Solana, the wallet signs our swap for exactly the ORE shown, and only a payment found on chain counts", async () => {
   const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
   const OTHER = "b".repeat(64)
-  const PAYER = "Payer1111111111111111111111111111111111111"
+  const PAYER = Keypair.generate().publicKey.toBase58()
   const ORE = SWAP_TOKENS[0]!
   const built: Array<{ payer: string; depositAddress: string; need: bigint; spend: bigint }> = []
   const looked: Array<[string, bigint]> = []
@@ -790,14 +841,13 @@ test("an ORE Top-Up: 1Click is quoted for USDC on Solana, the wallet signs our s
   assert.deepEqual([r.q.symbol, r.q.chain, r.q.swap, r.q.amountIn, r.q.amountInFormatted, r.q.usdcOut], ["ORE", "sol", true, "7000000000", "0.07", 117732])
   assert.deepEqual(r.refused.map((e) => e.message), ["Pay from a Solana wallet: scan the code with Phantom, Solflare or Backpack.", "No Top-Up is paid that way"])
   assert.equal(r.tx.transaction, "tx-1")
-  assert.equal(r.again.transaction, "tx-1", "the same wallet asking again within seconds gets the same transaction")
+  assert.equal(r.again.transaction, "tx-2", "the app asks only to send: sending again after a failed swap needs a fresh route")
   assert.match(r.busy.message, /Another wallet is paying/, "no second wallet's transaction while the first may land")
-  assert.equal(r.pay.transaction, "tx-2")
+  assert.equal(r.pay.transaction, "tx-3")
   assert.match(r.pay.message, /\$0\.12 Top-Up for 0\.07 ORE/)
-  assert.deepEqual(built, [
-    { token: ORE, payer: solanaAddress(SOL_ID), depositAddress: "dq-1", need: 5_000_000n, spend: 7_000_000_000n },
-    { token: ORE, payer: PAYER, depositAddress: "dq-2", need: 5_000_000n, spend: 7_000_000_000n }
-  ], "the wallet signed in, or whichever wallet scanned the code: the same swap")
+  const own = { token: ORE, payer: solanaAddress(SOL_ID), depositAddress: "dq-1", need: 5_000_000n, spend: 7_000_000_000n, retryBusy: true }
+  assert.deepEqual(built, [own, own, { token: ORE, payer: PAYER, depositAddress: "dq-2", need: 5_000_000n, spend: 7_000_000_000n, retryBusy: false }],
+    "the wallet signed in, or whichever wallet scanned the code: the same swap (Jupiter asked again when busy only for the one signed in)")
   assert.equal(r.told, null, "a swap the app says it sent isn't recorded as paid")
   assert.deepEqual(looked.slice(0, 2), [["dq-1", 5_000_000n], ["dq-2", 5_000_000n]], "the chain is asked for a payment of the USDC 1Click needs")
   assert.deepEqual(r.rows.map((x) => [x.symbol, x.chain, x.paid_symbol, x.paid_raw, x.amount_in_raw, x.deposit_tx]), [
@@ -807,6 +857,167 @@ test("an ORE Top-Up: 1Click is quoted for USDC on Solana, the wallet signs our s
   assert.deepEqual(w.submitted.map((x) => x.txHash), ["5sig", "5sig"], "only a payment found on chain is passed to 1Click")
   assert.match(r.after.message, /already paid/, "no transaction once it's paid")
   assert.deepEqual(r.listed.map((x) => [x.symbol, x.chain, x.paidWith, x.depositTx]), [["USDC", "sol", "0.07 ORE", "5sig"], ["USDC", "sol", "0.07 ORE", "5sig"]])
+})
+
+/**
+ * A fake Swap for ORE whose transactions wait on `gate` (open by default) and count each build in `built`; `refuse`
+ * answers for a payer instead. `asked` counts every request.
+ */
+const oreSwaps = (refuse: (payer: string) => SwapUnavailable | undefined = () => undefined) => {
+  const ORE = SWAP_TOKENS[0]!
+  const built: Array<{ payer: string; depositAddress: string; retryBusy: boolean }> = []
+  const s = { gate: Promise.resolve(), asked: 0 }
+  const layer = Layer.succeed(Swap, Swap.of({
+    tokens: Effect.succeed([{ ...ORE, price: 71.5 }]),
+    size: (_t, need) => Effect.succeed(need * 1_400n),
+    transaction: (o) => {
+      s.asked++
+      const refused = refuse(o.payer)
+      return refused
+        ? Effect.fail(refused)
+        : Effect.promise(async () => {
+          built.push({ payer: o.payer, depositAddress: o.depositAddress, retryBusy: o.retryBusy })
+          const n = built.length
+          await s.gate
+          return { transaction: `tx-${n}`, lastValidBlockHeight: 7 }
+        })
+    },
+    paidBy: () => Effect.succeed(undefined)
+  }))
+  return { ORE, built, layer, s }
+}
+const wallet = () => Keypair.generate().publicKey.toBase58()
+
+test("a swap-paid quote's transaction is built one at a time, at most eight times, and handed again to a wallet scanning its code while it can still land", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const [PAYER, OTHER, EMPTY] = [wallet(), wallet(), wallet()]
+  const f = oreSwaps((payer) => (payer === EMPTY ? new SwapUnavailable({ message: "This wallet doesn't hold the ORE this Top-Up swaps.", early: true }) : undefined))
+  const w = mainnetTopUp({}, { swaps: f.layer })
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const real = Date.now()
+  let later = 0
+  const clock = mock.method(Date, "now", () => real + later)
+  try {
+    const r = await w.run((t) =>
+      Effect.gen(function*() {
+        const q = yield* t.quote(SOL_ID, swapAssetId(f.ORE), 5_000_000, false, "solana") // dq-1
+        // Refused before Jupiter is asked, however often: no build is used up. Not a wallet at all: Swap isn't asked.
+        for (let i = 0; i < 10; i++) yield* said(t.solanaPay(q.depositAddress, EMPTY))
+        const notAWallet = yield* said(t.solanaPay(q.depositAddress, "not-a-wallet"))
+        const asked = f.s.asked
+        // Two requests at once (a wallet asking twice): one builds, the other is told to wait.
+        let open = () => {}
+        f.s.gate = new Promise<void>((ok) => (open = ok))
+        const first = yield* Effect.forkChild(t.solanaPay(q.depositAddress, PAYER))
+        for (let i = 0; i < 400 && f.built.length === 0; i++) yield* Effect.sleep("5 millis")
+        yield* Effect.forkChild(Effect.sleep("200 millis").pipe(Effect.andThen(Effect.sync(() => open()))))
+        const meanwhile = yield* said(t.solanaPay(q.depositAddress, PAYER))
+        const tx = (yield* Fiber.join(first)).transaction
+        // The same wallet within 30 seconds: the same transaction, nothing built.
+        later += 29_000
+        const again = (yield* t.solanaPay(q.depositAddress, PAYER)).transaction
+        // Past that, a fresh one; another wallet, none while that one may land.
+        later += 2_000
+        const fresh = (yield* t.solanaPay(q.depositAddress, PAYER)).transaction
+        const other = yield* said(t.solanaPay(q.depositAddress, OTHER))
+        // Six more builds over the next minutes, then no more for this quote.
+        for (let i = 0; i < 6; i++) {
+          later += 31_000
+          yield* t.solanaPay(q.depositAddress, PAYER)
+        }
+        later += 31_000
+        const spent = yield* said(t.solanaPay(q.depositAddress, PAYER))
+        // Another quote has its own eight. The signed-in wallet sending again (its swap failed) gets a new
+        // transaction at once, and its requests ask a busy Jupiter again.
+        const q2 = yield* t.quote(SOL_ID, swapAssetId(f.ORE), 5_000_000, false, "solana") // dq-2
+        const own = [(yield* t.swapTx(SOL_ID, q2.depositAddress, "solana")).transaction, (yield* t.swapTx(SOL_ID, q2.depositAddress, "solana")).transaction]
+        return { notAWallet, asked, meanwhile, tx, again, fresh, other, spent, own }
+      })
+    )
+    assert.match(r.notAWallet, /isn't a Solana wallet/)
+    assert.equal(r.asked, 10)
+    assert.match(r.meanwhile, /on its way/)
+    assert.deepEqual([r.tx, r.again, r.fresh], ["tx-1", "tx-1", "tx-2"])
+    assert.match(r.other, /Another wallet is paying/)
+    assert.match(r.spent, /fetched too many times/)
+    assert.deepEqual(r.own, ["tx-9", "tx-10"])
+    assert.deepEqual(f.built.map((b) => [b.depositAddress, b.retryBusy]), [...Array(8).fill(["dq-1", false]), ["dq-2", true], ["dq-2", true]],
+      "eight builds for the first quote, none asking a busy Jupiter again for a request anyone can make")
+  } finally {
+    clock.mock.restore()
+  }
+})
+
+test("Solana Pay: a wallet gets the label, its transaction, or a plain reason, never a server error", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const [PAYER, BUSY] = [wallet(), wallet()]
+  const f = oreSwaps((payer) => (payer === BUSY ? new SwapUnavailable({ message: "Jupiter is busy. Nothing was sent: try again in a few seconds.", busy: true }) : undefined))
+  const w = mainnetTopUp({}, { swaps: f.layer })
+  const r = await w.run((t) =>
+    Effect.gen(function*() {
+      const q = yield* t.quote(SOL_ID, swapAssetId(f.ORE), 5_000_000, false, "solana") // dq-1
+      const node = createServer()
+      return yield* Effect.promise(async () => {
+        const url = `http://127.0.0.1:${(node.address() as AddressInfo).port}/solana-pay`
+        const post = (path: string, body: string) => fetch(`${url}/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body })
+        const answer = async (res: Response) => [res.status, await res.json()] as const
+        return {
+          label: await answer(await fetch(`${url}/${q.depositAddress}`)),
+          garbled: await answer(await post(q.depositAddress, "not json")),
+          unknown: await answer(await post("nothing-here", JSON.stringify({ account: PAYER }))),
+          busy: await answer(await post(q.depositAddress, JSON.stringify({ account: BUSY }))),
+          paid: await answer(await post(q.depositAddress, JSON.stringify({ account: PAYER })))
+        }
+      }).pipe(Effect.provide(HttpRouter.serve(SolanaPayRoute, { disableLogger: true, disableListenLog: true }).pipe(
+        Layer.provide(NodeHttpServer.layer(() => node, { port: 0, host: "127.0.0.1" })),
+        Layer.provide(Layer.succeed(TopUp, t))
+      )))
+    })
+  )
+  assert.deepEqual(r.label, [200, { label: "Luckout", icon: "http://localhost:3000/logo.png" }])
+  assert.deepEqual([r.garbled[0], r.garbled[1].message], [400, "Send the wallet's account as JSON: {\"account\": \"…\"}."])
+  assert.deepEqual(r.unknown, [400, { message: "No Top-Up is paid that way" }])
+  assert.deepEqual(r.busy, [400, { message: "Jupiter is busy. Nothing was sent: try again in a few seconds." }])
+  assert.equal(r.paid[0], 200)
+  assert.equal(r.paid[1].transaction, "tx-1")
+  assert.match(r.paid[1].message, /^Luckout: a \$0\.12 Top-Up for 0\.07 ORE$/)
+})
+
+test("an unpaid swap-paid quote stops holding a place in the cap ten minutes past its deadline, and is still watched for an hour: a wallet may give its transaction a fresh blockhash and pay late", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const f = oreSwaps()
+  const w = mainnetTopUp({ [BASE]: "120132" }, { swaps: f.layer })
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const watched = (t: TopUp["Service"]) => Effect.gen(function*() {
+    w.checked.length = 0
+    yield* t.trackNow
+    return [...w.checked].sort()
+  })
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* Effect.sleep("100 millis") // the start-up pass is done
+      for (let i = 0; i < 10; i++) yield* t.quote(SOL_ID, swapAssetId(f.ORE), 1_000_000, false, "solana") // dq-1 … dq-10: the price moved on each
+      const full = yield* said(t.exit(SOL_ID, BASE, 1_000_000, "solana"))
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '9 minutes'`
+      const stillFull = yield* said(t.quote(SOL_ID, swapAssetId(f.ORE), 1_000_000, false, "solana"))
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '11 minutes', checked_at = NULL`
+      const room = yield* said(t.quote(SOL_ID, swapAssetId(f.ORE), 1_000_000, false, "solana")) // dq-11
+      const after11 = yield* watched(t)
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '61 minutes', checked_at = NULL WHERE deposit_address NOT IN ('dq-1', 'dq-11')`
+      const after61 = yield* watched(t)
+      // Any other unpaid quote keeps its place for the two hours a late transfer may still arrive in.
+      for (let i = 0; i < 10; i++) yield* t.quote(EVM, BASE, 1_000_000)
+      yield* sql`UPDATE intents_swaps SET deadline = now() - interval '11 minutes' WHERE account_id = ${EVM}`
+      const evm = yield* said(t.quote(EVM, BASE, 1_000_000))
+      return { full, stillFull, room, after11, after61, evm }
+    })
+  )
+  assert.match(r.full, /several quotes open already/, "ten unpaid ORE quotes hold every place, a withdrawal's too")
+  assert.match(r.stillFull, /several quotes open already/)
+  assert.equal(r.room, "ok", "eleven minutes past their deadline, they hold no place")
+  assert.equal(r.after11.length, 11, "but are all still checked for a payment")
+  assert.deepEqual(r.after61, ["dq-1", "dq-11"], "until an hour past their deadline")
+  assert.match(r.evm, /several quotes open already/)
 })
 
 test("an EVM wallet's change on Solana from a swap-paid Top-Up goes back to it as USDC on Base", async () => {

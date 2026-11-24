@@ -4,7 +4,7 @@ import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
 import { Refill } from "./Refill.ts"
-import { Config, Effect, Layer, Schema } from "effect"
+import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -24,7 +24,7 @@ import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
-import { TopUp } from "./TopUp.ts"
+import { SolanaPayRoute, TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -256,25 +256,8 @@ const Routes = Layer.mergeAll(
     return HttpRouter.add("GET", "/bitrefill/callback", (request) =>
       Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
   })),
-  // Solana Pay transaction requests (ADR-0014): a wallet that scans a swap-paid Top-Up's code asks here for the
-  // transaction that pays it. No session: whoever asks only ever gets a transaction paying that Top-Up from their
-  // own wallet. A wallet app sends no Origin, so the edge's same-site check lets it through.
-  Layer.unwrap(Effect.gen(function*() {
-    const topup = yield* TopUp
-    const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-    const refused = (message: string) => HttpServerResponse.jsonUnsafe({ message }, { status: 400 })
-    return Layer.mergeAll(
-      HttpRouter.add("GET", "/solana-pay/:depositAddress", HttpServerResponse.jsonUnsafe({ label: "Luckout", icon: `${web}/logo.png` })),
-      HttpRouter.add("POST", "/solana-pay/:depositAddress", Effect.gen(function*() {
-        const { depositAddress = "" } = yield* HttpRouter.params
-        const { account } = yield* HttpServerRequest.schemaBodyJson(Schema.Struct({ account: Schema.String }))
-        return HttpServerResponse.jsonUnsafe(yield* topup.solanaPay(depositAddress, account))
-      }).pipe(
-        Effect.catchTag("TopUpUnavailable", (e) => Effect.succeed(refused(e.message))),
-        Effect.catch(() => Effect.succeed(refused("Send the wallet's account as JSON: {\"account\": \"…\"}.")))
-      ))
-    )
-  }))
+  // Solana Pay transaction requests (ADR-0014): no session (TopUp.ts).
+  SolanaPayRoute
 ).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(

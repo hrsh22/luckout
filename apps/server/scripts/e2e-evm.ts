@@ -33,7 +33,7 @@ const req = async (method: string, path: string, body?: unknown, session?: strin
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
   // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
-  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("__Host-luckout_session="))?.split(";")[0]
   return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
