@@ -44,10 +44,25 @@ test("the sign-in message names the network, and a session works only on its own
     assert.equal((yield* auth.authenticate(s.token)).accountId, "alice.testnet")
 
     const e = Date.now() + 60_000
-    const mainnet = yield* auth.authenticate(mint({ a: "alice.near", e, n: "mainnet" })).pipe(Effect.flip)
+    const mainnet = yield* auth.authenticate(mint({ a: "alice.near", e, n: "mainnet", c: "app.test", i: Date.now() })).pipe(Effect.flip)
     assert.equal(mainnet._tag, "Unauthorized")
     const unbound = yield* auth.authenticate(mint({ a: "alice.testnet", e })).pipe(Effect.flip)
     assert.equal(unbound._tag, "Unauthorized", "tokens from before sessions named their network")
+  })))
+
+test("a session works only with the contract it was signed in for: staging and production share mainnet", () =>
+  run(Effect.gen(function*() {
+    const auth = yield* Auth
+    const c = yield* auth.challenge
+    const s = yield* auth.verify(new SignedChallenge({ accountId: "erin.testnet", publicKey: "ed25519:x", signature: "", nonce: c.nonce }))
+    assert.equal(JSON.parse(Buffer.from(s.token.split(".")[0]!, "base64url").toString()).c, "app.test", "the token names this server's contract")
+    const e = Date.now() + 60_000
+    const session = { a: "erin.testnet", e, n: "testnet", i: Date.now() }
+    assert.equal((yield* auth.authenticate(mint({ ...session, c: "app.test" }))).accountId, "erin.testnet")
+    const elsewhere = yield* auth.authenticate(mint({ ...session, c: "staging.app.test" })).pipe(Effect.flip)
+    assert.equal(elsewhere._tag, "Unauthorized", "the same secret on another deployment signs nobody in here")
+    const unnamed = yield* auth.authenticate(mint(session)).pipe(Effect.flip)
+    assert.equal(unnamed._tag, "Unauthorized", "tokens from before sessions named their contract")
   })))
 
 test("signing out everywhere ends every earlier session; a new sign-in works", () =>
@@ -165,10 +180,10 @@ test("a session names the wallet it signed in with; one from before that is read
     const auth = yield* Auth
     const e = Date.now() + 60_000
     const evm = "0x53a19a03679e8d5e9253a998dcde6c71dbb002a2"
-    assert.deepEqual(yield* auth.authenticate(mint({ a: evm, e, n: "testnet", i: Date.now() })), { accountId: evm, wallet: "evm" })
+    assert.deepEqual(yield* auth.authenticate(mint({ a: evm, e, n: "testnet", c: "app.test", i: Date.now() })), { accountId: evm, wallet: "evm" })
     const implicit = "ad".repeat(32)
-    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", i: Date.now() })), { accountId: implicit, wallet: "near" })
-    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", i: Date.now(), w: "solana" })), { accountId: implicit, wallet: "solana" })
+    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", c: "app.test", i: Date.now() })), { accountId: implicit, wallet: "near" })
+    assert.deepEqual(yield* auth.authenticate(mint({ a: implicit, e, n: "testnet", c: "app.test", i: Date.now(), w: "solana" })), { accountId: implicit, wallet: "solana" })
   })))
 
 test("a NEAR wallet is shown our site's host as the recipient", () =>
@@ -242,10 +257,12 @@ test("the session token reaches the browser only as an HttpOnly cookie, which ev
     const body = await signedIn.json()
     assert.deepEqual(Object.keys(body).sort(), ["accountId", "expiresAt", "wallet"], "no token in the body")
     const setCookie = signedIn.headers.get("set-cookie") ?? ""
-    assert.match(setCookie, /^luckout_session=[\w-]+\.[\w-]+;/)
+    assert.match(setCookie, /^__Host-luckout_session=[\w-]+\.[\w-]+;/)
     for (const part of ["HttpOnly", "Secure", "SameSite=Lax", "Path=/", `Expires=${new Date(body.expiresAt).toUTCString()}`]) assert.ok(setCookie.includes(part), `${part} in ${setCookie}`)
+    // What a browser asks of a __Host- cookie, or drops it: Secure, Path=/, and no Domain (this host only).
+    assert.doesNotMatch(setCookie, /domain=/i)
     const cookie = setCookie.split(";")[0]!
-    const token = cookie.slice("luckout_session=".length)
+    const token = cookie.slice("__Host-luckout_session=".length)
     assert.equal(await run(Effect.gen(function*() {
       return (yield* (yield* Auth).authenticate(token)).accountId
     })), "dave.testnet")
@@ -267,7 +284,7 @@ test("the session token reaches the browser only as an HttpOnly cookie, which ev
     // Signing out ends the session on the server and tells the browser to drop the cookie.
     const out = await post("/session/sign-out", { cookie })
     assert.equal(out.status, 204)
-    assert.match(out.headers.get("set-cookie") ?? "", /^luckout_session=; Max-Age=0;/)
+    assert.match(out.headers.get("set-cookie") ?? "", /^__Host-luckout_session=; Max-Age=0;/)
     assert.equal((await post("/session/sign-out", { cookie })).status, 401, "the old cookie is worth nothing")
   }))
 

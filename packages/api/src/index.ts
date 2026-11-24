@@ -90,9 +90,11 @@ export class Unauthorized extends Schema.TaggedError<Unauthorized>()(
 /**
  * The session token travels only in this cookie, set by the server as HttpOnly, so no script on the page can
  * read it. The API is on a subdomain of the Web App's own domain (api.luckout.wtf next to www.luckout.wtf),
- * which makes the cookie first-party.
+ * which makes the cookie first-party. `__Host-`: browsers take it only Secure, for path /, and for the API's own
+ * host, so no sibling site (a page on www., staging.) can set one for the API in its place. Chrome takes it over
+ * http://localhost too, as it does any Secure cookie.
  */
-export const sessionCookie = HttpApiSecurity.apiKey({ key: "luckout_session", in: "cookie" })
+export const sessionCookie = HttpApiSecurity.apiKey({ key: "__Host-luckout_session", in: "cookie" })
 
 export class Authorization extends HttpApiMiddleware.Service<Authorization, { provides: CurrentAccount; requires: never }>()(
   "luckout/Authorization",
