@@ -7,6 +7,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
+import { KeyPair } from "near-api-js"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { CatalogHandlers } from "./main.ts"
 import { Purchases } from "./Purchases.ts"
@@ -41,6 +42,24 @@ const refusal = (env: Record<string, string>) => {
   assert.equal(r.status, 1)
   return /also needs (.*)/.exec(r.stdout + r.stderr)?.[1]
 }
+
+test("the operator key is checked on chain before the database is touched", () => {
+  // A complete .env with a real key, and nothing reachable: it stops at the key, not at the database.
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL("./main.ts", import.meta.url))], {
+    env: {
+      PATH: process.env.PATH ?? "",
+      ...MAINNET,
+      OPERATOR_PRIVATE_KEY: KeyPair.fromRandom("ed25519").toString(),
+      TELEGRAM_BOT_TOKEN: "none",
+      REDEMPTION_KEY: "ab".repeat(32),
+      SESSION_SECRET: "x".repeat(32)
+    },
+    encoding: "utf8",
+    timeout: 60_000
+  })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout + r.stderr, /OPERATOR_PRIVATE_KEY: couldn't read the key on chain/)
+})
 
 test("mainnet needs the bot for alerts, a 32-byte REDEMPTION_KEY and a long SESSION_SECRET", () => {
   assert.equal(

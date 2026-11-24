@@ -139,6 +139,14 @@ export const failover = <P, A>(providers: ReadonlyArray<P>, at: { i: number }, w
   return attempt(providers.length)
 }
 
+/** An access key as the chain has it. */
+export interface AccessKey {
+  readonly nonce: bigint
+  readonly fullAccess: boolean
+  /** Set for a key limited to one contract's methods (none listed: any of them); without it the key may call anything. */
+  readonly calls?: { readonly receiverId: string; readonly methodNames: ReadonlyArray<string> }
+}
+
 /** A customer's signed NEP-366 delegate action, as borsh decodes it. */
 export interface SignedDelegate {
   readonly delegateAction: {
@@ -157,6 +165,8 @@ export class Near extends Context.Service<Near, {
   /** The USDC token contract (test USDC on testnet). */
   readonly usdcId: string
   readonly operatorId: string | undefined
+  /** The public half of OPERATOR_PRIVATE_KEY, when configured. */
+  readonly operatorPublicKey: string | undefined
   /** The server-held account that refills Bitrefill (ADR-0009), when configured. */
   readonly treasuryId: string | undefined
   /** The account that pays customers' network fees (NEP-366 relayer), when configured. */
@@ -191,8 +201,8 @@ export class Near extends Context.Service<Near, {
   ): Effect.Effect<Outcome, ContractRejected | NearUnavailable | E>
   /** The outcome of a transaction signed earlier, re-sending it if the network never saw it. */
   resume(signed: Signed): Effect.Effect<Outcome, ContractRejected | NearUnavailable | TxExpired>
-  /** An access key's nonce and whether it is full-access; undefined if the account has no such key. */
-  accessKey(accountId: string, publicKey: string): Effect.Effect<{ readonly nonce: bigint; readonly fullAccess: boolean } | undefined, NearUnavailable>
+  /** An access key's nonce and what it may call; undefined if the account has no such key. */
+  accessKey(accountId: string, publicKey: string): Effect.Effect<AccessKey | undefined, NearUnavailable>
   /** The latest final block height. */
   readonly height: Effect.Effect<bigint, NearUnavailable>
   /** An account's NEAR balance and storage, for monitoring. */
@@ -239,6 +249,7 @@ export class Near extends Context.Service<Near, {
       const sender = (id: string, key: Redacted.Redacted<string>) =>
         Effect.gen(function*() {
           const signer = KeyPairSigner.fromSecretKey(Redacted.value(key) as KeyPairString)
+          const publicKey = yield* Effect.promise(() => signer.getPublicKey())
           const lock = yield* Semaphore.make(1)
           let lastNonce = 0n
 
@@ -250,7 +261,6 @@ export class Near extends Context.Service<Near, {
           const send = <E>(receiverId: string, txActions: Array<Action>, persist: (signed: Signed) => Effect.Effect<void, E>) =>
             Effect.gen(function*() {
               const hash = yield* lock.withPermits(1)(Effect.gen(function*() {
-                const publicKey = yield* rpc("key", () => signer.getPublicKey())
                 const [key, block] = yield* Effect.all([
                   rpc("access key", (p) => p.viewAccessKey({ accountId: id, publicKey, finalityQuery: { finality: "optimistic" } })),
                   rpc("block", (p) => p.viewBlock({ finality: "final" }))
@@ -296,7 +306,7 @@ export class Near extends Context.Service<Near, {
               return yield* executed(signed.hash)
             })
 
-          return { id, send, resume }
+          return { id, publicKey: publicKey.toString(), send, resume }
         })
 
       const operator = Option.isSome(operatorId) && Option.isSome(operatorKey) ? yield* sender(operatorId.value, operatorKey.value) : undefined
@@ -342,7 +352,15 @@ export class Near extends Context.Service<Near, {
 
       const accessKey = (accountId: string, publicKey: string) =>
         rpc("access key", (p) => p.viewAccessKey({ accountId, publicKey, finalityQuery: { finality: "optimistic" } })).pipe(
-          Effect.map((k) => ({ nonce: BigInt(k.nonce), fullAccess: k.permission === "FullAccess" })),
+          Effect.map((k): AccessKey => {
+            const p = k.permission
+            const limited = typeof p !== "object" ? undefined : "FunctionCall" in p ? p.FunctionCall : "GasKeyFunctionCall" in p ? p.GasKeyFunctionCall : undefined
+            return {
+              nonce: BigInt(k.nonce),
+              fullAccess: p === "FullAccess",
+              ...(limited ? { calls: { receiverId: limited.receiver_id, methodNames: limited.method_names } } : {})
+            }
+          }),
           Effect.catchTag("NearUnavailable", (e) =>
             /UNKNOWN_ACCESS_KEY|UNKNOWN_ACCOUNT|does not exist/i.test(e.message) ? Effect.succeed(undefined) : Effect.fail(e))
         )
@@ -369,6 +387,7 @@ export class Near extends Context.Service<Near, {
         contractId,
         usdcId,
         operatorId: operator?.id,
+        operatorPublicKey: operator?.publicKey,
         relayerId: relayer?.id,
         treasuryId: treasury?.id,
         intentsId: testnet ? "intents.luckout.testnet" : "intents.near",
@@ -386,3 +405,30 @@ export class Near extends Context.Service<Near, {
     })
   )
 }
+
+/** What the operator's key sends to the contract: every checkout's admission and settlement (Purchases.ts). */
+export const OPERATOR_METHODS = ["purchase_many", "settle"]
+
+/**
+ * Refuses to start a server whose operator key can't send OPERATOR_METHODS to the contract (say, a key made before
+ * carts): NEAR would refuse every admission and settlement, and each purchase would wait for hours before going stuck.
+ * A chain that can't be asked stops the start too, as an unreachable database does (Db.ts); pm2 starts it again.
+ */
+export const checkOperatorKey = Effect.gen(function*() {
+  const near = yield* Near
+  if (!near.operatorId || !near.operatorPublicKey) return
+  const key = yield* near.accessKey(near.operatorId, near.operatorPublicKey).pipe(
+    Effect.catchTag("NearUnavailable", (e) => Effect.die(`OPERATOR_PRIVATE_KEY: couldn't read the key on chain (${e.message})`))
+  )
+  const calls = key?.calls
+  // No methods listed: the key may call any of the contract's.
+  const missing = calls && calls.methodNames.length > 0 ? OPERATOR_METHODS.filter((m) => !calls.methodNames.includes(m)) : []
+  const problem = !key
+    ? `${near.operatorId} has no such key on chain`
+    : calls && calls.receiverId !== near.contractId
+    ? `the key is for ${calls.receiverId}, not ${near.contractId}`
+    : missing.length > 0
+    ? `the key can't call ${missing.join(", ")} (it has ${calls!.methodNames.join(", ")})`
+    : undefined
+  if (problem) return yield* Effect.die(`OPERATOR_PRIVATE_KEY: ${problem}. Add a key that can (deploy/README.md, "Releasing staging to production").`)
+})
