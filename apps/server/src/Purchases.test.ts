@@ -1,17 +1,17 @@
 import { BitrefillUnavailable, CreditSettings, type Mode, NewPurchase, ShopStatus, Voucher } from "@luckout/api"
-import { ConfigProvider, Effect, Fiber, Layer } from "effect"
+import { ConfigProvider, Effect, Exit, Fiber, Layer } from "effect"
 import { FetchHttpClient } from "effect/http"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
 import { Base, BaseUnavailable, type PaymentStatus, type SignedPayment } from "./Base.ts"
-import { Bitrefill, type CardDelivery, type Order } from "./Bitrefill.ts"
+import { Bitrefill, type CardDelivery, matchOrders, type Order } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
-import { ContractRejected, Near, NearUnavailable, type Outcome } from "./Near.ts"
-import { Purchases } from "./Purchases.ts"
+import { ContractRejected, Near, NearUnavailable, type Outcome, TxExpired } from "./Near.ts"
+import { GAVE_UP_AT, Purchases, retryPurchase } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Sales } from "./Sales.ts"
 import { fakeBase, fakeBitrefill, fakeBitrefillOAuth, fakeNear } from "./testing.ts"
@@ -65,10 +65,15 @@ const world = (opts: {
   statuses?: Array<PaymentStatus>
   /** No Free Reserve left: a cart's Lucky cards are quoted Normal. */
   reserveFull?: boolean
-  /** How each card of the next deliveries ends, one by one; delivered unless set. */
-  deliveries?: Array<"Delivered" | "Failed" | "Pending">
+  /**
+   * Where each order of the invoice is at each delivery poll, one list per poll, in cart order; delivered unless set.
+   * "NoCode": delivered with Redemption Data that holds neither a code nor a link.
+   */
+  deliveries?: Array<Array<"Delivered" | "Failed" | "Pending" | "NoCode">>
   /** Bitrefill can't be reached (or is rate limiting us) for this call: its outcome is unknown. */
   bitrefillDown?: "order" | "delivery"
+  /** Telegram doesn't take this many customer notices first (it's worth sending them again). */
+  telegramDown?: number
 } = {}) => {
   const calls: Array<string> = []
   const alerts: Array<string> = []
@@ -89,6 +94,10 @@ const world = (opts: {
   /** How many cards each Bitrefill order held. */
   const ordered: Array<number> = []
   const deliveries = [...(opts.deliveries ?? [])]
+  /** How many cards each invoice holds, as ordered. */
+  const invoiceCards = new Map<string, number>()
+  let confirm = opts.confirm
+  let telegramDown = opts.telegramDown ?? 0
   let shop = new ShopStatus({ open: true })
   const price = opts.price ?? 10_000_000
   const mode = opts.mode ?? "normal"
@@ -151,10 +160,12 @@ const world = (opts: {
         for (const _ of failed) calls.push("fail_purchase")
         settled.push({ delivered, failed })
         yield* persist({ hash: `${method}-tx`, bytes: "" })
-        if (opts.confirm === "refused") return yield* new ContractRejected({ message: "Purchase is already closed" })
-        if (opts.confirm === "down" && delivered.length > 0) return yield* new NearUnavailable({ message: "send: timed out" })
+        if (confirm === "refused") return yield* new ContractRejected({ message: "Purchase is already closed" })
+        if (confirm === "down" && delivered.length > 0) return yield* new NearUnavailable({ message: "send: timed out" })
         return outcome(null)
-      })
+      }),
+    // A saved transaction the chain never saw (NEAR timed out before taking it): it's signed afresh.
+    resume: (signed) => Effect.fail(new TxExpired({ hash: signed.hash }))
   })
   const bitrefill = fakeBitrefill({
     guest: opts.guest ?? false,
@@ -173,25 +184,38 @@ const world = (opts: {
         const tag = orders.shift() ?? (opts.guest ? "Invoiced" : "Ordered")
         // A token Bitrefill no longer takes: the tool never ran.
         if (tag === "Refused") return { _tag: "Refused", reason: opts.refusal ?? "HTTP 401 invalid_token" }
-        if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId: `inv-${calls.length}`, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price * cart.length }
+        const invoiceId = `inv-${calls.length}`
+        invoiceCards.set(invoiceId, cart.length)
+        if (tag === "Invoiced") return { _tag: "Invoiced", invoiceId, accessToken: "secret-token", payTo: "0x1306efa7dc204B6e995AeD34ADBC24C9889c7f4F", amount: opts.invoiceAmount ?? price * cart.length }
         if (tag === "NoCredit") return { _tag: "NoCredit", reason: "Balance too low (INVALID_INPUT)" }
         // Ordering spends the credit, as Bitrefill would.
         creditBalance -= price * cart.length
-        return { _tag: "Ordered", invoiceId: "inv-1" }
+        return { _tag: "Ordered", invoiceId }
       }))),
+    // The invoice's orders as Bitrefill lists them, in cart order, each matched to the cards asked about the way
+    // Bitrefill.ts matches them: by product and amount, not by place in the list asked about.
     delivery: (invoiceId, token, cart) =>
       opts.bitrefillDown === "delivery"
         ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
         : Effect.suspend(() => {
           if (token) calls.push(`delivery:${token}`)
-          const found = cart.map((_, i): CardDelivery => {
-            const tag = deliveries.shift() ?? "Delivered"
-            return tag === "Delivered"
-              ? { _tag: "Delivered", orderId: `o-${i}`, redemption: { code: `ABC-12${i + 3}`, expirationTime: "2027-03-30T00:00:00.000Z" } }
-              : tag === "Failed"
-              ? { _tag: "Failed", reason: `order o-${i} failed` }
-              : { _tag: "Pending" }
+          const poll = deliveries.shift() ?? []
+          const invoice = Array.from({ length: invoiceCards.get(invoiceId) ?? cart.length }, (_, j) => {
+            const state = poll[j] ?? "Delivered"
+            const redemption_info: Record<string, unknown> | undefined = state === "Delivered"
+              ? { code: `ABC-12${j + 3}`, expirationTime: "2027-03-30T00:00:00.000Z" }
+              : state === "NoCode"
+              ? { other: "Show this at the till: S3CRET-TEXT" }
+              : undefined
+            return { order_id: `o-${j}`, status: state, product: { id: voucherId, value: "10" }, redemption_info }
           })
+          const found = matchOrders(cart, invoice).map((o): CardDelivery =>
+            o?.redemption_info
+              ? { _tag: "Delivered", orderId: o.order_id, redemption: o.redemption_info }
+              : o?.status === "Failed"
+              ? { _tag: "Failed", reason: `order ${o.order_id} failed` }
+              : { _tag: "Pending" }
+          )
           return found.every((d) => d._tag === "Pending")
             ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
             : Effect.succeed(found)
@@ -214,7 +238,7 @@ const world = (opts: {
       Layer.succeed(Base, base),
       Layer.succeed(Refill, refill),
       Layer.succeed(Sales, Sales.of({ status: Effect.sync(() => shop), setOpen: () => Effect.die("not used") })),
-      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: (_, t) => Effect.sync(() => (notices.push(t), true)) }))
+      Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: (_, t) => Effect.sync(() => (notices.push(t), telegramDown-- <= 0)) }))
     )),
     Layer.provideMerge(DbMemory),
     // Real cards are only sold on mainnet.
@@ -252,7 +276,8 @@ const world = (opts: {
     lookups: () => lookups,
     setCredit: (micro: number) => void (creditBalance = micro),
     setCreditDelay: (ms: number) => void (creditDelay = ms),
-    setShop: (s: ShopStatus) => void (shop = s)
+    setShop: (s: ShopStatus) => void (shop = s),
+    setConfirm: (c: typeof opts.confirm) => void (confirm = c)
   }
 }
 
@@ -1211,7 +1236,7 @@ test("a Lucky card the reserve no longer covers is refused before anything is si
 })
 
 test("each card of a cart gets its own code, and a card Bitrefill fails is refunded without holding the others", async () => {
-  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: ["Delivered", "Failed", "Delivered"] })
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: [["Delivered", "Failed", "Delivered"]] })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com")
     const placed = yield* w.cart(keys(3))
@@ -1225,8 +1250,8 @@ test("each card of a cart gets its own code, and a card Bitrefill fails is refun
 })
 
 test("a card still on its way doesn't hold the others: they're settled now, it is later", async () => {
-  // Still pending when it's asked about alone too: the run pauses there, the others settled.
-  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: ["Delivered", "Pending", "Delivered", "Pending"] })
+  // Still pending when it's asked about again: the run pauses there, the others settled.
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: [["Delivered", "Pending", "Delivered"], ["Delivered", "Pending", "Delivered"]] })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com")
     const placed = yield* w.cart(keys(3))
@@ -1239,4 +1264,169 @@ test("a card still on its way doesn't hold the others: they're settled now, it i
   assert.deepEqual(r.first, ["settled", "delivery", "settled"])
   assert.deepEqual(r.then, ["settled", "settled", "settled"])
   assert.deepEqual(w.settled, [{ delivered: [7, 9], failed: [] }, { delivered: [8], failed: [] }])
+})
+
+test("identical cards delivered in different rounds each get their own order's code", async () => {
+  // Bitrefill lists an order for each copy of the same card; the first copy arrives at once, the second a round later.
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: [["Delivered", "Pending"], ["Delivered", "Pending"]] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(2))
+    const first = yield* Effect.forEach(placed, (p) => settled(p.id))
+    yield* reconcilePass
+    yield* Effect.forEach(placed, (p) => settled(p.id))
+    return { first, cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
+  }))
+  assert.deepEqual(r.first, ["settled", "delivery"], "the second copy is still on its way after the first round")
+  assert.deepEqual(r.cards.map((p) => p.redemption?.code), ["ABC-123", "ABC-124"], "the second copy gets the second order's code, never the first's again")
+  assert.deepEqual(w.settled, [{ delivered: [7], failed: [] }, { delivered: [8], failed: [] }])
+})
+
+test("two carts at once can't both pass an email's guest limits or an account's open cards", async () => {
+  // Two accounts with the same Checkout Email: 10 cards each would make 20 for the email today.
+  const guest = world({ real: true, guest: true, credit: 1_000_000_000 })
+  const g = await guest.run(Effect.gen(function*() {
+    yield* withEmail("shared@example.com", "bob.test")
+    yield* withEmail("shared@example.com")
+    return yield* Effect.all([Effect.exit(guest.cart(keys(10))), Effect.exit(guest.cart(keys(10), "bob.test"))], { concurrency: "unbounded" })
+  }))
+  assert.equal(g.filter(Exit.isSuccess).length, 1, "only one cart goes through")
+  assert.match(JSON.stringify(g.find(Exit.isFailure)), /15 cards a day per email/)
+  assert.equal(guest.calls.filter((c) => c === "purchase").length, 10, "the other is refused before anything is signed")
+
+  // One account, two carts of 10 at once: 20 unfinished cards, more than a full cart.
+  const one = world({ deliveryDelay: 300 })
+  const o = await one.run(Effect.all([Effect.exit(one.cart(keys(10))), Effect.exit(one.cart(keys(10)))], { concurrency: "unbounded" }))
+  assert.equal(o.filter(Exit.isSuccess).length, 1)
+  assert.match(JSON.stringify(o.find(Exit.isFailure)), /still in progress/)
+})
+
+test("a card counts against its email's day from when it was ordered, not when it was placed", async () => {
+  // Fifteen cards placed 25 hours ago that waited for the float and were ordered an hour ago: Bitrefill counts them today.
+  const w = world({ real: true, guest: true, credit: 100_000_000 })
+  const e = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const [{ email_key }] = (yield* sql<{ email_key: string }>`SELECT email_key FROM checkout_emails WHERE account_id = 'alice.test'`) as [{ email_key: string }]
+    for (let i = 0; i < 15; i++) {
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id)
+                 INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, email_key, invoice_id, created_at, ordered_at)
+                 VALUES ((SELECT id FROM co), 'alice.test', ${`k${i}`}, 'amazon-us', 'Card', '1', 1000000, 'settled', ${email_key}, ${`inv${i}`},
+                         now() - interval '25 hours', now() - interval '1 hour')`
+    }
+    return yield* w.buy().pipe(Effect.flip)
+  }))
+  assert.match(e.message, /15 cards a day per email, and yours has had 15/)
+  assert.deepEqual(w.calls, [])
+})
+
+test("a checkout whose cards were partly bought already is refused, and nothing more is bought", async () => {
+  const w = world()
+  const k = crypto.randomUUID()
+  const e = await w.run(Effect.gen(function*() {
+    yield* w.cart([k])
+    return yield* w.cart([k, crypto.randomUUID()]).pipe(Effect.flip)
+  }))
+  assert.match(e.message, /already bought/)
+  assert.equal(w.calls.filter((c) => c === "purchase").length, 1)
+})
+
+test("a notice Telegram didn't take is sent again on the next pass, and only once", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveryDelay: 400, requestWait: 50, telegramDown: 1 })
+  await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    yield* w.buy()
+    yield* Effect.sleep("1 second")
+    yield* reconcilePass
+    yield* reconcilePass
+  }))
+  assert.equal(w.notices.length, 2, "tried once, then sent once more")
+  assert.match(w.notices[1]!, /is ready/)
+})
+
+test("a checkout is ordered with the Checkout Email it was placed under, even if that changed while it waited", async () => {
+  const w = world({ real: true, guest: true, price: 12_000_000, credit: 5_000_000 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const p = yield* w.buy()
+    yield* withEmail("later@example.com")
+    const sql = yield* SqlClient.SqlClient
+    const [stored] = yield* sql<{ email: string | null }>`SELECT email FROM checkouts`
+    w.setCredit(100_000_000)
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    yield* Effect.flatMap(Purchases, (s) => s.promoteWaiting)
+    return { first: p.status, stored: stored!.email, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.first, "waiting")
+  assert.equal(r.after, "settled")
+  assert.deepEqual(w.calls.filter((c) => c.startsWith("order:")), ["order:alice@example.com"], "the email the customer confirmed")
+  assert.ok(r.stored && !r.stored.includes("alice"), "kept on the checkout, sealed")
+})
+
+test("a card delivered with neither a code nor a link tells an admin, naming the purchase and none of its data", async () => {
+  const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: [["NoCode"]] })
+  const p = await w.run(Effect.andThen(withEmail("alice@example.com"), w.buy()))
+  assert.equal(p.status, "delivered")
+  assert.equal(w.alerts.filter((a) => a.includes(p.id)).length, 1)
+  assert.ok(!w.alerts.join(" ").includes("S3CRET"), "never the Redemption Data")
+})
+
+test("a checkout that gave up at settle goes back on Retry now, each card to where it was, and finishes", async () => {
+  // NEAR doesn't take the settlement for six hours of retries: one card has its code, the other failed at Bitrefill.
+  const w = world({ real: true, guest: true, credit: 100_000_000, confirm: "down", deliveries: [["Delivered", "Failed"]] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(2))
+    yield* Effect.forEach(placed, (p) => settled(p.id))
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    const stuck = yield* sql<{ step: string; error: string }>`SELECT step, error FROM purchases ORDER BY position`
+    const [checkout] = yield* sql<{ step: string }>`SELECT step FROM checkouts`
+    // NEAR is back; the admin presses Retry now on either card.
+    w.setConfirm("ok")
+    const at = yield* retryPurchase(placed[1]!.id)
+    yield* reconcilePass
+    const after = yield* Effect.forEach(placed, (p) => settled(p.id))
+    return { stuck, checkout: checkout!.step, at, after, cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
+  }))
+  assert.equal(r.checkout, "stuck")
+  assert.deepEqual(r.stuck.map((c) => [c.step, GAVE_UP_AT.exec(c.error)?.[1]]), [["stuck", "confirm"], ["stuck", "fail"]], "each card says where it gave up")
+  assert.equal(r.at, "fail")
+  assert.deepEqual(r.after, ["settled", "failed"])
+  assert.equal(r.cards[0]!.redemption?.code, "ABC-123", "the code it already had")
+  assert.deepEqual(w.settled.at(-1), { delivered: [7], failed: [8] }, "settled once more, as it was")
+  assert.equal(w.calls.filter((c) => c.startsWith("order:")).length, 1, "never ordered again")
+  assert.equal(w.paid.length, 1, "never paid again")
+})
+
+test("a checkout that gave up at delivery goes back to asking Bitrefill; one that gave up at pay needs a human", async () => {
+  const slow = world({ real: true, guest: true, credit: 100_000_000, bitrefillDown: "delivery" })
+  const d = await slow.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const p = yield* slow.buy()
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    const stuck = (yield* rowOf(p.id)).step
+    const at = yield* retryPurchase(p.id)
+    return { stuck, at, row: yield* rowOf(p.id), checkout: (yield* sql<{ step: string; error: string | null }>`SELECT step, error FROM checkouts`)[0]! }
+  }))
+  assert.equal(d.stuck, "stuck")
+  assert.equal(d.at, "delivery")
+  assert.deepEqual([d.row.step, d.row.attempts, d.row.due], ["delivery", 0, true], "due on the reconciler's next pass")
+  assert.deepEqual(d.checkout, { step: "delivery", error: null })
+  assert.equal(slow.paid.length, 1)
+
+  const unpaid = world({ real: true, guest: true, credit: 100_000_000, payDown: true })
+  const p = await unpaid.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const p = yield* unpaid.buy()
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    return { step: (yield* rowOf(p.id)).step, refused: yield* retryPurchase(p.id).pipe(Effect.flip) }
+  }))
+  assert.equal(p.step, "stuck")
+  assert.match(p.refused.message, /needs a manual check/)
 })

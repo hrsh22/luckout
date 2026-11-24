@@ -893,6 +893,8 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
 export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")({
   id: Schema.String,
+  /** The checkout it was bought in. A Cart's cards share one invoice and one Base payment: `payAmount` is the checkout's. */
+  checkoutId: Schema.String,
   accountId: Schema.String,
   voucherName: Schema.String,
   value: Schema.String,
