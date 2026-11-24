@@ -1,7 +1,21 @@
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { failover, isBrokeTx, isDeadTx, isUnknownTx, otherNetworkAccounts, RELAY_GAS, transportTrouble, upfront } from "./Near.ts"
+import {
+  type AccessKey,
+  checkOperatorKey,
+  failover,
+  isBrokeTx,
+  isDeadTx,
+  isUnknownTx,
+  Near,
+  NearUnavailable,
+  otherNetworkAccounts,
+  RELAY_GAS,
+  transportTrouble,
+  upfront
+} from "./Near.ts"
+import { fakeNear } from "./testing.ts"
 
 // A server refuses to start when its .env names accounts from the other network.
 
@@ -17,6 +31,43 @@ test("a mainnet .env with a testnet account is caught, and the reverse", () => {
   )
   assert.deepEqual(otherNetworkAccounts("testnet", { OPERATOR_ACCOUNT_ID: "server.luckout.near" }), ["OPERATOR_ACCOUNT_ID=server.luckout.near"])
   assert.deepEqual(otherNetworkAccounts("testnet", { LUCKOUT_CONTRACT_ID: "app.luckout.testnet", RELAYER_ACCOUNT_ID: undefined }), [])
+})
+
+// A server refuses to start when its operator key can't send what purchases send: NEAR would refuse every
+// admission and settlement, and each purchase would wait hours before going stuck.
+
+const keyCheck = (answer: Effect.Effect<AccessKey | undefined, NearUnavailable>) => {
+  const asked: Array<string> = []
+  const near = fakeNear({
+    contractId: "app.luckout.near",
+    operatorId: "server.luckout.near",
+    operatorPublicKey: "ed25519:operator",
+    accessKey: (accountId, publicKey) => (asked.push(`${accountId} ${publicKey}`), answer)
+  })
+  return Effect.runPromiseExit(Effect.provideService(checkOperatorKey, Near, near)).then((exit) => ({ exit, asked }))
+}
+const why = (exit: Exit.Exit<unknown, unknown>) => (Exit.isFailure(exit) ? String(Cause.squash(exit.cause)) : "started")
+const fc = (receiverId: string, methodNames: Array<string>): AccessKey => ({ nonce: 1n, fullAccess: false, calls: { receiverId, methodNames } })
+
+test("the operator key passes when it may call purchase_many and settle on the contract", async () => {
+  const first = await keyCheck(Effect.succeed(fc("app.luckout.near", ["purchase", "confirm_delivery", "fail_purchase", "purchase_many", "settle"])))
+  assert.equal(why(first.exit), "started")
+  assert.deepEqual(first.asked, ["server.luckout.near ed25519:operator"], "it reads the operator's own key")
+  assert.equal(why((await keyCheck(Effect.succeed(fc("app.luckout.near", [])))).exit), "started", "an empty method list allows every method")
+  assert.equal(why((await keyCheck(Effect.succeed({ nonce: 1n, fullAccess: true }))).exit), "started", "a full-access key may call anything")
+})
+
+test("the operator key is refused when it can't call them, isn't on chain, or the chain can't be asked", async () => {
+  // Production's key before the cart release: the three single-purchase methods only.
+  assert.match(why((await keyCheck(Effect.succeed(fc("app.luckout.near", ["purchase", "confirm_delivery", "fail_purchase"])))).exit), /can't call purchase_many, settle/)
+  assert.match(why((await keyCheck(Effect.succeed(fc("app.staging.luckout.near", ["purchase_many", "settle"])))).exit), /for app\.staging\.luckout\.near, not app\.luckout\.near/)
+  assert.match(why((await keyCheck(Effect.succeed(undefined))).exit), /server\.luckout\.near has no such key/)
+  assert.match(why((await keyCheck(Effect.fail(new NearUnavailable({ message: "access key: fetch failed" })))).exit), /couldn't read .*fetch failed/)
+})
+
+test("a server without an operator key has nothing to check", async () => {
+  const near = fakeNear({ operatorId: undefined, operatorPublicKey: undefined })
+  assert.equal(why(await Effect.runPromiseExit(Effect.provideService(checkOperatorKey, Near, near))), "started")
 })
 
 // Real error texts: a rate limit or outage moves to the next endpoint; an answer from the chain doesn't.

@@ -230,8 +230,14 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tx", params: { tx_hash: tx, sender_account_id: config.operator, wait_until: "NONE" } }),
           signal: AbortSignal.timeout(15_000)
-        }).then((r) => r.json() as Promise<{ result?: { receipts_outcome: Array<Receipt> } }>).catch(() => undefined)
-        if (!res?.result) throw new ToolError("NEAR RPC couldn't find that transaction.")
+        }).then((r) => r.json() as Promise<{ result?: { receipts_outcome: Array<Receipt> }; error?: { cause?: { name?: string } } }>).catch(() => undefined)
+        // The archival node saying it has no such transaction (or that the hash can't be one) is an answer; anything
+        // else is NEAR not answering, and asking again may work.
+        if (!res?.result) {
+          throw new ToolError(
+            /^(UNKNOWN_TRANSACTION|PARSE_ERROR)$/.test(res?.error?.cause?.name ?? "") ? "NEAR has no record of that transaction." : "NEAR isn't answering right now. Try again in a moment."
+          )
+        }
         const purchaseId = Number.isSafeInteger(args.purchase_id) ? Number(args.purchase_id) : undefined
         const draw = drawEvent(res.result.receipts_outcome, near.contractId, purchaseId)
         if (!draw) throw new ToolError("That transaction has no Luckout Draw.")

@@ -4,7 +4,7 @@ import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
 import { Refill } from "./Refill.ts"
-import { Config, Effect, Layer, Schema } from "effect"
+import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -12,19 +12,19 @@ import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
 import { Base } from "./Base.ts"
-import { Bitrefill } from "./Bitrefill.ts"
+import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { Near, Network, otherNetworkAccounts } from "./Near.ts"
+import { checkOperatorKey, Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
-import { TopUp } from "./TopUp.ts"
+import { SolanaPayRoute, TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -47,7 +47,7 @@ const visitorCountry = Effect.gen(function*() {
   return seen && /^[A-Z]{2}$/.test(seen) && seen !== "XX" && seen !== "T1" ? seen : undefined
 })
 
-const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
+export const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
   Effect.gen(function*() {
     const bitrefill = yield* Bitrefill
     const purchases = yield* Purchases
@@ -73,7 +73,9 @@ const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =>
           return new PopularCards({ ...(country ? { country } : {}), items })
         }),
       voucher: ({ params }) =>
-        quiet(Effect.zipWith(bitrefill.voucher(params.id), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))),
+        quiet(Effect.zipWith(bitrefill.voucher(params.id, { page: true }), purchases.useBy(params.id), (v, useBy) => (useBy ? new Voucher({ ...v, useBy }) : v))).pipe(
+          Effect.mapError((e) => (e.message === NO_SUCH_VOUCHER ? new NotFound() : e))
+        ),
       quote: ({ query }) => quiet(purchases.quote(query.voucherId, query.value, query.game)),
       quoteCart: ({ payload }) => quiet(purchases.quoteCart(payload.items))
     })
@@ -254,25 +256,8 @@ const Routes = Layer.mergeAll(
     return HttpRouter.add("GET", "/bitrefill/callback", (request) =>
       Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
   })),
-  // Solana Pay transaction requests (ADR-0014): a wallet that scans a swap-paid Top-Up's code asks here for the
-  // transaction that pays it. No session: whoever asks only ever gets a transaction paying that Top-Up from their
-  // own wallet. A wallet app sends no Origin, so the edge's same-site check lets it through.
-  Layer.unwrap(Effect.gen(function*() {
-    const topup = yield* TopUp
-    const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-    const refused = (message: string) => HttpServerResponse.jsonUnsafe({ message }, { status: 400 })
-    return Layer.mergeAll(
-      HttpRouter.add("GET", "/solana-pay/:depositAddress", HttpServerResponse.jsonUnsafe({ label: "Luckout", icon: `${web}/logo.png` })),
-      HttpRouter.add("POST", "/solana-pay/:depositAddress", Effect.gen(function*() {
-        const { depositAddress = "" } = yield* HttpRouter.params
-        const { account } = yield* HttpServerRequest.schemaBodyJson(Schema.Struct({ account: Schema.String }))
-        return HttpServerResponse.jsonUnsafe(yield* topup.solanaPay(depositAddress, account))
-      }).pipe(
-        Effect.catchTag("TopUpUnavailable", (e) => Effect.succeed(refused(e.message))),
-        Effect.catch(() => Effect.succeed(refused("Send the wallet's account as JSON: {\"account\": \"…\"}.")))
-      ))
-    )
-  }))
+  // Solana Pay transaction requests (ADR-0014): no session (TopUp.ts).
+  SolanaPayRoute
 ).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(
@@ -281,6 +266,8 @@ const Server = Layer.unwrap(
     if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
     const mixed = otherNetworkAccounts(yield* Network, process.env)
     if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)
+    // Before the database is touched, so a server refused here runs no migration and the previous release still fits it.
+    yield* checkOperatorKey.pipe(Effect.provide(Near.layer))
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)
@@ -293,4 +280,5 @@ const Server = Layer.unwrap(
   })
 )
 
-Layer.launch(Server).pipe(NodeRuntime.runMain)
+// Run as `node src/main.ts` (pm2, pnpm start/dev); a test that imports the handlers starts nothing.
+if (import.meta.main) Layer.launch(Server).pipe(NodeRuntime.runMain)

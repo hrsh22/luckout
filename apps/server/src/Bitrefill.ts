@@ -1,6 +1,6 @@
 import { BitrefillUnavailable, CatalogPage, type Category, Voucher, VoucherSummary } from "@luckout/api"
 import { decode as decodeToon } from "@toon-format/toon"
-import { Cache, Config, Context, Data, Effect, Exit, flow, Layer, Option, Redacted, Schedule, Schema } from "effect"
+import { Cache, Clock, Config, Context, Data, Effect, Exit, flow, Layer, Option, Redacted, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
@@ -152,16 +152,18 @@ const GuestPurchase = Schema.Struct({
     payment_info: Schema.Struct({ address: Schema.String, altBasePrice: Schema.Number, contractAddress: Schema.String })
   })
 })
-/** A guest invoice as get-invoice-by-id reads it back. */
 /** What an order says it is: Bitrefill lists a cart's orders in cart order, each with its product and amount. */
 const OrderProduct = Schema.optional(Schema.Struct({ id: Schema.String, value: Schema.optional(Schema.Unknown) }))
+/** An order's Redemption Data: missing or null until it's delivered. One order's null must not fail its whole cart's read. */
+const RedemptionInfo = Schema.optional(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown)))
+/** A guest invoice as get-invoice-by-id reads it back. */
 const GuestInvoice = Schema.Struct({
   invoice_status: Schema.String,
   orders: Schema.Array(Schema.Struct({
     order_id: Schema.String,
     status: Schema.String,
     product: OrderProduct,
-    redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
+    redemption_info: RedemptionInfo
   }))
 })
 const Token = Schema.Struct({ access_token: Schema.String, expires_in: Schema.Number })
@@ -175,7 +177,7 @@ const Invoice = Schema.Struct({
   status: Schema.String,
   orders: Schema.Array(Schema.Struct({
     id: Schema.String,
-    redemption_info: Schema.optional(Schema.Record(Schema.String, Schema.Unknown))
+    redemption_info: RedemptionInfo
   }))
 })
 const data = <A, I>(s: Schema.Codec<A, I>) => Schema.Struct({ data: s })
@@ -198,15 +200,25 @@ export type CardDelivery =
   | { readonly _tag: "Pending" }
 
 /**
- * Each card's order in an invoice: the first one not yet taken with the card's product and amount. An order that
- * names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is the order Bitrefill keeps.
+ * Each card's order in an invoice. A card delivered in an earlier round (`orderId`, saved by Purchases) takes the order
+ * it holds, wherever Bitrefill lists it now, and no other. The rest take the first order left with the card's product
+ * and amount; an order that names no product (Bitrefill's REST invoices) is taken by its place in the cart, which is
+ * the order Bitrefill keeps.
  */
-export const matchOrders = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined }>(
-  cards: ReadonlyArray<Card>,
+export const matchOrders = <
+  O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly order_id?: string; readonly id?: string }
+>(
+  cards: ReadonlyArray<Card & { readonly orderId?: string | undefined }>,
   orders: ReadonlyArray<O>
 ): Array<O | undefined> => {
   const taken = new Set<number>()
+  const held = cards.map((card) => {
+    const k = card.orderId === undefined ? -1 : orders.findIndex((o) => (o.order_id ?? o.id) === card.orderId)
+    if (k >= 0) taken.add(k)
+    return k
+  })
   return cards.map((card, i) => {
+    if (card.orderId !== undefined) return held[i]! >= 0 ? orders[held[i]!] : undefined
     let k = orders.findIndex((o, j) => !taken.has(j) && o.product?.id === card.id && (o.product.value === undefined || String(o.product.value) === card.value))
     if (k < 0 && !taken.has(i) && orders[i] && !orders[i].product) k = i
     if (k < 0) return undefined
@@ -272,11 +284,30 @@ const refusal = (e: unknown) =>
     Effect.flatMap((body) => Effect.fail(new Rejected({ reason: `HTTP ${httpStatus(e)} ${body.slice(0, 300)}`.trim() })))
   )
 
-// MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most
-// 20 of them, and browsing (catalog pages, quotes) at most 12, so junk lookups can never starve a
-// customer's purchase or its price check.
+// MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most 20 of them, and
+// browsing (catalog pages, quotes) at most 12, so browsing can never starve a customer's purchase or its price check.
+// Of browsing's 12, refreshing a price we could already show stops while 4 are left, kept for cards never priced yet.
+// A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: the first 3 such ids in a
+// minute get Bitrefill's answer (a 404 if it doesn't have them), and any more that minute answer busy, unasked. So a
+// card newer than our catalog copy still loads, and made-up ids can't use up anyone else's lookups.
 const LOOKUPS_PER_MINUTE = 20
 const BROWSE_LOOKUPS_PER_MINUTE = 12
+const FIRST_VIEW_LOOKUPS = 4
+const UNLISTED_LOOKUPS_PER_MINUTE = 3
+/**
+ * How old a price may be. A quote (what the customer confirms) and Buy take one at most a minute old. A card's page
+ * may show one up to 10 minutes old. When the minute's lookups are used up or Bitrefill doesn't answer, pages and
+ * quotes show the last one we had, up to an hour old, instead of failing. That's safe because no purchase is priced
+ * from those: Buy takes a price at most a minute old, or looks one up live on the whole budget, and the most the
+ * contract debits is the Maximum Price the customer confirmed (`max_debit`, ADR-0007).
+ */
+const FRESH_PRICE_MS = 60_000
+const PAGE_PRICE_MS = 10 * 60_000
+const LAST_PRICE_MS = 60 * 60_000
+/** What `voucher` fails with for a card Bitrefill doesn't sell: the card's page answers 404 for it. */
+export const NO_SUCH_VOUCHER = "No such voucher"
+/** Bitrefill's answer for a card it doesn't have: "Product 'x' was not found.", or a tool error coded so. */
+const NO_SUCH_PRODUCT = /was not found|NOT_FOUND/
 /** The least time between two delivery polls on the guest login, across all purchases: 20 a minute. */
 export const GUEST_POLL_GAP_MS = 3_000
 /** When the next guest delivery poll may go out, given when the last one was allowed to. */
@@ -412,10 +443,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   /** A card's logo and its brand colour, from our catalog copy: nothing if it isn't there (yet). */
   logo(id: string): { readonly image?: string; readonly background?: string }
   /**
-   * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
-   * the lookup may use the whole budget, not just browsing's share.
+   * Packages with their current USD price, the Reference Price (see FRESH_PRICE_MS for how current). `purchase`: a
+   * customer is buying, so the lookup may use the whole budget, not just browsing's share. `page`: only to show on the
+   * card's page, so a price up to 10 minutes old will do.
    */
-  voucher(id: string, options?: { readonly purchase?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
+  voucher(id: string, options?: { readonly purchase?: boolean; readonly page?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
   /**
    * Orders a card. With guest checkout it's an unpaid invoice to pay from the Base Wallet, placed as a guest
    * with the customer's Checkout Email or on their own Bitrefill account; otherwise it's paid at once from the
@@ -539,8 +571,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         ...(p.logo_background && HEX_COLOUR.test(p.logo_background) ? { background: p.logo_background } : {})
       })
 
-      const summary = (p: typeof Product.Type) =>
-        new VoucherSummary({
+      /** Cards a listing showed or Bitrefill priced since the server started: real, whether or not our catalog copy has them yet. */
+      const listed = new Set<string>()
+      const summary = (p: typeof Product.Type) => {
+        listed.add(p.id)
+        return new VoucherSummary({
           id: p.id,
           name: p.name,
           countryCode: p.country_code,
@@ -548,6 +583,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           currency: p.currency,
           ...images(p)
         })
+      }
       // On testnet only test products can be bought, so nothing else is offered (web or bot).
       const offered = (p: typeof Product.Type) => (testnet ? p.id.startsWith("test-") : sellable(p))
 
@@ -630,37 +666,80 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       const popular = (country?: string, category?: Category) => Effect.sync(() => pickPopular(brands, country, category).map(summary))
 
       // ponytail: fixed one-minute window in memory, one process.
-      let budget = { used: 0, resetAt: 0 }
-      const spendLookup = (limit: number) =>
-        Effect.suspend(() => {
-          const now = Date.now()
-          if (budget.resetAt < now) budget = { used: 0, resetAt: now + 60_000 }
-          if (budget.used >= limit) return Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
-          budget.used++
+      let budget = { used: 0, unlisted: 0, resetAt: 0 }
+      const spendLookup = (limit: number, unlisted: boolean) =>
+        Effect.flatMap(Clock.currentTimeMillis, (now) => {
+          if (budget.resetAt <= now) budget = { used: 0, unlisted: 0, resetAt: now + 60_000 }
+          if (unlisted ? budget.unlisted >= UNLISTED_LOOKUPS_PER_MINUTE : budget.used >= limit) {
+            return Effect.fail(new BitrefillUnavailable({ message: "Prices are busy right now; try again in a minute" }))
+          }
+          if (unlisted) budget.unlisted++
+          else budget.used++
           return Effect.void
         })
-      const lookup = (id: string, limit: number) =>
-        spendLookup(limit).pipe(
+      /** The last price Bitrefill gave for each card, and when: what a page shows when no newer one can be had. */
+      const lastKnown = new Map<string, { readonly product: typeof McpProduct.Type; readonly at: number }>()
+      const lookup = (id: string, limit: number, unlisted = false) =>
+        spendLookup(limit, unlisted).pipe(
           Effect.andThen(mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct)),
-          Effect.mapError((e) => (e._tag === "Rejected" ? unavailable(e.reason) : e))
+          Effect.mapError((e) => {
+            const why = e._tag === "Rejected" ? e.reason : e.message
+            // A refusal of the whole request (an HTTP status) says nothing about the card.
+            if (NO_SUCH_PRODUCT.test(why) && !why.startsWith("HTTP ")) return new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
+            return e._tag === "Rejected" ? unavailable(e.reason) : e
+          }),
+          Effect.tap((product) =>
+            Effect.map(Clock.currentTimeMillis, (at) => {
+              listed.add(id)
+              // Re-added at the end, so the card priced longest ago goes first once there are too many.
+              lastKnown.delete(id)
+              lastKnown.set(id, { product, at })
+              if (lastKnown.size > 1_000) lastKnown.delete(lastKnown.keys().next().value!)
+            })
+          )
         )
 
-      // Prices are cached for a minute; failures only briefly, so a busy minute doesn't stick.
-      const mcpPrices = yield* Cache.makeWith((id: string) => lookup(id, BROWSE_LOOKUPS_PER_MINUTE), {
-        capacity: 1_000,
-        timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds")
-      })
-      // A purchase takes a cached price if there is one, and otherwise looks it up on the whole budget:
-      // a browsing failure cached for this id never blocks it.
+      /**
+       * Whether a listing knows the card: our catalog copy has it, or a search or catalog page showed it. Before the
+       * first copy, every card counts. Only a card newer than the copy and unseen since the server started doesn't.
+       */
+      const isListed = (id: string) => logos.size === 0 || logos.has(id) || listed.has(id)
+      /** A card's last price while it's under an hour old: one a page or quote could still show. */
+      const recent = (id: string, now: number) => {
+        const last = lastKnown.get(id)
+        return last && now - last.at < LAST_PRICE_MS ? last : undefined
+      }
+      // Browsing's lookups, one at a time per card. A failure is kept 5 seconds, so a busy minute isn't asked again at once.
+      const browseLookups = yield* Cache.makeWith(
+        (id: string) =>
+          Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            lookup(id, recent(id, now) ? BROWSE_LOOKUPS_PER_MINUTE - FIRST_VIEW_LOOKUPS : BROWSE_LOOKUPS_PER_MINUTE, !isListed(id))),
+        { capacity: 1_000, timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds") }
+      )
+      // A page or quote takes a price at most `maxAge` old; past that, a new one if a lookup is free, else (or when
+      // Bitrefill doesn't answer) the last one we had while it's under an hour old.
+      // ponytail: when more than 8 cards in view need a new price in one minute, the rest show their last one, and only
+      // 4 cards never priced since the server started load that minute. More lookups (on mainnet the API key only
+      // prices; orders go through the guest login) would lift both.
+      const shownPrice = (id: string, maxAge: number) =>
+        Effect.flatMap(Clock.currentTimeMillis, (now) => {
+          const last = recent(id, now)
+          if (last && now - last.at < maxAge) return Effect.succeed(last.product)
+          return Cache.get(browseLookups, id).pipe(
+            Effect.catch((e) => (last && e.message !== NO_SUCH_VOUCHER ? Effect.succeed(last.product) : Effect.fail(e)))
+          )
+        })
+      // A purchase takes a price at most a minute old, and otherwise looks it up on the whole budget: a browsing
+      // failure kept for this card never blocks it. Pages and quotes show the price it found from then on.
       const purchasePrice = (id: string) =>
-        Effect.flatMap(Cache.getSuccess(mcpPrices, id), (cached) =>
-          Option.isSome(cached)
-            ? Effect.succeed(cached.value)
-            : Effect.tap(lookup(id, LOOKUPS_PER_MINUTE), (p) => Cache.set(mcpPrices, id, p)))
+        Effect.flatMap(Clock.currentTimeMillis, (now) => {
+          const last = lastKnown.get(id)
+          return last && now - last.at < FRESH_PRICE_MS ? Effect.succeed(last.product) : lookup(id, LOOKUPS_PER_MINUTE)
+        })
 
-      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string, options?: { readonly purchase?: boolean }) {
+      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string, options?: { readonly purchase?: boolean; readonly page?: boolean }) {
         // Refused before anything is spent, so junk ids can't use up the lookups.
-        if (!PRODUCT_ID.test(id)) return yield* new BitrefillUnavailable({ message: "No such voucher" })
+        if (!PRODUCT_ID.test(id)) return yield* new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
         if (testnet && !isTest(id)) {
           return yield* new BitrefillUnavailable({ message: "This is the testnet demo: only Bitrefill's test cards can be bought here." })
         }
@@ -678,8 +757,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             ))
           })
         }
-        const p = yield* (options?.purchase ? purchasePrice(id) : Cache.get(mcpPrices, id))
-        if (isTestMerchant(p)) return yield* new BitrefillUnavailable({ message: "No such voucher" })
+        const p = yield* (options?.purchase ? purchasePrice(id) : shownPrice(id, options?.page ? PAGE_PRICE_MS : FRESH_PRICE_MS))
+        if (isTestMerchant(p)) return yield* new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
         const all = p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
         return new Voucher({
           id: p.id,
@@ -796,7 +875,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
        * Where each card is, from the invoice's orders: delivered with its code, failed (the order or the whole invoice
        * ended without one), or still pending. Nothing settled at all is an unknown, tried again later.
        */
-      const cardsIn = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined }>(
+      const cardsIn = <O extends { readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | null | undefined }>(
         invoiceId: string,
         cards: ReadonlyArray<Card>,
         orders: ReadonlyArray<O>,
@@ -813,7 +892,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           ? Effect.fail(unavailable(`invoice ${invoiceId} is still ${status}`))
           : Effect.succeed(found)
       }
-      const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
+      const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | null | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
         invoiceFailed || matchOrders(cards, orders).every((o) => !!o && (!!o.redemption_info || GUEST_FAILED.test(o.status ?? "")))
 
       // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.

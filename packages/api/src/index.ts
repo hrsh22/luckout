@@ -90,9 +90,11 @@ export class Unauthorized extends Schema.TaggedError<Unauthorized>()(
 /**
  * The session token travels only in this cookie, set by the server as HttpOnly, so no script on the page can
  * read it. The API is on a subdomain of the Web App's own domain (api.luckout.wtf next to www.luckout.wtf),
- * which makes the cookie first-party.
+ * which makes the cookie first-party. `__Host-`: browsers take it only Secure, for path /, and for the API's own
+ * host, so no sibling site (a page on www., staging.) can set one for the API in its place. Chrome takes it over
+ * http://localhost too, as it does any Secure cookie.
  */
-export const sessionCookie = HttpApiSecurity.apiKey({ key: "luckout_session", in: "cookie" })
+export const sessionCookie = HttpApiSecurity.apiKey({ key: "__Host-luckout_session", in: "cookie" })
 
 export class Authorization extends HttpApiMiddleware.Service<Authorization, { provides: CurrentAccount; requires: never }>()(
   "luckout/Authorization",
@@ -225,6 +227,8 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   image: Schema.optional(Schema.String),
   background: Schema.optional(Schema.String),
   value: Schema.String,
+  /** The currency `value` is in (the card's own, e.g. INR); missing on purchases made before it was kept. */
+  currency: Schema.optional(Schema.String),
   status: PurchaseStatus,
   /** Why it was rejected or failed, in plain words. */
   error: Schema.optional(Schema.String),
@@ -347,10 +351,11 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
     },
     success: PopularCards
   }),
+  /** NotFound for a card Bitrefill doesn't sell; BitrefillUnavailable when its price can't be had right now. */
   HttpApiEndpoint.get("voucher", "/catalog/:id", {
     params: { id: Schema.String },
     success: Voucher,
-    error: BitrefillUnavailable
+    error: [BitrefillUnavailable, NotFound]
   }),
   /** The contract's quote for one package; `game` omitted means Normal. */
   HttpApiEndpoint.get("quote", "/quote", {
@@ -893,6 +898,8 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
 export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")({
   id: Schema.String,
+  /** The checkout it was bought in. A Cart's cards share one invoice and one Base payment: `payAmount` is the checkout's. */
+  checkoutId: Schema.String,
   accountId: Schema.String,
   voucherName: Schema.String,
   value: Schema.String,

@@ -4,6 +4,7 @@ import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { encodeDelegateAction, KeyType, PublicKey, SCHEMA } from "near-api-js"
 import { createHash } from "node:crypto"
+import { Alerts } from "./Alerts.ts"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
 import { isBrokeTx, Near, type NearUnavailable, Network, type SignedDelegate } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
@@ -128,6 +129,7 @@ export class Relay extends Context.Service<Relay, {
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
       const near = yield* Near
+      const alerts = yield* Alerts
       const testnet = (yield* Network) === "testnet"
       const usdcId = near.usdcId
 
@@ -142,16 +144,36 @@ export class Relay extends Context.Service<Relay, {
           SELECT count(*) FILTER (WHERE account_id = ${accountId})::int AS mine, count(*)::int AS everyone
           FROM relays WHERE counted AND created_at > now() - interval '1 day'`.pipe(Effect.map((r) => r[0] ?? { mine: 0, everyone: 0 }))
 
-      /** Whether the relayer is on and this account (and everyone) has free relays left today. */
+      // When an admin last heard that everyone's free relays were used up.
+      // ponytail: in memory, one process (ADR-0006); a restart may tell them once more that day.
+      let toldAllUsedAt = 0
+      /**
+       * Whether the relayer is on and this account (and everyone) has free relays left today. Everyone's running out
+       * stops EVM and Solana customers, who have no NEAR to pay with, so an admin hears it, once a day.
+       */
       const quotaLeft = (accountId: string) =>
-        Effect.all([settings, usedToday(accountId)]).pipe(
-          Effect.map(([s, u]) => s.enabled && u.mine < s.perAccountDaily && u.everyone < s.allDaily)
-        )
+        Effect.gen(function*() {
+          const [s, u] = yield* Effect.all([settings, usedToday(accountId)])
+          if (s.enabled && u.everyone >= s.allDaily && Date.now() - toldAllUsedAt > 24 * 60 * 60 * 1000) {
+            toldAllUsedAt = Date.now()
+            // On its own fiber: Telegram may take seconds, and a relay may be waiting on the one-at-a-time lock.
+            yield* Effect.forkDetach(alerts.admin(
+              `All ${s.allDaily} free relays for the last 24 hours are used. Until some are a day old, EVM and Solana customers can't withdraw, reclaim, change settings or send money out (NEAR wallets pay their own fee; Top-Up move-ins still go). If this is real use, raise "in all per day" in the admin panel; if not, see who used them in the relays table.`
+            ))
+          }
+          return s.enabled && u.mine < s.perAccountDaily && u.everyone < s.allDaily
+        })
 
       const available = (accountId: string) =>
         near.relayerId ? quotaLeft(accountId).pipe(Effect.orElseSucceed(() => false)) : Effect.succeed(false)
 
       const failed = (message: string) => new RelayFailed({ message })
+      /**
+       * NEAR not answering a read made before sending: nothing was sent, so trying again is safe. Said with "didn't
+       * answer", which TopUp keeps a Top-Up's move-in waiting on, to send it next pass.
+       */
+      const unsent = <A, E, R>(e: Effect.Effect<A, E | NearUnavailable, R>) =>
+        e.pipe(Effect.catchTag("NearUnavailable", () => Effect.fail(failed("NEAR didn't answer, so nothing was sent. Try again in a minute."))))
       /** NEAR's trouble, for the customer. A refusal for our fee ran nothing: NEAR wallets then pay it themselves. */
       const nearTrouble = (e: NearUnavailable) =>
         Effect.fail(
@@ -169,6 +191,29 @@ export class Relay extends Context.Service<Relay, {
               FROM intents_swaps WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction <> 'in'`.pipe(
               Effect.map((r) => r[0])
             )
+      /**
+       * Why a call on our contract would fail there for want of what it acts on, checked for free: the caller's
+       * Luckout account (with the Balance a withdrawal takes), or a purchase of theirs. Every one of these calls needs
+       * an account, so a new customer's first relays (enabling USDC, the first deposit or move-in, which go to other
+       * contracts) never come here. A refused call is never sent, so it uses up no free relay: an account with no
+       * money in Luckout can't spend everyone's.
+       */
+      const cantRun = (accountId: string, method: string, args: Record<string, unknown>) =>
+        Effect.gen(function*() {
+          if (method === "reclaim" || method === "retry_draw") {
+            const id = args.purchase_id
+            const p = typeof id === "number" && Number.isSafeInteger(id) && id >= 0
+              ? yield* near.view<{ customer: string } | null>("get_purchase", { purchase_id: id })
+              : null
+            return p?.customer === accountId ? undefined : "That isn't a purchase of yours."
+          }
+          const a = yield* near.view<{ balance: string } | null>("get_account", { account_id: accountId })
+          if (!a) return "There's no Luckout balance on this account yet. Deposit first."
+          if (method !== "withdraw") return undefined
+          const amount = typeof args.amount === "string" && /^[0-9]{1,39}$/.test(args.amount) ? BigInt(args.amount) : 0n
+          return amount === 0n || BigInt(a.balance) < amount ? "Your Luckout balance is lower than that." : undefined
+        })
+
       /**
        * The outcome of a relay we already sent for this hash, if it has one. A relayer transaction that expired
        * before NEAR took it never ran and never can, so it's forgotten and the caller sends afresh: what the
@@ -216,27 +261,34 @@ export class Relay extends Context.Service<Relay, {
               return yield* new RelayUnavailable({ message: "Luckout isn't paying this network fee right now, so your wallet pays it." })
             }
             // Everything the network would refuse, refused here for free.
-            const key = publicKeyOf(d)
-            if (!key) return yield* failed("That wallet key type isn't supported.")
-            const [access, height] = yield* Effect.all([near.accessKey(d.senderId, key.toString()), near.height], { concurrency: 2 })
-            if (!access) return yield* failed("That key isn't on your NEAR account. Sign in again with your wallet.")
-            // Full-access keys only, by design: deposits, withdrawals, settings and send-backs carry
-            // 1 yoctoNEAR (or USDC's storage fee), which NEAR never lets a function-call key attach.
-            // So a leaked function-call key can't move a customer's funds. Reclaims and reruns follow suit.
-            if (!access.fullAccess) return yield* failed("Approve it with your wallet's full-access key.")
-            if (BigInt(d.nonce) <= access.nonce) return yield* failed("That approval was already used. Try again.")
-            if (BigInt(d.maxBlockHeight) < height) return yield* failed("That approval expired. Try again.")
-            if (!signatureValid(sd, key)) return yield* failed("The signature doesn't match your account.")
-            // A second registration would refund its deposit to the customer: a free drip from us.
-            if (d.actions[0]!.functionCall!.methodName === "storage_deposit") {
-              const registered = yield* near.view<unknown>("storage_balance_of", { account_id: accountId }, usdcId)
-              if (registered !== null) return yield* failed("USDC is already enabled on your account.")
-            }
-            // A send-back that would fail for want of the token, refused before we pay for it.
-            if (sendBack) {
-              const has = yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: sendBack.token }, near.intentsId)
-              if (BigInt(has) < BigInt(sendBack.amount)) return yield* failed("That's no longer in your NEAR Intents account.")
-            }
+            yield* unsent(Effect.gen(function*() {
+              const key = publicKeyOf(d)
+              if (!key) return yield* failed("That wallet key type isn't supported.")
+              const [access, height] = yield* Effect.all([near.accessKey(d.senderId, key.toString()), near.height], { concurrency: 2 })
+              if (!access) return yield* failed("That key isn't on your NEAR account. Sign in again with your wallet.")
+              // Full-access keys only, by design: deposits, withdrawals, settings and send-backs carry
+              // 1 yoctoNEAR (or USDC's storage fee), which NEAR never lets a function-call key attach.
+              // So a leaked function-call key can't move a customer's funds. Reclaims and reruns follow suit.
+              if (!access.fullAccess) return yield* failed("Approve it with your wallet's full-access key.")
+              if (BigInt(d.nonce) <= access.nonce) return yield* failed("That approval was already used. Try again.")
+              if (BigInt(d.maxBlockHeight) < height) return yield* failed("That approval expired. Try again.")
+              if (!signatureValid(sd, key)) return yield* failed("The signature doesn't match your account.")
+              if (d.receiverId === near.contractId) {
+                const call = onlyCall(d)!
+                const why = yield* cantRun(accountId, call.call.methodName, call.args!)
+                if (why) return yield* failed(why)
+              }
+              // A second registration would refund its deposit to the customer: a free drip from us.
+              if (d.actions[0]!.functionCall!.methodName === "storage_deposit") {
+                const registered = yield* near.view<unknown>("storage_balance_of", { account_id: accountId }, usdcId)
+                if (registered !== null) return yield* failed("USDC is already enabled on your account.")
+              }
+              // A send-back that would fail for want of the token, refused before we pay for it.
+              if (sendBack) {
+                const has = yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: sendBack.token }, near.intentsId)
+                if (BigInt(has) < BigInt(sendBack.amount)) return yield* failed("That's no longer in your NEAR Intents account.")
+              }
+            }))
             return yield* near.relay(sd, (signed) =>
               sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES (${hash}, ${accountId}, ${JSON.stringify(signed)}::jsonb)
                   ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))
@@ -251,8 +303,11 @@ export class Relay extends Context.Service<Relay, {
           })
         )
 
-      /** Why this intent would fail for want of money: the token in the signer's Intents account, or their Luckout Balance. */
-      const fundsShort = (accountId: string, intent: Record<string, unknown>) =>
+      /**
+       * Why this intent would fail: for want of the token in the signer's Intents account, or, for one of our
+       * contract's calls, what `cantRun` checks.
+       */
+      const wouldFail = (accountId: string, intent: Record<string, unknown>) =>
         Effect.gen(function*() {
           const [token, need] = intent.intent === "ft_withdraw"
             ? [`nep141:${usdcId}`, BigInt(String(intent.amount))]
@@ -263,12 +318,9 @@ export class Relay extends Context.Service<Relay, {
             const has = BigInt(yield* near.view<string>("mt_balance_of", { account_id: accountId, token_id: token }, near.intentsId))
             return has < need ? "That isn't in your NEAR Intents account yet." : undefined
           }
-          const action = intent.intent === "auth_call" ? JSON.parse(String(intent.msg)) : undefined
-          if (action?.withdraw) {
-            const a = yield* near.view<{ balance: string } | null>("get_account", { account_id: accountId })
-            return BigInt(a?.balance ?? "0") < BigInt(action.withdraw.amount) ? "Your Luckout balance is lower than that." : undefined
-          }
-          return undefined
+          // payloadRefusal let through only one of our calls, as one key: {"withdraw": {"amount": "…"}}.
+          const [method, args] = intent.intent === "auth_call" ? Object.entries(JSON.parse(String(intent.msg)) as Record<string, Record<string, unknown>>)[0] ?? [] : []
+          return method ? yield* cantRun(accountId, method, args ?? {}) : undefined
         })
 
       const sendIntent = (accountId: string, signed: SignedIntent, o: { counted?: boolean } = {}) =>
@@ -289,13 +341,16 @@ export class Relay extends Context.Service<Relay, {
             if (before) return before
             const counted = o.counted !== false
             if (counted ? !(yield* quotaLeft(accountId)) : !(yield* settings).enabled) {
-              return yield* new RelayUnavailable({ message: "You've used today's free actions. Try again tomorrow." })
+              // Yours, or everyone's: the same for the customer.
+              return yield* new RelayUnavailable({ message: "Today's free actions are used up. Try again later." })
             }
-            const used = yield* near.view<boolean>("is_nonce_used", { account_id: accountId, nonce: p!.nonce }, near.intentsId)
-            if (used) return yield* failed("That approval was already used. Try again.")
-            // Money the intent would move must be there, checked for free, so nobody makes us pay for a refusal.
-            const why = yield* fundsShort(accountId, first!)
-            if (why) return yield* failed(why)
+            yield* unsent(Effect.gen(function*() {
+              const used = yield* near.view<boolean>("is_nonce_used", { account_id: accountId, nonce: p!.nonce }, near.intentsId)
+              if (used) return yield* failed("That approval was already used. Try again.")
+              // What the intent moves or acts on must be there, checked for free, so nobody makes us pay for a refusal.
+              const why = yield* wouldFail(accountId, first!)
+              if (why) return yield* failed(why)
+            }))
             return yield* near.relayerCall(near.intentsId, "execute_intents", { signed: [signed] }, (tx) =>
               sql`INSERT INTO relays (delegate_hash, account_id, signed_tx, counted) VALUES (${hash}, ${accountId}, ${JSON.stringify(tx)}::jsonb, ${counted})
                   ON CONFLICT DO NOTHING`.pipe(Effect.asVoid, Effect.orDie))

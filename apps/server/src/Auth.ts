@@ -136,7 +136,8 @@ export class Auth extends Context.Service<Auth, {
           yield* sql`INSERT INTO known_accounts (account_id) VALUES (${accountId}) ON CONFLICT DO NOTHING`.pipe(Effect.orDie)
           const issuedAt = Date.now()
           const expiresAt = issuedAt + SESSION_TTL_MS
-          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, i: issuedAt, w: wallet })).toString("base64url")
+          // `c`: staging and production share mainnet, so the contract, not the network, says which deployment it's for.
+          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, c: near.contractId, i: issuedAt, w: wallet })).toString("base64url")
           return { accountId, wallet, token: `${payload}.${mac(payload)}`, expiresAt } satisfies SignedIn
         })
 
@@ -147,10 +148,13 @@ export class Auth extends Context.Service<Auth, {
           const given = Buffer.from(tag)
           if (given.length !== expected.length || !timingSafeEqual(given, expected)) return yield* denied("Invalid session")
           const session = yield* Effect.try({
-            try: () => JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number; n: string; i: number; w?: unknown },
+            try: () => JSON.parse(Buffer.from(payload, "base64url").toString()) as { a: string; e: number; n: string; c?: unknown; i: number; w?: unknown },
             catch: () => denied("Invalid session")
           })
-          if (typeof session.a !== "string" || typeof session.e !== "number" || typeof session.i !== "number" || session.n !== network) {
+          if (
+            typeof session.a !== "string" || typeof session.e !== "number" || typeof session.i !== "number" || session.n !== network ||
+            session.c !== near.contractId
+          ) {
             return yield* denied("Invalid session")
           }
           if (Date.now() > session.e) return yield* denied("Session expired; sign in again")

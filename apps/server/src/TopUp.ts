@@ -15,7 +15,8 @@ import {
   type Wallet,
   walletOf
 } from "@luckout/api"
-import { Config, Context, Effect, Layer, Schedule } from "effect"
+import { Config, Context, Effect, Layer, Schedule, Schema } from "effect"
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { formatUnits } from "viem"
 import { SqlClient } from "effect/sql"
 import { parsePayload, payloadRefusal, signedBy } from "./Intents.ts"
@@ -23,7 +24,7 @@ import { Alerts } from "./Alerts.ts"
 import { Near, Network } from "./Near.ts"
 import { echoProblem, OneClick, type QuoteRequest, type SwapDetails } from "./OneClick.ts"
 import { Relay } from "./Relay.ts"
-import { SOL_USDC_ASSET, Swap, swapAssetId, type SwapTransaction, swapTokenByMint, swapTokenOf } from "./Swap.ts"
+import { isWallet, SOL_USDC_ASSET, Swap, swapAssetId, type SwapTransaction, swapTokenByMint, swapTokenOf } from "./Swap.ts"
 
 // Top-ups (ADR-0001): a NEAR Intents 1Click swap from any supported chain that lands native
 // USDC in the customer's own NEAR account; one deposit then moves it into their Balance.
@@ -57,6 +58,21 @@ const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.
 const evmChange = (wallet: Wallet, assetId: string) => wallet === "evm" && assetId === SOL_USDC_ASSET
 /** A swap's transaction can land up to about 90 seconds after it's built: none is built closer than this to the deadline. */
 const SWAP_DEADLINE_MARGIN_MS = 2 * 60_000
+/**
+ * A swap's blockhash lasts 150 blocks, about a minute. A wallet that scanned the code and asks again within its first
+ * 30 seconds (Solana Pay wallets often do) gets the same transaction, which still leaves it half a minute to be
+ * approved and land; after that, a fresh one. The signed-in app asks only to send, so it always gets a fresh one: a
+ * customer sending again after a failed swap needs a new route.
+ */
+const SWAP_REUSE_MS = 30_000
+/**
+ * The most transactions built for one quote. Paying takes one; a wallet asking again within SWAP_REUSE_MS costs
+ * nothing, and neither does a refusal before Jupiter is asked (a wallet without the token, scanned by mistake); a send
+ * that failed when the price moved, a slow approval, or a busy Jupiter each take one more. Eight leaves room for all of
+ * those, and past it a new quote is one tap. It bounds what one quote can spend of Jupiter's per-key limit (each build
+ * is up to two routes of three calls) on a request anyone holding its Solana Pay link can make.
+ */
+const SWAP_BUILDS = 8
 /** The chains a wallet signing through NEAR Intents has its own address on. */
 const HOME_CHAINS: Record<Wallet, ReadonlySet<string>> = { near: new Set(), evm: EVM_CHAINS, solana: new Set(["sol"]) }
 /** That wallet's address on its own chains: an EVM account is its address; a Solana account is its key in hex. */
@@ -71,12 +87,27 @@ const SEEN_PER_PASS = 30
 const MOST_OPEN = 10
 /** Paid Top-Ups 1Click hasn't seen that an admin hears about one by one, per two hours; past that, one line covers the rest. */
 const UNSEEN_ALERTS = 5
-/** The relayer's message when NEAR didn't answer: the intent may still have run, so it's resumed, not failed. */
-const UNANSWERED = /didn't answer in time/
+/**
+ * The relayer's message when NEAR didn't answer: before anything was sent (it's sent next pass), or after (it may still
+ * have run, so the saved transaction is resumed). Either way the move-in waits, never fails.
+ */
+const UNANSWERED = /didn't answer/
 /** 1Click is done with these: the money arrived or went back. */
 const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
 /** A quote nobody paid into is still checked this long past its deadline, in case the transfer was late. */
 const LATE_DEPOSIT_GRACE_MS = 2 * 60 * 60 * 1000
+/**
+ * The same for a swap-paid one. Its payment is a transaction we build, none closer than SWAP_DEADLINE_MARGIN_MS to the
+ * deadline, but a Solana Pay wallet may give it a fresh blockhash (the spec lets it, for a transaction it signs alone),
+ * so one approved late can still land well after the deadline. An hour covers a customer who scanned the code and
+ * came back to it.
+ */
+const SWAP_LATE_GRACE_MS = 60 * 60_000
+/**
+ * How long past its deadline an unpaid swap-paid quote holds a place in the account's cap: shorter than it's watched,
+ * since its price may have moved past use in minutes, and the customer needs a new quote, not a place held for an hour.
+ */
+const SWAP_CAP_GRACE_MS = 10 * 60_000
 /** A paid Top-Up 1Click hasn't seen this long past its deadline is chased: the customer and an admin are told. */
 const UNSEEN_MS = 5 * 60_000
 /** A landed Top-Up whose move-in has waited this long is late (it normally runs within one 15-second pass): both are told. */
@@ -364,6 +395,9 @@ export class TopUp extends Context.Service<TopUp, {
        * checks a hash it was told about (deposit/submit) on chain first. Anyone can name one for their own quote.
        */
       const unseen = sql`coalesce(status, 'PENDING_DEPOSIT') IN ('PENDING_DEPOSIT', 'KNOWN_DEPOSIT_TX')`
+      /** How long past its deadline a quote nobody paid into is still followed (`swap` for a swap-paid one). */
+      const grace = (swap: number) =>
+        sql`CASE WHEN paid_mint IS NULL THEN ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval ELSE ${`${swap / 1000} seconds`}::interval END`
 
       // ponytail: in memory, one process (ADR-0006). One real quote at a time per account, so parallel requests
       // can't all pass the cap below before one of them is saved.
@@ -378,12 +412,12 @@ export class TopUp extends Context.Service<TopUp, {
           if (quoting.has(accountId)) return Effect.fail(fail("One quote at a time. Try again in a moment."))
           quoting.add(accountId)
           return Effect.gen(function*() {
-            // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass).
+            // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass), less the
+            // swap-paid ones some minutes past their deadline (SWAP_CAP_GRACE_MS).
             const [{ open = 0 } = {}] = yield* sql<{ open: number }>`
               SELECT count(*)::int AS open FROM intents_swaps
               WHERE account_id = ${accountId} AND ${unseen} AND created_at > now() - interval '3 days'
-                AND NOT (deposit_tx IS NULL
-                         AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)`.pipe(Effect.orDie)
+                AND NOT (deposit_tx IS NULL AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${grace(SWAP_CAP_GRACE_MS)})`.pipe(Effect.orDie)
             if (open >= MOST_OPEN) return yield* fail("You have several quotes open already. Use one of them, or try again in a couple of hours.")
             return yield* make
             // Only the request that took the guard gives it back.
@@ -442,15 +476,24 @@ export class TopUp extends Context.Service<TopUp, {
       })
 
       /**
-       * The swap transactions handed out, by deposit address. A wallet asking again within seconds (a Solana Pay wallet
-       * often does) gets the same one; another wallet gets none while one may still land, so a quote is paid once even
-       * if 1Click were to close its USDC account between two payments. ponytail: in memory, one process (ADR-0006).
+       * The swap transactions handed out, by deposit address. A wallet that scanned the code asking again gets the same
+       * one while it still has time to land (SWAP_REUSE_MS); another wallet gets none while one may still land, so a
+       * quote is paid once even if 1Click were to close its USDC account between two payments.
+       * ponytail: in memory, one process (ADR-0006); a restart forgets them, and each quote's builds below.
        */
       const handedOut = new Map<string, { payer: string; tx: SwapTransaction; at: number }>()
-      /** A swap-paid Top-Up's transaction for `payer`, while its quote is unpaid and open. */
-      const swapTransaction = (r: SwapRow | undefined, payer: string) =>
+      /** Each quote's builds so far (each asks Jupiter, whose limit is per key, and simulates), kept until its deadline. */
+      const builds = new Map<string, { count: number; until: number }>()
+      const building = new Set<string>()
+      /**
+       * A swap-paid Top-Up's transaction for `payer`, while its quote is unpaid and open. `scanned`: asked for by a
+       * wallet that scanned its Solana Pay code, which anyone holding the link can be: it may be handed the same
+       * transaction again, and a busy Jupiter isn't asked again for it (Swap.transaction's `retryBusy`).
+       */
+      const swapTransaction = (r: SwapRow | undefined, payer: string, scanned: boolean) =>
         Effect.gen(function*() {
           if (!r || r.direction !== "in" || !r.paid_mint || !r.paid_raw || !r.amount_in_raw) return yield* fail("No Top-Up is paid that way")
+          if (!isWallet(payer)) return yield* fail("That isn't a Solana wallet address.")
           if (r.deposit_tx || (r.status !== null && r.status !== "PENDING_DEPOSIT")) return yield* fail("This Top-Up is already paid.")
           if (!(Date.now() < (ms(r.deadline) ?? 0) - SWAP_DEADLINE_MARGIN_MS)) {
             return yield* fail("This price has expired, or is about to. Nothing was sent: top up again for a new one.")
@@ -459,13 +502,24 @@ export class TopUp extends Context.Service<TopUp, {
           if (!token) return yield* fail("That token isn't taken for top-ups any more. Nothing was sent.")
           const now = Date.now()
           for (const [address, h] of handedOut) if (now - h.at > 120_000) handedOut.delete(address)
+          for (const [address, b] of builds) if (now > b.until) builds.delete(address)
           const last = handedOut.get(r.deposit_address)
           if (last && last.payer !== payer && now - last.at < 90_000) {
             return yield* fail("Another wallet is paying this Top-Up right now. If that doesn't go through, try again in a minute.")
           }
-          if (last && last.payer === payer && now - last.at < 15_000) return last.tx
-          const tx = yield* swaps.transaction({ token, payer, depositAddress: r.deposit_address, need: BigInt(r.amount_in_raw), spend: BigInt(r.paid_raw) }).pipe(
-            Effect.mapError(unavailable)
+          if (scanned && last && last.payer === payer && now - last.at < SWAP_REUSE_MS) return last.tx
+          // Checked and taken with nothing in between, so two requests at once can't both build.
+          if (building.has(r.deposit_address)) return yield* fail("This Top-Up's transaction is on its way. Try again in a few seconds.")
+          const built = builds.get(r.deposit_address)?.count ?? 0
+          if (built >= SWAP_BUILDS) return yield* fail("This price was fetched too many times. Nothing was sent: top up again for a new one.")
+          builds.set(r.deposit_address, { count: built + 1, until: ms(r.deadline) ?? now })
+          building.add(r.deposit_address)
+          const order = { token, payer, depositAddress: r.deposit_address, need: BigInt(r.amount_in_raw), spend: BigInt(r.paid_raw), retryBusy: !scanned }
+          const tx = yield* swaps.transaction(order).pipe(
+            // Refused before Jupiter was asked: it cost nothing, so the build is given back.
+            Effect.tapError((e) => Effect.sync(() => e.early && builds.set(r.deposit_address, { count: built, until: ms(r.deadline) ?? now }))),
+            Effect.mapError(unavailable),
+            Effect.ensuring(Effect.sync(() => building.delete(r.deposit_address)))
           )
           handedOut.set(r.deposit_address, { payer, tx, at: Date.now() })
           return tx
@@ -476,14 +530,14 @@ export class TopUp extends Context.Service<TopUp, {
       const swapTx = Effect.fn("TopUp.swapTx")(function*(accountId: string, depositAddress: string, wallet: Wallet = walletOf(accountId)) {
         if (wallet !== "solana") return yield* fail("Pay from a Solana wallet: scan the code with Phantom, Solflare or Backpack.")
         const r = yield* swapRow(depositAddress)
-        const tx = yield* swapTransaction(r?.account_id === accountId ? r : undefined, solanaAddress(accountId))
+        const tx = yield* swapTransaction(r?.account_id === accountId ? r : undefined, solanaAddress(accountId), false)
         return new SwapTx(tx)
       })
 
       // Anyone holding the link may ask: it only ever builds a transaction that pays this Top-Up from their own wallet.
       const solanaPay = Effect.fn("TopUp.solanaPay")(function*(depositAddress: string, payer: string) {
         const r = yield* swapRow(depositAddress)
-        const tx = yield* swapTransaction(r, payer)
+        const tx = yield* swapTransaction(r, payer, true)
         return { transaction: tx.transaction, message: `Luckout: a ${usd(Number(r!.usdc))} Top-Up for ${r!.paid_amount} ${r!.paid_symbol}` }
       })
 
@@ -642,14 +696,15 @@ export class TopUp extends Context.Service<TopUp, {
           }
         })
 
-      // Swaps still in motion. A quote nobody paid into stops being checked two hours past its deadline.
+      // Swaps still in motion. A quote nobody paid into stops being checked two hours past its deadline (a swap-paid
+      // one, an hour).
       const tracked = sql`(move = 'waiting'
              -- A notice Telegram didn't take is tried again, for a day.
              OR (retell AND coalesce(status_at, created_at) > now() - interval '1 day')
              OR (created_at > now() - interval '3 days'
                  AND coalesce(status, '') NOT IN ('SUCCESS', 'REFUNDED', 'FAILED')
                  AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
-                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval)))`
+                          AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${grace(SWAP_LATE_GRACE_MS)})))`
       // Least recently checked first, in two queues: swaps 1Click has seen money in are never held up by quotes
       // nobody paid into, however many of those there are, and those always get the rest of the pass (at least
       // PER_PASS - SEEN_PER_PASS), so a new payment is still noticed when many swaps are in flight.
@@ -805,3 +860,25 @@ export class TopUp extends Context.Service<TopUp, {
     })
   )
 }
+
+/**
+ * Solana Pay transaction requests (ADR-0014): a wallet that scans a swap-paid Top-Up's code asks here for the
+ * transaction that pays it. No session: whoever asks only ever gets a transaction paying that Top-Up from their own
+ * wallet. A wallet app sends no Origin, so the edge's same-site check lets it through.
+ */
+export const SolanaPayRoute = Layer.unwrap(Effect.gen(function*() {
+  const topup = yield* TopUp
+  const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
+  const refused = (message: string) => HttpServerResponse.jsonUnsafe({ message }, { status: 400 })
+  return Layer.mergeAll(
+    HttpRouter.add("GET", "/solana-pay/:depositAddress", HttpServerResponse.jsonUnsafe({ label: "Luckout", icon: `${web}/logo.png` })),
+    HttpRouter.add("POST", "/solana-pay/:depositAddress", Effect.gen(function*() {
+      const { depositAddress = "" } = yield* HttpRouter.params
+      const { account } = yield* HttpServerRequest.schemaBodyJson(Schema.Struct({ account: Schema.String }))
+      return HttpServerResponse.jsonUnsafe(yield* topup.solanaPay(depositAddress, account))
+    }).pipe(
+      Effect.catchTag("TopUpUnavailable", (e) => Effect.succeed(refused(e.message))),
+      Effect.catch(() => Effect.succeed(refused("Send the wallet's account as JSON: {\"account\": \"…\"}.")))
+    ))
+  )
+}))

@@ -5,7 +5,10 @@ import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { NO_LIMIT } from "@luckout/api"
-import { blocker, makeAgent, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
+import { blocker, makeAgent, type Offer, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
+
+/** The cards behind a turn's Buy button, if it has one. */
+const cards = (turn: { offer?: Offer | undefined }) => (turn.offer && "cards" in turn.offer ? turn.offer.cards : undefined)
 
 // A fake OpenAI-compatible endpoint that plays back scripted model turns and records what it was sent.
 const fakeModel = async (turns: Array<object>) => {
@@ -79,10 +82,12 @@ test("prepare_purchase returns a confirmation and buys nothing", async () => {
   const turn = await agent("alice.testnet", [], "buy me a 10 dollar test card on jackpot")
   model.close()
   assert.equal(bought, 0, "the model can't buy; only the customer's tap can")
-  assert.deepEqual(turn.pending, [{
-    voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000, country: "KN",
-    useBy: "2027-03-30T00:00:00.000Z"
-  }])
+  assert.deepEqual(turn.offer, {
+    cards: [{
+      voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", currency: "USD", mode: { lucky: 2 }, requestedMode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000,
+      luckyAmount: 10_000_000, country: "KN", useBy: "2027-03-30T00:00:00.000Z"
+    }]
+  })
   assert.equal(turn.reply, "Tap Buy to confirm.")
 })
 
@@ -95,7 +100,7 @@ test("every completion's exact bytes are checked, and an unverified turn shows n
   const turn = await agent("alice.testnet", [], "buy me a 10 dollar test card on jackpot")
   model.close()
   assert.deepEqual(checked, model.wire, "the signature check sees exactly what went over the wire")
-  assert.equal(turn.pending, undefined, "no Buy button")
+  assert.equal(turn.offer, undefined, "no Buy button")
   assert.match(turn.reply, /couldn't prove/)
   assert.deepEqual(turn.history, [], "the unverified turn isn't kept")
 })
@@ -138,7 +143,7 @@ test("no Confirm button for a purchase the customer can't pay for", async () => 
   const agent = makeAgent({ ...(deps as object), near: { view: () => Effect.succeed(broke) }, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
   const turn = await agent("alice.testnet", [], "buy it")
   model.close()
-  assert.equal(turn.pending, undefined)
+  assert.equal(turn.offer, undefined)
   const toolResult = JSON.stringify(model.seen[1]!.messages.at(-1))
   assert.match(toolResult, /\$14\.50 short/)
   assert.match(toolResult, /luckout\.test\/wallet/)
@@ -173,11 +178,11 @@ test("on mainnet, no Buy button until they've given an email for their cards; th
   const first = await agent("alice.near", [], "buy me a 10 dollar card on jackpot")
   const second = await agent("alice.near", first.history, "me@example.com")
   model.close()
-  assert.equal(first.pending, undefined, "no button without an email")
+  assert.equal(first.offer, undefined, "no button without an email")
   assert.match(String(model.seen[1]!.messages.at(-1)!.content), /haven't given an email/)
   assert.equal(email, "me@example.com")
-  assert.equal(second.pending?.[0]?.voucherId, "test-gift-card-code")
-  assert.equal(second.pending?.[0]?.receiptTo, "me@example.com", "the Buy line will say where the card is emailed")
+  assert.equal(cards(second)?.[0]?.voucherId, "test-gift-card-code")
+  assert.equal(cards(second)?.[0]?.receiptTo, "me@example.com", "the Buy line will say where the card is emailed")
   assert.equal(bought, 0)
 })
 
@@ -232,9 +237,85 @@ test("several cards go under one button, priced as a cart and checked against th
   const cart = await agent("alice.testnet", [], "a 10 dollar test card on jackpot and one on normal")
   const big = await agent("alice.testnet", cart.history, "make it eight on jackpot")
   model.close()
-  assert.deepEqual(cart.pending?.map((c) => [c.mode, c.maxPrice]), [[{ lucky: 2 }, 15_000_000], ["normal", 10_000_000]])
+  assert.deepEqual(cards(cart)?.map((c) => [c.mode, c.maxPrice]), [[{ lucky: 2 }, 15_000_000], ["normal", 10_000_000]])
   // $120 in all against a $100 balance, though each card alone fits: no button.
-  assert.equal(big.pending, undefined)
+  assert.equal(big.offer, undefined)
   assert.match(String(model.seen[3]!.messages.at(-1)!.content), /\$100\.00 and this needs \$120\.00/)
   assert.equal(bought, 0)
+})
+
+test("a Lucky card the Cashback Reserve can't cover is offered at Normal, and the offer keeps the mode they asked for", async () => {
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "classic" }] }), { role: "assistant", content: "Tap Buy." }])
+  const purchases = {
+    ...(deps as unknown as { purchases: object }).purchases,
+    quoteCart: () => Effect.succeed([new Quote({ mode: "normal", referencePrice: 10_000_000, luckyAmount: 0, maxPrice: 10_000_000 })])
+  }
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.testnet", [], "a 10 dollar test card on classic")
+  model.close()
+  assert.deepEqual(cards(turn)?.map((c) => [c.mode, c.requestedMode]), [["normal", { lucky: 1 }]], "bought at Normal; the Buy line can say Classic wasn't possible")
+})
+
+/** Mainnet with a Checkout Email that has used `used` of Bitrefill's guest limits, selling a real (non-test) card. */
+const guestDeps = (used: { orders: number; day: number; month: number }) => ({
+  ...(deps as object),
+  bitrefill: { voucher: () => Effect.succeed(new Voucher({ id: "amazon-us", name: "Amazon", countryCode: "US", currency: "USD", packages: [{ value: "10", priceMicroUsdc: 10_000_000 }] })) },
+  purchases: {
+    ...(deps as unknown as { purchases: object }).purchases,
+    checkoutEmail: () => Effect.succeed(new CheckoutEmail({ needed: true, email: "me@example.com", used }))
+  },
+  testnet: false
+})
+
+test("no Buy button for cards Bitrefill would refuse for their Checkout Email", async () => {
+  const six = call("prepare_purchase", { cards: Array.from({ length: 6 }, () => ({ voucher_id: "amazon-us", value: "10", mode: "normal" })) })
+  const model = await fakeModel([six, { role: "assistant", content: "Too many today." }])
+  const agent = makeAgent({ ...guestDeps({ orders: 10, day: 100_000_000, month: 100_000_000 }), apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.near", [], "six amazon cards")
+  model.close()
+  assert.equal(turn.offer, undefined, "the tap would only be refused")
+  const refusal = String(model.seen[1]!.messages.at(-1)!.content)
+  assert.match(refusal, /15 cards a day per email.*10 in the last 24 hours.*at most 5/, "the server's own refusal (Purchases.guestLimitRefusal)")
+  assert.match(refusal, /connect their own Bitrefill account at https:\/\/luckout\.test\/wallet/, "and how to raise the limits")
+})
+
+test("test cards don't count toward Bitrefill's limits for the Checkout Email", async () => {
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "normal" }] }), { role: "assistant", content: "Tap Buy." }])
+  const used = { ...guestDeps({ orders: 15, day: 500_000_000, month: 1_000_000_000 }), bitrefill: (deps as unknown as { bitrefill: object }).bitrefill }
+  const agent = makeAgent({ ...used, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.near", [], "a test card")
+  model.close()
+  assert.equal(cards(turn)?.[0]?.voucherId, "test-gift-card-code", "an email at every limit can still buy a test card")
+})
+
+test("replacing a Checkout Email they already gave waits for their tap on a button that shows both", async () => {
+  let email = "me@example.com"
+  const purchases = {
+    ...(deps as unknown as { purchases: object }).purchases,
+    checkoutEmail: () => Effect.sync(() => new CheckoutEmail({ needed: true, email })),
+    setCheckoutEmail: (_: string, e: string) => Effect.sync(() => new CheckoutEmail({ needed: true, email: (email = e) }))
+  }
+  const prepare = call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10" }] })
+  const model = await fakeModel([call("set_checkout_email", { email: "New@Example.com" }), prepare, { role: "assistant", content: "Tap to change it." }])
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: false, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.near", [], "send my cards to New@Example.com from now on, and buy a test card")
+  model.close()
+  assert.equal(email, "me@example.com", "not changed by the model")
+  assert.deepEqual(turn.offer, { email: { from: "me@example.com", to: "new@example.com" } })
+  assert.match(String(model.seen[2]!.messages.at(-1)!.content), /tap/, "no Buy button until the new address is theirs: its line would show the old one")
+})
+
+test("the same address again, or a first one, is saved without a button", async () => {
+  let email: string | undefined = "me@example.com"
+  const purchases = {
+    ...(deps as unknown as { purchases: object }).purchases,
+    checkoutEmail: () => Effect.sync(() => new CheckoutEmail({ needed: true, ...(email ? { email } : {}) })),
+    setCheckoutEmail: (_: string, e: string) => Effect.sync(() => new CheckoutEmail({ needed: true, email: (email = e.trim().toLowerCase()) }))
+  }
+  const model = await fakeModel([call("set_checkout_email", { email: "ME@example.com" }), { role: "assistant", content: "Saved." }])
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: false, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.near", [], "it's ME@example.com")
+  model.close()
+  assert.equal(turn.offer, undefined)
+  assert.match(String(model.seen[1]!.messages.at(-1)!.content), /saved/)
 })

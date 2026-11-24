@@ -18,7 +18,7 @@ const req = async (method: string, path: string, body?: unknown, session?: strin
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   })
   // A sign-in's session comes back only as a cookie: kept as the "name=value" to send back in `cookie`.
-  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("luckout_session="))?.split(";")[0]
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("__Host-luckout_session="))?.split(";")[0]
   return { status: r.status, json: await r.json().catch(() => null), session: cookie }
 }
 
@@ -48,7 +48,7 @@ const token = await signIn(customer)
 console.log("✔ sign-in works; replayed nonce and foreign key refused")
 
 assert.equal((await req("GET", "/purchases")).status, 401)
-assert.equal((await req("GET", "/purchases", undefined, "luckout_session=forged.token")).status, 401)
+assert.equal((await req("GET", "/purchases", undefined, "__Host-luckout_session=forged.token")).status, 401)
 console.log("✔ purchases need a valid session")
 
 const buy = (body: object) => req("POST", "/purchases", body, token)
