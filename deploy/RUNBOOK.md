@@ -141,7 +141,9 @@ To restore a broken or lost database (`<db>` and `<role>` are the site's, as in 
 5. **Park what could buy again.** Once the server starts it resumes every open purchase, and one restored at `waiting`, `admit`, `ordering`, `restock` or `pay` may have been bought and paid for after the dump: the contract hands back the existing purchase for an order id it has seen, and the server then orders and pays a new invoice. Park those first, as the site user:
    ```sh
    # The server resumes checkouts, not cards: both are parked, in one transaction, so a parked checkout is never
-   # admitted, ordered or paid again (and Retry now refuses it).
+   # admitted, ordered or paid again (and Retry now refuses it). A dump from before migration 0025 has no checkouts
+   # table, so this errors and parks nothing: run only its first UPDATE (purchases), and 0025 carries `stuck` over
+   # to the checkouts it makes when the server starts.
    psql -h 127.0.0.1 -U <role> -d <db> -v ON_ERROR_STOP=1 -c "UPDATE purchases SET step = 'stuck', error = 'Restored from a dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock', 'pay'); UPDATE checkouts SET step = 'stuck', error = 'Restored from a dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock', 'pay')"
    ```
    Those at `delivery`, `confirm` or `fail` are safe to resume: they only ask Bitrefill about their own invoice, or settle on chain, where the contract closes a purchase only once. Check the parked ones like the purchases in the last step.

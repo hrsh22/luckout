@@ -11,7 +11,7 @@ import { Connect } from "./Connect.ts"
 import { Credit, CREDIT_DEFAULTS } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { ContractRejected, Near, NearUnavailable, type Outcome, TxExpired } from "./Near.ts"
-import { GAVE_UP_AT, Purchases, retryPurchase } from "./Purchases.ts"
+import { GAVE_UP_AT, guestLimitRefusal, Purchases, retryPurchase } from "./Purchases.ts"
 import { Refill } from "./Refill.ts"
 import { Sales } from "./Sales.ts"
 import { fakeBase, fakeBitrefill, fakeBitrefillOAuth, fakeNear } from "./testing.ts"
@@ -65,6 +65,10 @@ const world = (opts: {
   statuses?: Array<PaymentStatus>
   /** No Free Reserve left: a cart's Lucky cards are quoted Normal. */
   reserveFull?: boolean
+  /** The most of a card's price the reserve lets a Lucky Buy play ($6 unless set). */
+  luckyCap?: number
+  /** For each delivery poll, the order in which Bitrefill lists the invoice's orders (cart order unless set). */
+  listed?: Array<ReadonlyArray<number>>
   /**
    * Where each order of the invoice is at each delivery poll, one list per poll, in cart order; delivered unless set.
    * "NoCode": delivered with Redemption Data that holds neither a code nor a link.
@@ -94,6 +98,7 @@ const world = (opts: {
   /** How many cards each Bitrefill order held. */
   const ordered: Array<number> = []
   const deliveries = [...(opts.deliveries ?? [])]
+  const listed = [...(opts.listed ?? [])]
   /** How many cards each invoice holds, as ordered. */
   const invoiceCards = new Map<string, number>()
   let confirm = opts.confirm
@@ -133,12 +138,17 @@ const world = (opts: {
           // The reserve covers $6 of a Lucky Buy right now.
           ? { mode, reference_price: String(price), lucky_amount: "6000000", max_price: String(price + 1_200_000) }
           : method === "quote_many"
-          // Each card as `quote` prices it; with no reserve left, a Lucky card comes back Normal.
-          ? (args as { items: Array<{ reference_price: string; mode: Mode }> }).items.map((i) =>
-            typeof i.mode === "object" && !opts.reserveFull
-              ? { mode: i.mode, reference_price: i.reference_price, lucky_amount: "6000000", max_price: String(Number(i.reference_price) + 1_200_000) }
+          // Each card as the contract prices it: a Lucky one plays as much of its price as the reserve allows, at a 20%
+          // premium rounded up; with no reserve left, it comes back Normal.
+          ? (args as { items: Array<{ reference_price: string; mode: Mode }> }).items.map((i) => {
+            const r = Number(i.reference_price)
+            const lucky = Math.min(r, opts.luckyCap ?? 6_000_000)
+            return typeof i.mode === "object" && !opts.reserveFull
+              ? { mode: i.mode, reference_price: i.reference_price, lucky_amount: String(lucky), max_price: String(r + Math.ceil(lucky * 2_000 / 10_000)) }
               : { mode: "normal", reference_price: i.reference_price, lucky_amount: "0", max_price: i.reference_price }
-          )
+          })
+          : method === "get_game_versions"
+          ? [0, 1].map((v) => ({ name: `v${v}`, premium_bps: 2_000, outcomes: [] }))
           : { status: opts.onchain ?? "Pending", ...opts.onchainPurchase }) as A
       ),
     // A cart's admission and settlement are logged card by card, under the single-card methods' names.
@@ -200,7 +210,8 @@ const world = (opts: {
         : Effect.suspend(() => {
           if (token) calls.push(`delivery:${token}`)
           const poll = deliveries.shift() ?? []
-          const invoice = Array.from({ length: invoiceCards.get(invoiceId) ?? cart.length }, (_, j) => {
+          const order = listed.shift()
+          const inCartOrder = Array.from({ length: invoiceCards.get(invoiceId) ?? cart.length }, (_, j) => {
             const state = poll[j] ?? "Delivered"
             const redemption_info: Record<string, unknown> | undefined = state === "Delivered"
               ? { code: `ABC-12${j + 3}`, expirationTime: "2027-03-30T00:00:00.000Z" }
@@ -209,6 +220,7 @@ const world = (opts: {
               : undefined
             return { order_id: `o-${j}`, status: state, product: { id: voucherId, value: "10" }, redemption_info }
           })
+          const invoice = order ? order.map((j) => inCartOrder[j]!) : inCartOrder
           const found = matchOrders(cart, invoice).map((o): CardDelivery =>
             o?.redemption_info
               ? { _tag: "Delivered", orderId: o.order_id, redemption: o.redemption_info }
@@ -319,6 +331,7 @@ test("a purchase walks every step and shows the code only once delivered", async
   const p = await w.run(w.buy())
   assert.equal(p.status, "delivered")
   assert.equal(p.redemption?.code, "ABC-123")
+  assert.equal(p.currency, "USD", "the card's own currency, for showing its value")
   assert.deepEqual(w.calls, ["purchase", "order", "confirm_delivery"])
 })
 
@@ -1327,7 +1340,7 @@ test("a checkout whose cards were partly bought already is refused, and nothing 
     yield* w.cart([k])
     return yield* w.cart([k, crypto.randomUUID()]).pipe(Effect.flip)
   }))
-  assert.match(e.message, /already bought/)
+  assert.match(e.message, /already sent in an earlier checkout/)
   assert.equal(w.calls.filter((c) => c === "purchase").length, 1)
 })
 
@@ -1429,4 +1442,81 @@ test("a checkout that gave up at delivery goes back to asking Bitrefill; one tha
   }))
   assert.equal(p.step, "stuck")
   assert.match(p.refused.message, /needs a manual check/)
+})
+
+test("the same cart sent twice at once is one checkout, returned to both", async () => {
+  const w = world()
+  const asked = keys(10)
+  const [a, b] = await w.run(Effect.all([w.cart(asked), w.cart(asked)], { concurrency: "unbounded" }))
+  assert.deepEqual(a.map((p) => p.id), b.map((p) => p.id))
+  assert.equal(new Set(a.map((p) => p.checkoutId)).size, 1)
+  assert.equal(w.calls.filter((c) => c === "purchase").length, 10, "admitted once")
+})
+
+test("a card is never given an order another card of its checkout already has, however Bitrefill lists them", async () => {
+  // Two copies of one card. In the second round Bitrefill lists the orders the other way round, so the copy still on
+  // its way is matched to the order the first copy got.
+  const w = world({
+    real: true,
+    guest: true,
+    credit: 100_000_000,
+    deliveries: [["Delivered", "Pending"], ["Delivered", "Pending"], ["Delivered", "Delivered"]],
+    listed: [[0, 1], [1, 0], [0, 1]]
+  })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com")
+    const placed = yield* w.cart(keys(2))
+    const first = yield* Effect.forEach(placed, (p) => settled(p.id))
+    yield* reconcilePass
+    yield* Effect.forEach(placed, (p) => settled(p.id))
+    return { placed, first, cards: yield* Effect.forEach(placed, (p) => Purchases.use((s) => s.get("alice.test", p.id))) }
+  }))
+  assert.deepEqual(r.first, ["settled", "delivery"], "left waiting rather than given the first copy's code")
+  assert.deepEqual(r.cards.map((p) => p.redemption?.code), ["ABC-123", "ABC-124"])
+  assert.equal(w.alerts.filter((a) => a.includes(`purchase ${r.placed[1]!.id}`) && /already has/.test(a)).length, 1)
+  assert.deepEqual(w.settled, [{ delivered: [7], failed: [] }, { delivered: [8], failed: [] }])
+})
+
+test("a card whose price rose since it was confirmed is refused before anything is signed; a drop buys at the lower price", async () => {
+  // The card is $10 now. Lucky Buys here play their whole price at a 20% premium.
+  const w = world({ price: 10_000_000, luckyCap: 100_000_000 })
+  const lucky = { lucky: 1 }
+  const buy = (cards: ReadonlyArray<{ mode: Mode; maxPrice: number; luckyAmount?: number }>) => {
+    const items = cards.map((c) => new NewPurchase({ voucherId: "test-card", value: "10", ...c, idempotencyKey: crypto.randomUUID() }))
+    return items.length === 1
+      ? Effect.map(Purchases.use((p) => p.create("alice.test", items[0]!)), (p) => [p])
+      : Purchases.use((p) => p.createCart("alice.test", items))
+  }
+  // Confirmed at $8: $8 in Normal, $9.60 for a Lucky Buy on the whole $8.
+  const normalUp = { mode: "normal" as const, maxPrice: 8_000_000 }
+  const luckyUp = { mode: lucky, luckyAmount: 8_000_000, maxPrice: 9_600_000 }
+  // Confirmed at $12: $12 in Normal, $14.40 for a Lucky Buy on the whole $12.
+  const normalDown = { mode: "normal" as const, maxPrice: 12_000_000 }
+  const luckyDown = { mode: lucky, luckyAmount: 12_000_000, maxPrice: 14_400_000 }
+  // Price unchanged, and the reserve has grown since a Lucky Buy on $5 of it was confirmed at $11: still exactly $11.
+  const luckyGrown = { mode: lucky, luckyAmount: 5_000_000, maxPrice: 11_000_000 }
+  const r = await w.run(Effect.gen(function*() {
+    const refused: Array<string> = []
+    for (const cards of [[normalUp], [luckyUp], [normalDown, luckyUp], [luckyDown, normalUp]]) refused.push((yield* Effect.flip(buy(cards))).message)
+    const signed = [...w.calls]
+    const bought = [...(yield* buy([normalDown])), ...(yield* buy([luckyDown])), ...(yield* buy([normalDown, luckyDown])), ...(yield* buy([luckyGrown]))]
+    return { refused, signed, bought: yield* Effect.forEach(bought, (p) => settled(p.id)) }
+  }))
+  assert.deepEqual(r.refused.map((m) => /Price changed since you confirmed; please confirm again/.test(m)), [true, true, true, true])
+  assert.deepEqual(r.signed, [], "nothing signed, so none of it counts as a refusal against the customer")
+  assert.deepEqual(r.bought, ["settled", "settled", "settled", "settled", "settled"], "four refusals later the customer still buys")
+  assert.deepEqual(w.admits.map((a) => [a.reference_price, a.lucky_amount ?? null]), [
+    ["10000000", null],
+    ["10000000", "10000000"],
+    ["10000000", null],
+    ["10000000", "10000000"],
+    ["10000000", "5000000"]
+  ], "at today's lower price, a whole-price Lucky Buy on the whole of it")
+})
+
+test("Bitrefill's guest limits, as one rule the shop and the bot share", () => {
+  assert.equal(guestLimitRefusal({ orders: 11, day: 0, month: 0 }, 4_000_000, 4), undefined)
+  assert.match(guestLimitRefusal({ orders: 12, day: 0, month: 0 }, 4_000_000, 4) ?? "", /yours has had 12 in the last 24 hours\. This cart can have at most 3\./)
+  assert.match(guestLimitRefusal({ orders: 0, day: 450_000_000, month: 450_000_000 }, 60_000_000, 1) ?? "", /a day per email; this one would go over it/)
+  assert.match(guestLimitRefusal({ orders: 0, day: 0, month: 950_000_000 }, 60_000_000, 2) ?? "", /a month per email; this cart would go over it/)
 })

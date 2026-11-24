@@ -225,6 +225,8 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   image: Schema.optional(Schema.String),
   background: Schema.optional(Schema.String),
   value: Schema.String,
+  /** The currency `value` is in (the card's own, e.g. INR); missing on purchases made before it was kept. */
+  currency: Schema.optional(Schema.String),
   status: PurchaseStatus,
   /** Why it was rejected or failed, in plain words. */
   error: Schema.optional(Schema.String),
