@@ -19,8 +19,11 @@ const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 const DEPOSIT_GAS: Gas = Gas::from_tgas(100);
 const WITHDRAW_GAS: Gas = Gas::from_tgas(60);
 const OPERATOR_GAS: Gas = Gas::from_tgas(100);
-/// The gas `settle` gives `on_draw_many` for a full cart, whatever its caller attaches: 5 Tgas plus 4 a Draw
-/// (GAS_DRAW_MANY_BASE, GAS_DRAW_EACH in src/lib.rs).
+// The gas the contract gives its Draw callbacks, whatever their caller attaches (src/lib.rs): `on_draw` gets GAS_DRAW,
+// and `on_draw_many` for a full cart 5 Tgas plus 4 a Draw (GAS_DRAW_MANY_BASE, GAS_DRAW_EACH). The caller's leftover
+// gas comes on top, so a Draw passes even if it outgrew its own allowance. Each must need at most half of it, so no
+// caller can attach just enough gas for one outcome and not another.
+const DRAW_STATIC_TGAS: u64 = 20;
 const DRAW_MANY_STATIC_TGAS: u64 = 5 + 4 * 15;
 
 fn wasm(path: &str) -> Vec<u8> {
@@ -155,6 +158,15 @@ impl World {
     }
 }
 
+/// The gas the receipt that ran the transaction's Draws burnt.
+fn draws_gas(r: &ExecutionFinalResult) -> Gas {
+    r.receipt_outcomes()
+        .iter()
+        .find(|o| o.logs.iter().any(|l| l.contains("\"event\":\"draw\"")))
+        .expect("the Draws' receipt")
+        .gas_burnt
+}
+
 /// The contract's panic message, from a failed transaction or any failed receipt in it.
 fn failure(r: &ExecutionFinalResult) -> String {
     format!("{:?}", r.receipt_failures())
@@ -272,6 +284,12 @@ async fn a_confirmed_lucky_buy_is_drawn_in_its_own_receipt_and_nobody_can_call_t
     assert_eq!(p["status"], "Delivered");
     let reserve: Value = w.luckout.view("get_reserve").await?.json()?;
     assert_eq!(reserve["locked"], "0");
+    // The same callback runs a customer's `retry_draw`, where the customer picks the gas.
+    let burnt = draws_gas(&r).as_gas() as f64 / 1e12;
+    assert!(
+        burnt < DRAW_STATIC_TGAS as f64 / 2.0,
+        "on_draw burnt {burnt:.1} Tgas (2.35 when measured, 2026-11-25): keep it under half its own {DRAW_STATIC_TGAS} Tgas"
+    );
 
     // `#[private]`: a customer can't run a Draw.
     let r = w
@@ -367,19 +385,10 @@ async fn a_full_cart_of_lucky_cards_is_admitted_settled_and_drawn_within_the_ser
             .count(),
         15
     );
-    // The callback also gets whatever gas the caller left over, so the run above would pass even if the callback
-    // outgrew its own allowance. It must need far less than that allowance, so no caller can attach just enough gas
-    // for one outcome and not another.
-    let draws = r
-        .receipt_outcomes()
-        .iter()
-        .find(|o| o.logs.iter().any(|l| l.contains("\"event\":\"draw\"")))
-        .expect("the Draws' receipt");
-    let burnt = draws.gas_burnt;
+    let burnt = draws_gas(&r).as_gas() as f64 / 1e12;
     assert!(
-        burnt < Gas::from_tgas(30),
-        "on_draw_many burnt {:.1} Tgas for 15 Draws (10.5 when measured, 2026-11-25): keep it well under its own {DRAW_MANY_STATIC_TGAS} Tgas",
-        burnt.as_gas() as f64 / 1e12
+        burnt < DRAW_MANY_STATIC_TGAS as f64 / 2.0,
+        "on_draw_many burnt {burnt:.1} Tgas for 15 Draws (10.5 when measured, 2026-11-25): keep it under half its own {DRAW_MANY_STATIC_TGAS} Tgas"
     );
     for id in &ids {
         let p: Value = w
