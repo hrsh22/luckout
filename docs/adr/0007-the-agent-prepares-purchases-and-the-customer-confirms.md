@@ -9,3 +9,7 @@ Amended 2026-11-16 (guest checkout, ADR-0012): one tool writes. The Agent can sa
 Redemption Data never enters the model's context: the purchase tools return names, prices and statuses, and the bot sends codes to the customer itself, in a private chat. The bot ignores group chats. Linking starts in the Web App, whose session comes from a NEP-413 signature by a full-access key: the signed-in customer gets a one-time `t.me/<bot>?start=<code>` link, valid for 10 minutes, and whichever Telegram account opens it is linked. The wallet owner therefore always chooses the Telegram account; a link sent by someone else can't attach their Telegram to your balance (an earlier design, where the bot issued the code and the Web App accepted it, allowed exactly that and was replaced after a security review). Customers can disconnect Telegram from the Wallet page at any time.
 
 Rejected: letting the model buy directly under a per-purchase cap (a prompt injection could still spend up to the cap without the customer's knowledge), and confirming by typing "yes" (the model, or text it was shown, could produce the same words).
+
+**Amended 2026-11-25 (Checkout Email).** Bitrefill emails each guest card's code to the Checkout Email as well as the receipt, so the address on the Confirm line is where the cards go too.
+
+**Amended 2026-11-25 (replacing a Checkout Email).** Replacing a saved Checkout Email through the Agent needs the customer's tap on a button that shows both the old and the new address, and a new offer withdraws the customer's earlier ones.

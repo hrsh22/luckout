@@ -23,3 +23,5 @@ Every Lucky Buy commits to an immutable Game Version; new economics need a new v
 **Amended 2026-11-15 (ADR-0012).** On mainnet, fulfillment no longer pays from a prepaid Bitrefill balance: each card is a guest order with the customer's Checkout Email, paid in USDC on Base from the Base Float, so the code arrives within about a minute instead of in seconds.
 
 **Amended 2026-11-17 (Cashback Cap).** The "Discount Cap" in the paragraph on randomness above no longer exists: on 2026-11-13 it and the fixed Cashback limit became one owner-set Cashback Cap (ADR-0002). Read that sentence as "the Cashback Cap and Spending Limits bound every Draw": the Cashback Cap bounds what one Draw can pay, so a block producer's bias on `random_seed` is worth at most that.
+
+**Amended 2026-11-25 (Checkout Email).** Voucher codes also reach the customer by email: a guest's cards are sent to their Checkout Email as a Bitrefill gift, with Bitrefill's receipt (`Bitrefill.ts`).

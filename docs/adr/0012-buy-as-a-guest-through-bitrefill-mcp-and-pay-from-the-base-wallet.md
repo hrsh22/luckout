@@ -14,3 +14,7 @@ So, on mainnet (staging and production):
 Testnet keeps its own Bitrefill account and key, because Bitrefill's free test cards can't be bought as a guest and a guest order needs real USDC on Base. Testnet now runs only on a developer's machine (ADR-0010).
 
 Considered and rejected: one Base wallet per customer to spread Bitrefill's limits (its Terms §29.6 count creating several wallets to get around limits as a breach), and Bitrefill's x402 wallet checkout (codes only reach the paying wallet, and its limits are that wallet's).
+
+**Amended 2026-11-25.** Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) are counted by Luckout per card over the last 24 hours and the last 30 days (`GUEST_LIMITS`, `Purchases.ts`). A guest's cards are also sent to the Checkout Email as a Bitrefill gift, so the code reaches the customer there as well as in Luckout.
+
+**Amended 2026-11-25 (Checkout Email on a Checkout).** A guest Checkout stores, sealed, the Checkout Email it was placed under, so changing the saved address later doesn't change where that Checkout's cards go. A Checkout placed on the customer's own Bitrefill account stores none; if it has to fall back to a guest order, it uses the Checkout Email on file then.

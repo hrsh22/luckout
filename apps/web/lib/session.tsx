@@ -68,7 +68,7 @@ interface Session {
   gasFree: boolean | undefined
   /** The kind of wallet signed in with; undefined when signed out. */
   wallet: Wallet | undefined
-  /** Signed in with an EVM or Solana wallet: it acts through NEAR Intents, and our relayer pays every NEAR fee. */
+  /** Signed in with an EVM or Solana wallet: it acts through NEAR Intents, and our relayer pays its NEAR fees within the free actions (past them it is refused, with no wallet path to fall back on). */
   intents: boolean
   signing: SignInStep | undefined
   signInError: SignInProblem | undefined

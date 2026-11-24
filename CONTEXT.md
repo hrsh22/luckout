@@ -36,16 +36,24 @@ _Avoid_: Wallet, account credit, house funds
 Moving value from any supported chain into a customer's Balance through a NEAR Intents swap followed by a deposit. A token NEAR Intents doesn't take (ORE) first goes through a Jupiter swap, in a transaction the customer's own Solana wallet signs (ADR-0014).
 _Avoid_: Payment, bridge
 
+**Swap Token**:
+A Solana token that NEAR Intents doesn't take (ORE today), paid for a Top-Up through one Jupiter swap that Luckout builds and the customer's own Solana wallet signs, in the app or by scanning the Top-Up's Solana Pay code (ADR-0014).
+_Avoid_: Supported token (1Click takes those directly), deposit token
+
+**Send-Back**:
+Moving money that 1Click returned to a customer's Intents Account (a refund or a Top-Up's change) back to their own wallet, through a 1Click swap the server quotes and the customer signs.
+_Avoid_: Withdrawal (that's from the Balance), refund
+
 **Intents Account**:
-A customer's own account in NEAR Intents, named after their EVM address or their Solana key (in hex) and controlled only by that key; an EVM or Solana wallet's Top-Ups pass through it and its withdrawals return to it, and Luckout moves money out of it only with the customer's signature.
+A customer's own account in NEAR Intents, controlled only by their own key: a NEAR wallet's is its NEAR account, and an EVM or Solana wallet's is named after its EVM address or Solana key (in hex). An EVM or Solana wallet's Top-Ups pass through it and its withdrawals return to it, 1Click's refunds and change can land in it for any wallet, and Luckout moves money out of it only with the customer's signature.
 _Avoid_: Deposit address, wallet, sub-account
 
 **Agent**:
-The Telegram chat bot that searches, quotes, and buys on a customer's behalf; like the Web App, it can only buy through the server, whose NEAR key is restricted to the contract's purchase methods.
+The Telegram chat bot that searches, quotes, and prepares purchases for a customer, who confirms each one with a tap; the only thing it saves is the Checkout Email the customer typed. Like the Web App, it can only buy through the server, whose NEAR key is restricted to the contract's purchase methods.
 _Avoid_: Custodian, operator, wallet
 
 **Web App**:
-The browser storefront where a customer connects their NEAR wallet, tops up, sets Spending Limits, links Telegram, buys, watches Draws, and reads purchase history and Redemption Data.
+The browser storefront where a customer connects their NEAR, EVM or Solana wallet, tops up, sets Spending Limits, links Telegram, buys, watches Draws, and reads purchase history and Redemption Data.
 _Avoid_: Dashboard, admin console
 
 **Bitrefill Credit**:
@@ -66,18 +74,18 @@ _Avoid_: EVM wallet, hot wallet
 
 **Base Float**:
 The USDC in the Base Wallet that pays each card's Bitrefill invoice; kept between a floor and a ceiling at about a day of sales and topped up from the Treasury by Refills.
+_Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
 **Checkout Email**:
-The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) count per customer, and Bitrefill can reach them about a bad code. A throwaway one is fine.
+The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) count per customer, and Luckout counts them per card over the last 24 hours and 30 days; Bitrefill emails each card's code and receipt there, and Bitrefill can reach them about a bad code. A throwaway one is fine.
 _Avoid_: Login, account email
-_Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
 **Bitrefill Connection**:
 A customer's own Bitrefill account, logged in from our site, that their cards are then bought on, under its limits instead of a guest's. We still pay for every card from the Base Wallet. While it lasts, buying needs no Checkout Email.
 _Avoid_: Linked account, Bitrefill login (that's the act of connecting)
 
 **Relayer**:
-The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings) and pays their network fee, so customers need no NEAR; it can only send what the customer signed.
+The server's NEAR account that sends a customer's own wallet-signed calls (deposits, withdrawals, settings, Reclaims, Draw reruns, Send-Backs, and an EVM or Solana wallet's signed NEAR Intents payloads) and pays their network fee, within a number of free actions in any 24 hours, so customers need no NEAR; it can only send what the customer signed.
 _Avoid_: Paymaster, gas station, sponsor
 
 **Spending Limit**:
@@ -96,8 +104,12 @@ _Avoid_: Spin, gamble, lottery ticket
 The promise that every successfully completed Lucky Buy delivers the exact Voucher the customer selected, regardless of the Draw outcome.
 _Avoid_: Principal protection, no-loss guarantee
 
+**Use-By Date**:
+The expiry date of the most recently bought card of that Voucher in the last 60 days, shown on the Voucher's page and on the Agent's Buy line as a guide, since cards come in batches; it is not a promise for the next card. On a delivered card, "Use it by" is that card's own date.
+_Avoid_: Expiry guarantee, validity
+
 **Redemption Data**:
-The private code, PIN, link, or instructions needed to use a Voucher, delivered only in the customer's private chat.
+The private code, PIN, link, or instructions needed to use a Voucher. It is shown only to the customer in the Web App, sent in their private Telegram chat, and emailed by Bitrefill to their Checkout Email; it never appears in public.
 _Avoid_: Voucher, public metadata, onchain token
 
 **Game Version**:
