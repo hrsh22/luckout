@@ -8,9 +8,11 @@ import type { Pending } from "./Agent.ts"
 import { DbMemory } from "./Db.ts"
 import {
   addLinkCode,
+  buyMessages,
   buySummary,
   deliver,
   describe,
+  fundedCheck,
   makeOffers,
   messageLimits,
   privateOnly,
@@ -90,30 +92,62 @@ test("each Telegram user gets so many messages a minute", () => {
   assert.equal(limits.check(1, t + 61_000), undefined, "a new minute")
 })
 
-test("messages that reach the model are counted per account, fewer with no Balance, so linking another Telegram account doesn't start over", () => {
+test("messages that reach the model are counted per account and per Telegram user, fewer with no Balance, so re-linking starts nothing over", () => {
   const limits = messageLimits({ perMinute: 100, perDay: 3, unfundedPerDay: 1, unfundedBotPerDay: 100 })
   const t = Date.UTC(2026, 10, 11, 12)
-  assert.equal(limits.model("alice.near", false, t), undefined)
-  // Alice re-links her wallet to a fresh Telegram account: the count is the account's, not the Telegram user's.
-  assert.equal(limits.model("alice.near", false, t), "day", "no Balance: one a day here, whichever Telegram account asks")
-  assert.equal(limits.model("bob.near", false, t), undefined, "another account has its own")
-  assert.equal(limits.model("alice.near", true, t), undefined, "once funded, the funded allowance counts")
-  assert.equal(limits.model("alice.near", true, t), undefined)
-  assert.equal(limits.model("alice.near", true, t), "day")
+  assert.equal(limits.model("alice.near", 1, false, t), undefined)
+  assert.equal(limits.model("alice.near", 2, false, t), "day", "the same wallet linked to another Telegram account: its count carries on")
+  assert.equal(limits.model("bob.near", 1, false, t), "day", "the same Telegram account linked to another wallet: its count carries on too")
+  assert.equal(limits.model("carol.near", 3, false, t), undefined, "another wallet on another Telegram account has its own")
+  assert.equal(limits.model("alice.near", 1, true, t), undefined, "once funded, the funded allowance counts")
+  assert.equal(limits.model("alice.near", 1, true, t), undefined)
+  assert.equal(limits.model("alice.near", 1, true, t), "day")
   limits.sweep(t + 61_000)
-  assert.equal(limits.model("alice.near", true, t + 61_000), "day", "a sweep keeps today's count")
-  assert.equal(limits.model("alice.near", true, t + 86_400_000), undefined, "a new UTC day")
+  assert.equal(limits.model("alice.near", 1, true, t + 61_000), "day", "a sweep keeps today's count")
+  assert.equal(limits.model("alice.near", 1, true, t + 86_400_000), undefined, "a new UTC day")
+})
+
+test("a day's highest allowance used up is known without reading the Balance", () => {
+  const limits = messageLimits({ perMinute: 100, perDay: 2, unfundedPerDay: 1, unfundedBotPerDay: 100 })
+  const t = Date.UTC(2026, 10, 11, 12)
+  assert.equal(limits.capped("alice.near", 1, t), false)
+  limits.model("alice.near", 1, true, t)
+  assert.equal(limits.capped("alice.near", 1, t), false, "one left at the funded allowance: the Balance decides")
+  limits.model("alice.near", 1, true, t)
+  assert.equal(limits.capped("alice.near", 1, t), true)
+  assert.equal(limits.capped("bob.near", 1, t), true, "by Telegram user too")
+  assert.equal(limits.capped("alice.near", 1, t + 86_400_000), false, "a new UTC day")
 })
 
 test("the whole bot's cap counts and stops only accounts with no Balance: a funded customer always gets through", () => {
   const limits = messageLimits({ perMinute: 100, perDay: 100, unfundedPerDay: 100, unfundedBotPerDay: 2 })
   const t = Date.UTC(2026, 10, 11, 12)
-  assert.equal(limits.model("a.near", false, t), undefined)
-  assert.equal(limits.model("rich.near", true, t), undefined, "funded messages don't use it up")
-  assert.equal(limits.model("b.near", false, t), undefined)
-  assert.equal(limits.model("c.near", false, t), "bot", "today's messages from accounts with no Balance are used up")
-  assert.equal(limits.model("rich.near", true, t), undefined, "a funded customer still gets through")
-  assert.equal(limits.model("c.near", false, t + 86_400_000), undefined, "a new UTC day")
+  assert.equal(limits.model("a.near", 1, false, t), undefined)
+  assert.equal(limits.model("rich.near", 9, true, t), undefined, "funded messages don't use it up")
+  assert.equal(limits.model("b.near", 2, false, t), undefined)
+  assert.equal(limits.model("c.near", 3, false, t), "bot", "today's messages from accounts with no Balance are used up")
+  assert.equal(limits.model("rich.near", 9, true, t), undefined, "a funded customer still gets through")
+  assert.equal(limits.model("c.near", 3, false, t + 86_400_000), undefined, "a new UTC day")
+})
+
+test("an account's Balance is read at most once a minute, and a failed read counts as funded only for that minute", async () => {
+  let reads = 0
+  let answer: () => Promise<boolean> = async () => false
+  const balances = fundedCheck(async () => (reads++, answer()))
+  const t = 1_000_000
+  assert.equal(await balances.funded("alice.near", t), false)
+  assert.equal(await balances.funded("alice.near", t + 59_000), false)
+  assert.equal(reads, 1, "a chatty or capped account costs one read a minute")
+  assert.equal(await balances.funded("bob.near", t), false)
+  assert.equal(reads, 2, "each account its own")
+  answer = () => Promise.reject(new Error("429 Too Many Requests"))
+  assert.equal(await balances.funded("alice.near", t + 61_000), true, "NEAR didn't answer: never shut out a paying customer")
+  assert.equal(await balances.funded("alice.near", t + 100_000), true)
+  assert.equal(reads, 3)
+  answer = async () => false
+  balances.sweep(t + 122_000)
+  assert.equal(await balances.funded("alice.near", t + 122_000), false, "only for that minute")
+  assert.equal(reads, 4)
 })
 
 test("the Buy line says where the card is emailed, when it needs an email", () => {
@@ -268,6 +302,15 @@ test("a card longer than one message has its free text split across messages; it
   assert.equal(sent.join(" ").replace(/\s+/g, " ").includes(other), true, "all of the free text, in order")
 })
 
+test("the card after a split one starts a new message", async () => {
+  const sent: Array<string> = []
+  const other = Array.from({ length: 1500 }, (_, i) => `word${i}`).join(" ")
+  const short = purchaseLines(delivered(2), "https://luckout.test")
+  await deliver(async (text) => void sent.push(text), [purchaseLines(delivered(1, { other }), "https://luckout.test"), short], async () => {})
+  assert.equal(sent.at(-1), short.join("\n"), "on its own, though it would fit after the split card's last lines")
+  assert.ok(sent.at(-2)!.endsWith("Use it by 30 March 2027."), "the split card ends in the message before")
+})
+
 test("the Buy message fits Telegram: a long reply goes on its own, and the button's message always carries the code-written lines", () => {
   const summary = buySummary([card(), card({ voucherName: "Amazon" })]).split("\n")
   assert.deepEqual(replyMessages("Here they are, tap Buy.", summary), [`Here they are, tap Buy.\n\n${summary.join("\n")}`], "one message when it fits")
@@ -280,6 +323,21 @@ test("the Buy message fits Telegram: a long reply goes on its own, and the butto
   assert.ok(messages.at(-1)!.endsWith(many.at(-1)!), "the total is on the button's message")
   assert.ok(many.every((line) => messages.some((m) => m.split("\n").includes(line))), "every code-written line, whole")
   assert.deepEqual(replyMessages("", summary), [summary.join("\n")], "no reply, just the lines")
+})
+
+test("when the Buy lines need several messages, the total on the button's message says which cards are above it", () => {
+  const two = [card(), card({ voucherName: "Amazon" })]
+  assert.deepEqual(buyMessages("Tap Buy.", two), [`Tap Buy.\n\n${buySummary(two)}`], "all on one message: nothing to point at")
+  const cards = Array.from({ length: 15 }, (_, i) => card({ voucherName: `Gift card ${i} ${"with a very long name ".repeat(10)}` }))
+  const lines = buySummary(cards).split("\n")
+  const messages = buyMessages("Tap Buy.", cards)
+  assert.ok(messages.length > 1 && messages.every((m) => m.length <= 4096))
+  const last = messages.at(-1)!.split("\n")
+  const above = lines.length - last.length
+  assert.ok(above > 0 && above < 15)
+  assert.deepEqual(last.slice(0, -1), lines.slice(above, -1), "the button's message carries the last cards")
+  assert.equal(last.at(-1), `${lines.at(-1)} Cards 1 to ${above} are in the messages above.`)
+  assert.ok(lines.slice(0, -1).every((line) => messages.some((m) => m.split("\n").includes(line))), "every card line, whole")
 })
 
 test("a tap on Change it saves the new Checkout Email, unless the one it replaces has changed since", async () => {

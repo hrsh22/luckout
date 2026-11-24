@@ -1,4 +1,4 @@
-import { AgentAttestation, LinkInvalid, NewPurchase, NotFound, type Purchase, redemptionFields } from "@luckout/api"
+import { AgentAttestation, LinkInvalid, MAX_CART, NewPurchase, NotFound, type Purchase, redemptionFields } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
@@ -42,13 +42,16 @@ export const describe = (e: unknown) =>
 // if the bot ever runs twice.
 /**
  * The bot's message limits: per Telegram user per minute, and per UTC day for messages that reach the model, counted by
- * account so that linking the wallet to another Telegram account doesn't start the count over.
+ * account and by Telegram user alike, so re-linking either to another doesn't start the count over.
  */
 export const messageLimits = (
   o = { perMinute: MESSAGES_PER_MINUTE, perDay: MESSAGES_PER_DAY, unfundedPerDay: UNFUNDED_MESSAGES_PER_DAY, unfundedBotPerDay: UNFUNDED_BOT_MESSAGES_PER_DAY }
 ) => {
   const minutes = new Map<number, { count: number; resetAt: number }>()
+  /** Today's messages by `account:<id>` and by `telegram:<id>`. */
   const days = new Map<string, { count: number; day: number }>()
+  const usedToday = (accountId: string, userId: number, day: number) =>
+    Math.max(...[`account:${accountId}`, `telegram:${userId}`].map((k) => (days.get(k)?.day === day ? days.get(k)!.count : 0)))
   let unfunded = { count: 0, day: 0 }
   return {
     /** Every message, before anything else: "minute" when this user is over theirs. */
@@ -58,28 +61,52 @@ export const messageLimits = (
       else if (++w.count > o.perMinute) return "minute"
       return undefined
     },
+    /** Whether this account or Telegram user has had today's highest allowance: known without reading their Balance. */
+    capped: (accountId: string, userId: number, now = Date.now()) => usedToday(accountId, userId, Math.floor(now / 86_400_000)) >= o.perDay,
     /**
-     * A message about to reach the model, counted only if it goes ahead: "day" when this account has had today's (fewer
-     * with no Balance to buy with), "bot" when accounts with no Balance have had today's, all together.
+     * A message about to reach the model, counted only if it goes ahead: "day" when this account or Telegram user has had
+     * today's (fewer with no Balance to buy with), "bot" when accounts with no Balance have had today's, all together.
      */
-    model: (accountId: string, funded: boolean, now = Date.now()): "day" | "bot" | undefined => {
+    model: (accountId: string, userId: number, funded: boolean, now = Date.now()): "day" | "bot" | undefined => {
       const day = Math.floor(now / 86_400_000)
       if (unfunded.day !== day) unfunded = { count: 0, day }
-      const d = days.get(accountId)
-      const used = d?.day === day ? d.count : 0
+      const used = usedToday(accountId, userId, day)
       if (used >= (funded ? o.perDay : o.unfundedPerDay)) return "day"
       // Only accounts with no Balance count toward the whole bot's cap, so it never turns away a customer who can buy.
       if (!funded) {
         if (unfunded.count >= o.unfundedBotPerDay) return "bot"
         unfunded.count++
       }
-      days.set(accountId, { count: used + 1, day })
+      days.set(`account:${accountId}`, { count: used + 1, day })
+      days.set(`telegram:${userId}`, { count: used + 1, day })
       return undefined
     },
     /** Forgets counters that no longer count. */
     sweep: (now = Date.now()) => {
       for (const [k, w] of minutes) if (w.resetAt < now) minutes.delete(k)
       for (const [k, d] of days) if (d.day !== Math.floor(now / 86_400_000)) days.delete(k)
+    }
+  }
+}
+
+// ponytail: in memory, one process; swept with the rest.
+/**
+ * Whether an account has a Balance to buy with, read from NEAR at most once a minute per account, so a chatty or capped
+ * account costs one read a minute. A failed read counts as funded (a paying customer is never shut out because NEAR
+ * didn't answer), but only until that minute is up.
+ */
+export const fundedCheck = (read: (accountId: string) => Promise<boolean>, ttl = 60_000) => {
+  const known = new Map<string, { funded: boolean; until: number }>()
+  return {
+    funded: async (accountId: string, now = Date.now()) => {
+      const k = known.get(accountId)
+      if (k && k.until > now) return k.funded
+      const funded = await read(accountId).catch(() => true)
+      known.set(accountId, { funded, until: now + ttl })
+      return funded
+    },
+    sweep: (now = Date.now()) => {
+      for (const [id, k] of known) if (k.until <= now) known.delete(id)
     }
   }
 }
@@ -215,6 +242,22 @@ export const replyMessages = (reply: string, lines: ReadonlyArray<string> = []) 
   fit([...(reply.trim() ? pieces(reply.trim()) : []), ...fit(lines, "\n")], "\n\n")
 
 /**
+ * The Agent's reply and the Buy lines (replyMessages). When the card lines need more than one message, the total on the
+ * button's message says which cards are in the messages above it.
+ */
+export const buyMessages = (reply: string, cards: ReadonlyArray<Pending>) => {
+  const lines = buySummary(cards).split("\n")
+  const total = lines.pop()!
+  // Fitted with room for the longest note, so the one it gets always fits.
+  const roomy = `${total} Cards 1 to ${MAX_CART} are in the messages above.`
+  const messages = replyMessages(reply, [...lines, roomy])
+  const onLast = fit([...lines, roomy], "\n").at(-1)!.split("\n").length - 1
+  const above = lines.length - onLast
+  const note = above === 0 ? "" : above === 1 ? " Card 1 is in the message above." : ` Cards 1 to ${above} are in the messages above.`
+  return [...messages.slice(0, -1), messages.at(-1)!.slice(0, -roomy.length) + total + note]
+}
+
+/**
  * One card's lines after a Buy tap: its code when delivered, or where it's at. Each line fits a message: Bitrefill's
  * free text comes in pieces, while a code, PIN or link is always one line.
  */
@@ -254,8 +297,18 @@ export const deliver = async (
   cards: ReadonlyArray<ReadonlyArray<string>>,
   fallback: () => Promise<unknown>
 ) => {
+  const messages: Array<string> = []
+  // Whether the last message ends with a whole card, so the next may join it; a split card's last lines stand alone.
+  let open = false
+  for (const lines of cards) {
+    const blocks = fit(lines, "\n")
+    const last = messages.at(-1)
+    if (open && blocks.length === 1 && last!.length + 2 + blocks[0]!.length <= MESSAGE_MAX) messages[messages.length - 1] = `${last}\n\n${blocks[0]}`
+    else messages.push(...blocks)
+    open = blocks.length === 1
+  }
   let failed = false
-  for (const text of fit(cards.flatMap((lines) => fit(lines, "\n")), "\n\n")) {
+  for (const text of messages) {
     await send(text, { link_preview_options: { is_disabled: true } }).catch((e) => {
       failed = true
       console.error("telegram delivery failed:", describe(e))
@@ -421,12 +474,16 @@ export class Telegram extends Context.Service<Telegram, {
         void next.then(() => chains.get(chatId) === next && chains.delete(chatId))
       }
       const limits = messageLimits()
+      const balances = fundedCheck((accountId) =>
+        Effect.runPromise(near.view<{ balance: string } | null>("get_account", { account_id: accountId }).pipe(Effect.map((a) => Number(a?.balance ?? 0) >= MIN_PRICE)))
+      )
       // Every few minutes, forget what can't matter any more: expired buttons, quiet chats, old counters.
       yield* Effect.sync(() => {
         const now = Date.now()
         offers.sweep(now)
         for (const [chat, h] of history) if (h.at < now - IDLE_MS) history.delete(chat)
         limits.sweep(now)
+        balances.sweep(now)
       }).pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
 
       bot.command("start", async (ctx) => {
@@ -465,26 +522,17 @@ export class Telegram extends Context.Service<Telegram, {
         await ctx.replyWithChatAction("typing")
         // No passing TEE check on file, no chat: the model's replies couldn't be trusted.
         if (!(await tee!.ready())) return void ctx.reply(offline)
-        // An account with nothing to buy with gets fewer messages a day. If NEAR can't say, it isn't held against them.
-        const funded = await Effect.runPromise(
-          near.view<{ balance: string } | null>("get_account", { account_id: accountId }).pipe(
-            Effect.map((a) => Number(a?.balance ?? 0) >= MIN_PRICE),
-            Effect.orElseSucceed(() => true)
-          )
-        )
-        const over = limits.model(accountId, funded)
+        const capped = `That's all I can chat today. You can still buy in the web app: ${webOrigin}/shop`
+        // The cap that needs no Balance first; then an account with nothing to buy with gets fewer (fundedCheck).
+        if (limits.capped(accountId, ctx.from.id)) return void ctx.reply(capped)
+        const funded = await balances.funded(accountId)
+        const over = limits.model(accountId, ctx.from.id, funded)
         if (over === "bot") {
           void Effect.runPromise(alerts.admin(
             `The Telegram Agent had ${UNFUNDED_BOT_MESSAGES_PER_DAY} messages today from accounts with no Balance; they get no answers until 00:00 UTC (funded customers still do). If that's real use, raise UNFUNDED_BOT_MESSAGES_PER_DAY.`
           ))
         }
-        if (over) {
-          return void ctx.reply(
-            funded
-              ? `That's all I can chat today. You can still buy in the web app: ${webOrigin}/shop`
-              : `That's all I can chat today until you add funds at ${webOrigin}/wallet. You can browse cards at ${webOrigin}/shop`
-          )
-        }
+        if (over) return void ctx.reply(funded ? capped : `That's all I can chat today until you add funds at ${webOrigin}/wallet. You can browse cards at ${webOrigin}/shop`)
         let failure: unknown
         // A forwarded message, or one sent through an inline bot, was written by someone else: the model
         // reads it, but it can't set the Checkout Email (ADR-0007).
@@ -512,19 +560,18 @@ export class Telegram extends Context.Service<Telegram, {
           if (w.messageId) void bot.api.editMessageReplyMarkup(w.chatId, w.messageId).catch(() => {})
         }
         const total = "cards" in offer ? offer.cards.reduce((s, c) => s + c.maxPrice, 0) : 0
-        const [lines, keyboard] = "email" in offer
+        // The button always sits on the message with the code-written lines, whatever the model wrote above them.
+        const [messages, keyboard] = "email" in offer
           ? [
-            [`Your cards are also emailed to ${offer.email.from} now. Change that to ${offer.email.to}?`],
+            replyMessages(turn.reply, [`Your cards are also emailed to ${offer.email.from} now. Change that to ${offer.email.to}?`]),
             new InlineKeyboard().text("Change it", `email:${id}`).text("Keep it", `cancel:${id}`)
           ]
           : [
-            buySummary(offer.cards).split("\n"),
+            buyMessages(turn.reply, offer.cards),
             new InlineKeyboard()
               .text(offer.cards.length === 1 ? `Buy for ${usdUp(total)}` : `Buy ${offer.cards.length} cards for ${usdUp(total)}`, `buy:${id}`)
               .text("Cancel", `cancel:${id}`)
           ]
-        // The button always sits on the message with the code-written lines, whatever the model wrote above them.
-        const messages = replyMessages(turn.reply, lines)
         for (const text of messages.slice(0, -1)) await ctx.reply(text)
         const sent = await ctx.reply(messages.at(-1)!, { reply_markup: keyboard })
         offers.shownIn(id, sent.message_id)
