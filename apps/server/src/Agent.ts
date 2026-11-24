@@ -3,7 +3,7 @@ import { Effect } from "effect"
 import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
 import type { Near } from "./Near.ts"
-import type { Purchases } from "./Purchases.ts"
+import { guestLimitRefusal, type Purchases } from "./Purchases.ts"
 
 // The Agent (ADR-0001, ADR-0006): a plain tool-calling loop on NEAR AI Cloud's
 // OpenAI-compatible API. Safety is structural, not prompt-based:
@@ -175,24 +175,6 @@ export const blocker = (a: Account | null, maxPrice: number, web: string, now = 
 }
 
 /**
- * Why Bitrefill would refuse `count` more cards costing `price` in all (micro-USDC, test cards left out) for a Checkout
- * Email that has `used` this much of a guest's limits (ADR-0012), in words the model can pass on; undefined if it wouldn't.
- * The server checks the same limits again when the customer taps Buy.
- */
-export const overGuestLimits = (used: { orders: number; day: number; month: number }, price: number, count: number, web: string) => {
-  if (count === 0) return undefined
-  const raise = ` Connecting their own Bitrefill account at ${web}/wallet raises the limits.`
-  const left = GUEST_LIMITS.orders - used.orders
-  return used.orders + count > GUEST_LIMITS.orders
-    ? `Bitrefill allows ${GUEST_LIMITS.orders} cards a day per email, and theirs has had ${used.orders} in the last 24 hours, so ${left > 0 ? `at most ${left} more now` : "none more until later"}.${raise}`
-    : used.day + price > GUEST_LIMITS.daily
-    ? `Over Bitrefill's ${usd(GUEST_LIMITS.daily)} a day per email: ${usd(used.day)} used in the last 24 hours, and this needs ${usd(price)}.${raise}`
-    : used.month + price > GUEST_LIMITS.monthly
-    ? `Over Bitrefill's ${usd(GUEST_LIMITS.monthly)} a month per email: ${usd(used.month)} used in the last 30 days, and this needs ${usd(price)}.${raise}`
-    : undefined
-}
-
-/**
  * Whether the customer typed this address in `message`. The Checkout Email is the one thing the Agent
  * writes, so the model's word isn't enough (ADR-0007): text it read elsewhere (a voucher name, an old
  * paste) could ask for another address. Whole addresses only: "ob@x.com" isn't in "bob@x.com".
@@ -342,10 +324,11 @@ export const makeAgent = (deps: {
             }`
           }
         }
-        // Bitrefill's limits for that email, which the tap would otherwise run into. Test cards don't count (Purchases.place).
+        // Bitrefill's limits for that email, which the tap would otherwise run into: the server's own check, on the same
+        // figures. Test cards don't count (Purchases.place).
         const real = quotes.filter((_, i) => !vouchers[i]!.id.startsWith("test-"))
-        const overLimit = email.used && overGuestLimits(email.used, real.reduce((s, q) => s + q.referencePrice, 0), real.length, deps.web)
-        if (overLimit) return { error: overLimit }
+        const overLimit = real.length > 0 && email.used && guestLimitRefusal(email.used, real.reduce((s, q) => s + q.referencePrice, 0), real.length)
+        if (overLimit) return { error: `${overLimit} Or they can connect their own Bitrefill account at ${deps.web}/wallet for higher limits.` }
         turn.offer = { cards: cards.map((c, i) => {
           const v = vouchers[i]!
           const q = quotes[i]!

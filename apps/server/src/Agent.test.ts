@@ -5,7 +5,7 @@ import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { NO_LIMIT } from "@luckout/api"
-import { blocker, makeAgent, type Offer, overGuestLimits, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
+import { blocker, makeAgent, type Offer, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
 
 /** The cards behind a turn's Buy button, if it has one. */
 const cards = (turn: { offer?: Offer | undefined }) => (turn.offer && "cards" in turn.offer ? turn.offer.cards : undefined)
@@ -274,16 +274,18 @@ test("no Buy button for cards Bitrefill would refuse for their Checkout Email", 
   const turn = await agent("alice.near", [], "six amazon cards")
   model.close()
   assert.equal(turn.offer, undefined, "the tap would only be refused")
-  assert.match(String(model.seen[1]!.messages.at(-1)!.content), /15 cards a day per email.*10 in the last 24 hours.*at most 5/)
+  const refusal = String(model.seen[1]!.messages.at(-1)!.content)
+  assert.match(refusal, /15 cards a day per email.*10 in the last 24 hours.*at most 5/, "the server's own refusal (Purchases.guestLimitRefusal)")
+  assert.match(refusal, /connect their own Bitrefill account at https:\/\/luckout\.test\/wallet/, "and how to raise the limits")
 })
 
-test("Bitrefill's guest limits: cards a day, then dollars a day and a month; test cards don't count", () => {
-  const none = { orders: 0, day: 0, month: 0 }
-  assert.equal(overGuestLimits(none, 500_000_000, 15, "w"), undefined, "exactly at the limits is fine")
-  assert.match(overGuestLimits({ ...none, orders: 15 }, 1_000_000, 1, "w")!, /none more until later/)
-  assert.match(overGuestLimits({ ...none, day: 450_000_000 }, 60_000_000, 1, "w")!, /\$500\.00 a day/)
-  assert.match(overGuestLimits({ ...none, day: 0, month: 990_000_000 }, 20_000_000, 1, "w")!, /\$1000\.00 a month/)
-  assert.equal(overGuestLimits({ orders: 15, day: 500_000_000, month: 1_000_000_000 }, 0, 0, "w"), undefined, "no real cards, nothing Bitrefill counts")
+test("test cards don't count toward Bitrefill's limits for the Checkout Email", async () => {
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "normal" }] }), { role: "assistant", content: "Tap Buy." }])
+  const used = { ...guestDeps({ orders: 15, day: 500_000_000, month: 1_000_000_000 }), bitrefill: (deps as unknown as { bitrefill: object }).bitrefill }
+  const agent = makeAgent({ ...used, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.near", [], "a test card")
+  model.close()
+  assert.equal(cards(turn)?.[0]?.voucherId, "test-gift-card-code", "an email at every limit can still buy a test card")
 })
 
 test("replacing a Checkout Email they already gave waits for their tap on a button that shows both", async () => {
