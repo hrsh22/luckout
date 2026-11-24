@@ -13,7 +13,8 @@ import type { Purchases } from "./Purchases.ts"
 // - on testnet the catalog itself only holds test cards (Bitrefill.ts), so the model can't offer others;
 // - Redemption Data never enters the model's context (the bot sends codes itself);
 // - the one thing the model can write is the Checkout Email, and only to an address the customer
-//   typed in the message being answered (typedByCustomer); the Buy line then shows it;
+//   typed in the message being answered (typedByCustomer); replacing one they already gave also
+//   waits for their tap on a button that shows both, and the Buy line shows where cards go;
 // - every completion must be signed inside NEAR AI's attested TEE (Attestation.ts), or the turn's
 //   reply and button are withheld.
 
@@ -25,8 +26,10 @@ export interface Pending {
   readonly currency: string
   /** Where the card works: a country code, or "XI" for worldwide. */
   readonly country: string
-  /** Always resolved (the Default Mode when the customer named none), so the button shows the real maximum. */
+  /** The mode the card is bought in: the quote's, so a Lucky card the Cashback Reserve can't cover now is Normal. */
   readonly mode: Mode
+  /** The mode they asked for, resolved (the Default Mode when they named none), so the Buy line can say when it isn't the one bought. */
+  readonly requestedMode: Mode
   readonly maxPrice: number
   readonly referencePrice: number
   /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
@@ -36,6 +39,9 @@ export interface Pending {
   /** ISO: the use-by date on the last of these delivered recently (Purchases.useBy); shown on the Buy line. */
   readonly useBy?: string
 }
+
+/** What the button under the Agent's reply does: buy these cards, or replace the Checkout Email they already gave. */
+export type Offer = { readonly cards: ReadonlyArray<Pending> } | { readonly email: { readonly from: string; readonly to: string } }
 
 const regions = new Intl.DisplayNames(["en"], { type: "region" })
 /** Where a card can be used, in words: "India only", or "anywhere" for a worldwide ("XI") card. */
@@ -90,7 +96,7 @@ export const TOOLS = [
     ["cards"]
   ),
   tool("recent_purchases", "The customer's last purchases and what they paid (codes are not included)."),
-  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards (and its receipt) to. Only an address the customer typed in their latest message is accepted. Needed before buying when prepare_purchase says so.", {
+  tool("set_checkout_email", "Save the email Bitrefill sends each of their cards (and its receipt) to. Only an address the customer typed in their latest message is accepted, and replacing one they already gave waits for their tap on a button. Needed before buying when prepare_purchase says so.", {
     email: { type: "string" }
   }, ["email"])
 ]
@@ -169,6 +175,24 @@ export const blocker = (a: Account | null, maxPrice: number, web: string, now = 
 }
 
 /**
+ * Why Bitrefill would refuse `count` more cards costing `price` in all (micro-USDC, test cards left out) for a Checkout
+ * Email that has `used` this much of a guest's limits (ADR-0012), in words the model can pass on; undefined if it wouldn't.
+ * The server checks the same limits again when the customer taps Buy.
+ */
+export const overGuestLimits = (used: { orders: number; day: number; month: number }, price: number, count: number, web: string) => {
+  if (count === 0) return undefined
+  const raise = ` Connecting their own Bitrefill account at ${web}/wallet raises the limits.`
+  const left = GUEST_LIMITS.orders - used.orders
+  return used.orders + count > GUEST_LIMITS.orders
+    ? `Bitrefill allows ${GUEST_LIMITS.orders} cards a day per email, and theirs has had ${used.orders} in the last 24 hours, so ${left > 0 ? `at most ${left} more now` : "none more until later"}.${raise}`
+    : used.day + price > GUEST_LIMITS.daily
+    ? `Over Bitrefill's ${usd(GUEST_LIMITS.daily)} a day per email: ${usd(used.day)} used in the last 24 hours, and this needs ${usd(price)}.${raise}`
+    : used.month + price > GUEST_LIMITS.monthly
+    ? `Over Bitrefill's ${usd(GUEST_LIMITS.monthly)} a month per email: ${usd(used.month)} used in the last 30 days, and this needs ${usd(price)}.${raise}`
+    : undefined
+}
+
+/**
  * Whether the customer typed this address in `message`. The Checkout Email is the one thing the Agent
  * writes, so the model's word isn't enough (ADR-0007): text it read elsewhere (a voucher name, an old
  * paste) could ask for another address. Whole addresses only: "ob@x.com" isn't in "bob@x.com".
@@ -224,7 +248,7 @@ export const makeAgent = (deps: {
   const resolveMode = (a: Account | null, name: string | undefined) => (name && MODES[name]) || a?.default_mode || ("normal" as Mode)
   const game = (m: Mode) => (m === "normal" ? undefined : m.lucky)
 
-  const tools = (accountId: string, text: string, prepare: (cards: ReadonlyArray<Pending>) => void) => ({
+  const tools = (accountId: string, text: string, turn: { offer?: Offer | undefined }) => ({
     search_vouchers: ({ query }: { query: string }) =>
       run(deps.bitrefill.search(query).pipe(Effect.map((vs) => {
         const results = vs.slice(0, 6).map((v) => ({ id: v.id, name: v.name, works_in: worksIn(v.countryCode, v.countryName) }))
@@ -290,6 +314,10 @@ export const makeAgent = (deps: {
     prepare_purchase: ({ cards }: { cards: ReadonlyArray<{ voucher_id: string; value: string; mode?: string }> }) =>
       run(Effect.gen(function*() {
         if (!Array.isArray(cards) || cards.length === 0 || cards.length > MAX_CART) return { error: `List 1 to ${MAX_CART} cards.` }
+        // Its Buy line would show the old address: the new one first, then the purchase.
+        if (turn.offer && "email" in turn.offer) {
+          return { error: "Their new card email isn't saved until they tap the button under your reply. Prepare the purchase again after that." }
+        }
         const a = yield* account(accountId)
         const modes = cards.map((c) => resolveMode(a, c.mode))
         // The cart's own terms (ADR-0013): each Lucky card priced on the reserve the cards before it left, Normal when
@@ -314,7 +342,11 @@ export const makeAgent = (deps: {
             }`
           }
         }
-        prepare(cards.map((c, i) => {
+        // Bitrefill's limits for that email, which the tap would otherwise run into. Test cards don't count (Purchases.place).
+        const real = quotes.filter((_, i) => !vouchers[i]!.id.startsWith("test-"))
+        const overLimit = email.used && overGuestLimits(email.used, real.reduce((s, q) => s + q.referencePrice, 0), real.length, deps.web)
+        if (overLimit) return { error: overLimit }
+        turn.offer = { cards: cards.map((c, i) => {
           const v = vouchers[i]!
           const q = quotes[i]!
           const useBy = useBys[i]
@@ -325,17 +357,18 @@ export const makeAgent = (deps: {
             currency: v.currency,
             country: v.countryCode,
             mode: q.mode,
+            requestedMode: modes[i]!,
             maxPrice: q.maxPrice,
             referencePrice: q.referencePrice,
             luckyAmount: q.luckyAmount,
             ...(email.needed && email.email ? { receiptTo: email.email } : {}),
             ...(useBy ? { useBy } : {})
           }
-        }))
+        }) }
         const normal = cards.flatMap((c, i) => (modes[i] !== "normal" && quotes[i]!.mode === "normal" ? [`${vouchers[i]!.name} ${c.value}`] : []))
         return {
           shown: `Under your reply the customer sees ${cards.length === 1 ? "the exact card" : "every card"}, mode, price and use-by date, and one Buy button. So reply with one short line and no prices, like: Here ${cards.length === 1 ? "it is" : "they are"}, tap Buy when you're ready.`,
-          // Said by the model in a few words, so a switch to Normal is never a surprise.
+          // The Buy line says it too; the model's words keep the reply from promising a Draw.
           ...(normal.length > 0
             ? { normal_price: `Nothing is bought yet. The cashback reserve can't cover these right now, so the button buys them at the normal price, with no Draw: ${normal.join(", ")}. Say that in a few words, without prices.` }
             : {})
@@ -343,9 +376,21 @@ export const makeAgent = (deps: {
       })),
     // Saved only when it's in the message being answered; anything else goes back to the model as a refusal.
     set_checkout_email: ({ email }: { email: string }) =>
-      typedByCustomer(text, String(email ?? ""))
-        ? run(deps.purchases.setCheckoutEmail(accountId, email).pipe(Effect.map((e) => ({ saved: e.email }))))
-        : Promise.resolve({ error: "Not saved: that address isn't in the customer's latest message. Ask them to type their email, then save exactly what they typed." }),
+      !typedByCustomer(text, String(email ?? ""))
+        ? Promise.resolve({ error: "Not saved: that address isn't in the customer's latest message. Ask them to type their email, then save exactly what they typed." })
+        : run(Effect.gen(function*() {
+          const to = String(email).trim().toLowerCase()
+          const now = yield* deps.purchases.checkoutEmail(accountId)
+          // Replacing an address they gave repoints where their cards are emailed: the model may have been talked into
+          // asking for this one, so it changes only when they tap a button showing both (ADR-0007). A first one is just saved.
+          if (now.email && now.email !== to) {
+            turn.offer = { email: { from: now.email, to } }
+            return {
+              not_saved_yet: "Under your reply they see their current card email and this one, with a button to change it. Reply in one short line, without the addresses. Prepare any purchase after they tap it."
+            }
+          }
+          return { saved: (yield* deps.purchases.setCheckoutEmail(accountId, to)).email }
+        })),
     recent_purchases: () =>
       run(deps.purchases.list(accountId, { limit: 5 }).pipe(Effect.map((page) => page.items.map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,
@@ -357,13 +402,13 @@ export const makeAgent = (deps: {
   })
 
   /**
-   * One customer turn: runs the tool loop and returns the reply plus any purchase to confirm. `typed` is
-   * what the customer wrote themselves ("" for a forwarded message): the model reads `text`, but only
-   * `typed` can set the Checkout Email.
+   * One customer turn: runs the tool loop and returns the reply plus any offer for them to confirm with a button. `typed`
+   * is what the customer wrote themselves ("" for a forwarded message): the model reads `text`, but only `typed` can set
+   * the Checkout Email.
    */
   return async (accountId: string, history: Array<ChatCompletionMessageParam>, text: string, typed = text) => {
-    let pending: ReadonlyArray<Pending> | undefined
-    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, typed, (p) => (pending = p))
+    const turn: { offer?: Offer | undefined } = {}
+    const handlers: Record<string, (args: never) => Promise<unknown>> = tools(accountId, typed, turn)
     const messages: Array<ChatCompletionMessageParam> = [{ role: "system", content: system(deps.testnet, deps.web) }, ...history, { role: "user", content: text }]
     // Signatures are checked alongside the tool loop and all awaited before anything reaches the customer.
     const signed: Array<Promise<boolean>> = []
@@ -378,11 +423,11 @@ export const makeAgent = (deps: {
       const calls = (msg.tool_calls ?? []).filter((c) => c.type === "function")
       if (calls.length === 0) {
         if (!(await Promise.all(signed)).every(Boolean)) {
-          return { reply: "I couldn't prove that answer came from the secure enclave, so I didn't send it. Try again in a moment.", pending: undefined, history }
+          return { reply: "I couldn't prove that answer came from the secure enclave, so I didn't send it. Try again in a moment.", offer: undefined, history }
         }
         // The whole transcript, tool calls included: the next turn's prompt then starts with exactly
         // this turn's tokens, which the provider has cached (cache reads cost 2% of fresh input).
-        return { reply: msg.content ?? "", pending, history: messages.slice(1) }
+        return { reply: msg.content ?? "", offer: turn.offer, history: messages.slice(1) }
       }
       for (const c of calls) {
         const handler = handlers[c.function.name]
@@ -393,6 +438,6 @@ export const makeAgent = (deps: {
     }
     // A button prepared along the way still needs every step behind it verified.
     const verified = (await Promise.all(signed)).every(Boolean)
-    return { reply: "Sorry, I couldn't finish that. Try asking again in a simpler way.", pending: verified ? pending : undefined, history: history }
+    return { reply: "Sorry, I couldn't finish that. Try asking again in a simpler way.", offer: verified ? turn.offer : undefined, history: history }
   }
 }

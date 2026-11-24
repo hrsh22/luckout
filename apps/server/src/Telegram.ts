@@ -4,19 +4,28 @@ import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
-import { dateText, makeAgent, modeName, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
+import { dateText, makeAgent, modeName, type Offer, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
 import { Alerts } from "./Alerts.ts"
 import { makeAttestation } from "./Attestation.ts"
-import { Bitrefill } from "./Bitrefill.ts"
+import { Bitrefill, MIN_PRICE } from "./Bitrefill.ts"
 import { closedMessage, Sales } from "./Sales.ts"
 import { Near, Network } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 
 const LINK_TTL_MINUTES = 10
-const PENDING_TTL_MS = 10 * 60 * 1000
-/** Messages per Telegram user per minute and per UTC day; each one can cost several LLM calls. */
+/** How long a button under the Agent's reply works (ADR-0007). */
+const OFFER_TTL_MS = 10 * 60 * 1000
+/** Messages per Telegram user per minute; each one can cost several LLM calls. */
 const MESSAGES_PER_MINUTE = 10
+/**
+ * Messages that reach the model per UTC day: per Telegram user, per user whose account has no Balance to buy with, and
+ * for the whole bot. A customer shopping all day sends a few dozen; these only stop runaway model costs.
+ */
 const MESSAGES_PER_DAY = 200
+const UNFUNDED_MESSAGES_PER_DAY = 50
+const BOT_MESSAGES_PER_DAY = 5_000
+/** Telegram takes at most 4096 characters in one message. */
+const MESSAGE_MAX = 4096
 /** A chat quiet this long starts over, so its history doesn't sit in memory. */
 const IDLE_MS = 60 * 60_000
 
@@ -28,20 +37,36 @@ export const describe = (e: unknown) =>
     ? `${e.name}: ${e.message}`
     : typeof e
 
-// ponytail: counters in memory, one process; a restart resets them, and the day is UTC.
-/** Per-Telegram-user message limits: "minute" or "day" when a message is over one, undefined when it may go ahead. */
-export const messageLimits = (perMinute = MESSAGES_PER_MINUTE, perDay = MESSAGES_PER_DAY) => {
+// ponytail: counters in memory, one process; a restart resets them, and the day is UTC. Raise BOT_MESSAGES_PER_DAY
+// when real use nears it (the admin alert says so), or move the counters to the database if the bot ever runs twice.
+/** The bot's message limits: per Telegram user per minute, and per UTC day for messages that reach the model. */
+export const messageLimits = (
+  o = { perMinute: MESSAGES_PER_MINUTE, perDay: MESSAGES_PER_DAY, unfundedPerDay: UNFUNDED_MESSAGES_PER_DAY, botPerDay: BOT_MESSAGES_PER_DAY }
+) => {
   const minutes = new Map<number, { count: number; resetAt: number }>()
   const days = new Map<number, { count: number; day: number }>()
+  let bot = { count: 0, day: 0 }
   return {
-    check: (userId: number, now = Date.now()): "minute" | "day" | undefined => {
+    /** Every message, before anything else: "minute" when this user is over theirs. */
+    check: (userId: number, now = Date.now()): "minute" | undefined => {
       const w = minutes.get(userId)
       if (!w || w.resetAt < now) minutes.set(userId, { count: 1, resetAt: now + 60_000 })
-      else if (++w.count > perMinute) return "minute"
+      else if (++w.count > o.perMinute) return "minute"
+      return undefined
+    },
+    /**
+     * A message about to reach the model, counted only if it goes ahead: "day" when this user has had today's (fewer
+     * with no Balance to buy with), "bot" when the whole bot has.
+     */
+    model: (userId: number, funded: boolean, now = Date.now()): "day" | "bot" | undefined => {
       const day = Math.floor(now / 86_400_000)
+      if (bot.day !== day) bot = { count: 0, day }
       const d = days.get(userId)
-      if (!d || d.day !== day) days.set(userId, { count: 1, day })
-      else if (++d.count > perDay) return "day"
+      const used = d?.day === day ? d.count : 0
+      if (used >= (funded ? o.perDay : o.unfundedPerDay)) return "day"
+      if (bot.count >= o.botPerDay) return "bot"
+      bot.count++
+      days.set(userId, { count: used + 1, day })
       return undefined
     },
     /** Forgets counters that no longer count. */
@@ -64,12 +89,153 @@ export const buySummary = (cards: ReadonlyArray<Pending>) => {
 }
 const cardLine = (p: Pending) =>
   (p.maxPrice === p.referencePrice
-    ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}.`
+    ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}` +
+      // A Lucky card the Cashback Reserve can't cover now is bought at Normal: said here by code, not left to the model.
+      (p.mode === "normal" && p.requestedMode !== "normal"
+        ? ` on Normal: the Cashback Reserve can't cover ${modeName(p.requestedMode)} right now, so there's no Draw.`
+        : ".")
     : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
   // A card only works in its own country: said on the button's line, every time.
   ` Works in ${worksIn(p.country)}.` +
   // Bitrefill gives no date before an order: the last delivered one's is the best guess, and said as one.
   (p.useBy ? ` Use it by about ${dateText(p.useBy)}.` : "")
+
+/** Codes only ever go to a private chat with their owner: the bot ignores groups and channels. */
+export const privateOnly = async (ctx: { readonly chat?: { readonly type: string } | undefined }, next: () => Promise<void>) => {
+  if (ctx.chat?.type === "private") await next()
+}
+
+/** What the customer wrote themselves: nothing for a forwarded message, or one sent through an inline bot (ADR-0007). */
+export const typedText = (m: { readonly text: string; readonly forward_origin?: unknown; readonly via_bot?: unknown }) =>
+  m.forward_origin || m.via_bot ? "" : m.text
+
+interface Held {
+  readonly offer: Offer
+  readonly telegramUserId: number
+  readonly accountId: string
+  readonly chatId: number
+  /** The message its buttons are on, once sent: withdrawing the offer takes them off. */
+  messageId?: number
+  readonly expires: number
+}
+
+// ponytail: offers live in memory (lost on restart, one process): a button from before a restart says it expired.
+/** The offers behind the buttons under the Agent's replies (ADR-0007). */
+export const makeOffers = (ttl = OFFER_TTL_MS) => {
+  const held = new Map<string, Held>()
+  return {
+    /**
+     * Holds a new offer under a fresh id. Only the newest of a user's offers stands: their earlier ones (a cart they've
+     * since changed, a Buy line with the email they're replacing) are withdrawn and returned, so their buttons can come off.
+     */
+    add: (o: Omit<Held, "expires" | "messageId">, now = Date.now()) => {
+      const withdrawn = [...held].filter(([, h]) => h.telegramUserId === o.telegramUserId)
+      for (const [id] of withdrawn) held.delete(id)
+      const id = randomUUID()
+      held.set(id, { ...o, expires: now + ttl })
+      return { id, withdrawn: withdrawn.map(([, h]) => h) }
+    },
+    shownIn: (id: string, messageId: number) => {
+      const h = held.get(id)
+      if (h) h.messageId = messageId
+    },
+    /**
+     * The offer behind a tap, at most once: only for the Telegram user it was made for, before it expires, and while
+     * they're still linked to the account it was made for (`linkedTo`). Otherwise, what to tell them.
+     */
+    take: (id: string, userId: number, linkedTo: string | undefined, now = Date.now()): Held | string => {
+      const h = held.get(id)
+      if (!h || h.telegramUserId !== userId || h.expires < now) return "This offer expired. Ask again."
+      held.delete(id)
+      return h.accountId === linkedTo ? h : "This Telegram account is no longer linked to that wallet."
+    },
+    sweep: (now = Date.now()) => {
+      for (const [id, h] of held) if (h.expires < now) held.delete(id)
+    }
+  }
+}
+
+/**
+ * The purchases a Buy tap makes: each card at the most it showed, which the contract won't debit past. The offer's id
+ * keys each card, so a repeat returns the same purchases (ADR-0007).
+ */
+export const purchaseItems = (id: string, cards: ReadonlyArray<Pending>) =>
+  cards.map((c, i) =>
+    new NewPurchase({
+      voucherId: c.voucherId,
+      value: c.value,
+      mode: c.mode,
+      maxPrice: c.maxPrice,
+      ...(c.mode === "normal" ? {} : { luckyAmount: c.luckyAmount }),
+      idempotencyKey: cards.length === 1 ? id : `${id}:${i}`
+    })
+  )
+
+/** One card's message after a Buy tap: its code when delivered, or where it's at. */
+export const purchaseMessage = (p: Purchase, web: string) => {
+  if (p.status === "waiting") {
+    return `Your ${p.voucherName} ${p.value} needs a little time: we're topping up our gift card supply, usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then in the app under Purchases. I'll message you here when it's ready.`
+  }
+  if (p.status === "pending") return `Your ${p.voucherName} ${p.value} is on its way: Bitrefill usually sends the code within a minute. I'll message you here when it's ready.`
+  if (p.status !== "delivered") return p.error ?? `Purchase ${p.status}.`
+  const paid = p.draw ? p.draw.finalPrice : p.referencePrice
+  const diff = paid - p.referencePrice
+  const r = redemptionFields(p.redemption)
+  const lines = [
+    `${p.voucherName} ${p.value} is yours.`,
+    !p.draw
+      ? `You paid ${usdUp(paid)}.`
+      : p.draw.cashback === 0
+      ? `No cashback this time: you paid ${usdUp(paid)}.`
+      : `${paid === 0 ? "100% off!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
+    ...r.secrets.map((f) => `${f.label}: ${f.value}`),
+    r.other ?? "",
+    r.link ? `Link: ${r.link}` : "",
+    r.expires && !Number.isNaN(Date.parse(r.expires)) ? `Use it by ${dateText(r.expires)}.` : "",
+    p.draw && p.settleTx ? `Draw Proof: ${web}/draw/${p.settleTx}` : ""
+  ]
+  return lines.filter(Boolean).join("\n")
+}
+
+/**
+ * Sends a Buy tap's messages, each card whole and as few messages as fit, with no link previews (Telegram would fetch
+ * the redemption link). If Telegram won't take one (too long, down, rate-limited), `fallback` sends a short notice
+ * instead, so a customer who was charged never sees only "Buying…".
+ */
+export const deliver = async (
+  send: (text: string, other: { link_preview_options: { is_disabled: true } }) => Promise<unknown>,
+  texts: ReadonlyArray<string>,
+  fallback: () => Promise<unknown>
+) => {
+  const messages = texts.reduce<Array<string>>((out, t) => {
+    const last = out.at(-1)
+    if (last !== undefined && last.length + 2 + t.length <= MESSAGE_MAX) out[out.length - 1] = `${last}\n\n${t}`
+    else out.push(t)
+    return out
+  }, [])
+  for (const text of messages) {
+    try {
+      await send(text, { link_preview_options: { is_disabled: true } })
+    } catch (e) {
+      console.error("telegram delivery failed:", describe(e))
+      return void (await fallback())
+    }
+  }
+}
+
+/** A tap on "Change it": the new Checkout Email is saved only if the one it replaces is still the one on file. */
+export const replaceCheckoutEmail = (
+  purchases: Pick<Purchases["Service"], "checkoutEmail" | "setCheckoutEmail">,
+  accountId: string,
+  change: { readonly from: string; readonly to: string }
+) =>
+  Effect.gen(function*() {
+    if ((yield* purchases.checkoutEmail(accountId)).email !== change.from) {
+      return "Your card email changed since I asked, so I left it. Ask me again if you still want to change it."
+    }
+    const saved = yield* purchases.setCheckoutEmail(accountId, change.to)
+    return `Done: your cards are now also emailed to ${saved.email}.`
+  }).pipe(Effect.catch((e) => Effect.succeed(e.message)))
 
 /** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
 export const addLinkCode = (accountId: string, code: string, expiresAt: Date) =>
@@ -173,6 +339,7 @@ export class Telegram extends Context.Service<Telegram, {
 
       const purchases = yield* Purchases
       const alerts = yield* Alerts
+      const near = yield* Near
       const offline = `The assistant is offline right now. You can still buy in the web app: ${webOrigin}/shop`
       const ai = Option.isSome(aiKey) ? { apiKey: Redacted.value(aiKey.value), baseURL: aiBase, model: aiModel } : undefined
       const tee = ai && makeAttestation(ai, (message) => void Effect.runPromise(alerts.admin(message)))
@@ -181,7 +348,7 @@ export class Telegram extends Context.Service<Telegram, {
         ? makeAgent({
           bitrefill: yield* Bitrefill,
           purchases,
-          near: yield* Near,
+          near,
           shopClosed: Effect.map((yield* Sales).status, (st) => (st.open ? undefined : closedMessage(st))),
           testnet,
           web: webOrigin,
@@ -194,18 +361,15 @@ export class Telegram extends Context.Service<Telegram, {
         return a ? Effect.succeed(new AgentAttestation(a)) : Effect.fail(new NotFound())
       })
 
-      // ponytail: chat history and pending confirmations live in memory (lost on restart, one process).
+      // ponytail: chat history lives in memory (lost on restart, one process).
       const history = new Map<number, { messages: Array<ChatCompletionMessageParam>; at: number }>()
-      const pending = new Map<string, { cards: ReadonlyArray<Pending>; telegramUserId: number; accountId: string; expires: number }>()
+      const offers = makeOffers()
 
       const linkedAccount = (telegramUserId: number) =>
         db(sql<{ account_id: string }>`SELECT account_id FROM telegram_links WHERE telegram_user_id = ${telegramUserId}`)
           .then((r) => r[0]?.account_id)
 
-      // Codes only ever go to a private chat with their owner.
-      bot.use(async (ctx, next) => {
-        if (ctx.chat?.type === "private") await next()
-      })
+      bot.use(privateOnly)
 
       // grammY handles updates one at a time, so slow work (the LLM, a purchase) runs detached:
       // one chat waiting never holds up another. Each chat's jobs still run in order.
@@ -219,7 +383,7 @@ export class Telegram extends Context.Service<Telegram, {
       // Every few minutes, forget what can't matter any more: expired buttons, quiet chats, old counters.
       yield* Effect.sync(() => {
         const now = Date.now()
-        for (const [id, p] of pending) if (p.expires < now) pending.delete(id)
+        offers.sweep(now)
         for (const [chat, h] of history) if (h.at < now - IDLE_MS) history.delete(chat)
         limits.sweep(now)
       }).pipe(Effect.repeat(Schedule.spaced("5 minutes")), Effect.forkScoped)
@@ -253,20 +417,36 @@ export class Telegram extends Context.Service<Telegram, {
       bot.command("chatid", (ctx) => ctx.reply(`This chat's id is ${ctx.chat.id}.`))
 
       bot.on("message:text", (ctx) => inChat(ctx.chat.id, async () => {
-        const over = limits.check(ctx.from.id)
-        if (over === "minute") return void ctx.reply("That's a lot of messages; give me a minute.")
-        if (over === "day") return void ctx.reply(`That's all I can chat today. You can still buy in the web app: ${webOrigin}/shop`)
+        if (limits.check(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
         const accountId = await linkedAccount(ctx.from.id)
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
         if (!agent) return void ctx.reply(offline)
         await ctx.replyWithChatAction("typing")
         // No passing TEE check on file, no chat: the model's replies couldn't be trusted.
         if (!(await tee!.ready())) return void ctx.reply(offline)
+        // An account with nothing to buy with gets fewer messages a day. If NEAR can't say, it isn't held against them.
+        const funded = await Effect.runPromise(
+          near.view<{ balance: string } | null>("get_account", { account_id: accountId }).pipe(
+            Effect.map((a) => Number(a?.balance ?? 0) >= MIN_PRICE),
+            Effect.orElseSucceed(() => true)
+          )
+        )
+        const over = limits.model(ctx.from.id, funded)
+        if (over === "bot") {
+          void Effect.runPromise(alerts.admin(`The Telegram Agent reached its ${BOT_MESSAGES_PER_DAY} messages today and answers no one until 00:00 UTC. If that's real use, raise BOT_MESSAGES_PER_DAY.`))
+          return void ctx.reply(`I can't chat any more today. You can still buy in the web app: ${webOrigin}/shop`)
+        }
+        if (over === "day") {
+          return void ctx.reply(
+            funded
+              ? `That's all I can chat today. You can still buy in the web app: ${webOrigin}/shop`
+              : `That's all I can chat today until you add funds at ${webOrigin}/wallet. You can browse cards at ${webOrigin}/shop`
+          )
+        }
         let failure: unknown
         // A forwarded message, or one sent through an inline bot, was written by someone else: the model
         // reads it, but it can't set the Checkout Email (ADR-0007).
-        const typed = ctx.message.forward_origin || ctx.message.via_bot ? "" : ctx.message.text
-        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text, typed).catch((e) => {
+        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text, typedText(ctx.message)).catch((e) => {
           failure = e
           console.error("agent error", e)
           return undefined
@@ -280,74 +460,56 @@ export class Telegram extends Context.Service<Telegram, {
           return void ctx.reply("Sorry, something went wrong on my side. Try again in a moment.")
         }
         history.set(ctx.chat.id, { messages: trimHistory(turn.history), at: Date.now() })
-        if (!turn.pending) return void ctx.reply(turn.reply || "…")
-        const id = randomUUID()
-        const cards = turn.pending
-        pending.set(id, { cards, telegramUserId: ctx.from.id, accountId, expires: Date.now() + PENDING_TTL_MS })
-        const total = cards.reduce((s, c) => s + c.maxPrice, 0)
-        await ctx.reply(`${turn.reply}\n\n${buySummary(cards)}`.trim(), {
-          reply_markup: new InlineKeyboard().text(cards.length === 1 ? `Buy for ${usdUp(total)}` : `Buy ${cards.length} cards for ${usdUp(total)}`, `buy:${id}`).text("Cancel", `cancel:${id}`)
+        const offer = turn.offer
+        if (!offer) return void ctx.reply(turn.reply || "…")
+        const { id, withdrawn } = offers.add({ offer, telegramUserId: ctx.from.id, accountId, chatId: ctx.chat.id })
+        for (const w of withdrawn) {
+          if (w.messageId) void bot.api.editMessageReplyMarkup(w.chatId, w.messageId).catch(() => {})
+        }
+        if ("email" in offer) {
+          const sent = await ctx.reply(`${turn.reply}\n\nYour cards are also emailed to ${offer.email.from} now. Change that to ${offer.email.to}?`.trim(), {
+            reply_markup: new InlineKeyboard().text("Change it", `email:${id}`).text("Keep it", `cancel:${id}`)
+          })
+          return void offers.shownIn(id, sent.message_id)
+        }
+        const total = offer.cards.reduce((s, c) => s + c.maxPrice, 0)
+        const sent = await ctx.reply(`${turn.reply}\n\n${buySummary(offer.cards)}`.trim(), {
+          reply_markup: new InlineKeyboard()
+            .text(offer.cards.length === 1 ? `Buy for ${usdUp(total)}` : `Buy ${offer.cards.length} cards for ${usdUp(total)}`, `buy:${id}`)
+            .text("Cancel", `cancel:${id}`)
         })
+        offers.shownIn(id, sent.message_id)
       }))
 
-      const result = (p: Purchase) => {
-        if (p.status === "waiting") {
-          return `Your ${p.voucherName} ${p.value} needs a little time: we're topping up our gift card supply, usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then in the app under Purchases. I'll message you here when it's ready.`
-        }
-        if (p.status === "pending") return `Your ${p.voucherName} ${p.value} is on its way: Bitrefill usually sends the code within a minute. I'll message you here when it's ready.`
-        if (p.status !== "delivered") return p.error ?? `Purchase ${p.status}.`
-        const paid = p.draw ? p.draw.finalPrice : p.referencePrice
-        const diff = paid - p.referencePrice
-        const r = redemptionFields(p.redemption)
-        const lines = [
-          `${p.voucherName} ${p.value} is yours.`,
-          !p.draw
-            ? `You paid ${usdUp(paid)}.`
-            : p.draw.cashback === 0
-            ? `No cashback this time: you paid ${usdUp(paid)}.`
-            : `${paid === 0 ? "100% off!" : `${usd(p.draw.cashback)} cashback!`} You paid ${usdUp(paid)}${diff < 0 ? `, ${usd(-diff)} less than the price` : diff > 0 ? `, ${usd(diff)} above the price` : ", exactly the price"}.`,
-          ...r.secrets.map((f) => `${f.label}: ${f.value}`),
-          r.other ?? "",
-          r.link ? `Link: ${r.link}` : "",
-          r.expires && !Number.isNaN(Date.parse(r.expires)) ? `Use it by ${dateText(r.expires)}.` : "",
-          p.draw && p.settleTx ? `Draw Proof: ${webOrigin}/draw/${p.settleTx}` : ""
-        ]
-        return lines.filter(Boolean).join("\n")
-      }
-
-      bot.callbackQuery(/^(buy|cancel):(.+)$/, async (ctx) => {
+      bot.callbackQuery(/^(buy|email|cancel):(.+)$/, async (ctx) => {
         const [, action, id] = ctx.match as RegExpMatchArray
-        const p = pending.get(id!)
-        // Only the customer it was prepared for can confirm it, and only once.
-        if (!p || p.telegramUserId !== ctx.from.id || p.expires < Date.now()) {
-          return void ctx.answerCallbackQuery({ text: "This offer expired. Ask again." })
-        }
-        pending.delete(id!)
+        // Only the customer it was made for, still linked to that wallet, and only once.
+        const held = offers.take(id!, ctx.from.id, await linkedAccount(ctx.from.id))
+        if (typeof held === "string") return void ctx.answerCallbackQuery({ text: held })
         await ctx.editMessageReplyMarkup().catch(() => {})
         if (action === "cancel") return void ctx.answerCallbackQuery({ text: "Cancelled." })
-        // The wallet may have unlinked this Telegram account since the button was made.
-        if ((await linkedAccount(ctx.from.id)) !== p.accountId) {
-          return void ctx.answerCallbackQuery({ text: "This Telegram account is no longer linked to that wallet." })
+        const { offer, accountId } = held
+        if ("email" in offer) {
+          await ctx.answerCallbackQuery()
+          return inChat(ctx.chat!.id, async () => void (await ctx.reply(await Effect.runPromise(replaceCheckoutEmail(purchases, accountId, offer.email)))))
         }
         await ctx.answerCallbackQuery({ text: "Buying…" })
         inChat(ctx.chat!.id, async () => {
-          // The contract refuses to debit more than each card's maximum shown on the button. The button's id keys each
-          // card, so a second tap returns the same purchases (ADR-0007).
-          const items = p.cards.map((c, i) =>
-            new NewPurchase({
-              voucherId: c.voucherId,
-              value: c.value,
-              mode: c.mode,
-              maxPrice: c.maxPrice,
-              ...(c.mode === "normal" ? {} : { luckyAmount: c.luckyAmount }),
-              idempotencyKey: p.cards.length === 1 ? id! : `${id}:${i}`
-            })
-          )
+          const items = purchaseItems(id!, offer.cards)
+          const lost = `I couldn't send your purchase details here. See them, and any codes, at ${webOrigin}/purchases`
+          // Something unexpected: whether it went through is unknown, so send them to their purchases rather than say it failed.
+          const unsure = `Something went wrong on my side, so I can't tell whether that went through. Check ${webOrigin}/purchases before buying again.`
           const outcome = await Effect.runPromise(
-            (items.length === 1 ? Effect.map(purchases.create(p.accountId, items[0]!), (one) => [one]) : purchases.createCart(p.accountId, items))
-              .pipe(Effect.match({ onFailure: (e) => e.message, onSuccess: (bought) => bought.map(result).join("\n\n") }))
+            (items.length === 1 ? Effect.map(purchases.create(accountId, items[0]!), (one) => [one]) : purchases.createCart(accountId, items)).pipe(
+              Effect.match({
+                onFailure: (e) => ({ texts: [e.message], notice: e.message }),
+                onSuccess: (bought) => ({ texts: bought.map((p) => purchaseMessage(p, webOrigin)), notice: lost })
+              }),
+              Effect.catchCause((cause) => Effect.as(Effect.logError("telegram buy failed", cause), { texts: [unsure], notice: unsure }))
+            )
           )
-          await ctx.reply(outcome)
+          await deliver((text, other) => ctx.reply(text, other), outcome.texts, () =>
+            Effect.runPromise(alerts.customer(accountId, outcome.notice).pipe(Effect.repeat({ schedule: Schedule.spaced("30 seconds"), until: (sent) => sent, times: 3 }))))
         })
       })
 
