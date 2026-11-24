@@ -32,8 +32,11 @@ export function useWalletActions() {
   const { accountId, token, intents, refresh, send, signIntent } = useSession()
   const qc = useQueryClient()
 
-  /** Each step may ask the wallet to approve or sign; the toast says what's happening throughout. */
-  const steps = (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>) =>
+  /**
+   * Each step may ask the wallet to approve or sign; the toast says what's happening throughout. `tapped` is false for
+   * a request the app makes by itself, which stays quiet if another is open.
+   */
+  const steps = (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>, tapped = true) =>
     // One wallet request at a time: a second tap while this one is open answers false and asks the wallet nothing.
     oneAtATime(async () => {
       if (!accountId) return false
@@ -51,16 +54,17 @@ export function useWalletActions() {
         // Even a failure or a timeout may have moved money: show what the chain says now.
         await refresh().catch(() => {})
       }
-    })
+    }, tapped)
 
   const run = (pending: string, done: string, ...calls: Array<Call>) => steps(pending, done, () => send(...calls))
-  const setDefaultMode = (mode: Mode) =>
-    run(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, {
-      receiverId: contractId,
-      method: "set_default_mode",
-      args: { mode },
-      deposit: ONE_YOCTO
-    })
+  const setDefaultMode = (mode: Mode, tapped = true) =>
+    steps(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, () =>
+      send({
+        receiverId: contractId,
+        method: "set_default_mode",
+        args: { mode },
+        deposit: ONE_YOCTO
+      }), tapped)
   /** Welcome's pick, made before there was an account to save it on: the first deposit carries it. */
   const startMode = () => (accountId ? pendingMode(accountId) : undefined)
   /**
@@ -74,7 +78,8 @@ export function useWalletActions() {
     setPendingMode(accountId, undefined)
     const started = await view<{ default_mode: Mode } | null>(contractId, "get_account", { account_id: accountId })
       .then((a) => a?.default_mode, () => undefined)
-    if (started !== undefined && !sameMode(started, m)) await setDefaultMode(m)
+    // Started by the app, not a tap (here when a deposit lands, or from the header when a Top-Up does).
+    if (started !== undefined && !sameMode(started, m)) await setDefaultMode(m, false)
   }
   const withdrawCall = (micro: number): Call => ({
     receiverId: contractId,

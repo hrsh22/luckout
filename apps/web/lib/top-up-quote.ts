@@ -1,4 +1,5 @@
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
+import { TransferReverted } from "./evm.ts"
 
 /**
  * What the wallet is asked to transfer for an EVM or Solana Top-Up. The token comes from the asset the quote was asked for
@@ -25,3 +26,21 @@ type Priced = Pick<TopUpQuote, "symbol" | "chain" | "amountInFormatted" | "swap"
 export const pricedAsShown = (shown: Priced | undefined, real: Priced) =>
   !!shown && shown.symbol === real.symbol && shown.chain === real.chain &&
   Number(real.amountInFormatted) <= Number(shown.amountInFormatted) * (real.swap ? 1 : 1.005)
+
+/**
+ * After the wallet's send threw: whether this Top-Up's Send may be offered again, and the error to show. Once the
+ * wallet has sent it, only a transfer mined and reverted (TransferReverted) left nothing on its way; any other failure
+ * (a timeout waiting for it, a wallet that lost its connection) may still land, and a second send would pay twice.
+ */
+export const afterSendFailed = (e: unknown, asset: Pick<TopUpAsset, "symbol" | "swap">): { sendAgain: boolean; error: unknown } =>
+  !(e instanceof TransferReverted)
+    ? { sendAgain: false, error: e }
+    : asset.swap
+    // A swap fails whole when the price moved past its room before it landed: only Solana's fee was spent.
+    ? {
+      sendAgain: true,
+      error: new Error(
+        `The swap didn't go through: ${asset.symbol}'s price moved past what this swap allowed before it landed, or it took too long. Only Solana's network fee left your wallet. Send it again; if the price has moved too far, you'll be asked for a new Top-Up.`
+      )
+    }
+    : { sendAgain: true, error: e }
