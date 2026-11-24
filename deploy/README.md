@@ -135,9 +135,9 @@ A release is `staging` merged into `main` by PR, and merging deploys production'
    ```
    On 2026-11-25: 4.092 NEAR − 292,283 bytes × 0.00001 = 1.17 NEAR free; the new code's 21,956 more bytes lock 0.22, leaving 0.95, under the Monitor's 1 NEAR alert. Send about 0.3 NEAR to `app.luckout.near`, so it reads at least 1.4 before the upgrade.
 5. **The Base Wallet and the Treasury** (owner, Admin → Gas). From the merge, every card is paid from the Base Float: the Base Wallet holds about a day of sales in USDC and at least 0.0001 ETH, and the Treasury at least 0.1 NEAR, with proceeds to pull (Automatic) or USDC of its own for Refills.
-6. **The web's Deploy Hook for `main`** (owner). CI deploys production's web only through it, and this release is its first. Copy its URL from Vercel → Project → Settings → Git → Deploy Hooks and run `curl -fsS -X POST '<url>'`: a Production deployment of `main`'s current commit appears in Vercel (it redeploys what is live). If none does, create a new hook for `main`, put it in the `VERCEL_DEPLOY_HOOK_MAIN` secret and delete the old one.
+6. **The web's Deploy Hook for `main`** (owner). CI deploys production's web only through it, and this release is its first. Copy its URL from Vercel → Project → Settings → Git → Deploy Hooks; the URL is as good as a password, so paste it where it isn't echoed or kept in shell history: `read -rs HOOK && curl -fsS -X POST "$HOOK"; unset HOOK`. A Production deployment of `main`'s current commit appears in Vercel (it redeploys what is live). If none does, create a new hook for `main`, put it in the `VERCEL_DEPLOY_HOOK_MAIN` secret (`gh secret set VERCEL_DEPLOY_HOOK_MAIN` asks for it without echoing) and delete the old one.
 7. **The VM**, as `luckout-api`: `git status --porcelain --untracked-files=no` prints nothing. The first deploy of this release still runs the previous `deploy/remote-deploy.sh` (see [Updating](#updating)), which doesn't check it.
-8. **About a day before** (owner, optional): Admin → Bitrefill credit → Settings → Auto off, so sales spend the Bitrefill Credit down; whatever is left stays on the Bitrefill account. Step 21 turns it back on.
+8. **About a day before** (any admin, optional): in Admin's **Bitrefill credit** section, switch **Auto** off (the switch at the top right of the "USD credit at Bitrefill" card), so sales spend the Bitrefill Credit down; whatever is left stays on the Bitrefill account. Step 21 turns it back on.
 
 ### Before the merge, sales still open
 
@@ -145,49 +145,59 @@ A release is `staging` merged into `main` by PR, and merging deploys production'
    ```sh
    near account add-key server.luckout.near grant-function-call-access --allowance unlimited \
      --contract-account-id app.luckout.near --function-names 'purchase, confirm_delivery, fail_purchase, purchase_many, settle' \
-     autogenerate-new-keypair save-to-legacy-keychain network-config mainnet sign-with-… send
+     autogenerate-new-keypair save-to-legacy-keychain network-config mainnet sign-with-seed-phrase send
    ```
-   It is signed with `server.luckout.near`'s full-access key, which only the owner's wallet holds. `near account list-keys server.luckout.near network-config mainnet now` then shows two function-call keys for `app.luckout.near`, the new one with all five methods. It keeps the three old ones, so the server running now works with it too.
+   It is signed with `server.luckout.near`'s full-access key, which only the owner's wallet holds. `sign-with-seed-phrase` with no phrase on the command line makes the CLI ask for it (with a Ledger, `sign-with-ledger` instead). Never use `sign-with-plaintext-private-key`: it puts the key in shell history. The new key is saved under `~/.near-credentials/mainnet/server.luckout.near/` on the machine that ran the command. `near account list-keys server.luckout.near network-config mainnet now` then shows two function-call keys for `app.luckout.near`, the new one with all five methods, besides the full-access key. It keeps the three old methods, so the server running now works with it too.
 10. **Server `.env`**, as `luckout-api` (copy it to `.env.bak-<date>` first):
-    - `OPERATOR_PRIVATE_KEY`: the key from step 9 (in `~/.near-credentials/mainnet/server.luckout.near/` on the machine that made it).
+    - `OPERATOR_PRIVATE_KEY`: the `private_key` from step 9's key file, pasted in with an editor (not through a shell command, which history would keep).
     - `BITREFILL_CLIENT_ID`, `BITREFILL_CLIENT_SECRET`, `BITREFILL_CLIENT_SECRET_EXPIRES_AT`, `BITREFILL_REDIRECT_URI=https://api.luckout.wtf/bitrefill/callback`. `BITREFILL_API_KEY` stays.
     - `JUPITER_API_KEY` and `SOLANA_RPC_URL`.
 
+    Check that `.env` now holds the new key by printing only its public key, which must be the new one in step 9's key list:
+    ```sh
+    (cd ~/htdocs/luckout-api.gamified.trade/apps/server && node --env-file=../../.env --input-type=module \
+      -e 'import {KeyPair} from "near-api-js"; console.log(KeyPair.fromString(process.env.OPERATOR_PRIVATE_KEY).getPublicKey().toString())')
+    ```
     The running server reads none of this until it restarts. The new one refuses to start without the Bitrefill client, or with a key that can't call `purchase_many` and `settle` (`OPERATOR_PRIVATE_KEY: …` in `pm2 logs luckout-api`); the key check comes before the database, so a server refused there has run no migration.
 11. **Contract dry run:** `CHECK_ACCOUNT=<your account on production> CHECK_PURCHASE=<one of its settled purchases> ./contract/upgrade.sh production <run id from step 1>` ([Upgrading the contract](#upgrading-the-contract)). It checks the run, downloads its build, shows both code hashes, and saves the code on chain now to `~/luckout-wasm/production-<hash>.wasm`.
 
 ### The sales pause (about half an hour)
 
-12. **Admin → Stop sales** (any admin). `https://api.luckout.wtf/status` then answers `"open":false`. Withdrawals and Reclaims keep working, and purchases under way finish.
+12. **Admin → Stop sales** (any admin). `curl -s https://api.luckout.wtf/status` then answers `{"open":false,"reason":"stopped"}`. Withdrawals and Reclaims keep working, and purchases under way finish.
 13. **Let purchases under way finish.** On the VM, repeat until nothing is at `admit` or `ordering` (`<role>` and `<db>` as in `DATABASE_URL`; `~/.pgpass` has the password):
     ```sh
     psql -h 127.0.0.1 -U <role> <db> -c "SELECT step, count(*) FROM purchases WHERE step NOT IN ('settled', 'failed', 'rejected', 'stuck') GROUP BY step"
     ```
     One still at `ordering` a minute later may already be ordered on Bitrefill Credit, and the new server orders afresh: park it for a hand check (RUNBOOK.md, "Bitrefill order outcome unknown"):
     ```sh
-    psql -h 127.0.0.1 -U <role> <db> -c "UPDATE purchases SET step = 'stuck', error = 'At ordering on Bitrefill Credit when guest checkout came in: check the Bitrefill account' WHERE step = 'ordering'"
+    psql -h 127.0.0.1 -U <role> <db> -c "UPDATE purchases SET step = 'stuck', error = 'At ordering on Bitrefill Credit when guest checkout came in: check the Bitrefill account' WHERE step = 'ordering' AND updated_at < now() - interval '1 minute'"
     ```
     The rest (`waiting`, `restock`, `delivery`, `confirm`, `fail`) carry on under the new server. Admin → Bitrefill credit shows no Refill running: one started for the credit would end in the Base Float.
-14. **Upgrade the contract:** the command from step 11 with `GO=1` in front, on the machine with `app.luckout.near`'s key. It refuses while sales are open, and ends "The account, the purchase and the Game Versions read the same as before." The server and web running now keep working with the new code; the new ones need it (Checkouts, Solana Top-Ups, a first deposit's Default Mode). If it fails, roll back with the command it prints, run the check it prints, Restart sales, and stop the release here.
+14. **Upgrade the contract:** the command from step 11 with `GO=1` in front, on the machine with `app.luckout.near`'s key. It refuses while sales are open, and ends "The account, the purchase and the Game Versions read the same as before." **Leave sales stopped:** they reopen at step 22, after the merge has been checked. The server and web running now keep working with the new code; the new ones need it (Checkouts, Solana Top-Ups, a first deposit's Default Mode). If it fails, roll back with the command it prints, run the check it prints, Restart sales, and stop the release here.
 15. **Dump the database**, on the VM, now that nothing changes it:
     ```sh
-    set -o pipefail
-    f=~/backups/luckout-prerelease-$(date +%F-%H%M).sql.gz
+    umask 077; set -o pipefail
+    f=~/backups/prerelease-$(date +%F-%H%M).sql.gz
     pg_dump -h 127.0.0.1 -U <role> <db> | gzip > "$f" && gzip -dc "$f" | tail -n 3
     ```
-    It ends `-- PostgreSQL database dump complete`. Copy it off the VM (`scp luckout-milesvm:backups/luckout-prerelease-<…>.sql.gz .`): it is the only way back past migration 0025.
+    It ends `-- PostgreSQL database dump complete`. Only the site user can read it (`umask 077`), and its name keeps it out of the nightly backup's pruning of `luckout-*.sql.gz`. Copy it off the VM (`scp luckout-milesvm:backups/prerelease-<…>.sql.gz .`): it is the only way back past migration 0025.
 16. **Merge** the release PR from `staging` into `main` once its checks are green.
-17. **The server deploys** (CI's `deploy` job). The old server finishes its purchases first (up to three minutes), then the new one starts and runs the migrations. This deploy runs the previous script, so its last line is the old `mainnet main <commit>: health 204`. On the VM, `git rev-parse --short HEAD` is the merge commit, `pm2 describe luckout-api` shows it online and started minutes ago, and the newest row of `effect_sql_migrations` is 0027. If the job is red, read `pm2 logs luckout-api --lines 100`: a missing or wrong `.env` value is fixed in `.env`, then `pm2 restart luckout-api` (Node reads `.env` when it starts). Anything else: [RUNBOOK.md](RUNBOOK.md#rolling-back-a-release).
-18. **The web deploys** (CI's `web` job, after the server): Vercel shows a Production deployment of the merge commit as Ready, and www.luckout.wtf has the Cart. Everyone signs in again once. If the job failed, POST the hook from step 6 at once: until the new web is live, nobody can sign in.
+17. **The server deploys** (CI's `deploy` job). The old server finishes its purchases first (up to three minutes), then the new one starts and runs the migrations. This deploy runs the previous script, so its last line is the old `mainnet main <commit>: health 204`. On the VM:
+    - `git rev-parse --short HEAD` is the merge commit, and `pm2 describe luckout-api` shows it online and started minutes ago.
+    - `psql -h 127.0.0.1 -U <role> <db> -c "SELECT max(migration_id) FROM effect_sql_migrations"` reads 27 (it read 17 before).
+    - pm2 has this release's restart backoff (`deploy/ecosystem.config.cjs`): `pm2 jlist | tail -n 1 | python3 -c 'import json,sys; print([a["pm2_env"].get("exp_backoff_restart_delay") for a in json.load(sys.stdin) if a["name"] == "luckout-api"])'` prints `[1000]`. If it prints `[None]`, apply it while sales are still stopped: `cd ~/htdocs/luckout-api.gamified.trade && pm2 delete luckout-api && pm2 start deploy/ecosystem.config.cjs && pm2 save`.
+
+    If the job is red, read `pm2 logs luckout-api --lines 100`: a missing or wrong `.env` value is fixed in `.env`, then `pm2 restart luckout-api` (Node reads `.env` when it starts). Anything else: [RUNBOOK.md](RUNBOOK.md#rolling-back-a-release).
+18. **The web deploys** (CI's `web` job, after the server): Vercel shows a Production deployment of the merge commit as Ready, and www.luckout.wtf has the Cart. Everyone signs in again once. If the job failed, call the hook from step 6 at once (`read -rs HOOK && curl -fsS -X POST "$HOOK"; unset HOOK`): until the new web is live, nobody can sign in.
 
 ### After the merge
 
 19. **Admin** (signed in again): the Base Float shows its balance and the Checkout card, Gas is green, and the Treasury card doesn't say "Check the server".
-20. **Purchases under way went on:** `psql -h 127.0.0.1 -U <role> <db> -c "SELECT step, count(*) FROM checkouts WHERE step NOT IN ('done', 'rejected', 'stuck') GROUP BY step"` empties within minutes.
-21. **Admin → Base Float → Settings → Auto on** (owner), if step 8 turned it off: otherwise nothing refills the Base Float.
+20. **Purchases under way went on:** `psql -h 127.0.0.1 -U <role> <db> -c "SELECT step, count(*) FROM checkouts WHERE step NOT IN ('done', 'rejected', 'stuck', 'waiting') GROUP BY step"` empties within minutes. `waiting` is left out: those wait, uncharged, until sales reopen. One at `restock` waits for the Base Float (Admin → Base Float).
+21. **Auto back on** (any admin), if step 8 turned it off: in Admin's **Base Float** section, switch **Auto** on (the switch at the top right of the "USDC in our Base Wallet" card). Otherwise nothing refills the Base Float.
 22. **Admin → Restart sales.**
 23. **Prove it:** a ₹50 card on the site with a Checkout Email, a Lucky Buy, a Cart of two, a card through the Agent, Connect Bitrefill from Wallet, a relayed deposit and withdrawal, a small Top-Up from a Solana wallet and one in ORE. Admin → Purchases shows each card's Base payment; on nearblocks the admission is `purchase_many` and the settlement `settle`. If a purchase waits at `admit` for more than a minute, Stop sales and read `pm2 logs luckout-api`.
-24. **Delete the old server key** (owner's wallet), once a card has settled with the new one: `near account delete-keys server.luckout.near public-keys <old key> network-config mainnet sign-with-… send`. `list-keys` then shows the new function-call key alone.
+24. **Delete the old server key** (owner's wallet), once a card has settled with the new one: `near account delete-keys server.luckout.near public-keys <old key> network-config mainnet sign-with-seed-phrase send`, signed at the prompt as in step 9. `list-keys` then shows the new function-call key and the full-access key; the old function-call key is gone.
 25. **The nightly backup**, as `luckout-api`: in `crontab -e`, replace the `pg_dump … | gzip …` line with the `deploy/backup.sh` line from [Once](#once), step 7, with this site's role and database. Run that command once by hand (`~/backups/backup.log` says `saved …`), and once with a wrong database name to see the alert reach the admin chat.
 26. **Before the next deploy:** `git status --porcelain --untracked-files=no` prints nothing on the VM. That deploy is the first to run the new `deploy/remote-deploy.sh`.
 
@@ -199,7 +209,7 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 2. **What to check against.** Pick an account with a Balance on that contract and a settled purchase there, a Lucky Buy if you have one. Your own test account and one of its purchases are best: nothing else changes them during the upgrade.
 3. **Dry run.** `CHECK_ACCOUNT=<account> CHECK_PURCHASE=<id> ./contract/upgrade.sh staging <run id>` shows both code hashes, the reserve, whether sales are open, the account, the purchase and the Game Versions, and saves the code on chain now to `~/luckout-wasm/staging-<code hash>.wasm`.
 4. **Admin → Stop sales first**, on that environment's site, so no purchase is admitted while the code changes. Confirmations, failures, withdrawals and Reclaims keep working. The script won't deploy while the API's `/status` says sales are open; when `/status` doesn't answer, it says so and goes on.
-5. **Deploy:** the same command with `GO=1` in front. It checks the chain reports the new hash, then reads the account, the purchase and the Game Versions again and fails if any can't be read or reads differently. **Start sales again after the checks** pass (Admin → Restart sales).
+5. **Deploy:** the same command with `GO=1` in front. It checks the chain reports the new hash, then reads the account, the purchase and the Game Versions again and fails if any can't be read or reads differently. **Start sales again after the checks** pass (Admin → Restart sales); in a release, at the release's own step instead.
 6. **If it fails,** it prints the command to roll back, which deploys the saved code directly: `near contract deploy app.staging.luckout.near use-file ~/luckout-wasm/staging-<hash>.wasm without-init-call network-config mainnet sign-with-legacy-keychain send` (not the script itself: it would first try to read the records with the failing code). Then it prints the check: a dry run on the saved file (the script takes a file only for a dry run), `CHECK_ACCOUNT=… CHECK_PURCHASE=… ./contract/upgrade.sh staging ~/luckout-wasm/staging-<hash>.wasm`, which should end "Already deployed.". Restart sales once it does, and find out why before trying again.
 7. **Production** goes with the release ([Releasing staging to production](#releasing-staging-to-production), steps 11 and 14). When depends on what the release's apps send the contract, because merging into `main` deploys the web and the server at once:
    - **The apps send something the code on chain refuses** (a new deposit message, method or argument): upgrade production **before** merging into `main`, with the `staging` run from step 1. Merged first, the apps would send it to the old code, and a deposit it refuses goes back to the customer.

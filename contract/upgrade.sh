@@ -160,4 +160,5 @@ if [ "$new" != "$old" ]; then
 fi
 reserve=$(view get_reserve '{}') || { echo "The new code can't read the contract's state." >&2; way_back; exit 1; }
 echo "  reserve now:  $reserve"
-echo "The account, the purchase and the Game Versions read the same as before. Restart sales in Admin."
+# Sales stay as they were: a release reopens them at its own step, later than this (deploy/README.md).
+echo "The account, the purchase and the Game Versions read the same as before. Sales are left as they were: reopen them in Admin when your procedure says so."

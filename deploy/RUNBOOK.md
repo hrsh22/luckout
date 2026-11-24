@@ -121,15 +121,15 @@ A release from `staging` to `main` changes the contract (before the merge), then
 - **Anything else once the migrations ran: fix forward.** Revert or fix the change on `staging` by PR, then release it to `main`; CI deploys each. Never run `remote-deploy.sh main <earlier commit>` across migration 0025: the earlier code can't record a purchase on the migrated tables, so sales stop for everyone.
 - **The last resort, only if fixing forward can't work: the pre-release dump** (step 15 of the release). Everything recorded after it is lost from the database and has to be read back from the chains.
   1. Admin → Stop sales, then `pm2 stop luckout-api`.
-  2. Restore the dump as in [Restoring from a dump](#restoring-from-a-dump), steps 2 to 4.
+  2. Restore the dump (`~/backups/prerelease-<date>.sql.gz`, or the copy taken off the VM) as in [Restoring from a dump](#restoring-from-a-dump), steps 2 to 4.
   3. Park what could buy again. That dump predates Checkouts, so it is the purchases themselves:
      ```sh
      psql -h 127.0.0.1 -U <role> -d <db> -c "UPDATE purchases SET step = 'stuck', error = 'Restored from the pre-release dump at ' || step || ': check by hand' WHERE step IN ('waiting', 'admit', 'ordering', 'restock')"
      ```
-  4. As the site user: `bash deploy/remote-deploy.sh main <commit before the merge>`. Put the web back with it (Vercel → Deployments → production's deployment from before the merge → Instant Rollback): the release's web can't sign in to the earlier server. Then revert the merge on `main` by PR, or CI deploys the release again on its next push.
+  4. As the site user: `bash deploy/remote-deploy.sh main <commit before the merge>`. Put the web back with it: the release's web can't sign in to the earlier server. Vercel's Instant Rollback (Deployments → Instant Rollback) restores the production deployment before the current one, and on the Hobby plan only that one, so it fits only while the release's deployment is the latest; otherwise open production's deployment from before the merge and Redeploy it. Then revert the merge on `main` by PR, or CI deploys the release again on its next push.
   5. Purchases made since the merge are on chain but not in the database: find and close them as in [Restoring from a dump](#restoring-from-a-dump), step 7. Their cards were paid from the Base Float, so match them to the Base Wallet's payments.
-  6. The earlier code buys with Bitrefill Credit again: check Admin → Bitrefill credit and turn Auto on if it was spent down. Keep the new server key and the new `.env` lines (the earlier code ignores the lines, and the key allows its methods too), and keep the upgraded contract: the earlier server and web work with it.
-- **The web alone:** Vercel's Instant Rollback brings back the earlier web, which can't sign in to the new server. Fix forward instead. If the release's web never deployed, POST `main`'s Deploy Hook (Vercel → Project → Settings → Git → Deploy Hooks).
+  6. The earlier code buys with Bitrefill Credit again: check Admin's **Bitrefill credit** section, and switch **Auto** on (top right of the "USD credit at Bitrefill" card) if it was spent down. Keep the new server key and the new `.env` lines (the earlier code ignores the lines, and the key allows its methods too), and keep the upgraded contract: the earlier server and web work with it.
+- **The web alone:** Vercel's Instant Rollback brings back the earlier web (only the one production deployment before, on the Hobby plan), which can't sign in to the new server. Fix forward instead. If the release's web never deployed, call `main`'s Deploy Hook (Vercel → Project → Settings → Git → Deploy Hooks) without echoing its URL: `read -rs HOOK && curl -fsS -X POST "$HOOK"; unset HOOK`.
 
 ## Restoring from a dump
 
