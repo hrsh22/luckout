@@ -274,22 +274,24 @@ const refusal = (e: unknown) =>
 
 // MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most 20 of them, and
 // browsing (catalog pages, quotes) at most 12, so browsing can never starve a customer's purchase or its price check.
-// A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: a card newer than our
-// catalog copy still loads, and made-up ids can't use up anyone else's.
+// Of browsing's 12, refreshing a price we could already show stops while 4 are left, kept for cards never priced yet.
+// A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: the first 3 such ids in a
+// minute get Bitrefill's answer (a 404 if it doesn't have them), and any more that minute answer busy, unasked. So a
+// card newer than our catalog copy still loads, and made-up ids can't use up anyone else's lookups.
 const LOOKUPS_PER_MINUTE = 20
 const BROWSE_LOOKUPS_PER_MINUTE = 12
+const FIRST_VIEW_LOOKUPS = 4
 const UNLISTED_LOOKUPS_PER_MINUTE = 3
 /**
- * How old a price a page or quote shows may be: up to 10 minutes, and when the minute's lookups are used up or
- * Bitrefill doesn't answer, the last one we had, up to an hour old. That's safe because Buy never pays it: a purchase
- * is priced again from one at most a minute old, or looked up live on the whole budget (PURCHASE_PRICE_MS), and is
- * refused before anything is signed when the Maximum Price the customer confirmed no longer covers what the contract
- * would debit at that price ("Price changed since you confirmed"). The contract never debits more than that maximum,
- * and Bitrefill's invoice is never paid above what the contract admitted.
+ * How old a price may be. A quote (what the customer confirms) and Buy take one at most a minute old. A card's page
+ * may show one up to 10 minutes old. When the minute's lookups are used up or Bitrefill doesn't answer, pages and
+ * quotes show the last one we had, up to an hour old, instead of failing. That's safe because no purchase is priced
+ * from those: Buy takes a price at most a minute old, or looks one up live on the whole budget, and the most the
+ * contract debits is the Maximum Price the customer confirmed (`max_debit`, ADR-0007).
  */
-const SHOWN_PRICE_TTL = "10 minutes"
+const FRESH_PRICE_MS = 60_000
+const PAGE_PRICE_MS = 10 * 60_000
 const LAST_PRICE_MS = 60 * 60_000
-const PURCHASE_PRICE_MS = 60_000
 /** What `voucher` fails with for a card Bitrefill doesn't sell: the card's page answers 404 for it. */
 export const NO_SUCH_VOUCHER = "No such voucher"
 /** Bitrefill's answer for a card it doesn't have: "Product 'x' was not found.", or a tool error coded so. */
@@ -429,10 +431,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
   /** A card's logo and its brand colour, from our catalog copy: nothing if it isn't there (yet). */
   logo(id: string): { readonly image?: string; readonly background?: string }
   /**
-   * Packages with their current USD price, the Reference Price. `purchase`: a customer is buying, so
-   * the lookup may use the whole budget, not just browsing's share.
+   * Packages with their current USD price, the Reference Price (see FRESH_PRICE_MS for how current). `purchase`: a
+   * customer is buying, so the lookup may use the whole budget, not just browsing's share. `page`: only to show on the
+   * card's page, so a price up to 10 minutes old will do.
    */
-  voucher(id: string, options?: { readonly purchase?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
+  voucher(id: string, options?: { readonly purchase?: boolean; readonly page?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
   /**
    * Orders a card. With guest checkout it's an unpaid invoice to pay from the Base Wallet, placed as a guest
    * with the customer's Checkout Email or on their own Bitrefill account; otherwise it's paid at once from the
@@ -689,35 +692,40 @@ export class Bitrefill extends Context.Service<Bitrefill, {
        * first copy, every card counts. Only a card newer than the copy and unseen since the server started doesn't.
        */
       const isListed = (id: string) => logos.size === 0 || logos.has(id) || listed.has(id)
-      // What pages and quotes show (SHOWN_PRICE_TTL); failures only briefly, so a busy minute doesn't stick.
-      const mcpPrices = yield* Cache.makeWith((id: string) => lookup(id, BROWSE_LOOKUPS_PER_MINUTE, !isListed(id)), {
-        capacity: 1_000,
-        timeToLive: (exit) => (Exit.isSuccess(exit) ? SHOWN_PRICE_TTL : "5 seconds")
-      })
-      // A page or quote takes the price it showed last; past its 10 minutes, a new one if a lookup is free, else
-      // (or when Bitrefill doesn't answer) the last one we had, while it's under an hour old.
-      // ponytail: first views and refreshes share browsing's 12 a minute; once ~120 cards are in view at once, a card
-      // never priced since the server started answers busy. Keep part of the 12 for first views if that happens.
-      const shownPrice = (id: string) =>
-        Cache.get(mcpPrices, id).pipe(
-          Effect.catch((e) =>
-            Effect.flatMap(Clock.currentTimeMillis, (now) => {
-              const last = lastKnown.get(id)
-              return last && e.message !== NO_SUCH_VOUCHER && now - last.at < LAST_PRICE_MS ? Effect.succeed(last.product) : Effect.fail(e)
-            })
+      /** A card's last price while it's under an hour old: one a page or quote could still show. */
+      const recent = (id: string, now: number) => {
+        const last = lastKnown.get(id)
+        return last && now - last.at < LAST_PRICE_MS ? last : undefined
+      }
+      // Browsing's lookups, one at a time per card. A failure is kept 5 seconds, so a busy minute isn't asked again at once.
+      const browseLookups = yield* Cache.makeWith(
+        (id: string) =>
+          Effect.flatMap(Clock.currentTimeMillis, (now) =>
+            lookup(id, recent(id, now) ? BROWSE_LOOKUPS_PER_MINUTE - FIRST_VIEW_LOOKUPS : BROWSE_LOOKUPS_PER_MINUTE, !isListed(id))),
+        { capacity: 1_000, timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds") }
+      )
+      // A page or quote takes a price at most `maxAge` old; past that, a new one if a lookup is free, else (or when
+      // Bitrefill doesn't answer) the last one we had while it's under an hour old.
+      // ponytail: when more than 8 cards in view need a new price in one minute, the rest show their last one, and only
+      // 4 cards never priced since the server started load that minute. More lookups (on mainnet the API key only
+      // prices; orders go through the guest login) would lift both.
+      const shownPrice = (id: string, maxAge: number) =>
+        Effect.flatMap(Clock.currentTimeMillis, (now) => {
+          const last = recent(id, now)
+          if (last && now - last.at < maxAge) return Effect.succeed(last.product)
+          return Cache.get(browseLookups, id).pipe(
+            Effect.catch((e) => (last && e.message !== NO_SUCH_VOUCHER ? Effect.succeed(last.product) : Effect.fail(e)))
           )
-        )
+        })
       // A purchase takes a price at most a minute old, and otherwise looks it up on the whole budget: a browsing
-      // failure cached for this id never blocks it. Pages show the price it found from then on.
+      // failure kept for this card never blocks it. Pages and quotes show the price it found from then on.
       const purchasePrice = (id: string) =>
         Effect.flatMap(Clock.currentTimeMillis, (now) => {
           const last = lastKnown.get(id)
-          return last && now - last.at < PURCHASE_PRICE_MS
-            ? Effect.succeed(last.product)
-            : Effect.tap(lookup(id, LOOKUPS_PER_MINUTE), (p) => Cache.set(mcpPrices, id, p))
+          return last && now - last.at < FRESH_PRICE_MS ? Effect.succeed(last.product) : lookup(id, LOOKUPS_PER_MINUTE)
         })
 
-      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string, options?: { readonly purchase?: boolean }) {
+      const voucher = Effect.fn("Bitrefill.voucher")(function*(id: string, options?: { readonly purchase?: boolean; readonly page?: boolean }) {
         // Refused before anything is spent, so junk ids can't use up the lookups.
         if (!PRODUCT_ID.test(id)) return yield* new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
         if (testnet && !isTest(id)) {
@@ -737,7 +745,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             ))
           })
         }
-        const p = yield* (options?.purchase ? purchasePrice(id) : shownPrice(id))
+        const p = yield* (options?.purchase ? purchasePrice(id) : shownPrice(id, options?.page ? PAGE_PRICE_MS : FRESH_PRICE_MS))
         if (isTestMerchant(p)) return yield* new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
         const all = p.packages.map((pkg) => ({ value: pkg.package_value, priceMicroUsdc: usdToMicro(pkg.payment_price) }))
         return new Voucher({
