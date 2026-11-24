@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation"
 import { api, TimedOut } from "./api"
 import type { CartCard } from "./cart"
 import { checkoutRequest } from "./checkout-terms.ts"
+import { playable } from "./modes"
 import { useSession } from "./session"
 
 /** One card of a checkout, with the key that makes it one purchase however often the checkout is sent. */
@@ -16,8 +17,8 @@ export interface Unit {
 
 /**
  * Several cards priced together, as the contract would admit them now (ADR-0013): each Lucky card on the reserve the
- * cards before it left, Normal when there's none left for it. One quote per unit, in order. Renewed as it goes stale
- * while in sight.
+ * cards before it left, Normal when there's none left for it, or too little for a cent of Cashback (playable). One quote
+ * per unit, in order. Renewed as it goes stale while in sight.
  */
 export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) =>
   useQuery({
@@ -30,7 +31,7 @@ export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) =>
     staleTime: 20_000,
     refetchInterval: 20_000,
     refetchOnWindowFocus: true,
-    select: (q) => (q.length === units.length ? q : undefined)
+    select: (q) => (q.length === units.length ? q.map(playable) : undefined)
   })
 
 /**

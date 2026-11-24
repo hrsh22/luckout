@@ -77,8 +77,17 @@ export const pricedOutcomes = (m: ModeInfo, q: { referencePrice: number; luckyAm
       return { price, cashback: q.maxPrice - price, pct: cashbackPct(m.premiumBps, x.finalBps), chanceBps: x.chanceBps }
     })
 
-/** The single most likely price. */
-export const mostLikely = (outcomes: ReadonlyArray<PricedOutcome>) => outcomes.reduce((a, b) => (b.chanceBps > a.chanceBps ? b : a))
+/**
+ * The quote to buy on: a Lucky one whose best Cashback is under a cent can't give back anything a customer would see,
+ * so like one the reserve can't cover at all (Lucky Amount 0: the contract quotes it Normal in a cart and refuses it
+ * alone) it's bought at Normal, at the Reference Price. One rule for the card page, the Cart and the mode tiles.
+ */
+export const playable = <Q extends { mode: Mode; referencePrice: number; luckyAmount: number; maxPrice: number }>(q: Q): Q => {
+  const m = modeInfo(q.mode)
+  if (!m || m.premiumBps === 0) return q
+  const best = finalPrice(q.referencePrice, q.luckyAmount, q.maxPrice, Number(minFinalBps(m)))
+  return q.luckyAmount > 0 && q.maxPrice - best >= 10_000 ? q : ({ ...q, mode: "normal", luckyAmount: 0, maxPrice: q.referencePrice } as Q)
+}
 
 const minFinalBps = (m: ModeInfo) => BigInt(Math.min(...m.outcomes.map((o) => o.finalBps)))
 

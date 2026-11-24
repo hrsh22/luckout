@@ -2,7 +2,7 @@
 
 import { OddsBar } from "@/components/odds"
 import { shownCashbackBps, shownOutcomes, usdCents, usdUp } from "@/lib/format"
-import { cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
+import { cashbackChanceBps, MODES, playable, pricedOutcomes, RECOMMENDED, sameMode, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { useReserve } from "@/lib/queries"
 import type { Mode } from "@luckout/api"
@@ -40,8 +40,11 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
         // As the card's outcome list shows them: the chance and the best Cashback read from these, like the bar.
         const rows = quote && outcomes && shownOutcomes(quote.maxPrice, outcomes)
         const best = rows?.at(-1)
-        // No Cashback a cent can show: the Cashback Reserve is used up for now (the contract takes no Lucky Buy then).
-        const usedUp = m.premiumBps > 0 && best?.cashback === 0
+        // Too little reserve for a cent of Cashback on this price (none at all included): a purchase in this mode is
+        // bought at Normal (playable), so the tile says the reserve is used up. With a card, it can't be picked; as a
+        // Default Mode it still can, and each purchase falls back to Normal until the reserve has room again.
+        const usedUp = m.premiumBps > 0 && !!quote && playable({ mode: m.mode, ...quote }).mode === "normal"
+        const blocked = usedUp && price !== undefined
         // When only part of the price plays (a small Cashback Reserve), the extra is less than the mode's
         // percentage of the price: say what it really is.
         const extra = quote && quote.luckyAmount < example ? `+${usdUp(quote.maxPrice - example)}` : `+${m.premiumBps / 100}%`
@@ -52,9 +55,10 @@ export function ModePicker({ value, onChange, price, savedDefault, saving, compa
             type="button"
             role="radio"
             aria-checked={selected}
+            disabled={blocked}
             onClick={() => onChange(m.mode)}
-            whileTap={{ scale: 0.98 }}
-            className={`relative flex flex-col overflow-hidden rounded-[1.75rem] text-left transition-shadow outline-none focus-visible:ring-4 focus-visible:ring-lilac/40 ${compact ? "min-h-[112px] p-4" : "min-h-[148px] p-5"}`}
+            whileTap={{ scale: blocked ? 1 : 0.98 }}
+            className={`relative flex flex-col overflow-hidden rounded-[1.75rem] text-left transition-shadow outline-none focus-visible:ring-4 focus-visible:ring-lilac/40 disabled:cursor-not-allowed disabled:opacity-60 ${compact ? "min-h-[112px] p-4" : "min-h-[148px] p-5"}`}
             style={{
               background: selected ? p.tile : "#fff",
               color: selected ? p.ink : undefined,

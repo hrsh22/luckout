@@ -124,7 +124,7 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
     <li>
       <details className="group rounded-[1.25rem] bg-white shadow-card">
         <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-4 gap-y-1 p-4 [&::-webkit-details-marker]:hidden">
-          <span className="min-w-0 flex-1 font-semibold">{p.voucherName} {p.value}</span>
+          <span className="min-w-0 flex-1 font-semibold">{p.voucherName} {p.value}{p.currency ? ` ${p.currency}` : ""}</span>
           <span className="truncate text-sm text-muted sm:max-w-56">{p.accountId}</span>
           <ModeChip mode={p.mode} />
           <span className="w-20 text-right font-medium tabular-nums">{usd(p.paid ?? p.maxPrice ?? p.referencePrice)}</span>

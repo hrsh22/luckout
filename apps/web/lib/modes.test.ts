@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { ModeInfo } from "./modes.ts"
-import { cashbackChanceBps, finalPrice, MODES, pricedOutcomes, simpleQuote } from "./modes.ts"
+import { cashbackChanceBps, finalPrice, MODES, playable, pricedOutcomes, simpleQuote } from "./modes.ts"
 
 const USDC = 1_000_000
 const [normal, lite, classic, jackpot] = MODES as [ModeInfo, ModeInfo, ModeInfo, ModeInfo]
@@ -74,4 +74,22 @@ test("matches the contract's own quote tests", () => {
   assert.equal(simpleQuote(lite, 6 * USDC, at(0)).luckyAmount, 0)
   // A reserve too big for doubles stays exact.
   assert.equal(simpleQuote(jackpot, 7 * USDC, { free: "100000000000000000000", max_cashback: "20000000000000000000" }).luckyAmount, 7 * USDC)
+})
+
+test("a Lucky quote whose best Cashback is under a cent is bought at Normal, like one the reserve can't cover", () => {
+  const normalAt = (r: number) => ({ mode: "normal" as const, referencePrice: r, luckyAmount: 0, maxPrice: r })
+  // Free Reserve of a few cents: Classic on a $5 card plays $0.0075, its best Cashback $0.009: under a cent.
+  const tiny = { free: 3 * USDC, max_cashback: 9_000 }
+  const q = { mode: classic.mode, ...simpleQuote(classic, 5 * USDC, tiny) }
+  assert.ok(q.luckyAmount > 0 && q.maxPrice > q.referencePrice, "the contract would take it, with a premium")
+  assert.ok(pricedOutcomes(classic, q).at(-1)!.cashback < 10_000, "and give back less than a cent at best")
+  assert.deepEqual(playable(q), normalAt(5 * USDC))
+  // The reserve can't cover it at all: Lucky Amount 0.
+  assert.deepEqual(playable({ mode: jackpot.mode, ...simpleQuote(jackpot, 5 * USDC, { free: 0, max_cashback: 0 }) }), normalAt(5 * USDC))
+  // A cent of best Cashback plays as quoted; so does Normal.
+  const cent = { mode: lite.mode, ...simpleQuote(lite, 5 * USDC, { free: 3 * USDC, max_cashback: 11_000 }) }
+  assert.ok(pricedOutcomes(lite, cent).at(-1)!.cashback >= 10_000)
+  assert.equal(playable(cent), cent)
+  const n = normalAt(5 * USDC)
+  assert.equal(playable(n), n)
 })
