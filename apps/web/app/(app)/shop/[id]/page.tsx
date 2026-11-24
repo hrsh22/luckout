@@ -1,10 +1,13 @@
 import { VoucherPage } from "@/components/voucher-page"
 import { Suspense } from "react"
+import { MissingCard } from "./missing-card"
 
 export default function Page() {
   return (
     <Suspense>
-      <VoucherPage />
+      <MissingCard>
+        <VoucherPage />
+      </MissingCard>
     </Suspense>
   )
 }

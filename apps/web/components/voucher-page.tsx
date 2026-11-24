@@ -17,7 +17,7 @@ import { totals, useCartQuote, useCheckout } from "@/lib/checkout"
 import { Quantity } from "@/components/quantity"
 import { api, errorMessage, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
-import { usd, usdUp } from "@/lib/format"
+import { centsUp, usd, usdCents, usdUp } from "@/lib/format"
 import { modeInfo, modeName, modeSlug, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
@@ -393,7 +393,7 @@ function Receipt({ shown, exact, info, count = 1, total, error, retry, children 
         <p className="mt-2 text-[15px] text-ink-soft">
           {count > 1 && <span className="font-semibold text-ink">{count} cards. Each: </span>}
           {lucky
-            ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usd(best.cashback)} back${count > 1 ? ", with its own Draw" : ""}.`
+            ? `${count > 1 ? "the" : "The"} ${usd(shown.referencePrice)} price, plus ${usdUp(shown.maxPrice - shown.referencePrice)} for a chance at up to ${best.price === 0 ? "all of it" : usdCents(centsUp(shown.maxPrice) - centsUp(best.price))} back${count > 1 ? ", with its own Draw" : ""}.`
             : `${count > 1 ? "exactly" : "Exactly"} the price. No Draw, no cashback.`}
         </p>
       </div>

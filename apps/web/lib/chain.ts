@@ -64,23 +64,28 @@ export async function view<T>(contract: string, method: string, args: object = {
 }
 
 /**
- * Luckout events logged by one transaction, and when its block was produced. Only receipts our
- * contract executed successfully count, so another contract can't log a look-alike Draw.
+ * Luckout events logged by one transaction, and the block it's in. Only receipts our contract executed
+ * successfully count, so another contract can't log a look-alike Draw.
  */
 export async function txEvents(txHash: string, signer: string) {
   const tx = await rpc<{
     receipts_outcome: Array<{ outcome: { logs: Array<string>; executor_id: string; status: Record<string, unknown> } }>
     transaction_outcome: { block_hash: string }
   }>("tx", { tx_hash: txHash, sender_account_id: signer, wait_until: "NONE" }, historyUrls)
-  const block = await rpc<{ header: { timestamp_nanosec: string } }>("block", { block_id: tx.transaction_outcome.block_hash }, historyUrls)
   const events = tx.receipts_outcome
     .filter((r) => r.outcome.executor_id === contractId && !("Failure" in r.outcome.status))
     .flatMap((r) => r.outcome.logs)
     .filter((l) => l.startsWith("EVENT_JSON:"))
     .map((l) => JSON.parse(l.slice(11)) as { standard: string; event: string; data: Array<unknown> })
     .filter((e) => e.standard === "luckout")
-  return { events, time: new Date(Number(BigInt(block.header.timestamp_nanosec) / 1_000_000n)) }
+  return { events, blockHash: tx.transaction_outcome.block_hash }
 }
+
+/** When a block was produced. A separate lookup (archival for an old one), so only callers that show the time pay for it. */
+export const blockTime = (blockHash: string) =>
+  rpc<{ header: { timestamp_nanosec: string } }>("block", { block_id: blockHash }, historyUrls).then((b) =>
+    new Date(Number(BigInt(b.header.timestamp_nanosec) / 1_000_000n))
+  )
 
 /**
  * Why a sent transaction failed on chain, or undefined if it went through. Wallets hand back the

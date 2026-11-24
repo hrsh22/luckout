@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
 import { CHAIN_NAMES } from "@/lib/evm"
-import { tokenAmount, usd } from "@/lib/format"
+import { receivedAmount, tokenAmount, usd } from "@/lib/format"
 import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import type { HeldToken, Transfer } from "@luckout/api"
@@ -33,6 +33,8 @@ const walletOn = (c: string) => (c === "near" ? "your NEAR wallet" : `your walle
 const refundPlace = (t: Transfer) => (t.refundsToWallet ? walletOn(t.chain) : "your NEAR Intents account")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
 const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+/** "under 0.01" opens a title as "Under 0.01". */
+const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const when = (iso: string) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
 const titleOf = (t: Transfer) =>
   t.direction === "in"
@@ -40,7 +42,7 @@ const titleOf = (t: Transfer) =>
       t.paidWith ? ` from ${t.paidWith}` : t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""
     }${on(t.chain)}`
     : t.direction === "back"
-    ? `${tokenAmount(t.amountOut ?? t.amountIn ?? "", t.symbol, "down")} ${t.symbol} to ${walletOn(t.chain)}`
+    ? `${capital(receivedAmount(t.amountOut ?? t.amountIn ?? "", t.symbol))} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
 /** Still before the deadline, so the rest of a short payment can be sent. */
 const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
@@ -294,7 +296,7 @@ function say(t: Transfer, intents: boolean, canDeposit: boolean) {
     case "done":
       return t.direction === "in"
         ? "In your Luckout balance."
-        : `Arrived: ${t.amountOut ? tokenAmount(t.amountOut, t.symbol, "down") : usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
+        : `Arrived: ${t.amountOut ? receivedAmount(t.amountOut, t.symbol) : usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
     case "refunded": {
       const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
       if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`

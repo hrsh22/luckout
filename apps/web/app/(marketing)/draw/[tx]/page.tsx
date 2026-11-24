@@ -1,14 +1,14 @@
+import { shortAccount } from "@/components/avatar"
 import { BrowserCheck } from "@/components/browser-check"
 import { LocalTime } from "@/components/local-time"
 import { contractId, explorer } from "@/lib/chain"
 import { usd, usdUp } from "@/lib/format"
 import { cashbackPct } from "@/lib/modes"
-import { loadDraw, TX_HASH } from "@/lib/proof"
-import { ArrowLeft } from "lucide-react"
+import { loadDrawAt, NoDraw, TX_HASH } from "@/lib/proof"
 import type { Metadata } from "next"
-import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cache } from "react"
+import { PurchasesLink } from "./purchases-link"
 
 /** `purchase`: which Draw, when the transaction settled a cart (ADR-0013). */
 type Props = { params: Promise<{ tx: string }>; searchParams: Promise<{ purchase?: string }> }
@@ -19,9 +19,12 @@ const purchaseOf = async (searchParams: Props["searchParams"]) => {
 }
 
 // Once per request: generateMetadata and the page share it (RPC POSTs aren't memoized like GET fetches).
+// A link that names no Draw is the not-found page; NEAR not answering keeps its own message, to try again.
 const load = cache(async (tx: string, purchase: number | undefined) => {
   if (!TX_HASH.test(tx)) notFound()
-  return loadDraw(tx, purchase).catch((e: unknown) => ({ error: String((e as Error)?.message ?? e) }))
+  const d = await loadDrawAt(tx, purchase).catch((e: unknown) => (e instanceof NoDraw ? undefined : { error: String((e as Error)?.message ?? e) }))
+  if (!d) notFound()
+  return d
 })
 
 export async function generateMetadata({ params, searchParams }: Props): Promise<Metadata> {
@@ -53,16 +56,13 @@ export default async function DrawProof({ params, searchParams }: Props) {
   return (
     <main id="main" className="relative mx-auto flex w-full max-w-[1000px] flex-col gap-10 px-6 pt-14 sm:px-10">
       <div className="blob top-0 -right-40 size-[380px] bg-[#FFE1A6] opacity-70" aria-hidden="true" />
-      {/* A customer checking their own Draw gets back to their purchases (this page loads no wallet code). */}
-      <Link href="/purchases" className="relative -mb-6 inline-flex items-center gap-2 self-start font-semibold text-muted hover:text-ink">
-        <ArrowLeft size={18} aria-hidden="true" />Your purchases
-      </Link>
+      <PurchasesLink />
       <div className="relative flex flex-col gap-4">
         <h1 className="font-display text-[48px] leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[72px]">
           {paid === 0 ? "100% off" : `Paid ${usdUp(paid)} for`} a {usd(ref)} card
         </h1>
         <p className="text-lg text-ink-soft">
-          Purchase #{draw.purchase_id} by <span className="break-all">{draw.customer}</span> on {version.name} (up to +{version.premium_bps / 100}%),{" "}
+          Purchase #{draw.purchase_id} by <span title={draw.customer}>{shortAccount(draw.customer)}</span> on {version.name} (up to +{version.premium_bps / 100}%),{" "}
           <LocalTime iso={time.toISOString()} options={{ dateStyle: "medium", timeStyle: "short" }} />.
         </p>
       </div>
