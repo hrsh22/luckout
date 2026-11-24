@@ -1,6 +1,7 @@
 "use client"
 
 import { Qr } from "@/components/qr"
+import { SolanaPayCode } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
@@ -35,7 +36,9 @@ const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-di
 const when = (iso: string) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
 const titleOf = (t: Transfer) =>
   t.direction === "in"
-    ? `${usd(t.usdc)} top-up${t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""}${on(t.chain)}`
+    ? `${usd(t.usdc)} top-up${
+      t.paidWith ? ` from ${t.paidWith}` : t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""
+    }${on(t.chain)}`
     : t.direction === "back"
     ? `${tokenAmount(t.amountOut ?? t.amountIn ?? "", t.symbol, "down")} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
@@ -101,7 +104,7 @@ export function RecentTransfers() {
  * token paid with. Luckout can't spend it, but it's the customer's: one tap sends it to their own wallet.
  */
 export function HeldInIntents() {
-  const { token, intents } = useSession()
+  const { token, intents, wallet } = useSession()
   const actions = useWalletActions()
   const held = useHeld(token).data ?? []
   const [sending, setSending] = useState<string>()
@@ -119,7 +122,12 @@ export function HeldInIntents() {
             <span className="font-semibold">{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
             {h.sendable && (
               <Button size="sm" variant="light" disabled={sending !== undefined} onClick={() => sendBack(h)}>
-                {intents ? `Send to my wallet on ${chain(h.chain)}` : "Send to my NEAR wallet as USDC"}
+                {!intents
+                  ? "Send to my NEAR wallet as USDC"
+                  // An EVM wallet's change from a Solana swap (ADR-0014): it has no Solana address, so it gets USDC on Base.
+                  : wallet === "evm" && h.chain === "sol"
+                  ? "Send to my wallet as USDC on Base"
+                  : `Send to my wallet on ${chain(h.chain)}`}
               </Button>
             )}
           </li>
@@ -161,7 +169,11 @@ function Row({ t }: { t: Transfer }) {
         <p className="font-semibold">{titleOf(t)}</p>
         <p className="text-sm text-ink-soft">{say(t, intents, sitting >= 1_000_000)}</p>
 
-        {((unpaid && shown) || (t.phase === "incomplete" && open(t))) && (
+        {/* A swap-paid Top-Up's deposit address takes only USDC: the token sent there would be lost, so it has its code instead. */}
+        {t.paidWith && unpaid && shown && open(t) && (
+          <div className="rounded-2xl bg-soft p-3 text-sm"><SolanaPayCode depositAddress={t.depositAddress} /></div>
+        )}
+        {!t.paidWith && ((unpaid && shown) || (t.phase === "incomplete" && open(t))) && (
           <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm sm:flex-row">
             <Qr value={t.depositAddress} size={112} label="QR code of the deposit address" />
             <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -185,7 +197,9 @@ function Row({ t }: { t: Transfer }) {
         )}
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-          {unpaid && !shown && <Button size="sm" variant="light" onClick={() => setShown(true)}>Show address</Button>}
+          {unpaid && !shown && (!t.paidWith || open(t)) && (
+            <Button size="sm" variant="light" onClick={() => setShown(true)}>{t.paidWith ? "Show the code to pay" : "Show address"}</Button>
+          )}
           {t.phase === "in-wallet" && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
           )}
@@ -256,6 +270,11 @@ function say(t: Transfer, intents: boolean, canDeposit: boolean) {
         return open(t)
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
+      }
+      if (t.paidWith) {
+        return open(t)
+          ? `Waiting for your swap: pay ${t.paidWith} from a Solana wallet before ${time(t.deadline!)}.`
+          : "This price has expired and nothing was paid. Top up again for a new one."
       }
       return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} (a little more is fine: the extra comes back).`
     case "incomplete":

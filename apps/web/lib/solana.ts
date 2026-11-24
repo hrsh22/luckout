@@ -136,6 +136,27 @@ export async function sendFromSolana(expected: string, o: { contract?: string | 
   tx.recentBlockhash = blockhash
   const signature = await provider.sendTransaction(tx, connection)
   onSent?.(signature)
+  return landed(connection, signature, lastValidBlockHeight)
+}
+
+/**
+ * Signs and sends a transaction Luckout built for this wallet: a swap-paid Top-Up's (ADR-0014), which the wallet shows
+ * before it's approved. `onSent` and TransferReverted as for sendFromSolana.
+ */
+export async function sendSolanaTransaction(expected: string, built: { transaction: string; lastValidBlockHeight: number }, onSent?: (signature: string) => void) {
+  const provider = await walletOn(expected)
+  const { Connection, VersionedTransaction } = await import("@solana/web3.js")
+  const connection = new Connection(RPC, "confirmed")
+  const tx = VersionedTransaction.deserialize(Uint8Array.from(atob(built.transaction), (c) => c.charCodeAt(0)))
+  // Built for the wallet signed in, as its fee payer: one for any other is refused before the wallet is asked.
+  if (tx.message.staticAccountKeys[0]?.toBase58() !== solanaAddress(expected)) throw new Error("That transaction isn't for this wallet. Nothing was sent.")
+  const signature = await provider.sendTransaction(tx, connection)
+  onSent?.(signature)
+  return landed(connection, signature, built.lastValidBlockHeight)
+}
+
+/** Follows a sent transaction until it confirms (its signature), or throws TransferReverted once it can never land. */
+async function landed(connection: import("@solana/web3.js").Connection, signature: string, lastValidBlockHeight: number) {
   const sentAt = Date.now()
   // Polled, not subscribed: Reown's RPC answers over HTTP only.
   for (;;) {
@@ -145,8 +166,8 @@ export async function sendFromSolana(expected: string, o: { contract?: string | 
     // Its blockhash expired unseen: it can never land now. Before saying nothing left the wallet, ask the ledger and
     // not only the RPC's recent statuses, which can miss a transfer that did land (staging, 2026-11-19).
     if (!status && blockhashExpired(await connection.getBlockHeight("confirmed"), lastValidBlockHeight, Date.now() - sentAt)) {
-      const [landed] = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value
-      if (landed && !landed.err) return signature
+      const [found] = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value
+      if (found && !found.err) return signature
       throw new TransferReverted()
     }
     await new Promise((r) => setTimeout(r, 2000))

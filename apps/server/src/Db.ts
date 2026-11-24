@@ -351,6 +351,14 @@ export const migrationSteps = {
     yield* sql`CREATE INDEX checkouts_open ON checkouts (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'settle')`
     yield* sql`CREATE INDEX checkouts_account ON checkouts (account_id, step)`
     yield* sql`CREATE INDEX checkouts_ordered ON checkouts (ordered_at) WHERE ordered_at IS NOT NULL`
+  }),
+  // Top-Ups paid with a Solana token 1Click doesn't take (ADR-0014): the row stays 1Click's side (USDC on Solana);
+  // these say what the customer's transaction swaps into it. paid_raw is the exact amount (base units) they were
+  // shown and sign; amount_in_raw is the USDC (base units) the transaction sends on to 1Click.
+  "0026_swap_paid": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN paid_symbol TEXT, ADD COLUMN paid_mint TEXT, ADD COLUMN paid_amount TEXT,
+               ADD COLUMN paid_raw TEXT, ADD COLUMN amount_in_raw TEXT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

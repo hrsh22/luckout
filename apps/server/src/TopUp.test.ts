@@ -12,6 +12,7 @@ import { SqlClient } from "effect/sql"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { Alerts } from "./Alerts.ts"
+import { SOL_USDC_ASSET, Swap, swapAssetId, SWAP_TOKENS } from "./Swap.ts"
 import { isLate, noticeFor, phaseOf, refundsToWallet, type SwapRow, TopUp } from "./TopUp.ts"
 import type { SwapDetails } from "./OneClick.ts"
 
@@ -26,7 +27,14 @@ const noRelay = Layer.succeed(Relay, Relay.of({
   configure: () => Effect.die("relay.configure was not expected")
 }))
 const noAlerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
-const layer = TopUp.layer.pipe(Layer.provide([OneClick.layer, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory]))
+// No Jupiter key: no swap-paid tokens (Swap.test.ts covers those).
+const noSwaps = Layer.succeed(Swap, Swap.of({
+  tokens: Effect.succeed([]),
+  size: () => Effect.die("swap.size was not expected"),
+  transaction: () => Effect.die("swap.transaction was not expected"),
+  paidBy: () => Effect.succeed(undefined)
+}))
+const layer = TopUp.layer.pipe(Layer.provide([OneClick.layer, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory, noSwaps]))
 // Live calls to 1Click, only when asked for (pnpm --filter @luckout/server test:live).
 const live = { skip: !process.env.LIVE_TESTS && "set LIVE_TESTS=1 to call 1Click" }
 
@@ -95,7 +103,7 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
         Effect.andThen(tag(t.move(me, "d5", yield* Effect.promise(() => sign("2000000")))))
       )
     }
-  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(pending, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory))))))
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(pending, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory, noSwaps))))))
   assert.match(results.wrongAmount, /doesn't move this Top-Up/)
   assert.deepEqual([results.first, results.same, results.second, results.third], ["ok", "ok", "ok", "ok"])
   assert.match(results.again, /already handled/, "a second signed move-in for the same Top-Up is refused")
@@ -125,7 +133,7 @@ test("a quote tells the customer, and records, when refunds begin (30 min), not 
     const rows = yield* sql<{ deadline: Date }>`SELECT deadline FROM intents_swaps ORDER BY direction`
     return { shown: Date.parse(q.deadline), stored: rows.map((x) => new Date(x.deadline).getTime()) }
   }).pipe(Effect.provide(TopUp.layer.pipe(
-    Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory)),
+    Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), noRelay, noAlerts, DbMemory, noSwaps)),
     Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
   ))))
   const inHalfAnHour = (ms: number) => Math.abs(ms - (Date.now() + 30 * 60_000)) < 60_000
@@ -307,7 +315,7 @@ test("tracking follows every swap, moves EVM Top-Ups in, tells each customer onc
     const mine = yield* t.transfers(EVM)
     const near = yield* t.transfers(NEAR)
     return { mine, near }
-  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), relay, alerts, DbMemory))))))
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), relay, alerts, DbMemory, noSwaps))))))
 
   assert.deepEqual(sent, [EVM], "the EVM Top-Up's move-in is sent once, when its swap landed")
   assert.ok(!checked.includes("abandoned"), "a quote nobody paid into, long past its deadline, isn't checked")
@@ -359,7 +367,7 @@ test("what 1Click sent back in the token paid with is listed, so no change or re
   const r = await Effect.runPromise(Effect.gen(function*() {
     const t = yield* TopUp
     return { evm: yield* t.held(EVM), near: yield* t.held(NEAR) }
-  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory))))))
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory, noSwaps))))))
   const show = (xs: ReadonlyArray<{ amount: string; symbol: string; chain: string }>) => xs.map((x) => `${x.amount} ${x.symbol} on ${x.chain}`)
   assert.deepEqual(show(r.evm), ["0.120132 USDC on base"], "an EVM wallet's NEAR USDC is its Luckout wallet already; an unknown token is skipped")
   assert.deepEqual(show(r.near), ["0.120132 USDC on base", "2.5 USDC on near"], "a NEAR wallet sees its NEAR USDC there too; nothing at zero")
@@ -372,13 +380,14 @@ const tokens = [
   { assetId: BASE, blockchain: "base", symbol: "USDC", contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", decimals: 6 },
   { assetId: "nep141:sol.omft.near", blockchain: "sol", symbol: "SOL", decimals: 9 },
   { assetId: "nep141:eth.omft.near", blockchain: "eth", symbol: "ETH", decimals: 18 },
-  { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 }
+  { assetId: "nep141:wrap.near", blockchain: "near", symbol: "wNEAR", decimals: 24 },
+  { assetId: SOL_USDC_ASSET, blockchain: "sol", symbol: "USDC", contractAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6 }
 ]
 /** A mainnet TopUp whose 1Click records each quote request; NEAR Intents holds `holdings` for everyone. */
 const mainnetTopUp = (
   holdings: Record<string, string> = {},
   /** `echo`: what 1Click says it will do, given what was asked (default: exactly that); undefined for no echo at all. */
-  o: { deliver?: () => boolean; status?: string; echo?: (asked: QuoteRequest) => object | undefined } = {}
+  o: { deliver?: () => boolean; status?: string; echo?: (asked: QuoteRequest) => object | undefined; swaps?: Layer.Layer<Swap> } = {}
 ) => {
   const deliver = o.deliver ?? (() => true)
   const asked: Array<Parameters<OneClick["Service"]["quote"]>[0]> = []
@@ -415,7 +424,7 @@ const mainnetTopUp = (
     Effect.runPromise(Effect.gen(function*() {
       return yield* f(yield* TopUp, yield* SqlClient.SqlClient)
     }).pipe(Effect.provide(TopUp.layer.pipe(
-      Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, alerts, DbMemory)),
+      Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, near), noRelay, alerts, DbMemory, o.swaps ?? noSwaps)),
       Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet" } })))
     ))))
   return { asked, submitted, told, checked, run }
@@ -733,4 +742,77 @@ test("paid Top-Ups 1Click hasn't seen reach the admin one by one only up to a ha
   assert.ok(summary.length >= 7 && new Set(summary).size === 1, "the rest share one text, which goes out at most hourly")
   assert.equal(oneByOne.length + summary.length, 12, "every one of them was accounted for")
   assert.equal(w.told.filter((x) => !x.startsWith("admin: ")).length, 12, "each customer is still told about their own")
+})
+
+// ---------- a token 1Click doesn't take, paid through a swap (ADR-0014) ----------
+
+test("an ORE Top-Up: 1Click is quoted for USDC on Solana, the wallet signs our swap for exactly the ORE shown, and only a payment found on chain counts", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const OTHER = "b".repeat(64)
+  const PAYER = "Payer1111111111111111111111111111111111111"
+  const ORE = SWAP_TOKENS[0]!
+  const built: Array<{ payer: string; depositAddress: string; need: bigint; spend: bigint }> = []
+  const looked: Array<[string, bigint]> = []
+  let paid: string | undefined
+  const swaps = Layer.succeed(Swap, Swap.of({
+    tokens: Effect.succeed([{ ...ORE, price: 71.5 }]),
+    size: (_t, need) => Effect.succeed(need * 1_400n),
+    transaction: (o) => Effect.sync(() => (built.push(o), { transaction: `tx-${built.length}`, lastValidBlockHeight: 7 })),
+    paidBy: (address, need) => Effect.sync(() => (looked.push([address, need]), paid))
+  }))
+  const w = mainnetTopUp({}, { swaps })
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      const assets = yield* t.assets
+      const q = yield* t.quote(SOL_ID, swapAssetId(ORE), 5_000_000, false, "solana") // dq-1
+      const q2 = yield* t.quote(SOL_ID, swapAssetId(ORE), 5_000_000, false, "solana") // dq-2
+      const refused = yield* Effect.all([t.swapTx(SOL_ID, q.depositAddress, "near"), t.swapTx(OTHER, q.depositAddress, "solana")].map(Effect.flip))
+      const tx = yield* t.swapTx(SOL_ID, q.depositAddress, "solana")
+      const again = yield* t.swapTx(SOL_ID, q.depositAddress, "solana")
+      const busy = yield* Effect.flip(t.solanaPay(q.depositAddress, PAYER))
+      const pay = yield* t.solanaPay(q2.depositAddress, PAYER)
+      // The app's word that it sent the swap isn't a payment: the swap may still fail, and another may be sent.
+      yield* t.sent(SOL_ID, q.depositAddress, "5".repeat(87))
+      const [{ deposit_tx: told = null } = {}] = yield* sql<{ deposit_tx: string | null }>`SELECT deposit_tx FROM intents_swaps WHERE deposit_address = 'dq-1'`
+      paid = "5sig"
+      yield* t.trackNow
+      const after = yield* Effect.flip(t.solanaPay(q.depositAddress, PAYER))
+      const rows = yield* sql<SwapRow>`SELECT * FROM intents_swaps ORDER BY deposit_address`
+      const listed = yield* t.transfers(SOL_ID)
+      return { assets, q, refused, tx, again, busy, pay, told, after, rows, listed }
+    })
+  )
+  const ore = r.assets.find((a) => a.symbol === "ORE")!
+  assert.deepEqual([ore.assetId, ore.chain, ore.contract, ore.decimals, ore.swap], [swapAssetId(ORE), "sol", ORE.mint, 11, true])
+  assert.deepEqual(w.asked.map((a) => [a.originAsset, a.swapType, a.amount, a.refundTo, a.refundType])[0], [SOL_USDC_ASSET, "EXACT_OUTPUT", "5000000", solanaAddress(SOL_ID), "ORIGIN_CHAIN"],
+    "1Click's side is USDC on Solana; its change goes back to the Solana wallet")
+  // 1Click's fake asks for exactly the 5 USDC it quotes; the swap is sized for that.
+  assert.deepEqual([r.q.symbol, r.q.chain, r.q.swap, r.q.amountIn, r.q.amountInFormatted, r.q.usdcOut], ["ORE", "sol", true, "7000000000", "0.07", 117732])
+  assert.deepEqual(r.refused.map((e) => e.message), ["Pay from a Solana wallet: scan the code with Phantom, Solflare or Backpack.", "No Top-Up is paid that way"])
+  assert.equal(r.tx.transaction, "tx-1")
+  assert.equal(r.again.transaction, "tx-1", "the same wallet asking again within seconds gets the same transaction")
+  assert.match(r.busy.message, /Another wallet is paying/, "no second wallet's transaction while the first may land")
+  assert.equal(r.pay.transaction, "tx-2")
+  assert.match(r.pay.message, /\$0\.12 Top-Up for 0\.07 ORE/)
+  assert.deepEqual(built, [
+    { token: ORE, payer: solanaAddress(SOL_ID), depositAddress: "dq-1", need: 5_000_000n, spend: 7_000_000_000n },
+    { token: ORE, payer: PAYER, depositAddress: "dq-2", need: 5_000_000n, spend: 7_000_000_000n }
+  ], "the wallet signed in, or whichever wallet scanned the code: the same swap")
+  assert.equal(r.told, null, "a swap the app says it sent isn't recorded as paid")
+  assert.deepEqual(looked.slice(0, 2), [["dq-1", 5_000_000n], ["dq-2", 5_000_000n]], "the chain is asked for a payment of the USDC 1Click needs")
+  assert.deepEqual(r.rows.map((x) => [x.symbol, x.chain, x.paid_symbol, x.paid_raw, x.amount_in_raw, x.deposit_tx]), [
+    ["USDC", "sol", "ORE", "7000000000", "5000000", "5sig"],
+    ["USDC", "sol", "ORE", "7000000000", "5000000", "5sig"]
+  ])
+  assert.deepEqual(w.submitted.map((x) => x.txHash), ["5sig", "5sig"], "only a payment found on chain is passed to 1Click")
+  assert.match(r.after.message, /already paid/, "no transaction once it's paid")
+  assert.deepEqual(r.listed.map((x) => [x.symbol, x.chain, x.paidWith, x.depositTx]), [["USDC", "sol", "0.07 ORE", "5sig"], ["USDC", "sol", "0.07 ORE", "5sig"]])
+})
+
+test("an EVM wallet's change on Solana from a swap-paid Top-Up goes back to it as USDC on Base", async () => {
+  const w = mainnetTopUp({ [SOL_USDC_ASSET]: "251000" })
+  const r = await w.run((t) => Effect.all([t.held(EVM), t.sendBack(EVM, SOL_USDC_ASSET)]))
+  assert.deepEqual(r[0].map((h) => [h.symbol, h.chain, h.sendable]), [["USDC", "sol", true]])
+  assert.deepEqual([r[1].symbol, r[1].chain], ["USDC", "base"])
+  assert.deepEqual(w.asked.map((a) => [a.originAsset, a.destinationAsset, a.recipient]), [[SOL_USDC_ASSET, BASE, EVM]])
 })
