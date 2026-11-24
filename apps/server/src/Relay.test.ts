@@ -7,7 +7,8 @@ import { test } from "node:test"
 import { DbMemory } from "./Db.ts"
 import { fakeNear } from "./testing.ts"
 import { Near, NearUnavailable, type Outcome, TxExpired } from "./Near.ts"
-import { authCallIntent, intentPayload, intentSignature, moveInIntent, mtTransferArgs, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
+import { type AuthAction, authCallIntent, intentPayload, intentSignature, moveInIntent, mtTransferArgs, RelaySettings, type SignedIntent, transferIntent } from "@luckout/api"
+import { Alerts } from "./Alerts.ts"
 import { randomBytes } from "node:crypto"
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { refusal, Relay, RELAY_DEFAULTS, USDC_REGISTRATION } from "./Relay.ts"
@@ -24,6 +25,13 @@ const BASE_USDC = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.n
 const SEND_BACK = { receiverId: "d".repeat(64), token: BASE_USDC, amount: "120132" }
 const key = KeyPair.fromRandom("ed25519")
 const stranger = KeyPair.fromRandom("ed25519")
+
+/** What `get_purchase` answers for these purchases (id to customer). */
+const purchase = (purchases: Record<number, string> | undefined, args: Record<string, unknown> | undefined) => {
+  const customer = purchases?.[Number(args?.purchase_id)]
+  return customer ? { customer } : null
+}
+const alertsInto = (into: Array<string> = []) => Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void into.push(t)), customer: () => Effect.succeed(true) }))
 
 const delegate = (
   receiverId: string,
@@ -98,6 +106,11 @@ const world = (o: {
   held?: string
   /** The relayer's first transaction is saved, never reaches NEAR, and has expired by the time it's resumed. */
   lostOnce?: boolean
+  /** The caller's Luckout account (null: none yet); by default one with 1,000 USDC. */
+  account?: { balance: string } | null
+  /** Purchases on the contract, by id: whose each is. */
+  purchases?: Record<number, string>
+  alerts?: Array<string>
 } = {}) => {
   const relayed: Array<string> = []
   const resumed: Array<string> = []
@@ -106,7 +119,16 @@ const world = (o: {
     contractId: APP,
     usdcId: USDC,
     relayerId: o.relayer === false ? undefined : "relayer.test",
-    view: <A>(method: string) => Effect.succeed((method === "mt_balance_of" ? (o.held ?? "0") : null) as A),
+    view: <A>(method: string, args?: Record<string, unknown>) =>
+      Effect.succeed((
+        method === "mt_balance_of"
+          ? (o.held ?? "0")
+          : method === "get_account"
+          ? (o.account === undefined ? { balance: "1000000000" } : o.account)
+          : method === "get_purchase"
+          ? purchase(o.purchases, args)
+          : null
+      ) as A),
     relay: (sd, persist) =>
       Effect.gen(function*() {
         const hash = `tx-${relayed.length + 1}`
@@ -123,7 +145,7 @@ const world = (o: {
       Effect.succeed(publicKey === key.getPublicKey().toString() ? { nonce: o.nonce ?? 10n, fullAccess: o.fullAccess ?? true } : undefined),
     height: Effect.succeed(500n)
   })
-  const layer = Relay.layer.pipe(Layer.provide(Layer.succeed(Near, near)), Layer.provideMerge(DbMemory))
+  const layer = Relay.layer.pipe(Layer.provide([Layer.succeed(Near, near), alertsInto(o.alerts)]), Layer.provideMerge(DbMemory))
   const send = (b64: string) => Relay.use((r) => r.send(ALICE, b64))
   const run = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) => Effect.runPromise(e.pipe(Effect.provide(layer)))
   const tag = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) =>
@@ -233,21 +255,32 @@ const signIntent = async (intent: object, nonce = randomBytes(32).toString("base
   return { standard: "erc191", payload, signature: intentSignature(await evmKey.signMessage({ message: payload })) }
 }
 
-const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: string; lostOnce?: boolean; broke?: boolean } = {}) => {
+const intentWorld = (o: {
+  nonceUsed?: boolean
+  intentsUsdc?: string
+  balance?: string
+  /** No Luckout account yet. */
+  noAccount?: boolean
+  purchases?: Record<number, string>
+  lostOnce?: boolean
+  broke?: boolean
+} = {}) => {
   const sent: Array<{ receiver: string; method: string; args: unknown }> = []
   const near = fakeNear({
     contractId: APP,
     usdcId: USDC,
     intentsId: INTENTS,
     relayerId: "relayer.test",
-    view: <A>(method: string) =>
+    view: <A>(method: string, args?: Record<string, unknown>) =>
       Effect.succeed((
         method === "is_nonce_used"
           ? (o.nonceUsed ?? false)
           : method === "mt_balance_of"
           ? (o.intentsUsdc ?? "1000000000")
           : method === "get_account"
-          ? { balance: o.balance ?? "1000000000" }
+          ? (o.noAccount ? null : { balance: o.balance ?? "1000000000" })
+          : method === "get_purchase"
+          ? purchase(o.purchases, args)
           : null
       ) as A),
     relayerCall: (receiver, method, args, persist) =>
@@ -264,7 +297,7 @@ const intentWorld = (o: { nonceUsed?: boolean; intentsUsdc?: string; balance?: s
         ? Effect.fail(new TxExpired({ hash: signed.hash }))
         : Effect.succeed({ hash: signed.hash, value: null, events: [], failures: [] })
   })
-  const layer = Relay.layer.pipe(Layer.provide(Layer.succeed(Near, near)), Layer.provideMerge(DbMemory))
+  const layer = Relay.layer.pipe(Layer.provide([Layer.succeed(Near, near), alertsInto()]), Layer.provideMerge(DbMemory))
   const run = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) => Effect.runPromise(e.pipe(Effect.provide(layer)))
   const tag = <A, E>(e: Effect.Effect<A, E, Relay | SqlClient.SqlClient>) =>
     run(e.pipe(Effect.match({ onFailure: (err) => (err as { _tag: string; message: string }), onSuccess: () => ({ _tag: "ok", message: "" }) })))
@@ -376,6 +409,96 @@ test("an intent that would fail for want of money is refused before we pay", asy
   const withdraw = authCallIntent(APP, { withdraw: { amount: "1000000" } })
   assert.equal((await broke.tag(broke.send(await signIntent(withdraw))))._tag, "RelayFailed")
   assert.equal(poor.sent.length + broke.sent.length, 0)
+})
+
+// ---------- free relays go to calls that can run, and everyone's share is watched ----------
+
+test("a NEAR wallet's call on our contract is paid for only when it can run there; refused, it uses up no free relay", async () => {
+  // No Luckout account yet: a setting, a withdrawal and a reclaim can't run, and are refused for free. Enabling USDC
+  // and the first deposit, its first relays, go through on the two free relays it has.
+  const fresh = world({ account: null })
+  const r = await fresh.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 2, allDaily: 2 }), "admin.testnet"))
+    const refused: Array<string> = []
+    for (
+      const b64 of [
+        delegate(APP, "set_default_mode", { mode: "normal" }, 1n).b64,
+        delegate(APP, "set_limits", { per_purchase: "1", daily: "1" }, 1n).b64,
+        withdraw(),
+        delegate(APP, "reclaim", { purchase_id: 7 }, 0n).b64
+      ]
+    ) refused.push((yield* Effect.flip(fresh.send(b64))).message)
+    const register = yield* fresh.send(delegate(USDC, "storage_deposit", { account_id: ALICE, registration_only: true }, USDC_REGISTRATION).b64)
+    const deposit = yield* fresh.send(delegate(USDC, "ft_transfer_call", { receiver_id: APP, amount: "5000000", msg: "" }, 1n, { gas: 100_000_000_000_000n }).b64)
+    return { refused, ok: [register.hash, deposit.hash] }
+  }))
+  assert.deepEqual(r.refused.map((m) => /Deposit first/.test(m)), [true, true, true, false])
+  assert.match(r.refused[3]!, /isn't a purchase of yours/)
+  assert.deepEqual(r.ok, ["tx-1", "tx-2"], "the refusals left both free relays")
+  assert.deepEqual(fresh.relayed, ["storage_deposit", "ft_transfer_call"])
+
+  // 5 USDC in Luckout: no withdrawal of more, or of nothing; no reclaim of someone else's purchase. Its own, yes.
+  const funded = world({ account: { balance: "5000000" }, purchases: { 7: ALICE, 8: "mallory.testnet" } })
+  const tags = await funded.run(Effect.all([
+    delegate(APP, "withdraw", { amount: "5000001" }, 1n).b64,
+    delegate(APP, "withdraw", { amount: "0" }, 1n).b64,
+    delegate(APP, "withdraw", { amount: "lots" }, 1n).b64,
+    delegate(APP, "retry_draw", { purchase_id: 8 }, 0n).b64,
+    delegate(APP, "reclaim", { purchase_id: "7" }, 0n).b64,
+    delegate(APP, "reclaim", { purchase_id: 7 }, 0n).b64,
+    delegate(APP, "withdraw", { amount: "5000000" }, 1n).b64
+  ].map((b64) => funded.send(b64).pipe(Effect.match({ onFailure: (e) => e._tag, onSuccess: () => "ok" })))))
+  assert.deepEqual(tags, ["RelayFailed", "RelayFailed", "RelayFailed", "RelayFailed", "RelayFailed", "ok", "ok"])
+  assert.deepEqual(funded.relayed, ["reclaim", "withdraw"])
+})
+
+test("an EVM or Solana customer's call on our contract is paid for only when it can run there; their first move-in always is", async () => {
+  const fresh = intentWorld({ noAccount: true })
+  const actions: Array<AuthAction> = [
+    { set_default_mode: { mode: "normal" } },
+    { set_limits: { per_purchase: "1", daily: "1" } },
+    { withdraw: { amount: "1000000" } },
+    { reclaim: { purchase_id: 7 } },
+    { retry_draw: { purchase_id: 7 } }
+  ]
+  const r = await fresh.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 1 }), "admin.testnet"))
+    const refused: Array<string> = []
+    for (const action of actions) refused.push((yield* Effect.flip(fresh.send(yield* Effect.promise(() => signIntent(authCallIntent(APP, action)))))).message)
+    // The move-in that creates the account, on the one free relay the refusals didn't use.
+    const first = yield* fresh.send(yield* Effect.promise(() => signIntent(moveIn())))
+    return { refused, first: first.hash }
+  }))
+  assert.deepEqual(r.refused.map((m) => /Deposit first|isn't a purchase of yours/.test(m)), [true, true, true, true, true])
+  assert.equal(r.first, "tx-1")
+  assert.equal(fresh.sent.length, 1)
+
+  const funded = intentWorld({ purchases: { 7: EVM, 8: "0x" + "9".repeat(40) } })
+  const own = await funded.tag(funded.send(await signIntent(authCallIntent(APP, { reclaim: { purchase_id: 7 } }))))
+  const theirs = await funded.tag(funded.send(await signIntent(authCallIntent(APP, { retry_draw: { purchase_id: 8 } }))))
+  assert.deepEqual([own._tag, theirs._tag], ["ok", "RelayFailed"])
+  assert.equal(funded.sent.length, 1)
+})
+
+test("once the free relays for everyone are used up, an admin hears it once, not on every refusal", async () => {
+  const alerts: Array<string> = []
+  const w = world({ alerts })
+  const r = await w.run(Effect.gen(function*() {
+    const relay = yield* Relay
+    // One account using up its own share is no news.
+    yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet")
+    yield* w.send(withdraw({ nonce: 11n }))
+    const own = (yield* Effect.flip(w.send(withdraw({ nonce: 12n }))))._tag
+    const afterOwn = alerts.length
+    // Everyone's share used up: refused for everyone, and said once, however often it's asked.
+    yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 1 }), "admin.testnet")
+    const everyone = [(yield* Effect.flip(w.send(withdraw({ nonce: 13n }))))._tag, (yield* Effect.flip(w.send(withdraw({ nonce: 14n }))))._tag]
+    const others = yield* relay.available("bob.testnet")
+    return { own, afterOwn, everyone, others }
+  }))
+  assert.deepEqual(r, { own: "RelayUnavailable", afterOwn: 0, everyone: ["RelayUnavailable", "RelayUnavailable"], others: false })
+  assert.equal(alerts.length, 1)
+  assert.match(alerts[0]!, /All 1 free relays/)
 })
 
 // ---------- a gas floor, and a relay whose own transaction expired ----------
