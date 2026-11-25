@@ -116,7 +116,8 @@ test("a simulated swap is signed only if it pays exactly the USDC needed, takes 
   assert.match(outcomeProblem({ ...before, usdc: 300n }, { ...after, usdc: 299n }, expect)!, /take USDC from your wallet/)
   assert.match(outcomeProblem(before, { ...after, others: [39n] }, expect)!, /another token/)
   assert.match(outcomeProblem(before, { ...after, authorities: ["- -", "Mallory -", "- -", "- -"] }, expect)!, /someone else spend/)
-  assert.match(outcomeProblem(before, { ...after, lamports: 4_999_999n }, expect)!, /more SOL/)
+  assert.equal(outcomeProblem(before, { ...after, lamports: 3_800_000n }, expect), undefined, "rent for three token accounts (a route through another token) is within reach")
+  assert.match(outcomeProblem(before, { ...after, lamports: 2_999_999n }, expect)!, /more SOL/)
 })
 
 test("a failed simulation is told in the customer's words", () => {

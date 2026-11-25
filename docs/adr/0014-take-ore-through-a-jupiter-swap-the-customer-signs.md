@@ -31,3 +31,5 @@ Rejected for now:
 - **Letting the swap deliver to 1Click without a minimum out.** The customer couldn't know the most it costs.
 
 **Amended 2026-11-25 (outcome check).** The server's simulation check covers every token account of the wallet that the swap is given, not only its ORE and USDC: it refuses a transaction that lowers any of their balances, closes one, gives one another owner, or changes who besides the owner may spend from or close it (a delegate or a close authority). The priority fee is held within its limit (0.0002 SOL) by lowering Jupiter's priority price where needed.
+
+**Amended 2026-11-25 (SOL ceiling).** The wallet may spend at most 0.007 SOL, not 0.005. A real route can pass through a token the wallet has no account for, which Jupiter opens for the wallet; with the deposit address's USDC account and the wallet's own, that is three accounts' rent (about 0.0062 SOL), and the lower ceiling refused such a swap for a wallet that held no USDC yet. The rent stays in accounts the wallet owns.
