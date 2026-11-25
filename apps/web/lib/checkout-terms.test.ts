@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { NewCart, NewPurchase, Quote } from "@luckout/api"
 import { NO_LIMIT } from "@luckout/api/limits"
-import { checkoutRequest, pricedLines, spendingCheck, totals } from "./checkout-terms.ts"
+import { checkoutRequest, laterPlayLess, pricedLines, spendingCheck, totals } from "./checkout-terms.ts"
 
 const classic = { lucky: 1 } as const
 const q = (referencePrice: number, maxPrice: number, luckyAmount = 0, mode: Quote["mode"] = luckyAmount > 0 ? classic : "normal") =>
@@ -30,6 +30,24 @@ test("each line gets its own copies' quotes, and says when the reserve put a Luc
   assert.equal(pricedLines([{ mode: classic, keys: ["a", "b"] }], [q(1, 12_000_001, 1), q(1, 12_000_004, 1)])[0]!.each, 12_000_001)
   // Before the quote is in: nothing is claimed.
   assert.deepEqual(pricedLines(lines, undefined)[0], { line: lines[0], total: undefined, each: undefined, normal: false, plays: undefined })
+})
+
+test("one card's odds stand for each copy only while no later copy plays less than one card alone", () => {
+  const lines = [{ mode: classic, keys: ["a", "b", "c"] }]
+  // One card alone plays 4 of its 10: quote_many caps the copies after it from the Free Reserve the first leaves.
+  const alone = q(10_000_000, 10_800_000, 4_000_000)
+  const shrinking = pricedLines(lines, [alone, q(10_000_000, 10_600_000, 3_000_000), q(10_000_000, 10_500_000, 2_500_000)])[0]!
+  assert.equal(laterPlayLess(alone, shrinking), true)
+  // The first plays whole, a later one only in part.
+  const whole = q(10_000_000, 12_000_000, 10_000_000)
+  assert.equal(laterPlayLess(whole, pricedLines(lines, [whole, whole, q(10_000_000, 10_800_000, 4_000_000)])[0]!), true)
+  // A later copy put at Normal plays nothing.
+  assert.equal(laterPlayLess(whole, pricedLines(lines, [whole, whole, q(10_000_000, 10_000_000)])[0]!), true)
+  // A fixed cap that holds every copy to the same part: one card's figure is each one's.
+  assert.equal(laterPlayLess(alone, pricedLines(lines, [alone, alone, alone])[0]!), false)
+  // Every copy whole, or the quote not in yet: nothing differs.
+  assert.equal(laterPlayLess(whole, pricedLines(lines, [whole, whole, whole])[0]!), false)
+  assert.equal(laterPlayLess(whole, pricedLines(lines, undefined)[0]!), false)
 })
 
 test("a checkout buys each card exactly as its quote showed, a Lucky card the reserve put at Normal as Normal, each with its own key", () => {

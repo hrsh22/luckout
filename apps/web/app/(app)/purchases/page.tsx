@@ -4,7 +4,7 @@ import { charged, PurchaseRow } from "@/components/purchase-view"
 import { SignInCard } from "@/components/sign-in-card"
 import { buttonVariants } from "@/components/ui/button"
 import { errorMessage } from "@/lib/api"
-import { usd } from "@/lib/format"
+import { usdDown } from "@/lib/format"
 import { usePurchases } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { type Purchase } from "@luckout/api"
@@ -47,7 +47,7 @@ function Purchases() {
         {delivered.length > 0 && (
           <div className="flex flex-wrap gap-2">
             <span className="pill !bg-white !px-4 !py-2 !text-sm">{delivered.length}{more} delivered</span>
-            {cashback > 0 && <span className="pill !bg-gold !px-4 !py-2 !text-sm !text-gold-ink">{usd(cashback)}{more} cashback</span>}
+            {cashback > 0 && <span className="pill !bg-gold !px-4 !py-2 !text-sm !text-gold-ink">{usdDown(cashback)}{more} cashback</span>}
             {free > 0 && <span className="pill !bg-gold-soft !px-4 !py-2 !text-sm !text-gold-ink">{free}{more} at 100% off</span>}
           </div>
         )}

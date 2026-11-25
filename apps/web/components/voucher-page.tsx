@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
 import { useCartQuote, useCheckout } from "@/lib/checkout"
-import { pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
+import { laterPlayLess, pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
 import { Quantity } from "@/components/quantity"
 import { api, errorMessage, isNotFound, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
@@ -120,8 +120,10 @@ function Voucher() {
   // The server's quote replaces the local one in a moment, under the same rule (its reserve may be fresher).
   const served = quote.data && playable(quote.data)
   const shown: Quote | undefined = served ?? local
+  // Several: the receipt's odds are the Cart quote's first copy, from the same quotes its copies note reads.
+  const first = many && cartQuote ? cartQuote[0] : shown
   /** The mode asked for can't play on this card right now: this purchase is Normal, and the receipt says so. */
-  const fellBack = info.premiumBps > 0 && shown?.mode === "normal"
+  const fellBack = info.premiumBps > 0 && first?.mode === "normal"
   const shownInfo = fellBack ? modeInfo("normal")! : info
   const panel = useRef<HTMLElement>(null)
 
@@ -242,7 +244,7 @@ function Voucher() {
               : (
                 <motion.div key="receipt" exit={{ opacity: 0, scale: 0.97 }} transition={{ duration: 0.15 }}>
                   <Receipt
-                    shown={shown}
+                    shown={first}
                     exact={!!quote.data && (!many || !!cartQuote)}
                     info={shownInfo}
                     count={quantity}
@@ -387,6 +389,9 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
   const lucky = shown.luckyAmount > 0
   // "Each" holds only while every copy plays in full; otherwise the Cart's note says what the reserve did to them.
   const differ = copies && (copies.normal || copies.plays !== undefined) ? copies : undefined
+  // The odds below are one card's, which is the first copy's. When a later copy plays less, that card's cap would read
+  // as each one's: say whose chances they are instead.
+  const later = !!copies && laterPlayLess(shown, copies)
   const outcomes = pricedOutcomes(info, shown)
   const best = outcomes[outcomes.length - 1]!
   return (
@@ -426,11 +431,18 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
         <div className="flex flex-col gap-3 border-t border-line pt-5">
           <OddsBar outcomes={outcomes} />
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
-          {shown.luckyAmount < shown.referencePrice && (
-            <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Cashback is capped at {usdDown(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
-            </p>
-          )}
+          {later
+            ? (
+              <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
+                These are the first card's chances{shown.luckyAmount < shown.referencePrice ? `, with ${usd(shown.luckyAmount)} of its price playing` : ""}. Each
+                card's Cashback Cap comes from what the cards before it leave free in the Cashback Reserve, so later ones can play less.
+              </p>
+            )
+            : shown.luckyAmount < shown.referencePrice && (
+              <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
+                Cashback is capped at {usdDown(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
+              </p>
+            )}
         </div>
       )}
     </div>
