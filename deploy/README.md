@@ -120,7 +120,7 @@ Once the old server has been stopped, a failed deploy prints the command to go b
 
 A release is `staging` merged into `main` by PR, and merging deploys production's server and then its web (CI). So everything the new code needs is in place before the merge, and sales stop around it. The steps below run in this order. **Owner's wallet** marks a step only the owner can sign; **owner** one that needs the owner's accounts; the rest are the operator's.
 
-**There is no going back past migration 0025.** It moves every purchase into a Checkout (`checkouts`) and adds a column that earlier code doesn't fill, so once the new server has started, an earlier commit can't record a purchase. If the release goes wrong after the merge, fix it forward: a PR to `staging`, then to `main`. The dump in step 15 is the last resort, and it loses everything after it ([RUNBOOK.md](RUNBOOK.md#rolling-back-a-release)). The release that brings guest checkout, Carts, Solana wallets and ORE Top-Ups to production runs migrations 0018 to 0027 when the server starts.
+**There is no going back past migration 0025.** It moves every purchase into a Checkout (`checkouts`) and adds a column that earlier code doesn't fill, so once the new server has started, an earlier commit can't record a purchase. If the release goes wrong after the merge, fix it forward: a PR to `staging`, then to `main`. The dump in step 15 is the last resort, and it loses everything after it ([RUNBOOK.md](RUNBOOK.md#rolling-back-a-release)). The release that brings guest checkout, Carts, Solana wallets and ORE Top-Ups to production runs migrations 0018 to 0029 when the server starts.
 
 ### Days before
 
@@ -184,7 +184,7 @@ A release is `staging` merged into `main` by PR, and merging deploys production'
 16. **Merge** the release PR from `staging` into `main` once its checks are green, and only while Admin → Bitrefill credit still shows no Refill running (look again now: with Auto on, one can have started since step 13).
 17. **The server deploys** (CI's `deploy` job). The old server finishes its purchases first (up to three minutes), then the new one starts and runs the migrations. This deploy runs the previous script, so its last line is the old `mainnet main <commit>: health 204`. On the VM:
     - `git rev-parse --short HEAD` is the merge commit, and `pm2 describe luckout-api` shows it online and started minutes ago.
-    - `psql -h 127.0.0.1 -U <role> <db> -c "SELECT max(migration_id) FROM effect_sql_migrations"` reads 27 (it read 17 before).
+    - `psql -h 127.0.0.1 -U <role> <db> -c "SELECT max(migration_id) FROM effect_sql_migrations"` reads 29 (it read 17 before).
     - pm2 has this release's restart backoff (`deploy/ecosystem.config.cjs`): `pm2 jlist | tail -n 1 | python3 -c 'import json,sys; print([a["pm2_env"].get("exp_backoff_restart_delay") for a in json.load(sys.stdin) if a["name"] == "luckout-api"])'` prints `[1000]`. If it prints `[None]`, apply it while sales are still stopped: `cd ~/htdocs/luckout-api.gamified.trade && pm2 delete luckout-api && pm2 start deploy/ecosystem.config.cjs && pm2 save`.
 
     If the job is red, read `pm2 logs luckout-api --lines 100`: a missing or wrong `.env` value is fixed in `.env`, then `pm2 restart luckout-api` (Node reads `.env` when it starts). Anything else: [RUNBOOK.md](RUNBOOK.md#rolling-back-a-release).
