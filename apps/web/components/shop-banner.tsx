@@ -9,7 +9,7 @@ import { useEffect, useState } from "react"
 const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
 
 /** How long until `at` ("2h 14m"), kept current. */
-function useLeft(at: number) {
+export function useLeft(at: number) {
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15_000)

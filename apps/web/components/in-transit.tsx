@@ -1,6 +1,7 @@
 "use client"
 
 import { Qr } from "@/components/qr"
+import { useLeft } from "@/components/shop-banner"
 import { SolanaPayCode } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
@@ -44,8 +45,12 @@ const titleOf = (t: Transfer) =>
     : t.direction === "back"
     ? `${capital(receivedAmount(t.amountOut ?? t.amountIn ?? "", t.symbol))} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
+/** The server builds no swap transaction in the last 2 minutes before a swap-paid Top-Up's deadline (SWAP_DEADLINE_MARGIN_MS). */
+const SWAP_MARGIN_MS = 2 * 60_000
+/** When it can last be paid: its deadline, or for a swap-paid one the last moment a transaction is still built. */
+const payBy = (t: Transfer) => Date.parse(t.deadline ?? "") - (t.paidWith ? SWAP_MARGIN_MS : 0)
 /** Still before the deadline, so the rest of a short payment can be sent. */
-const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
+const open = (t: Transfer) => t.deadline !== undefined && payBy(t) > Date.now()
 
 /**
  * Money on its way (Top-Ups from other chains and withdrawals to them), read from the server so it
@@ -121,7 +126,7 @@ export function HeldInIntents() {
       <ul className="flex flex-col gap-2">
         {held.map((h) => (
           <li key={h.assetId} className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-semibold">{h.amount} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
+            <span className="font-semibold">{receivedAmount(h.amount, h.symbol)} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
             {h.sendable && (
               <Button size="sm" variant="light" disabled={sending !== undefined} onClick={() => sendBack(h)}>
                 {!intents
@@ -147,12 +152,34 @@ export function HeldInIntents() {
 }
 
 function Row({ t }: { t: Transfer }) {
-  const { intents, walletUsdc } = useSession()
+  const { token, intents, walletUsdc } = useSession()
   const actions = useWalletActions()
+  const qc = useQueryClient()
   const incoming = t.direction === "in"
   // A quote nobody has paid into yet keeps its address behind a tap: it's often one the customer started and left.
   const unpaid = t.phase === "awaiting-transfer" && !t.depositTx
+  // Ticks, so the time left stays current and the row turns over at its deadline.
+  const left = useLeft(payBy(t))
+  const waiting = unpaid && open(t)
   const [shown, setShown] = useState(false)
+  const [dismissing, setDismissing] = useState(false)
+  // Only a Top-Up nobody paid into: the server refuses anything else. Money sent anyway still arrives and lists it again.
+  const dismiss = async () => {
+    setDismissing(true)
+    try {
+      await api((c) => c.topup.dismiss({ payload: { depositAddress: t.depositAddress } }), token)
+      toast.success(
+        t.paidWith
+          ? "Cancelled. A payment your wallet already approved still arrives, and shows here again."
+          : "Dismissed. Money already sent to it still arrives, and shows here again."
+      )
+      await qc.invalidateQueries({ queryKey: ["transfers"] })
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setDismissing(false)
+    }
+  }
   const Icon = t.phase === "done" || t.phase === "in-wallet"
     ? CircleCheck
     : t.phase === "refunded"
@@ -168,8 +195,17 @@ function Row({ t }: { t: Transfer }) {
     <li className="flex gap-4 py-4">
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="font-semibold">{titleOf(t)}</p>
-        <p className="text-sm text-ink-soft">{say(t, intents, sitting >= 1_000_000)}</p>
+        <p className="font-semibold">{waiting ? `${usd(t.usdc)} top-up` : titleOf(t)}</p>
+        {waiting
+          ? (
+            <p className="text-sm text-ink-soft">
+              {t.paidWith ? "Pay " : "Send "}
+              <span className="font-semibold text-ink">{t.paidWith ?? `${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}`.trim()}</span>
+              {on(t.chain)} <span className="whitespace-nowrap text-muted">· {left} left</span>
+              {!t.paidWith && <span className="block">A little more is fine: the extra comes back.</span>}
+            </p>
+          )
+          : <p className="text-sm text-ink-soft">{say(t, intents, sitting >= 1_000_000)}</p>}
 
         {/* A swap-paid Top-Up's deposit address takes only USDC: the token sent there would be lost, so it has its code instead. */}
         {t.paidWith && unpaid && shown && open(t) && (
@@ -200,7 +236,17 @@ function Row({ t }: { t: Transfer }) {
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
           {unpaid && !shown && (!t.paidWith || open(t)) && (
-            <Button size="sm" variant="light" onClick={() => setShown(true)}>{t.paidWith ? "Show the code to pay" : "Show address"}</Button>
+            <Button size="sm" onClick={() => setShown(true)}>{t.paidWith ? "Show the code to pay" : "Show address"}</Button>
+          )}
+          {unpaid && (
+            <button
+              type="button"
+              disabled={dismissing}
+              onClick={() => void dismiss()}
+              className="font-semibold text-muted underline-offset-4 hover:text-ink hover:underline disabled:opacity-45"
+            >
+              {t.paidWith ? "Cancel this Top-Up" : "Dismiss"}
+            </button>
           )}
           {t.phase === "in-wallet" && sitting >= 1_000_000 && (
             <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
@@ -218,10 +264,13 @@ function Row({ t }: { t: Transfer }) {
               Delivery on {chain(t.chain)}<ExternalLink size={14} aria-hidden="true" />
             </a>
           )}
-          <a href={t.explorer} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-muted underline-offset-2 hover:underline">
-            Track on NEAR Intents<ExternalLink size={14} aria-hidden="true" />
-          </a>
-          <span className="text-muted">{when(t.createdAt)}</span>
+          {/* Nothing to track until something is paid in. */}
+          {!unpaid && (
+            <a href={t.explorer} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-muted underline-offset-2 hover:underline">
+              Track on NEAR Intents<ExternalLink size={14} aria-hidden="true" />
+            </a>
+          )}
+          {!waiting && <span className="text-muted">{when(t.createdAt)}</span>}
         </div>
       </div>
     </li>
@@ -269,20 +318,20 @@ function say(t: Transfer, intents: boolean, canDeposit: boolean) {
   switch (t.phase) {
     case "awaiting-transfer":
       if (t.depositTx) {
-        return open(t)
+        // Paid: 1Click has until the deadline itself to see it.
+        return Date.parse(t.deadline ?? "") > Date.now()
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
       }
-      if (t.paidWith) {
-        return open(t)
-          ? `Waiting for your swap: pay ${t.paidWith} from a Solana wallet before ${time(t.deadline!)}.`
-          : "This price has expired and nothing was paid. Top up again for a new one."
-      }
+      // One still open is said by the row itself: what to pay and the time left.
+      if (t.paidWith) return "This price has expired and nothing was paid. Top up again for a new one."
       return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} (a little more is fine: the extra comes back).`
-    case "incomplete":
+    case "incomplete": {
+      const got = t.deposited ? receivedAmount(t.deposited, t.symbol) : "part"
       return open(t)
-        ? `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
-        : `1Click got ${t.deposited ?? "part"} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
+        ? `1Click got ${got} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
+        : `1Click got ${got} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
+    }
     case "swapping":
       return t.direction === "in"
         ? `1Click has your ${t.symbol} and is ${t.symbol === "USDC" ? "bringing it over to NEAR" : "converting it to USDC"}. Usually ${usual}.`
@@ -301,7 +350,7 @@ function say(t: Transfer, intents: boolean, canDeposit: boolean) {
       const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
       if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`
       if (t.direction === "out") return `${why} 1Click sent it back to your NEAR Intents account${intents ? "; move it back into Luckout below." : "."}`
-      return `${why} 1Click sent ${t.refunded ? `${t.refunded} ${t.symbol}` : "it"} back to ${refundPlace(t)}${t.refundsToWallet ? "." : ", listed below."}`
+      return `${why} 1Click sent ${t.refunded ? `${receivedAmount(t.refunded, t.symbol)} ${t.symbol}` : "it"} back to ${refundPlace(t)}${t.refundsToWallet ? "." : ", listed below."}`
     }
   }
 }

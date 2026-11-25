@@ -134,6 +134,8 @@ const walletOfRow = (r: Pick<SwapRow, "account_id" | "wallet">): Wallet => r.wal
 export const refundsToWallet = (r: Pick<SwapRow, "direction" | "account_id" | "chain" | "wallet">) =>
   r.direction === "in" && r.chain !== null && CHEAP_REFUND_CHAINS.has(r.chain) && HOME_CHAINS[walletOfRow(r)].has(r.chain)
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
+/** A swap-paid Top-Up's "0.26566 ORE": rounded up, as an amount to pay is, never its 11 decimals. */
+const paidText = (r: Pick<SwapRow, "paid_amount" | "paid_symbol">) => `${tokenAmount(r.paid_amount ?? "", r.paid_symbol ?? "", "up")} ${r.paid_symbol}`
 
 /** A row of `intents_swaps`: one 1Click swap of a customer's money. */
 export interface SwapRow {
@@ -172,6 +174,8 @@ export interface SwapRow {
   readonly paid_raw?: string | null
   /** Base units of amount_in: the USDC the swap's transaction sends on to 1Click. */
   readonly amount_in_raw?: string | null
+  /** The customer dismissed it before paying into it (see TopUp.dismiss). */
+  readonly dismissed_at?: Date | string | null
   readonly told: ReadonlyArray<string>
   readonly created_at: Date | string
 }
@@ -217,7 +221,7 @@ export const noticeFor = (r: SwapRow, now: number, web: string): { key: string; 
   const amount = usd(Number(r.usdc))
   const leg = `${r.amount_in ? tokenAmount(r.amount_in, r.symbol ?? "", "up") : ""} ${r.symbol ?? ""} on ${chainName(r.chain)}`.replace(/\s+/g, " ").trim()
   // A swap-paid Top-Up's USDC came from the customer's own swap: what they paid with is said too.
-  const from = r.paid_symbol ? `${leg}, from ${r.paid_amount} ${r.paid_symbol}` : leg
+  const from = r.paid_symbol ? `${leg}, from ${paidText(r)}` : leg
   const refundPlace = refundsToWallet(r) ? walletOn(r.chain) : "your NEAR Intents account"
   if (r.direction === "in") {
     if (phase === "incomplete") {
@@ -282,6 +286,8 @@ export class TopUp extends Context.Service<TopUp, {
   solanaPay(depositAddress: string, payer: string): Effect.Effect<{ readonly transaction: string; readonly message: string }, TopUpUnavailable>
   /** The app paid this Top-Up from the customer's wallet: keeps the transaction and passes it to 1Click. */
   sent(accountId: string, depositAddress: string, txHash: string): Effect.Effect<void, TopUpUnavailable>
+  /** The customer is done with a Top-Up they haven't paid into: it leaves their list, and a swap-paid one is cancelled. */
+  dismiss(accountId: string, depositAddress: string): Effect.Effect<void, TopUpUnavailable>
   /** EVM and Solana wallets: keeps the signed intent that moves this Top-Up into Luckout, and sends it once the swap lands. */
   move(accountId: string, depositAddress: string, signed: SignedIntent): Effect.Effect<void, TopUpUnavailable>
   /** Testnet, EVM and Solana wallets: 100 test USDC into their NEAR Intents account (they move it in themselves), once a day. */
@@ -395,6 +401,8 @@ export class TopUp extends Context.Service<TopUp, {
        * checks a hash it was told about (deposit/submit) on chain first. Anyone can name one for their own quote.
        */
       const unseen = sql`coalesce(status, 'PENDING_DEPOSIT') IN ('PENDING_DEPOSIT', 'KNOWN_DEPOSIT_TX')`
+      /** A swap-paid quote the customer dismissed: no transaction is built for it again (see dismiss). */
+      const cancelled = sql`(paid_mint IS NOT NULL AND dismissed_at IS NOT NULL)`
       /** How long past its deadline a quote nobody paid into is still followed (`swap` for a swap-paid one). */
       const grace = (swap: number) =>
         sql`CASE WHEN paid_mint IS NULL THEN ${`${LATE_DEPOSIT_GRACE_MS / 1000} seconds`}::interval ELSE ${`${swap / 1000} seconds`}::interval END`
@@ -413,7 +421,9 @@ export class TopUp extends Context.Service<TopUp, {
           quoting.add(accountId)
           return Effect.gen(function*() {
             // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass), less the
-            // swap-paid ones some minutes past their deadline (SWAP_CAP_GRACE_MS).
+            // swap-paid ones some minutes past their deadline (SWAP_CAP_GRACE_MS). A cancelled one (dismiss) keeps its
+            // place until then: every swap quote costs a call on the Jupiter key all customers share, so quoting and
+            // cancelling in a loop must still run into this cap.
             const [{ open = 0 } = {}] = yield* sql<{ open: number }>`
               SELECT count(*)::int AS open FROM intents_swaps
               WHERE account_id = ${accountId} AND ${unseen} AND created_at > now() - interval '3 days'
@@ -444,9 +454,10 @@ export class TopUp extends Context.Service<TopUp, {
         if (row.move !== null) return yield* fail("This Top-Up's USDC was already handled. Move what's in your NEAR Intents account from the wallet page.")
         const [{ waiting = 0 } = {}] = yield* sql<{ waiting: number }>`
           SELECT count(*)::int AS waiting FROM intents_swaps WHERE account_id = ${accountId} AND move = 'waiting'
-            -- A quote left unpaid past its deadline can't land, so it doesn't hold up new ones (its approval lasts a day).
+            -- A quote left unpaid past its deadline can't land, so it doesn't hold up new ones (its approval lasts a day),
+            -- nor does a cancelled swap-paid one (still armed, should a transaction built before land).
             AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT' AND deposit_tx IS NULL
-                     AND coalesce(deadline, created_at + interval '30 minutes') < now())`.pipe(Effect.orDie)
+                     AND (coalesce(deadline, created_at + interval '30 minutes') < now() OR ${cancelled}))`.pipe(Effect.orDie)
         if (waiting >= MOST_WAITING) return yield* fail("Finish your other Top-Ups first.")
         const p = parsePayload(signed.payload)
         const why = payloadRefusal(p, { accountId, intentsId: near.intentsId, contractId: near.contractId, usdcId: near.usdcId, now: new Date() })
@@ -476,6 +487,19 @@ export class TopUp extends Context.Service<TopUp, {
       })
 
       /**
+       * Only one nobody has paid into, as far as anyone knows. Tracking is untouched: a plain transfer can't be stopped
+       * once its address is out, nor a swap transaction built before, so money that arrives anyway is moved in as usual
+       * and the Top-Up is listed again. A swap-paid one gets no new transaction (swapTransaction).
+       */
+      const dismiss = Effect.fn("TopUp.dismiss")(function*(accountId: string, depositAddress: string) {
+        const [row] = yield* sql`UPDATE intents_swaps SET dismissed_at = coalesce(dismissed_at, now())
+                                 WHERE deposit_address = ${depositAddress} AND account_id = ${accountId} AND direction = 'in'
+                                   AND deposit_tx IS NULL AND coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
+                                 RETURNING 1`.pipe(Effect.orDie)
+        if (!row) return yield* fail("Only an unpaid Top-Up of yours can be dismissed. One already paid stays listed until it lands.")
+      })
+
+      /**
        * The swap transactions handed out, by deposit address. A wallet that scanned the code asking again gets the same
        * one while it still has time to land (SWAP_REUSE_MS); another wallet gets none while one may still land, so a
        * quote is paid once even if 1Click were to close its USDC account between two payments.
@@ -495,6 +519,7 @@ export class TopUp extends Context.Service<TopUp, {
           if (!r || r.direction !== "in" || !r.paid_mint || !r.paid_raw || !r.amount_in_raw) return yield* fail("No Top-Up is paid that way")
           if (!isWallet(payer)) return yield* fail("That isn't a Solana wallet address.")
           if (r.deposit_tx || (r.status !== null && r.status !== "PENDING_DEPOSIT")) return yield* fail("This Top-Up is already paid.")
+          if (r.dismissed_at) return yield* fail("This Top-Up was cancelled. Nothing was sent: top up again for a new one.")
           if (!(Date.now() < (ms(r.deadline) ?? 0) - SWAP_DEADLINE_MARGIN_MS)) {
             return yield* fail("This price has expired, or is about to. Nothing was sent: top up again for a new one.")
           }
@@ -538,7 +563,7 @@ export class TopUp extends Context.Service<TopUp, {
       const solanaPay = Effect.fn("TopUp.solanaPay")(function*(depositAddress: string, payer: string) {
         const r = yield* swapRow(depositAddress)
         const tx = yield* swapTransaction(r, payer, true)
-        return { transaction: tx.transaction, message: `Luckout: a ${usd(Number(r!.usdc))} Top-Up for ${r!.paid_amount} ${r!.paid_symbol}` }
+        return { transaction: tx.transaction, message: `Luckout: a ${usd(Number(r!.usdc))} Top-Up for ${paidText(r!)}` }
       })
 
       const exit = Effect.fn("TopUp.exit")(function*(accountId: string, destinationAsset: string, usdc: number, wallet: Wallet = walletOf(accountId)) {
@@ -731,8 +756,9 @@ export class TopUp extends Context.Service<TopUp, {
           WHERE account_id = ${accountId} AND created_at > now() - interval '7 days'
             AND NOT (coalesce(status, 'PENDING_DEPOSIT') = 'PENDING_DEPOSIT'
                      AND CASE direction
-                           -- A Top-Up we know was paid stays in sight until 1Click settles it.
-                           WHEN 'in' THEN deposit_tx IS NULL AND coalesce(deadline, created_at + interval '30 minutes') < now()
+                           -- A Top-Up we know was paid stays in sight until 1Click settles it; an unpaid one the
+                           -- customer dismissed leaves at once, and is back once money arrives.
+                           WHEN 'in' THEN deposit_tx IS NULL AND (dismissed_at IS NOT NULL OR coalesce(deadline, created_at + interval '30 minutes') < now())
                            -- A withdrawal is sent the moment it's quoted and 1Click sees it within seconds: one
                            -- still unseen after 3 minutes was never signed, and the money never left.
                            ELSE created_at < now() - interval '3 minutes' END)
@@ -749,7 +775,7 @@ export class TopUp extends Context.Service<TopUp, {
                 symbol: r.symbol ?? "USDC",
                 chain: r.chain ?? "",
                 ...(r.amount_in ? { amountIn: r.amount_in } : {}),
-                ...(r.paid_symbol ? { paidWith: `${r.paid_amount} ${r.paid_symbol}` } : {}),
+                ...(r.paid_symbol ? { paidWith: paidText(r) } : {}),
                 ...(r.amount_out ? { amountOut: r.amount_out } : {}),
                 ...(r.deposited ? { deposited: r.deposited } : {}),
                 ...(r.deposit_tx ? { depositTx: r.deposit_tx } : {}),
@@ -847,6 +873,7 @@ export class TopUp extends Context.Service<TopUp, {
           dry ? quote(accountId, originAsset, usdc, true, wallet) : capped(accountId, quote(accountId, originAsset, usdc, false, wallet)),
         status,
         sent,
+        dismiss,
         swapTx,
         solanaPay,
         move,
