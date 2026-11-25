@@ -286,7 +286,8 @@ const refusal = (e: unknown) =>
 
 // MCP allows 30 calls a minute per key. A mainnet server needs a guest client to start (main.ts), so there the key
 // makes only these price lookups: orders and delivery polls use the guest login or the customer's own Bitrefill
-// login, each with its own limit, and the catalog is read over REST. Lookups take at most 27 a minute, leaving 3 spare.
+// login, each with its own limit. The catalog is read over REST, which we don't count here: the documented 30 is
+// MCP's (docs/research/bitrefill-funding.md). Lookups take at most 27 a minute, leaving 3 spare.
 // A purchase's price check may use 24, browsing (catalog pages, quotes) at most 16, so browsing can never starve a
 // purchase. Of browsing's 16, refreshing a price we could already show stops while 6 are left, kept for cards never
 // priced yet. A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: the first 3 such
