@@ -85,9 +85,10 @@ export class Admin extends Context.Service<Admin, {
             Effect.map((g) => g.flat())
           ),
           relay.settings,
-          sql<{ n: number }>`SELECT count(*)::int AS n FROM relays WHERE created_at > now() - interval '1 day'`,
+          // What the caps count (Relay.usedToday): a Top-Up's own move-in is sent uncounted, so it isn't shown here either.
+          sql<{ n: number }>`SELECT count(*)::int AS n FROM relays WHERE counted AND created_at > now() - interval '1 day'`,
           sql<{ account_id: string; n: number }>`
-            SELECT account_id, count(*)::int AS n FROM relays WHERE created_at > now() - interval '1 day'
+            SELECT account_id, count(*)::int AS n FROM relays WHERE counted AND created_at > now() - interval '1 day'
             GROUP BY account_id ORDER BY n DESC LIMIT 5`,
           sql<{ today: number; delivered: number; ordered: number }>`
             SELECT count(*)::int AS today,
