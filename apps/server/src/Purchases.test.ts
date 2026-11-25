@@ -1259,7 +1259,7 @@ test("a Lucky card the reserve no longer covers is refused before anything is si
   assert.deepEqual(w.calls, [])
 })
 
-test("a Lucky cart confirmed on a smaller reserve is admitted as confirmed; a card the reserve no longer covers is refused before signing", async () => {
+test("a Lucky cart confirmed under a lower Cashback Cap is admitted as confirmed; a card the reserve no longer covers is refused before signing", async () => {
   // $10 cards. Confirmed when a card could play $4 of a $7 reserve: $4, then the $3 it left. Now a card may play $6 of
   // an $8 reserve. Priced at that most, the first card would leave the second $2, but admission locks only the $4 the
   // first was confirmed at, which leaves the second $4.
