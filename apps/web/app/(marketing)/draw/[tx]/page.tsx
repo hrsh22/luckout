@@ -50,6 +50,9 @@ export default async function DrawProof({ params, searchParams }: Props) {
   const ref = Number(draw.reference_price)
   const paid = Number(draw.final_price)
   const diff = paid - ref
+  // When only part of the price played (the Lucky Amount), the table's shares are of that part, not of the whole price.
+  const lucky = Number(draw.lucky_amount)
+  const part = lucky < ref
 
   return (
     <main id="main" className="relative mx-auto flex w-full max-w-[1000px] flex-col gap-10 px-6 pt-14 sm:px-10">
@@ -62,6 +65,7 @@ export default async function DrawProof({ params, searchParams }: Props) {
         <p className="text-lg text-ink-soft">
           Purchase #{draw.purchase_id} by <span title={draw.customer}>{shortAccount(draw.customer)}</span> on {version.name} (up to +{version.premium_bps / 100}%),{" "}
           <LocalTime iso={time.toISOString()} options={{ dateStyle: "medium", timeStyle: "short" }} />.
+          {part && ` Only ${usd(lucky)} of the price played; the rest was bought at the price.`}
         </p>
       </div>
 
@@ -78,7 +82,13 @@ export default async function DrawProof({ params, searchParams }: Props) {
           <li>The block's random seed: <code className="font-mono text-sm break-all text-ink">{draw.seed}</code></li>
           <li>Random value = sha256(seed, then purchase number #{draw.purchase_id}), so Draws in the same block are independent.</li>
           <li>Roll = the first 8 bytes of the random value, modulo 10,000.</li>
-          <li>The roll picks a row of the {version.name} table below. The Final Price is that share of the price, rounded up, never above what they paid up front; the rest comes back as cashback.</li>
+          <li>
+            The roll picks a row of the {version.name} table below.{" "}
+            {part
+              ? `That row's share applies to the ${usd(lucky)} that played, and the remainder is paid at the price. The Final Price is their sum`
+              : "The Final Price is that share of the price"}
+            , rounded up, never above what they paid up front; the difference comes back as cashback.
+          </li>
         </ol>
         <BrowserCheck tx={tx} purchase={Number(draw.purchase_id)} />
       </section>
@@ -100,7 +110,7 @@ export default async function DrawProof({ params, searchParams }: Props) {
                     <td className="p-4 tabular-nums">{o.chance_bps / 100}%</td>
                     <td className="p-4">
                       {o.final_bps < 10_000 + version.premium_bps ? `${cashbackPct(version.premium_bps, o.final_bps)}% back` : "None"}
-                      <span className="text-muted">, pays {o.final_bps / 100}% of the price</span>
+                      <span className="text-muted">, pays {o.final_bps / 100}% of {part ? "the part that played" : "the price"}</span>
                       {hit ? `, roll ${draw.roll}` : ""}
                     </td>
                   </tr>
