@@ -121,7 +121,7 @@ test("junk ids spend no lookups, and browsing can never use up the ones a purcha
       Effect.gen(function*() {
         const junk = yield* b.voucher("../admin").pipe(Effect.flip)
         // Browsing (catalog pages, quotes) uses its share of the minute's lookups...
-        for (let i = 0; i < 12; i++) yield* b.voucher(`card-${i}`)
+        for (let i = 0; i < 16; i++) yield* b.voucher(`card-${i}`)
         const busy = yield* b.voucher("amazon-us").pipe(Effect.flip)
         // ...and a purchase still gets its price, even for the id browsing was just refused.
         const bought = yield* b.voucher("amazon-us", { purchase: true })
@@ -135,7 +135,7 @@ test("junk ids spend no lookups, and browsing can never use up the ones a purcha
     assert.match(r.busy.message, /busy/)
     assert.equal(r.bought.packages[0]?.priceMicroUsdc, 10_000_000)
     assert.equal(r.browsed.id, "amazon-us")
-    assert.equal(looked.length, 14, "twelve for browsing, one for each purchase, none for the junk id or the cached price")
+    assert.equal(looked.length, 18, "sixteen for browsing, one for each purchase, none for the junk id or the cached price")
   } finally {
     globalThis.fetch = realFetch
   }
@@ -352,7 +352,7 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
     }
     return toolResult({ id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: price, payment_currency: "USD" }] })
   }) as typeof fetch
-  const cards = Array.from({ length: 12 }, (_, i) => `card-${i}`)
+  const cards = Array.from({ length: 16 }, (_, i) => `card-${i}`)
   try {
     const r = await Effect.runPromise(
       Effect.gen(function*() {
@@ -374,12 +374,12 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
         // A card a search showed counts as listed, though the copy doesn't have it.
         yield* b.search("pin")
         const pin = yield* page("phone-pin")
-        // So browsing still has all 12 of its lookups: amazon-us, phone-pin and ten more.
-        for (const id of cards.slice(0, 10)) yield* page(id)
+        // So browsing still has all 16 of its lookups: amazon-us, phone-pin and fourteen more.
+        for (const id of cards.slice(0, 14)) yield* page(id)
         // A card never priced can't be shown without a lookup...
-        const cold = yield* refused("card-10")
+        const cold = yield* refused("card-14")
         // ...but a purchase still gets its price: browsing can't use the last 8. A price from this minute is reused.
-        const bought = yield* buy("card-10")
+        const bought = yield* buy("card-14")
         yield* buy("card-0")
         yield* quote("amazon-us")
         const lookedFirst = [...looked]
@@ -394,18 +394,18 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
         const lookedOrdinary = looked.length
 
         // Eleven minutes in, a busy minute, and the price has gone up again. Open pages refresh their quotes: once
-        // 8 have, the rest show the last price we had instead of failing...
+        // 10 have, the rest show the last price we had instead of failing...
         yield* TestClock.adjust("6 minutes")
         price = "11.00"
-        for (const id of cards.slice(1, 9)) yield* quote(id)
-        const staleQuote = yield* quote("card-9")
+        for (const id of cards.slice(1, 11)) yield* quote(id)
+        const staleQuote = yield* quote("card-11")
         // ...and so does a page whose price is past its 10 minutes...
         const stalePage = yield* page("phone-pin")
-        // ...while a card never priced still loads: 4 of browsing's 12 are kept for first views.
-        const firstView = yield* page("card-11")
+        // ...while a card never priced still loads: 6 of browsing's 16 are kept for first views.
+        const firstView = yield* page("card-15")
         // Buy prices it live, and the next quote shows that price.
-        const buying = yield* buy("card-9")
-        const after = yield* quote("card-9")
+        const buying = yield* buy("card-11")
+        const after = yield* quote("card-11")
         return { first, madeUp, pin, cold, bought, lookedFirst, later, quoted, repriced, lookedOrdinary, staleQuote, stalePage, firstView, buying, after }
       }).pipe(
         Effect.scoped,
@@ -422,17 +422,17 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
     assert.equal(r.pin, 10_000_000)
     assert.match(r.cold, /busy/)
     assert.equal(r.bought, 10_000_000)
-    assert.equal(r.lookedFirst.length, 16, "amazon-us, 3 made-up, phone-pin, 10 cards, the new card's purchase")
+    assert.equal(r.lookedFirst.length, 20, "amazon-us, 3 made-up, phone-pin, 14 cards, the new card's purchase")
     assert.equal(r.later, 10_000_000, "a page shows a price up to 10 minutes old")
     assert.equal(r.quoted, 10_500_000, "a quote takes a price at most a minute old while lookups are free")
     assert.equal(r.repriced, 10_500_000, "so does Buy")
-    assert.equal(r.lookedOrdinary, 18)
+    assert.equal(r.lookedOrdinary, 22)
     assert.equal(r.staleQuote, 10_000_000, "the last price, not an error")
     assert.equal(r.stalePage, 10_000_000)
     assert.equal(r.firstView, 11_000_000)
     assert.equal(r.buying, 11_000_000)
     assert.equal(r.after, 11_000_000)
-    assert.equal(looked.length, 18 + 8 + 1 + 1, "the 8 refreshes, the first view, the purchase")
+    assert.equal(looked.length, 22 + 10 + 1 + 1, "the 10 refreshes, the first view, the purchase")
   } finally {
     globalThis.fetch = realFetch
   }

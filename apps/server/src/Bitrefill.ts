@@ -9,8 +9,8 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // Email, or on their own Bitrefill account once they've connected it (Connect.ts), and each invoice is paid
 // in USDC on Base from our Base Wallet (ADR-0012). The API key only reads:
 // the catalog, logos and prices. Testnet buys Bitrefill's free test cards on REST with its own account,
-// since a guest can't buy those. Without a guest client (BITREFILL_CLIENT_ID), mainnet still buys from the
-// account's USD store credit (ADR-0009), until it's switched over.
+// since a guest can't buy those. Without a guest client (BITREFILL_CLIENT_ID), real cards are bought from the
+// account's USD store credit (ADR-0009), but a mainnet server no longer starts without one (main.ts).
 
 const Product = Schema.Struct({
   id: Schema.String,
@@ -284,15 +284,18 @@ const refusal = (e: unknown) =>
     Effect.flatMap((body) => Effect.fail(new Rejected({ reason: `HTTP ${httpStatus(e)} ${body.slice(0, 300)}`.trim() })))
   )
 
-// MCP allows 30 calls a minute per key, shared by price lookups and buys. Lookups get at most 20 of them, and
-// browsing (catalog pages, quotes) at most 12, so browsing can never starve a customer's purchase or its price check.
-// Of browsing's 12, refreshing a price we could already show stops while 4 are left, kept for cards never priced yet.
-// A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: the first 3 such ids in a
-// minute get Bitrefill's answer (a 404 if it doesn't have them), and any more that minute answer busy, unasked. So a
-// card newer than our catalog copy still loads, and made-up ids can't use up anyone else's lookups.
-const LOOKUPS_PER_MINUTE = 20
-const BROWSE_LOOKUPS_PER_MINUTE = 12
-const FIRST_VIEW_LOOKUPS = 4
+// MCP allows 30 calls a minute per key. A mainnet server needs a guest client to start (main.ts), so there the key
+// makes only these price lookups: orders and delivery polls use the guest login or the customer's own Bitrefill
+// login, each with its own limit, and the catalog is read over REST. Lookups take at most 27 a minute, leaving 3 spare.
+// A purchase's price check may use 24, browsing (catalog pages, quotes) at most 16, so browsing can never starve a
+// purchase. Of browsing's 16, refreshing a price we could already show stops while 6 are left, kept for cards never
+// priced yet. A page for a card no listing knows (see `isListed`) looks it up from 3 more of its own: the first 3 such
+// ids in a minute get Bitrefill's answer (a 404 if it doesn't have them), and any more that minute answer busy, unasked
+// (or 404 if Bitrefill already said so, see `missing`). So a card newer than our catalog copy still loads, and made-up
+// ids can't use up anyone else's lookups.
+const LOOKUPS_PER_MINUTE = 24
+const BROWSE_LOOKUPS_PER_MINUTE = 16
+const FIRST_VIEW_LOOKUPS = 6
 const UNLISTED_LOOKUPS_PER_MINUTE = 3
 /**
  * How old a price may be. A quote (what the customer confirms) and Buy take one at most a minute old. A card's page
@@ -668,7 +671,9 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       }
       const popular = (country?: string, category?: Category) => Effect.sync(() => pickPopular(brands, country, category).map(summary))
 
-      // ponytail: fixed one-minute window in memory, one process.
+      // ponytail: fixed one-minute window in memory, one process. Across a window's edge up to twice the budget can go
+      // out within 60 seconds; if Bitrefill then refuses one (429), that lookup fails like an outage and no order is
+      // touched. A sliding window if those refusals show up in the logs.
       let budget = { used: 0, unlisted: 0, resetAt: 0 }
       const spendLookup = (limit: number, unlisted: boolean) =>
         Effect.flatMap(Clock.currentTimeMillis, (now) => {
@@ -736,9 +741,9 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       )
       // A page or quote takes a price at most `maxAge` old; past that, a new one if a lookup is free, else (or when
       // Bitrefill doesn't answer) the last one we had while it's under an hour old.
-      // ponytail: when more than 8 cards in view need a new price in one minute, the rest show their last one, and only
-      // 4 cards never priced since the server started load that minute. More lookups (on mainnet the API key only
-      // prices; orders go through the guest login) would lift both.
+      // ponytail: when more than 10 cards in view need a new price in one minute, the rest show their last one, and cards
+      // never priced since the server started share what's left of browsing's 16 (at least 6); past that they answer
+      // busy until the next minute. The key already uses most of Bitrefill's 30; a higher limit from Bitrefill would lift both.
       const shownPrice = (id: string, maxAge: number) =>
         Effect.flatMap(Clock.currentTimeMillis, (now) => {
           const last = recent(id, now)
