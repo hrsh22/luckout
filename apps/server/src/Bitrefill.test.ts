@@ -487,7 +487,7 @@ test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, 
     )
     assert.equal(r.typo, NO_SUCH_VOUCHER)
     assert.equal(r.again, NO_SUCH_VOUCHER, "not found, not busy")
-    assert.match(r.unseen, /busy/, "an id never asked about still waits for the next minute")
+    assert.match(r.unseen, /^Prices are busy.*If you typed its link, check it/, "an id never asked about still waits for the next minute, and may be a typo")
     assert.equal(r.later, NO_SUCH_VOUCHER)
     assert.equal(r.listed.id, "amazn-us")
     assert.deepEqual(looked, ["amazn-us", "made-up-0", "made-up-1", "amazn-us", "amazn-us"])

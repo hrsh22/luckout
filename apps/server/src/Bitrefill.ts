@@ -316,6 +316,8 @@ const NOT_FOUND_MS = 10 * 60_000
 export const NO_SUCH_VOUCHER = "No such voucher"
 /** What `voucher` fails with when no lookup can be sent this minute; Purchases doesn't count it as a missing card. */
 const PRICES_BUSY = "Prices are busy right now; try again in a minute"
+/** The same, for a card no listing knows: it may be a mistyped link, which we can't tell until the minute is over. */
+const UNKNOWN_BUSY = "Prices are busy right now, so we couldn't check this card. If you typed its link, check it; otherwise try again in a minute."
 /** Bitrefill's answer for a card it doesn't have: "Product 'x' was not found.", or a tool error coded so. */
 const NO_SUCH_PRODUCT = /was not found|NOT_FOUND/
 /** The least time between two delivery polls on the guest login, across all purchases: 20 a minute. */
@@ -685,7 +687,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         Effect.flatMap(Clock.currentTimeMillis, (now) => {
           sent = sent.filter((s) => s.at > now - 60_000)
           if (sent.filter((s) => s.unlisted === unlisted).length >= (unlisted ? UNLISTED_LOOKUPS_PER_MINUTE : limit)) {
-            return Effect.fail(new BitrefillUnavailable({ message: PRICES_BUSY }))
+            return Effect.fail(new BitrefillUnavailable({ message: unlisted ? UNKNOWN_BUSY : PRICES_BUSY }))
           }
           sent.push({ at: now, unlisted })
           return Effect.void
