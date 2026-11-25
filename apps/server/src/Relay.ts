@@ -16,6 +16,8 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // panel can switch it off and change both caps.
 
 /** Until an admin changes them: free relays per account, and for everyone, per rolling day. Mainnet starts small. */
+const DAY_MS = 24 * 60 * 60 * 1000
+
 export const RELAY_DEFAULTS = {
   mainnet: new RelaySettings({ enabled: true, perAccountDaily: 5, allDaily: 50 }),
   testnet: new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 500 })
@@ -144,21 +146,31 @@ export class Relay extends Context.Service<Relay, {
           SELECT count(*) FILTER (WHERE account_id = ${accountId})::int AS mine, count(*)::int AS everyone
           FROM relays WHERE counted AND created_at > now() - interval '1 day'`.pipe(Effect.map((r) => r[0] ?? { mine: 0, everyone: 0 }))
 
-      // When an admin last heard that everyone's free relays were used up.
+      // When an admin last heard that everyone's free relays were used up, and that an account was near its own share.
       // ponytail: in memory, one process (ADR-0006); a restart may tell them once more that day.
       let toldAllUsedAt = 0
+      const toldNearAt = new Map<string, number>()
       /**
        * Whether the relayer is on and this account (and everyone) has free relays left today. Everyone's running out
-       * stops EVM and Solana customers, who have no NEAR to pay with, so an admin hears it, once a day.
+       * stops EVM and Solana customers, who have no NEAR to pay with, so an admin hears it, once a day. So does an
+       * account that has used 80% of its own share: real use that may need a higher cap, or someone spending ours.
        */
       const quotaLeft = (accountId: string) =>
         Effect.gen(function*() {
           const [s, u] = yield* Effect.all([settings, usedToday(accountId)])
-          if (s.enabled && u.everyone >= s.allDaily && Date.now() - toldAllUsedAt > 24 * 60 * 60 * 1000) {
-            toldAllUsedAt = Date.now()
-            // On its own fiber: Telegram may take seconds, and a relay may be waiting on the one-at-a-time lock.
+          const now = Date.now()
+          // On their own fibers: Telegram may take seconds, and a relay may be waiting on the one-at-a-time lock.
+          if (s.enabled && u.everyone >= s.allDaily && now - toldAllUsedAt > DAY_MS) {
+            toldAllUsedAt = now
             yield* Effect.forkDetach(alerts.admin(
-              `All ${s.allDaily} free relays for the last 24 hours are used. Until some are a day old, EVM and Solana customers can't withdraw, reclaim, change settings or send money out (NEAR wallets pay their own fee; Top-Up move-ins still go). If this is real use, raise "in all per day" in the admin panel; if not, see who used them in the relays table.`
+              `All ${s.allDaily} free relays for the last 24 hours are used. Until some are a day old, EVM and Solana customers can't withdraw, reclaim, change settings or send money out (NEAR wallets pay their own fee; Top-Up move-ins still go). If this is real use, raise "Everyone a day" in the admin panel; if not, see who used them in the relays table.`
+            ))
+          }
+          if (s.enabled && s.perAccountDaily > 0 && u.mine >= Math.ceil(s.perAccountDaily * 0.8) && now - (toldNearAt.get(accountId) ?? 0) > DAY_MS) {
+            for (const [a, at] of toldNearAt) if (now - at > DAY_MS) toldNearAt.delete(a)
+            toldNearAt.set(accountId, now)
+            yield* Effect.forkDetach(alerts.admin(
+              `${accountId} has used ${u.mine} of its ${s.perAccountDaily} free relays in the last 24 hours. At ${s.perAccountDaily} it can't withdraw, reclaim or change settings for free until some are a day old. If this is real use, raise "Per account a day" in the admin panel; if not, see its rows in the relays table.`
             ))
           }
           return s.enabled && u.mine < s.perAccountDaily && u.everyone < s.allDaily

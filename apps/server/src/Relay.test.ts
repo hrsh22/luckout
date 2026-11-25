@@ -493,11 +493,12 @@ test("once the free relays for everyone are used up, an admin hears it once, not
   const w = world({ alerts })
   const r = await w.run(Effect.gen(function*() {
     const relay = yield* Relay
-    // One account using up its own share is no news.
+    // One account using up its own share: refused, and said once as its own news (the next test).
     yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 1, allDaily: 500 }), "admin.testnet")
     yield* w.send(withdraw({ nonce: 11n }))
     const own = (yield* Effect.flip(w.send(withdraw({ nonce: 12n }))))._tag
-    const afterOwn = alerts.length
+    yield* Effect.sleep("20 millis")
+    const afterOwn = alerts.filter((a) => /All \d+ free relays/.test(a)).length
     // Everyone's share used up: refused for everyone, and said once, however often it's asked.
     yield* relay.configure(new RelaySettings({ enabled: true, perAccountDaily: 20, allDaily: 1 }), "admin.testnet")
     const everyone = [(yield* Effect.flip(w.send(withdraw({ nonce: 13n }))))._tag, (yield* Effect.flip(w.send(withdraw({ nonce: 14n }))))._tag]
@@ -506,8 +507,28 @@ test("once the free relays for everyone are used up, an admin hears it once, not
     return { own, afterOwn, everyone, others }
   }))
   assert.deepEqual(r, { own: "RelayUnavailable", afterOwn: 0, everyone: ["RelayUnavailable", "RelayUnavailable"], others: false })
+  assert.equal(alerts.filter((a) => /All 1 free relays/.test(a)).length, 1)
+})
+
+test("an account that has used 80% of its own free relays is told to an admin once a day, and no one else's use is", async () => {
+  const alerts: Array<string> = []
+  const w = world({ alerts })
+  const r = await w.run(Effect.gen(function*() {
+    yield* Relay.use((r) => r.configure(new RelaySettings({ enabled: true, perAccountDaily: 5, allDaily: 500 }), "admin.testnet"))
+    const told: Array<number> = []
+    for (let n = 1n; n <= 6n; n++) {
+      yield* Effect.ignore(w.send(withdraw({ nonce: 20n + n })))
+      yield* Effect.sleep("20 millis") // the alert goes on its own fiber
+      told.push(alerts.length)
+    }
+    const bob = yield* Relay.use((r) => r.available("bob.testnet"))
+    return { told, bob }
+  }))
+  // Sent 1 to 5, refused the 6th. Its 5th try finds 4 used (80% of 5): said then, and not again that day.
+  assert.deepEqual(r.told, [0, 0, 0, 0, 1, 1])
+  assert.match(alerts[0]!, /^alice\.testnet has used 4 of its 5 free relays in the last 24 hours\./)
+  assert.equal(r.bob, true, "another account still has its own share")
   assert.equal(alerts.length, 1)
-  assert.match(alerts[0]!, /All 1 free relays/)
 })
 
 // ---------- a gas floor, and a relay whose own transaction expired ----------
