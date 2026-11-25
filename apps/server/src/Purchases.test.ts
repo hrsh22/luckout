@@ -68,6 +68,10 @@ const world = (opts: {
   reserveFull?: boolean
   /** The most of a card's price the reserve lets a Lucky Buy play ($6 unless set). */
   luckyCap?: number
+  /** Free Reserve a cart's Lucky cards play out of in order, each locking what it plays (unlimited unless set). */
+  reserve?: number
+  /** A contract from before quote_many read confirmed Lucky Amounts: it quotes each card at the most it may play. */
+  oldContract?: boolean
   /** For each delivery poll, the order in which Bitrefill lists the invoice's orders (cart order unless set). */
   listed?: Array<ReadonlyArray<number>>
   /**
@@ -140,14 +144,20 @@ const world = (opts: {
           ? { mode, reference_price: String(price), lucky_amount: "6000000", max_price: String(price + 1_200_000) }
           : method === "quote_many"
           // Each card as the contract prices it: a Lucky one plays as much of its price as the reserve allows, at a 20%
-          // premium rounded up; with no reserve left, it comes back Normal.
-          ? (args as { items: Array<{ reference_price: string; mode: Mode }> }).items.map((i) => {
-            const r = Number(i.reference_price)
-            const lucky = Math.min(r, opts.luckyCap ?? 6_000_000)
-            return typeof i.mode === "object" && !opts.reserveFull
-              ? { mode: i.mode, reference_price: i.reference_price, lucky_amount: String(lucky), max_price: String(r + Math.ceil(lucky * 2_000 / 10_000)) }
-              : { mode: "normal", reference_price: i.reference_price, lucky_amount: "0", max_price: i.reference_price }
-          })
+          // premium rounded up, or exactly its confirmed Lucky Amount if the reserve still covers that, and locks what it
+          // plays from the cards after it (a Classic card's lock); with no reserve left, it comes back Normal.
+          ? ((free) =>
+            (args as { items: Array<{ reference_price: string; mode: Mode; lucky_amount?: string }> }).items.map((i) => {
+              const r = Number(i.reference_price)
+              const most = Math.min(r, opts.luckyCap ?? 6_000_000, free)
+              const confirmed = opts.oldContract ? 0 : Number(i.lucky_amount ?? 0)
+              const lucky = confirmed > 0 && confirmed <= most ? confirmed : most
+              if (typeof i.mode !== "object" || opts.reserveFull || most === 0) {
+                return { mode: "normal", reference_price: i.reference_price, lucky_amount: "0", max_price: i.reference_price }
+              }
+              free -= lucky
+              return { mode: i.mode, reference_price: i.reference_price, lucky_amount: String(lucky), max_price: String(r + Math.ceil(lucky * 2_000 / 10_000)) }
+            }))(opts.reserve ?? Number.POSITIVE_INFINITY)
           : method === "get_game_versions"
           ? [0, 1].map((v) => ({ name: `v${v}`, premium_bps: 2_000, outcomes: [] }))
           : { status: opts.onchain ?? "Pending", ...opts.onchainPurchase }) as A
@@ -1249,6 +1259,26 @@ test("a Lucky card the reserve no longer covers is refused before anything is si
   assert.deepEqual(w.calls, [])
 })
 
+test("a Lucky cart confirmed under a lower Cashback Cap is admitted as confirmed; a card the reserve no longer covers is refused before signing", async () => {
+  // $10 cards. Confirmed when a card could play $4 of a $7 reserve: $4, then the $3 it left. Now a card may play $6 of
+  // an $8 reserve. Priced at that most, the first card would leave the second $2, but admission locks only the $4 the
+  // first was confirmed at, which leaves the second $4.
+  const w = world({ luckyCap: 6_000_000, reserve: 8_000_000 })
+  const card = (luckyAmount: number) =>
+    new NewPurchase({ voucherId: "test-card", value: "10", mode: { lucky: 1 }, luckyAmount, maxPrice: 10_000_000 + luckyAmount / 5, idempotencyKey: crypto.randomUUID() })
+  const r = await w.run(Effect.gen(function*() {
+    // $5 for the second card is more than the $4 the first leaves it: the contract would refuse it.
+    const stale = yield* Purchases.use((p) => p.createCart("alice.test", [card(4_000_000), card(5_000_000)])).pipe(Effect.flip)
+    const signed = [...w.calls]
+    const placed = yield* Purchases.use((p) => p.createCart("alice.test", [card(4_000_000), card(3_000_000)]))
+    return { stale, signed, steps: yield* Effect.forEach(placed, (p) => settled(p.id)) }
+  }))
+  assert.match(r.stale.message, /^Card 10: That quote is out of date/)
+  assert.deepEqual(r.signed, [], "nothing signed for the stale cart")
+  assert.deepEqual(r.steps, ["settled", "settled"])
+  assert.deepEqual(w.admits.map((a) => [a.lucky_amount, a.max_debit]), [["4000000", "10800000"], ["3000000", "10600000"]])
+})
+
 test("each card of a cart gets its own code, and a card Bitrefill fails is refunded without holding the others", async () => {
   const w = world({ real: true, guest: true, credit: 100_000_000, deliveries: [["Delivered", "Failed", "Delivered"]] })
   const r = await w.run(Effect.gen(function*() {
@@ -1539,6 +1569,10 @@ test("a card whose price rose since it was confirmed is refused before anything 
     ["10000000", "10000000"],
     ["10000000", "5000000"]
   ], "at today's lower price, a whole-price Lucky Buy on the whole of it")
+  // A contract from before quote_many read confirmed amounts quotes the whole $10 here: $5's price is worked out instead.
+  const old = world({ price: 10_000_000, luckyCap: 100_000_000, oldContract: true })
+  assert.equal((await old.run(buy([luckyGrown])))[0]!.status, "delivered")
+  assert.deepEqual(old.admits.map((a) => [a.lucky_amount, a.max_debit]), [["5000000", "11000000"]])
 })
 
 test("Bitrefill's guest limits, as one rule the shop and the bot share", () => {

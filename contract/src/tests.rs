@@ -2573,6 +2573,7 @@ fn a_cart_is_quoted_and_admitted_exactly_as_its_cards_would_be_one_by_one() {
             .map(|(r, mode)| QuoteItem {
                 reference_price: U128(r),
                 mode,
+                lucky_amount: None,
             })
             .collect(),
     );
@@ -2609,10 +2610,12 @@ fn a_lucky_card_the_reserve_cant_cover_is_quoted_normal() {
         QuoteItem {
             reference_price: U128(10 * USDC),
             mode: Mode::Lucky(1),
+            lucky_amount: None,
         },
         QuoteItem {
             reference_price: U128(5 * USDC),
             mode: Mode::Normal,
+            lucky_amount: None,
         },
     ]);
     assert_eq!(
@@ -2620,6 +2623,121 @@ fn a_lucky_card_the_reserve_cant_cover_is_quoted_normal() {
         (Mode::Normal, 0, 10 * USDC)
     );
     assert_eq!((q[1].mode, q[1].max_price.0), (Mode::Normal, 5 * USDC));
+}
+
+/// A cart's cards to quote, each with the Lucky Amount the customer confirmed (or none).
+fn quote_items(cards: &[(u128, Mode)], confirmed: &[Option<u128>]) -> Vec<QuoteItem> {
+    cards
+        .iter()
+        .zip(confirmed)
+        .map(|(&(r, mode), l)| QuoteItem {
+            reference_price: U128(r),
+            mode,
+            lucky_amount: l.map(U128),
+        })
+        .collect()
+}
+
+fn terms(quotes: &[Quote]) -> Vec<(Mode, u128, u128)> {
+    quotes
+        .iter()
+        .map(|q| (q.mode, q.lucky_amount.0, q.max_price.0))
+        .collect()
+}
+
+#[test]
+fn a_cart_confirmed_before_the_cap_rose_is_quoted_exactly_as_it_is_admitted() {
+    // 260 USDC of Free Reserve under the default Cashback Cap (50 USDC, 20%): the first Classic card is capped by the
+    // 50 USDC, the second by 20% of what the first left, and the third plays what both left.
+    let mut c = setup(260 * USDC, 500 * USDC);
+    raise_limits(&mut c);
+    let cart = [(100 * USDC, Mode::Lucky(1)); 3];
+    let seen = c.quote_many(quote_items(&cart, &[None; 3]));
+    // The customer confirms the first two cards' Lucky Amounts; the third card has none, so it plays what's left.
+    let confirmed = [
+        Some(seen[0].lucky_amount.0),
+        Some(seen[1].lucky_amount.0),
+        None,
+    ];
+    // Then the owner drops the fixed limit. Quoted at the most it may play now, the first card would lock more than
+    // admission locks for it, and leave the second less than the customer confirmed: a refusal the contract wouldn't make.
+    set_cap(&mut c, None, Some(2_000));
+    let most = c.quote_many(quote_items(&cart, &[None; 3]));
+    assert!(most[1].lucky_amount.0 < seen[1].lucky_amount.0);
+
+    let quoted = c.quote_many(quote_items(&cart, &confirmed));
+    as_(operator());
+    let ids = c.purchase_many(
+        alice(),
+        cart.iter()
+            .zip(confirmed)
+            .enumerate()
+            .map(|(i, (&(r, m), l))| CartItem {
+                lucky_amount: l.map(U128),
+                ..item(r, m, &format!("c{i}"))
+            })
+            .collect(),
+    );
+    let admitted: Vec<(Mode, u128, u128)> = ids
+        .iter()
+        .map(|id| {
+            let p = c.get_purchase(*id).unwrap();
+            (p.mode, p.lucky_amount.0, p.max_price.0)
+        })
+        .collect();
+    // The third card matching shows the quote locked for the first two what admission locked.
+    assert_eq!(terms(&quoted), admitted, "the quote is what's admitted");
+    assert_eq!(terms(&quoted[..2]), terms(&seen[..2]));
+}
+
+#[test]
+fn a_confirmed_lucky_amount_that_no_longer_fits_is_quoted_as_without_one() {
+    // The owner lowered the cap since the customer's quote, so the first card's confirmed amount is more than it may
+    // play now: it comes back at the most it may, which the server sees is less. An amount of 0, one above the card's
+    // price, and one on a Normal card are quoted as if missing. None of them panics: this is a view.
+    let mut c = setup(260 * USDC, USDC);
+    let cart = [
+        (100 * USDC, Mode::Lucky(1)),
+        (100 * USDC, Mode::Lucky(1)),
+        (5 * USDC, Mode::Lucky(0)),
+        (5 * USDC, Mode::Normal),
+    ];
+    let seen = c.quote_many(quote_items(&cart, &[None; 4]));
+    set_cap(&mut c, Some(10 * USDC), Some(2_000));
+    let most = c.quote_many(quote_items(&cart, &[None; 4]));
+    assert!(most[0].lucky_amount.0 < seen[0].lucky_amount.0);
+    let confirmed = [
+        Some(seen[0].lucky_amount.0),
+        Some(0),
+        Some(6 * USDC),
+        Some(USDC),
+    ];
+    assert_eq!(
+        terms(&c.quote_many(quote_items(&cart, &confirmed))),
+        terms(&most)
+    );
+    // No reserve left: a confirmed Lucky card comes back Normal, as one without an amount does.
+    let empty = setup(0, USDC);
+    assert_eq!(
+        terms(&empty.quote_many(quote_items(&cart[..1], &[Some(seen[0].lucky_amount.0)]))),
+        [(Mode::Normal, 0, 100 * USDC)]
+    );
+}
+
+#[test]
+fn a_quote_item_may_leave_out_its_lucky_amount() {
+    // Callers from before the field send none, and get the quotes they always got.
+    let items: Vec<QuoteItem> = near_sdk::serde_json::from_str(
+        r#"[{"reference_price":"1000000","mode":{"lucky":1}},{"reference_price":"1000000","mode":{"lucky":1},"lucky_amount":"5"}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| i.lucky_amount.map(|l| l.0))
+            .collect::<Vec<_>>(),
+        [None, Some(5)]
+    );
 }
 
 #[test]
@@ -2890,6 +3008,7 @@ fn a_cart_the_reserve_runs_out_on_quotes_the_rest_normal_and_admits_them_so() {
             .map(|_| QuoteItem {
                 reference_price: U128(USDC),
                 mode: Mode::Lucky(0),
+                lucky_amount: None,
             })
             .collect(),
     );
@@ -3034,6 +3153,7 @@ fn every_usdc_is_accounted_for_however_carts_are_settled() {
                     0 => Mode::Normal,
                     k => Mode::Lucky(k as u32 - 1),
                 },
+                lucky_amount: None,
             })
             .collect();
         let quotes = c.quote_many(wanted);

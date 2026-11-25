@@ -236,11 +236,12 @@ pub struct CartItem {
     pub lucky_amount: Option<U128>,
 }
 
-/// One card to price in a cart.
+/// One card to price in a cart. `lucky_amount`: the Lucky Amount the customer confirmed, as in `CartItem`.
 #[near(serializers = [json])]
 pub struct QuoteItem {
     pub reference_price: U128,
     pub mode: Mode,
+    pub lucky_amount: Option<U128>,
 }
 
 #[near(serializers = [json])]
@@ -854,7 +855,9 @@ impl Contract {
 
     /// A cart's terms, card by card, as `purchase_many` would admit them now: each Lucky card's Cashback
     /// Cap and lock come from the Free Reserve the cards before it left. A Lucky card the reserve can't
-    /// cover at all comes back Normal, at the Reference Price; one it covers in part plays that part.
+    /// cover at all comes back Normal, at the Reference Price; one it covers in part plays that part. A Lucky card with
+    /// a confirmed Lucky Amount the reserve still covers plays and locks exactly that, as admission would; one it no
+    /// longer covers is quoted as without one, so the caller sees it moved.
     pub fn quote_many(&self, items: Vec<QuoteItem>) -> Vec<Quote> {
         require!(
             !items.is_empty() && items.len() <= MAX_CART,
@@ -865,11 +868,20 @@ impl Contract {
             .into_iter()
             .map(|i| {
                 let r = i.reference_price.0;
-                let mode = match i.mode {
-                    Mode::Lucky(v) if self.lucky_allowed(free, r, v) == 0 => Mode::Normal,
-                    m => m,
+                let (mode, confirmed) = match i.mode {
+                    Mode::Lucky(v) => match self.lucky_allowed(free, r, v) {
+                        0 => (Mode::Normal, None),
+                        // `allowed` is at most `r`, so this is also the check `quote_at` makes, without its panic.
+                        allowed => (
+                            i.mode,
+                            i.lucky_amount
+                                .map(|l| l.0)
+                                .filter(|&x| x > 0 && x <= allowed),
+                        ),
+                    },
+                    m => (m, None),
                 };
-                let q = self.quote_at(free, r, mode, None);
+                let q = self.quote_at(free, r, mode, confirmed);
                 if let Mode::Lucky(v) = mode {
                     free -= q.lucky_amount.0 * self.version(v).max_discount_bps() / BPS;
                 }
