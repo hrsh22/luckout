@@ -9,7 +9,8 @@ import { readSetting, writeSetting } from "./Settings.ts"
 
 // Bitrefill credit (ADR-0009). Every real card is paid from our USD store credit, which can't be
 // refunded, so we keep only what recent sales need. Bitrefill is asked for the balance every few
-// minutes (its MCP endpoint allows 30 calls a minute, shared with prices and buys); in between,
+// minutes (its MCP endpoint allows 30 calls a minute per key; without a guest client the key also prices and
+// buys, while with one, which mainnet requires, its MCP calls are only price lookups); in between,
 // the estimate subtracts what we ordered since and what purchases in progress are about to order.
 // One lock covers "is there credit for this card?" and recording the answer, so two purchases can
 // never both count on the same dollars. Test cards are free and never touch any of this.
