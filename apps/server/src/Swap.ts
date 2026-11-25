@@ -67,10 +67,11 @@ const MAX_PRICE_GAP = 0.015
 /** The priority fee's ceiling, in lamports (0.0002 SOL). */
 export const MAX_PRIORITY_LAMPORTS = 200_000
 /**
- * The most SOL the wallet may spend (0.005 SOL): fees, priority, rent for the deposit address's USDC account, and
- * for the wallet's own USDC account when it has none yet (0.00204 SOL each).
+ * The most SOL the wallet may spend (0.007 SOL): fees, priority, and rent for up to three token accounts at about
+ * 0.00204 SOL each: the deposit address's USDC account, the wallet's own USDC account when it has none yet, and one
+ * for a token the route passes through (Jupiter opens it for the wallet; seen on real routes with a Token-2022 hop).
  */
-const MAX_SOL_SPENT = 5_000_000n
+const MAX_SOL_SPENT = 7_000_000n
 export const JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 /** Compute for our own two instructions (opening the deposit's USDC account, the transfer): Jupiter's limit counts only its own. */
 const OUR_UNITS = 60_000
@@ -272,7 +273,7 @@ export const simulationProblem = (logs: ReadonlyArray<string>, symbol: string) =
   if (/already in use/i.test(text)) return "This Top-Up is already paid, or a payment for it is on its way. Nothing more was sent."
   if (/insufficient funds/i.test(text)) return `This wallet doesn't hold enough ${symbol} for this. Nothing was sent.`
   if (/insufficient lamports|no record of a prior credit|InsufficientFundsForRent/i.test(text)) {
-    return "This wallet needs a little more SOL for the network fee and token accounts (up to 0.005 SOL). Nothing was sent."
+    return "This wallet needs a little more SOL for the network fee and token accounts (up to 0.007 SOL). Nothing was sent."
   }
   return undefined
 }

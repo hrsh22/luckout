@@ -67,7 +67,7 @@ export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | und
         Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee:{" "}
         {/* A token sent on Solana also opens the deposit address's account for that token, which the sender pays for. */}
         {q.swap
-          ? "under 0.005 SOL, with the token accounts it opens"
+          ? "under 0.007 SOL, with the token accounts it opens"
           : q.chain === "sol" && q.symbol !== "SOL" ? "about 0.002 SOL, with the deposit address's token account" : FEES[q.chain] ?? "set by your wallet"}
       </p>
       {warning && <p className="text-sm font-medium text-warn">{warning}</p>}
