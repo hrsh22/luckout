@@ -9,7 +9,7 @@
 Buy the gift cards you already buy, paid in USDC from eight chains.<br />
 Pay the price, or add a little for a provably fair chance at cashback. Either way, the card is yours.
 
-**[Open the app](https://www.luckout.wtf)** · [Telegram bot](https://t.me/luckoutbot) · [Try it free on testnet](https://testnet.luckout.wtf/welcome) · [Is it fair?](https://www.luckout.wtf/fair)
+**[Open the app](https://www.luckout.wtf)** · [Telegram bot](https://t.me/luckoutbot) · [Is it fair?](https://www.luckout.wtf/fair)
 
 [![CI](https://github.com/hrsh22/luckout/actions/workflows/ci.yml/badge.svg)](https://github.com/hrsh22/luckout/actions/workflows/ci.yml)
 [![NEAR mainnet](https://img.shields.io/badge/NEAR-mainnet-00EC97)](https://nearblocks.io/address/app.luckout.near)
@@ -48,7 +48,6 @@ Built during NEAR HACKATHON 2026. See [Hackathon notes](#hackathon-notes).
 | A real Draw Proof (100% cashback), recomputed in your browser | [Purchase #10 on Classic](https://www.luckout.wtf/draw/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62) |
 | Live Average, reserve, Cashback Cap, code hash, AI enclave check | [luckout.wtf/fair](https://www.luckout.wtf/fair) |
 | Staging (a small copy of production on mainnet, where each release is tried with real money first) | [staging.luckout.wtf](https://staging.luckout.wtf), contract `app.staging.luckout.near` |
-| Free testnet demo (test USDC, Bitrefill test cards) | [testnet.luckout.wtf](https://testnet.luckout.wtf), bot [@luckouttestingbot](https://t.me/luckouttestingbot) |
 
 As of 14 November 2026, mainnet has settled 12 Lucky Buys of real cards (`get_stats`), and `app.luckout.near` has 119 transactions. The Cashback Reserve holds $1,000, so one purchase can get up to $200 back (`get_reserve`). `/fair` reads the current numbers from the contract.
 
@@ -92,19 +91,7 @@ Exact odds on a ₹500 voucher (chance → what you end up paying):
 
 ## Try it
 
-### 1. Free, on testnet (about 5 minutes)
-
-1. Open [testnet.luckout.wtf/welcome](https://testnet.luckout.wtf/welcome) and sign in with a testnet NEAR wallet or any EVM wallet. **You see** "How do you like to pay?"
-2. Pick a Default Mode (we suggest Classic) and tap Continue. **You see** "Add funds".
-3. Tap "Get 100 test USDC". **You see** $100 in your balance, then "You're all set" with your mode and Spending Limits. An EVM wallet needs no testnet funds: the faucet pays its NEAR Intents account, and one signature moves the money in.
-4. In the shop, buy the $10 Bitrefill test gift card. **You see** the code, the Draw's result and your new balance within seconds.
-5. Open the purchase's Draw Proof. **You see** the seed, the table and the outcome, recomputed in your browser from the testnet transaction.
-6. Optional: on the Wallet page, tap "Connect Telegram" and ask the bot for "a $10 test gift card on Jackpot". **You see** one line and a Buy button. Nothing is bought until you tap it.
-
-> [!NOTE]
-> Our testnet Bitrefill account allows 15 orders in any 24 hours, shared by everyone trying it. If the shop says Bitrefill refused, try again a few hours later.
-
-### 2. With real money, on mainnet
+### 1. With real money, on mainnet
 
 You need at least $1 of USDC (or another token) on a supported chain, plus that chain's gas.
 
@@ -113,7 +100,7 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 3. Buy any card from the shop. The cheapest we've bought is a ₹50 Swiggy voucher, about $0.60. **You see** the real code and, on a lucky mode, the Draw.
 4. Withdraw what's left from Wallet → Withdraw. **You see** it go back to your wallet, or to your EVM or Solana address on the chain you pick, with no gas to pay.
 
-### 3. Check it without a wallet
+### 2. Check it without a wallet
 
 - **A Draw Proof:** open the [mainnet Draw Proof](https://www.luckout.wtf/draw/EYG7gjCYCAzEQMYPj1SrYRWkbLQAsyLEcJ6rqskQyz62). It fetches the transaction from NEAR RPC and recomputes the Cashback in your browser. That browser code is tested against a real testnet Draw event (`apps/web/lib/draw.test.ts`), and the contract's test checks the same hash (`contract/src/tests.rs`).
 - **The same Draw, by hand:** its `draw` event logs `purchase_id` 10 and `seed` `3478d52f…185f`. Hash the two together as the contract does:
@@ -139,7 +126,7 @@ You need at least $1 of USDC (or another token) on a supported chain, plus that 
 
 ![The /fair page: the Live Average read from the contract, next to the promised 105.6%](docs/images/fair.jpg)
 
-### 4. Run it locally
+### 3. Run it locally, on testnet
 
 <details>
 <summary>Install, run the tests, deploy your own contract</summary>
@@ -157,8 +144,9 @@ pnpm test              # unit tests; nothing calls Bitrefill or 1Click (pnpm --f
 
 Without any keys, the server starts on PGlite (no database to install), the Draw Proof and Live Average pages read testnet directly, and the shop says which key is missing. With `BITREFILL_API_KEY`, the catalog and prices work. With the operator key and `REDEMPTION_KEY`, purchases work. All variables are in [`.env.example`](.env.example).
 
-- **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). The paths that move USDC also run as real wasm in a local NEAR sandbox: build both contracts (`cargo near build non-reproducible-wasm` in `contract/` and in `contract/test-usdc/`), then `cd contract/sandbox && cargo test` (the first run downloads the sandbox). `contract/deploy-testnet.sh` deploys your own copy with a faucet account.
-- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. `node apps/server/scripts/e2e-evm.ts` does the same for a fresh EVM wallet through NEAR Intents (it needs the server's relayer) and checks what must be refused. Set `API_URL=https://testnet-api.luckout.wtf` to run them against the deployed testnet server.
+- **Purchases on testnet:** local development runs against testnet, and the server's key (`OPERATOR_PRIVATE_KEY`) must be a function-call key on the contract that may call `purchase`, `confirm_delivery`, `fail_purchase`, `purchase_many` and `settle`; the server refuses to start when it can't call `purchase_many` or `settle`. `OWNER=<name>.testnet ./contract/deploy-testnet.sh` deploys your own contract, test USDC and a server account with such a key. The shared `app.luckout.testnet` needs two steps first: its owner (`hrsh2211.testnet`) upgrades it to current code with `./contract/upgrade.sh testnet <wasm>`, and, since a key's methods can't be changed, `server.luckout.testnet` gets a new key, signed with its full-access key: `near account add-key server.luckout.testnet grant-function-call-access --allowance unlimited --contract-account-id app.luckout.testnet --function-names 'purchase, confirm_delivery, fail_purchase, purchase_many, settle' autogenerate-new-keypair save-to-legacy-keychain network-config testnet sign-with-legacy-keychain send`.
+- **Contract:** `cd contract && cargo test` (Rust 1.95, pinned). The paths that move USDC also run as real wasm in a local NEAR sandbox: build both contracts (`cargo near build non-reproducible-wasm` in `contract/` and in `contract/test-usdc/`), then `cd contract/sandbox && cargo test` (the first run downloads the sandbox).
+- **End to end against testnet:** with the server running, `node apps/server/scripts/e2e.ts` signs in with keys from `~/.near-credentials` and checks sign-in, sessions, idempotency, a Jackpot Draw, Spending Limits and isolation. `node apps/server/scripts/e2e-evm.ts` does the same for a fresh EVM wallet through NEAR Intents (it needs the server's relayer) and checks what must be refused.
 - **Deploying:** see [`deploy/README.md`](deploy/README.md) (server on a VM with pm2, web on Vercel).
 
 </details>

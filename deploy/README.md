@@ -12,7 +12,7 @@
 | Telegram | the testnet bot | the staging bot | the mainnet bot |
 | Bitrefill | its own account (test cards are free) | its own guest client for orders (ADR-0012); the testnet account's key ($0 credit) reads the catalog | its own guest client for orders; its account's key reads the catalog |
 
-Staging is a small copy of production on mainnet (ADR-0010): real money in small amounts, its own contract and caps, so a release is tried there before it reaches `main`. Its accounts hold about a fifth of production's NEAR, so its server sets `GAS_ALERT_PERCENT=20` to scale the low-NEAR alerts to match. After the hackathon's judging, hosted testnet retires and runs locally instead.
+Staging is a small copy of production on mainnet (ADR-0010): real money in small amounts, its own contract and caps, so a release is tried there before it reaches `main`. Its accounts hold about a fifth of production's NEAR, so its server sets `GAS_ALERT_PERCENT=20` to scale the low-NEAR alerts to match. Hosted testnet retires at the release that ships `staging` to `main` (steps 27 to 30 of [Releasing staging to production](#releasing-staging-to-production)); after that, testnet is for local development only (README, "Run it locally, on testnet").
 
 Nothing is shared that could move money across: each server has its own database, keys, contract, bot and Bitrefill account. A push to `testnet` deploys the testnet API after CI passes, a merge into `staging` deploys staging, and a merge into `main` deploys mainnet, once the `DEPLOY_TESTNET` / `DEPLOY_STAGING` / `DEPLOY_MAINNET` repository variables are `on`. Each site's CI key in `~/.ssh/authorized_keys` runs only `deploy/remote-deploy.sh` with that site's branch, and the script refuses a branch that doesn't match the site's `NEAR_NETWORK` and VM user, or one that has moved past the commit CI tested. By hand: `pnpm deploy:testnet`, `pnpm deploy:staging` or `pnpm deploy:mainnet`. Contracts are deployed by hand, never from CI.
 
@@ -201,6 +201,13 @@ A release is `staging` merged into `main` by PR, and merging deploys production'
 25. **The nightly backup**, as `luckout-api`: in `crontab -e`, replace the `pg_dump … | gzip …` line with the `deploy/backup.sh` line from [Once](#once), step 7, with this site's role and database. Run that command once by hand (`~/backups/backup.log` says `saved …`), and once with a wrong database name to see the alert reach the admin chat.
 26. **Before the next deploy:** `git status --porcelain --untracked-files=no` prints nothing on the VM. That deploy is the first to run the new `deploy/remote-deploy.sh`.
 
+Hosted testnet retires here (ADR-0010), once the steps above show production healthy (owner):
+
+27. **The testnet server**, as `luckout-testnet-api` on the VM: `pm2 delete luckout-testnet-api && pm2 save`, and in `crontab -e` remove the `@reboot` and backup lines. `curl -s https://testnet-api.luckout.wtf/health` then gets no 204.
+28. **The testnet web:** in Vercel, remove the `testnet.luckout.wtf` domain and the Preview env vars for branch `testnet`. Delete the DNS records for `testnet.luckout.wtf`, `testnet-api.luckout.wtf` and `luckout-testnet-api.gamified.trade`. In the Reown dashboard, remove `testnet.luckout.wtf` from the allowed domains (`localhost` stays, for local development).
+29. **CI:** remove the testnet CI key's line from `luckout-testnet-api`'s `~/.ssh/authorized_keys`, then `gh variable delete DEPLOY_TESTNET`, `gh variable delete TESTNET_SSH_TARGET` and `gh secret delete TESTNET_DEPLOY_KEY`. In `.github/workflows/ci.yml` (a PR from your own account: CI's token can't change workflows): drop `testnet` from the push `branches`, the `refs/heads/testnet` clause from the `deploy` job's `if`, the `TESTNET_*` fallbacks from `KEY` and `TARGET`, and the testnet mentions in the comments.
+30. **The `testnet` branch:** `git push origin --delete testnet`, once nothing on it is missing from `main`.
+
 ## Upgrading the contract
 
 Upgrades happen in place: same account, same state, new code, so balances never move. The new code must read the old state as it is (no change to the stored types). A release goes to staging's contract (`app.staging.luckout.near`) first, and to production's (`app.luckout.near`) only after staging has sold with it. `contract/upgrade.sh` takes the contract by name, `testnet`, `staging` or `production`, so production is never reached by accident, and it sends nothing without `GO=1`.
@@ -220,7 +227,7 @@ Upgrades happen in place: same account, same state, new code, so balances never 
 ## EVM wallets (ADR-0011)
 
 - **Nothing to configure on the server:** the NEAR Intents account is fixed per network (`intents.near`, `intents.luckout.testnet`), as in the contract, and EVM customers' intents go through the existing relayer, so it needs gas money on both networks. One relayed intent burns about 17 Tgas (about 0.002 NEAR).
-- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `staging.luckout.wtf`, `testnet.luckout.wtf` and `localhost`, or WalletConnect refuses to connect there.
+- **Web:** the Reown (WalletConnect) project id defaults to Luckout's; `NEXT_PUBLIC_REOWN_PROJECT_ID` overrides it. In the Reown dashboard, the project's allowed domains must include `www.luckout.wtf`, `luckout.wtf`, `staging.luckout.wtf` and `localhost`, or WalletConnect refuses to connect there.
 - **Testnet NEAR Intents** at `intents.luckout.testnet` is the exact wasm `intents.near` runs, deployed with `new({config:{wnear_id:"wrap.testnet",fees:{fee:0,fee_collector:"luckout.testnet"},roles:{super_admins:["luckout.testnet"]}}})` and registered on test USDC. To redeploy it after `intents.near` upgrades: fetch the code with the RPC's `view_code`, check its hash, and deploy it without an init call.
 
 ## Solana wallets (ADR-0011, amended 2026-11-18)
