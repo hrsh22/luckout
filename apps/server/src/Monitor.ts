@@ -5,6 +5,7 @@ import { Alerts } from "./Alerts.ts"
 import { Base, GAS_RESERVE } from "./Base.ts"
 import { Near, Network, OPERATOR_GAS, RELAY_GAS, TREASURY_GAS, upfront } from "./Near.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
+import { readSetting, writeSetting } from "./Settings.ts"
 
 const NEAR = 10n ** 24n
 /** NEAR storage staking: 1e19 yoctoNEAR per byte. */
@@ -29,6 +30,13 @@ const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
  * payment's L1 fee), so the alert comes while payments still go out. Each one spends far less than that.
  */
 export const BASE_GAS_ALERT = 2n * GAS_RESERVE
+/**
+ * A low-balance alert is said when an account drops under its line, then once a day while it stays there. When each
+ * was last said is kept in the database, so a restart or a deploy doesn't say it again; back over its line, the next
+ * drop is news again.
+ */
+const LOW_REPEAT_MS = 24 * 60 * 60_000
+const LowSaid = Schema.Record(Schema.String, Schema.Number)
 /** Accounts the contract isn't known to hold money for that the solvency check asks about each round, in turn. */
 const UNSEEN_PER_ROUND = 50
 
@@ -82,19 +90,44 @@ export const Monitor = Layer.effectDiscard(
       if (r && r.late > 0) yield* alerts.admin(`${r.late} purchase(s) still unfinished after 15 minutes`)
     })
 
+    /** Says `text` on the drop under the line, then once a day while it lasts (LOW_REPEAT_MS). */
+    const low = (key: string, under: boolean, text: string) =>
+      Effect.gen(function*() {
+        const said = yield* readSetting("low_balances", LowSaid, {})
+        const at = said[key]
+        const now = Date.now()
+        if (under && (at === undefined || now - at > LOW_REPEAT_MS)) {
+          yield* alerts.admin(text)
+          yield* writeSetting("low_balances", LowSaid, { ...said, [key]: now }, "server")
+        } else if (!under && at !== undefined) {
+          const { [key]: _, ...rest } = said
+          yield* writeSetting("low_balances", LowSaid, rest, "server")
+        }
+      }).pipe(Effect.provideService(SqlClient.SqlClient, sql))
+
     const gas = Effect.gen(function*() {
-      if (near.operatorId && (yield* spendable(near, near.operatorId)) < GAS_ALERT.operator) {
-        yield* alerts.admin(`operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
+      if (near.operatorId) {
+        yield* low("operator", (yield* spendable(near, near.operatorId)) < GAS_ALERT.operator, `operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
       }
-      if (near.relayerId && (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer) {
-        yield* alerts.admin(`relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM and Solana wallets' top-ups, withdrawals and settings wait until it has more`)
+      if (near.relayerId) {
+        yield* low(
+          "relayer",
+          (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer,
+          `relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM and Solana wallets' top-ups, withdrawals and settings wait until it has more`
+        )
       }
-      if (near.treasuryId && (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury) {
-        yield* alerts.admin(`treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`)
+      if (near.treasuryId) {
+        yield* low(
+          "treasury",
+          (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury,
+          `treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`
+        )
       }
-      if ((yield* spendable(near, near.contractId)) < GAS_ALERT.contract) {
-        yield* alerts.admin(`contract ${near.contractId} has under ${nearText(GAS_ALERT.contract)} free for storage; purchases fail when it runs out`)
-      }
+      yield* low(
+        "contract",
+        (yield* spendable(near, near.contractId)) < GAS_ALERT.contract,
+        `contract ${near.contractId} has under ${nearText(GAS_ALERT.contract)} free for storage; purchases fail when it runs out`
+      )
     })
 
     // The contract owes customers' balances, the reserve and the proceeds, and must hold at least that much;
@@ -135,8 +168,10 @@ export const Monitor = Layer.effectDiscard(
       if (!refills || !base.configured) return
       // A Base RPC hiccup only skips this check.
       const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
-      if (w && w[1].eth < BASE_GAS_ALERT) {
-        yield* alerts.admin(
+      if (w) {
+        yield* low(
+          "base",
+          w[1].eth < BASE_GAS_ALERT,
           `the Base wallet ${w[0]} has under ${formatEther(BASE_GAS_ALERT)} ETH left for gas; Base payments to Bitrefill stop once it holds under ` +
             `${formatEther(GAS_RESERVE)} ETH plus a payment's L1 fee, what Base's node wants on hand to take one (send about $1 of ETH on Base)`
         )
