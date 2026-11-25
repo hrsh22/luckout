@@ -377,7 +377,8 @@ export const makeAgent = (deps: {
     recent_purchases: () =>
       run(deps.purchases.list(accountId, { limit: 5 }).pipe(Effect.map((page) => page.items.map((p) => ({
         voucher: `${p.voucherName} ${p.value}`,
-        status: p.status,
+        // "used": delivered, and the customer marked it used.
+        status: p.usedAt ? "used" : p.status,
         price: usd(p.referencePrice),
         paid: p.draw ? usdUp(p.draw.finalPrice) : p.status === "delivered" ? usd(p.referencePrice) : null,
         when: p.createdAt

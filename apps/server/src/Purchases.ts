@@ -87,6 +87,8 @@ interface Row {
   /** The settlement that closed it: its Draw is in there. */
   settle_tx: Signed | null
   draw: Record<string, unknown> | null
+  /** When the customer marked it used; null while unused. */
+  used_at: Date | string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -293,6 +295,8 @@ export class Purchases extends Context.Service<Purchases, {
   get(accountId: string, id: string): Effect.Effect<Purchase, NotFound>
   /** The customer cancels a checkout still waiting for money, by any of its cards: nothing was charged. */
   cancel(accountId: string, id: string): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
+  /** The customer marks their own delivered card used, or unused again; nothing else changes. */
+  setUsed(accountId: string, id: string, used: boolean): Effect.Effect<Purchase, NotFound | PurchaseInvalid>
   /** One pass over checkouts waiting for money (also runs every 10 seconds by itself). */
   readonly promoteWaiting: Effect.Effect<void>
   /** One reconciler pass (also runs every 30 seconds by itself). */
@@ -829,7 +833,8 @@ export class Purchases extends Context.Service<Purchases, {
           ...(row.admit_tx ? { admitTx: row.admit_tx.hash } : {}),
           ...(row.settle_tx ? { settleTx: row.settle_tx.hash } : {}),
           ...(row.contract_purchase_id !== null ? { contractPurchaseId: Number(row.contract_purchase_id) } : {}),
-          createdAt: new Date(row.created_at).toISOString()
+          createdAt: new Date(row.created_at).toISOString(),
+          ...(row.used_at && row.step === "settled" ? { usedAt: new Date(row.used_at).toISOString() } : {})
         })
       }
 
@@ -1150,6 +1155,19 @@ export class Purchases extends Context.Service<Purchases, {
           return view(yield* load(id))
         })
 
+      // Only the customer's own card, and only once delivered (settled is final). Marking it used again keeps when it was
+      // first marked, so a retried request changes nothing. `updated_at` stays: this is a note, not a step.
+      const setUsed = (accountId: string, id: string, used: boolean) =>
+        Effect.gen(function*() {
+          const [row] = yield* sql<Row>`
+            UPDATE purchases SET used_at = CASE WHEN ${used}::boolean THEN COALESCE(used_at, now()) END
+            WHERE id = ${id} AND account_id = ${accountId} AND step = 'settled'
+            RETURNING *`.pipe(Effect.orDie)
+          if (row) return view(row)
+          yield* get(accountId, id)
+          return yield* new PurchaseInvalid({ message: "Only a delivered card can be marked as used." })
+        })
+
       const giveUp = (id: string) =>
         Effect.gen(function*() {
           const co = yield* loadCheckout(id)
@@ -1270,6 +1288,7 @@ export class Purchases extends Context.Service<Purchases, {
         list,
         get,
         cancel,
+        setUsed,
         promoteWaiting: promote,
         reconcileNow: reconcile,
         checkoutEmail,

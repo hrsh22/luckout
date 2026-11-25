@@ -122,6 +122,10 @@ const PurchaseHandlers = HttpApiBuilder.group(Api, "purchases", (handlers) =>
         UUID.test(params.id)
           ? CurrentAccount.use((a) => purchases.cancel(a.accountId, params.id))
           : Effect.fail(new NotFound()),
+      setUsed: ({ params, payload }) =>
+        UUID.test(params.id)
+          ? CurrentAccount.use((a) => purchases.setUsed(a.accountId, params.id, payload.used))
+          : Effect.fail(new NotFound()),
       checkoutEmail: () => CurrentAccount.use((a) => purchases.checkoutEmail(a.accountId)),
       setCheckoutEmail: ({ payload }) => CurrentAccount.use((a) => purchases.setCheckoutEmail(a.accountId, payload.email)),
       connectBitrefill: () => CurrentAccount.use((a) => Effect.map(connect.url(a.accountId), (url) => ({ url }))),

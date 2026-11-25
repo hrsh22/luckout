@@ -1166,6 +1166,74 @@ test("the purchase list pages newest first, every purchase exactly once, and onl
   }))
 })
 
+test("a customer marks their own delivered card used, again changes nothing, and unused clears it; the list carries it", async () => {
+  const w = world()
+  const r = await w.run(Effect.gen(function*() {
+    const p = yield* Purchases
+    const card = yield* w.buy()
+    const other = yield* w.buy()
+    const used = yield* p.setUsed("alice.test", card.id, true)
+    yield* Effect.sleep("20 millis")
+    const again = yield* p.setUsed("alice.test", card.id, true)
+    const listed = (yield* p.list("alice.test")).items
+    const got = yield* p.get("alice.test", card.id)
+    const cleared = yield* p.setUsed("alice.test", card.id, false)
+    const clearedAgain = yield* p.setUsed("alice.test", card.id, false)
+    return { card, other, used, again, listed, got, cleared, clearedAgain, after: (yield* p.list("alice.test")).items }
+  }))
+  assert.equal(r.card.usedAt, undefined, "a new card is unused")
+  assert.ok(r.used.usedAt && Date.parse(r.used.usedAt) > 0)
+  assert.equal(r.again.usedAt, r.used.usedAt, "marking it again keeps when it was first marked")
+  assert.equal(r.got.usedAt, r.used.usedAt)
+  assert.deepEqual(r.listed.map((x) => [x.id, x.usedAt]), [[r.other.id, undefined], [r.card.id, r.used.usedAt]], "only that card, in the list too")
+  assert.equal(r.cleared.usedAt, undefined)
+  assert.equal(r.clearedAgain.usedAt, undefined)
+  assert.ok(r.after.every((x) => x.usedAt === undefined))
+  assert.equal(r.cleared.status, "delivered", "only a note: the card is as it was")
+  assert.equal(r.cleared.redemption?.code, "ABC-123")
+  assert.deepEqual(w.calls, ["purchase", "order", "confirm_delivery", "purchase", "order", "confirm_delivery"], "nothing is sent to NEAR or Bitrefill")
+})
+
+test("only the customer's own card, and only once delivered, can be marked used", async () => {
+  const w = world({ real: true, price: 12_000_000, credit: 0 })
+  const r = await w.run(Effect.gen(function*() {
+    const p = yield* Purchases
+    const waiting = yield* w.buy()
+    w.setCredit(100_000_000)
+    yield* Effect.flatMap(Credit, (c) => c.refresh)
+    const delivered = yield* w.buy(undefined, "bob.test")
+    const notYours = yield* p.setUsed("alice.test", delivered.id, true).pipe(Effect.flip)
+    const notDelivered = yield* p.setUsed("alice.test", waiting.id, true).pipe(Effect.flip)
+    const unknown = yield* p.setUsed("alice.test", crypto.randomUUID(), true).pipe(Effect.flip)
+    const cancelled = yield* p.cancel("alice.test", waiting.id)
+    const notBought = yield* p.setUsed("alice.test", cancelled.id, true).pipe(Effect.flip)
+    const sql = yield* SqlClient.SqlClient
+    const marked = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM purchases WHERE used_at IS NOT NULL`
+    return { delivered, notYours, notDelivered, unknown, notBought, marked: marked[0]!.n, bobs: yield* p.get("bob.test", delivered.id) }
+  }))
+  assert.equal(r.delivered.status, "delivered")
+  assert.equal(r.notYours._tag, "NotFound", "someone else's card is no different from one that doesn't exist")
+  assert.equal(r.unknown._tag, "NotFound")
+  assert.match(r.notDelivered.message, /Only a delivered card/)
+  assert.match(r.notBought.message, /Only a delivered card/)
+  assert.equal(r.marked, 0, "nothing was marked")
+  assert.equal(r.bobs.usedAt, undefined)
+})
+
+test("a cart's cards are marked one at a time: the order view shows just that one used", async () => {
+  const w = world()
+  const r = await w.run(Effect.gen(function*() {
+    const p = yield* Purchases
+    const placed = yield* w.cart(keys(3))
+    yield* Effect.forEach(placed, (c) => settled(c.id))
+    yield* p.setUsed("alice.test", placed[1]!.id, true)
+    const order = (yield* p.list("alice.test")).items.filter((x) => x.checkoutId === placed[0]!.checkoutId)
+    return { placed, order }
+  }))
+  assert.equal(r.order.length, 3)
+  assert.deepEqual(r.order.filter((x) => x.usedAt).map((x) => x.id), [r.placed[1]!.id])
+})
+
 const keys = (n: number) => Array.from({ length: n }, () => crypto.randomUUID())
 
 test("a cart buys every card as its own purchase, each admitted, delivered and drawn on its own", async () => {

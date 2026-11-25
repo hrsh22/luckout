@@ -7,8 +7,10 @@ import { errorMessage } from "@/lib/api"
 import { usdDown } from "@/lib/format"
 import { usePurchases } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { firstShelf, onShelf, type Shelf, shelfCounts } from "@/lib/used"
 import { type Purchase } from "@luckout/api"
 import { ArrowLeft, Check } from "lucide-react"
+import { motion } from "motion/react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
 import { Suspense, useState } from "react"
@@ -21,10 +23,16 @@ export default function Page() {
   )
 }
 
+const SHELVES: ReadonlyArray<[Shelf, string]> = [["unused", "Unused"], ["used", "Used"], ["all", "All"]]
+
 function Purchases() {
   const { accountId, token, ready } = useSession()
   const list = usePurchases(token)
   const [open, setOpen] = useState<string>()
+  const [picked, setPicked] = useState<Shelf>()
+  // Cards marked used or unused on this shelf stay on it until the customer picks another, so the card they just marked
+  // doesn't jump out from under them (its toast has Undo), and neither does the shelf when its last card goes.
+  const [kept, setKept] = useState<ReadonlySet<string>>(new Set())
   // Right after a checkout: just its cards, filling in as each arrives (the list keeps checking while any is on its way).
   const order = useSearchParams().get("order")
   const all = list.data?.pages.flatMap((p) => p.items)
@@ -36,6 +44,11 @@ function Purchases() {
   const free = delivered.filter((p) => p.draw?.finalPrice === 0).length
   // Older purchases not loaded yet aren't in these totals: say so with a "+".
   const more = list.hasNextPage ? "+" : ""
+  const counts = shelfCounts(purchases ?? [])
+  const shelf = picked ?? firstShelf(counts)
+  const shown = purchases?.filter((p) => onShelf(p, shelf) || kept.has(p.id))
+  const pick = (s: Shelf) => (setPicked(s), setKept(new Set()))
+  const keep = (id: string) => (setPicked(shelf), setKept((k) => new Set(k).add(id)))
 
   return (
     <div className="flex flex-col gap-8">
@@ -66,9 +79,43 @@ function Purchases() {
         </div>
       )}
       {purchases && purchases.length > 0 && (
-        <ul className="flex flex-col gap-3">
-          {purchases.map((p) => <PurchaseRow key={p.id} p={p} open={open === p.id} onToggle={() => setOpen(open === p.id ? undefined : p.id)} />)}
-        </ul>
+        <div className="flex flex-col gap-4">
+          <div role="group" aria-label="Show cards" className="flex rounded-full bg-white/80 p-1 sm:self-start">
+            {SHELVES.map(([s, label]) => (
+              <button
+                key={s}
+                type="button"
+                aria-pressed={shelf === s}
+                onClick={() => pick(s)}
+                className="group relative flex h-10 flex-1 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold text-ink-soft transition-colors hover:text-ink aria-pressed:text-white sm:flex-none sm:px-5"
+              >
+                {shelf === s && <motion.span layoutId="shelf" className="absolute inset-0 rounded-full bg-ink" transition={{ type: "spring", stiffness: 420, damping: 34 }} />}
+                <span className="relative">{label}</span>
+                <span className="relative min-w-6 rounded-full bg-soft px-1.5 py-px text-xs tabular-nums text-muted group-aria-pressed:bg-white/15 group-aria-pressed:text-white">
+                  {counts[s]}{more}
+                </span>
+              </button>
+            ))}
+          </div>
+          {shown && shown.length > 0
+            ? (
+              <ul className="flex flex-col gap-3">
+                {shown.map((p) => <PurchaseRow key={p.id} p={p} open={open === p.id} onToggle={() => setOpen(open === p.id ? undefined : p.id)} onUsed={keep} />)}
+              </ul>
+            )
+            : (
+              <div className="card flex flex-col items-start gap-2 p-6 sm:p-8">
+                <p className="font-display text-2xl font-extrabold">{shelf === "used" ? "No used cards yet" : "Nothing left to use"}</p>
+                <p className="max-w-md text-ink-soft">
+                  {shelf === "used"
+                    ? "Open a card and tap Mark as used once you've used it. It moves here, code and all."
+                    : counts.used > 0
+                    ? "Every card you have is marked used. They're under Used, codes and all."
+                    : "No cards to use right now."}
+                </p>
+              </div>
+            )}
+        </div>
       )}
       {list.hasNextPage && (
         <div className="flex justify-center">

@@ -63,6 +63,10 @@ const deps = {
           new Purchase({
             id: "p1", voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "10", status: "delivered",
             referencePrice: 10_000_000, redemption: { code: "SECRET-CODE-123" }, createdAt: new Date(0).toISOString()
+          }),
+          new Purchase({
+            id: "p2", voucherId: "test-gift-card-code", voucherName: "Test Gift Card Code", value: "5", status: "delivered",
+            referencePrice: 5_000_000, createdAt: new Date(0).toISOString(), usedAt: new Date(1).toISOString()
           })
         ]
       }))
@@ -112,6 +116,7 @@ test("voucher codes never reach the model", async () => {
   model.close()
   assert.ok(!JSON.stringify(model.seen).includes("SECRET-CODE-123"))
   assert.ok(JSON.stringify(model.seen).includes("Test Gift Card Code"), "the tool result itself did reach the model")
+  assert.ok(JSON.stringify(model.seen).includes(String.raw`\"status\":\"used\"`), "a card the customer marked used says so")
 })
 
 test("each turn's prompt starts with the previous turn's exact messages, so it hits the cache", async () => {

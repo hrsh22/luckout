@@ -11,9 +11,10 @@ import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
 import { purchasePollMs } from "@/lib/purchase-poll"
 import { redemptionShown } from "@/lib/redemption"
-import type { Purchase } from "@luckout/api"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Check, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, ShieldCheck } from "lucide-react"
+import { withPurchase } from "@/lib/used"
+import type { Purchase, PurchasePage } from "@luckout/api"
+import { type InfiniteData, useQuery, useQueryClient } from "@tanstack/react-query"
+import { Check, CheckCheck, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, LoaderCircle, ShieldCheck, Undo2 } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import Link from "next/link"
 import { useEffect, useState } from "react"
@@ -111,6 +112,8 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
       <SafetyNet p={p} />
 
       {r.any && <CodeBlock p={p} />}
+
+      {p.status === "delivered" && <UsedToggle p={p} />}
 
       {p.draw && p.settleTx && <ProofLinks p={p} />}
 
@@ -240,6 +243,62 @@ function SafetyNet({ p }: { p: Purchase }) {
   return null
 }
 
+const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" })
+/** "Nov 20", with the year only when it isn't this one: short enough for a chip on a phone. */
+const shortDay = (iso: string) => {
+  const d = new Date(iso)
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) })
+}
+
+/**
+ * The customer's own note that they've used a delivered card, and its undo. It changes nothing about money or the Draw
+ * and is one tap to reverse, so there's no confirmation: the toast offers Undo instead. While the request is out the
+ * button stays focusable (aria-disabled, not disabled), so a keyboard user keeps their place as its label flips.
+ */
+function UsedToggle({ p, onChange }: { p: Purchase; onChange?: ((id: string) => void) | undefined }) {
+  const { token } = useSession()
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const used = !!p.usedAt
+  const set = async (to: boolean) => {
+    setBusy(true)
+    try {
+      const fresh = await api((c) => c.purchases.setUsed({ params: { id: p.id }, payload: { used: to } }), token)
+      qc.setQueriesData<InfiniteData<PurchasePage, string> | Purchase>({ queryKey: ["purchases"] }, (d) => withPurchase(d, fresh))
+      onChange?.(p.id)
+      const card = `${p.voucherName}, ${faceValue(p)}`
+      // One toast per card: Undo replaces "Marked as used" rather than stacking under it. Sonner keeps a replaced
+      // toast's fields, so "Marked as unused" clears the Undo explicitly (null).
+      if (to) toast.success("Marked as used", { id: `used-${p.id}`, description: card, action: { label: "Undo", onClick: () => void set(false) } })
+      else toast.success("Marked as unused", { id: `used-${p.id}`, description: card, action: null })
+    } catch (e) {
+      toast.error(errorMessage(e))
+    }
+    setBusy(false)
+  }
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 rounded-[1.25rem] bg-soft p-3 pl-4">
+      <p className="flex min-w-0 items-center gap-2 text-sm text-ink-soft">
+        {used
+          ? <><CheckCheck size={16} className="shrink-0 text-ink" aria-hidden="true" /><span>You marked it used on <b className="font-semibold text-ink">{day(p.usedAt!)}</b>.</span></>
+          : "Used this card? Mark it, to keep it apart from the ones you haven't."}
+      </p>
+      <Button
+        size="sm"
+        variant={used ? "light" : "primary"}
+        aria-disabled={busy || !token || undefined}
+        aria-busy={busy || undefined}
+        onClick={() => !busy && token && void set(!used)}
+        // The shared button turns the outline off; keyboard focus gets the app's ring back here.
+        className="focus-visible:outline-solid max-sm:w-full"
+      >
+        {busy ? <LoaderCircle className="animate-spin" /> : used ? <Undo2 /> : <Check />}
+        {used ? "Mark as unused" : "Mark as used"}
+      </Button>
+    </div>
+  )
+}
+
 export function CodeBlock({ p }: { p: Purchase }) {
   const r = redemptionShown(p.redemption)
   return (
@@ -323,29 +382,49 @@ export function ModeChip({ mode }: { mode: Purchase["mode"] }) {
   )
 }
 
-/** One line of history; open it for the code and the proof. */
-export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean; onToggle: () => void }) {
+/**
+ * One line of history; open it for the code and the proof. A card marked used reads as done: greyed and stamped with a
+ * check, its price quiet, and a "Used" mark with the day. Opened, its code is all there, as on any other card.
+ */
+export function PurchaseRow({ p, open, onToggle, onUsed }: { p: Purchase; open: boolean; onToggle: () => void; onUsed?: (id: string) => void }) {
+  const used = !!p.usedAt
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
   // Delivered, or still on its way after the contract took its price: either way it has left the Balance, but the
   // second only for now (a card that can't be delivered returns it in full).
   const onItsWay = (p.status === "pending" || p.status === "waiting") && charged(p)
   return (
-    <li className="card overflow-hidden">
+    <li className={`card overflow-hidden transition-[background-color,box-shadow] duration-300 ${used ? "bg-white/60 shadow-none ring-1 ring-line" : ""}`}>
       <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-4 p-4 text-left sm:p-5">
-        <GiftCard v={{ name: p.voucherName, image: p.image, background: p.background }} notch={6} className="h-12 w-[76px] shrink-0 rounded-xl text-[8px]" />
+        <span className="relative shrink-0">
+          <GiftCard
+            v={{ name: p.voucherName, image: p.image, background: p.background }}
+            notch={6}
+            className={`h-12 w-[76px] rounded-xl text-[8px] transition-[filter,opacity] duration-300 ${used ? "opacity-55 grayscale" : ""}`}
+          />
+          {used && (
+            <span className="absolute -right-1.5 -bottom-1.5 grid size-6 place-items-center rounded-full bg-ink text-white ring-[3px] ring-white" aria-hidden="true">
+              <Check size={13} strokeWidth={3} />
+            </span>
+          )}
+        </span>
         <span className="min-w-0 flex-1">
-          <span className="line-clamp-2 font-semibold break-words">{p.voucherName}, {faceValue(p)}</span>
+          <span className={`line-clamp-2 font-semibold break-words ${used ? "text-ink-soft" : ""}`}>{p.voucherName}, {faceValue(p)}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+            {used && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2 py-0.5 text-xs font-semibold whitespace-nowrap text-white">
+                <CheckCheck size={12} aria-hidden="true" />Used {shortDay(p.usedAt!)}
+              </span>
+            )}
             <ModeChip mode={p.mode} />
             {new Date(p.createdAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
           </span>
         </span>
         <span className="flex shrink-0 flex-col items-end gap-1">
           {p.status === "delivered"
-            ? <span className="font-display text-xl font-extrabold">{usdUp(paid)}</span>
+            ? <span className={`font-display text-xl font-extrabold ${used ? "text-muted" : ""}`}>{usdUp(paid)}</span>
             : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
-            <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
+            <span className={`rounded-full px-2 py-0.5 text-xs font-bold text-gold-ink ${used ? "bg-gold-soft" : "bg-gold"}`}>
               {p.draw.finalPrice === 0 ? "100% off" : backText(p.draw.cashback)}
             </span>
           )}
@@ -379,6 +458,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
                 </>
               )}
               {redemptionShown(p.redemption).any ? <CodeBlock p={p} /> : null}
+              {p.status === "delivered" && <UsedToggle p={p} onChange={onUsed} />}
               {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (
                 <a href={explorer(p.settleTx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start`}>
                   Delivery transaction<ExternalLink />
