@@ -573,7 +573,7 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   chain: Schema.String,
   /** What the customer sends, formatted (a Top-Up). */
   amountIn: Schema.optional(Schema.String),
-  /** A Top-Up paid with a swap (ADR-0014): what the customer swapped, e.g. "0.0705 ORE". symbol/amountIn are then USDC on Solana. */
+  /** A Top-Up paid with a swap (ADR-0014): what the customer swaps, readable and rounded up, e.g. "0.26566 ORE". symbol/amountIn are then USDC on Solana. */
   paidWith: Schema.optional(Schema.String),
   /** What arrives on the other chain, formatted (a withdrawal). */
   amountOut: Schema.optional(Schema.String),
@@ -633,6 +633,15 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   /** The app paid this Top-Up from the customer's wallet: its transaction, kept and passed on to 1Click. */
   HttpApiEndpoint.post("sent", "/topup/sent", {
     payload: Schema.Struct({ depositAddress: Schema.String, txHash: Schema.String }),
+    success: HttpApiSchema.NoContent,
+    error: TopUpUnavailable
+  }),
+  /**
+   * A Top-Up the customer hasn't paid into leaves their list; a swap-paid one is cancelled. Money sent anyway still
+   * arrives, and the Top-Up is listed again.
+   */
+  HttpApiEndpoint.post("dismiss", "/topup/dismiss", {
+    payload: Schema.Struct({ depositAddress: Schema.String }),
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),

@@ -106,6 +106,14 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
       // d1 left unpaid past its deadline: it can't land, so it stops counting.
       afterDeadline: yield* sql`UPDATE intents_swaps SET deadline = now() - interval '1 minute' WHERE deposit_address = 'd1'`.pipe(
         Effect.andThen(tag(t.move(me, "d5", yield* Effect.promise(() => sign("2000000")))))
+      ),
+      // A dismissed transfer's address is out, so it may still land: it keeps its place.
+      dismissed: yield* sql`UPDATE intents_swaps SET dismissed_at = now() WHERE deposit_address = 'd2'`.pipe(
+        Effect.andThen(tag(t.move(me, "d4", yield* Effect.promise(() => sign("2000000")))))
+      ),
+      // A cancelled swap-paid one gets no new transaction: it stops counting, as if past its deadline.
+      cancelled: yield* sql`UPDATE intents_swaps SET paid_mint = 'mint' WHERE deposit_address = 'd2'`.pipe(
+        Effect.andThen(tag(t.move(me, "d4", yield* Effect.promise(() => sign("2000000")))))
       )
     }
   }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(pending, Layer.succeed(Near, near), noRelay, noAlerts, DbMemory, noSwaps))))))
@@ -114,6 +122,8 @@ test("a Top-Up's move-in is armed once, for exactly what its swap delivers, and 
   assert.match(results.again, /already handled/, "a second signed move-in for the same Top-Up is refused")
   assert.match(results.fourth, /other Top-Ups first/)
   assert.equal(results.afterDeadline, "ok", "an unpaid quote past its deadline doesn't hold up a new Top-Up")
+  assert.match(results.dismissed, /other Top-Ups first/, "a dismissed transfer may still land")
+  assert.equal(results.cancelled, "ok", "a cancelled swap-paid Top-Up doesn't hold up a new one")
 })
 
 // ---------- money in transit stays in sight ----------
@@ -866,7 +876,8 @@ test("an ORE Top-Up: 1Click is quoted for USDC on Solana, the wallet signs our s
 const oreSwaps = (refuse: (payer: string) => SwapUnavailable | undefined = () => undefined) => {
   const ORE = SWAP_TOKENS[0]!
   const built: Array<{ payer: string; depositAddress: string; retryBusy: boolean }> = []
-  const s = { gate: Promise.resolve(), asked: 0 }
+  /** `paid`: the payment found on chain, by deposit address. */
+  const s = { gate: Promise.resolve(), asked: 0, paid: {} as Record<string, string> }
   const layer = Layer.succeed(Swap, Swap.of({
     tokens: Effect.succeed([{ ...ORE, price: 71.5 }]),
     size: (_t, need) => Effect.succeed(need * 1_400n),
@@ -882,7 +893,7 @@ const oreSwaps = (refuse: (payer: string) => SwapUnavailable | undefined = () =>
           return { transaction: `tx-${n}`, lastValidBlockHeight: 7 }
         })
     },
-    paidBy: () => Effect.succeed(undefined)
+    paidBy: (address) => Effect.succeed(s.paid[address])
   }))
   return { ORE, built, layer, s }
 }
@@ -1026,4 +1037,79 @@ test("an EVM wallet's change on Solana from a swap-paid Top-Up goes back to it a
   assert.deepEqual(r[0].map((h) => [h.symbol, h.chain, h.sendable]), [["USDC", "sol", true]])
   assert.deepEqual([r[1].symbol, r[1].chain], ["USDC", "base"])
   assert.deepEqual(w.asked.map((a) => [a.originAsset, a.destinationAsset, a.recipient]), [[SOL_USDC_ASSET, BASE, EVM]])
+})
+
+test("a customer dismisses an unpaid Top-Up of theirs: it leaves the list but is still watched, and comes back once money arrives; anyone else's, or a paid one, is refused", async () => {
+  const o = { status: "PENDING_DEPOSIT" }
+  const w = mainnetTopUp({}, o)
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      yield* Effect.sleep("100 millis") // the start-up pass is done
+      for (let i = 0; i < 3; i++) yield* t.quote(EVM, BASE, 1_000_000) // dq-1 … dq-3
+      yield* t.sent(EVM, "dq-2", "0x" + "cd".repeat(32))
+      yield* sql`UPDATE intents_swaps SET status = 'PROCESSING' WHERE deposit_address = 'dq-3'`
+      const refused = {
+        others: yield* said(t.dismiss(NEAR, "dq-1")),
+        sent: yield* said(t.dismiss(EVM, "dq-2")),
+        seen: yield* said(t.dismiss(EVM, "dq-3")),
+        unknown: yield* said(t.dismiss(EVM, "nothing-here"))
+      }
+      const twice = [yield* said(t.dismiss(EVM, "dq-1")), yield* said(t.dismiss(EVM, "dq-1"))]
+      const listed = (yield* t.transfers(EVM)).map((x) => x.depositAddress).sort()
+      w.checked.length = 0
+      yield* t.trackNow
+      const watched = [...w.checked].sort()
+      // Its address was out, so a transfer can still come: 1Click sees it.
+      o.status = "PROCESSING"
+      yield* t.trackNow
+      const back = (yield* t.transfers(EVM)).find((x) => x.depositAddress === "dq-1")
+      return { refused, twice, listed, watched, back }
+    })
+  )
+  for (const m of Object.values(r.refused)) assert.match(m, /Only an unpaid Top-Up of yours/)
+  assert.deepEqual(r.twice, ["ok", "ok"], "dismissing twice is fine")
+  assert.deepEqual(r.listed, ["dq-2", "dq-3"], "a dismissed quote leaves the list")
+  assert.ok(r.watched.includes("dq-1"), "but tracking still follows it")
+  assert.equal(r.back?.phase, "swapping", "and money sent anyway shows again")
+})
+
+test("a dismissed swap-paid Top-Up is cancelled: no transaction is built for it again and its place in the cap is free at once, but one built before still pays it", async () => {
+  const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
+  const PAYER = wallet()
+  const f = oreSwaps()
+  const w = mainnetTopUp({}, { swaps: f.layer })
+  const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
+  const r = await w.run((t, sql) =>
+    Effect.gen(function*() {
+      const ore = () => said(t.quote(SOL_ID, swapAssetId(f.ORE), 1_000_000, false, "solana"))
+      yield* Effect.sleep("100 millis") // the start-up pass is done
+      for (let i = 0; i < 10; i++) yield* ore() // dq-1 … dq-10
+      // The customer's wallet has dq-1's transaction, not yet approved.
+      const before = (yield* t.swapTx(SOL_ID, "dq-1", "solana")).transaction
+      const full = yield* ore()
+      yield* t.dismiss(SOL_ID, "dq-1")
+      const room = yield* ore() // dq-11
+      const stillFull = yield* ore()
+      const refused = [yield* said(t.swapTx(SOL_ID, "dq-1", "solana")), yield* said(t.solanaPay("dq-1", PAYER))]
+      const listed = (yield* t.transfers(SOL_ID)).map((x) => x.depositAddress)
+      // It's approved after all, and lands.
+      f.s.paid["dq-1"] = "5sig"
+      yield* sql`UPDATE intents_swaps SET paid_amount = '0.26565993349', checked_at = NULL WHERE deposit_address = 'dq-1'`
+      yield* t.trackNow
+      const back = (yield* t.transfers(SOL_ID)).find((x) => x.depositAddress === "dq-1")
+      const paid = yield* said(t.dismiss(SOL_ID, "dq-1"))
+      return { before, full, room, stillFull, refused, listed, back, paid }
+    })
+  )
+  assert.equal(r.before, "tx-1")
+  assert.match(r.full, /several quotes open already/)
+  assert.equal(r.room, "ok", "cancelled, it holds no place at once, not ten minutes past its deadline")
+  assert.match(r.stillFull, /several quotes open already/, "one place came free, no more")
+  for (const m of r.refused) assert.match(m, /cancelled/)
+  assert.equal(f.built.length, 1, "nothing is built for it after")
+  assert.ok(!r.listed.includes("dq-1"))
+  assert.deepEqual(w.submitted, [{ txHash: "5sig", depositAddress: "dq-1" }], "the transaction built before is found on chain and passed to 1Click like any payment")
+  assert.deepEqual([r.back?.phase, r.back?.depositTx, r.back?.paidWith], ["awaiting-transfer", "5sig", "0.26566 ORE"], "and it's listed again, its amount readable")
+  assert.match(r.paid, /Only an unpaid Top-Up of yours/)
 })

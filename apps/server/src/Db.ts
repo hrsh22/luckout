@@ -370,6 +370,12 @@ export const migrationSteps = {
     yield* sql`ALTER TABLE checkouts ADD COLUMN email TEXT, ADD COLUMN retell BOOLEAN NOT NULL DEFAULT false`
     yield* sql`CREATE INDEX checkouts_retell ON checkouts (updated_at) WHERE retell`
     yield* sql`ALTER TABLE purchases ADD COLUMN order_id TEXT, ADD COLUMN currency TEXT`
+  }),
+  // A Top-Up the customer dismissed before paying into it: off their list, still tracked (money sent anyway is moved in
+  // and listed again). A swap-paid one is cancelled too: no new transaction, no place in the account's quote cap.
+  "0028_swap_dismissed": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN dismissed_at TIMESTAMPTZ`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)
