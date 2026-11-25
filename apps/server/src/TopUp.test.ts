@@ -1074,7 +1074,7 @@ test("a customer dismisses an unpaid Top-Up of theirs: it leaves the list but is
   assert.equal(r.back?.phase, "swapping", "and money sent anyway shows again")
 })
 
-test("a dismissed swap-paid Top-Up is cancelled: no transaction is built for it again and its place in the cap is free at once, but one built before still pays it", async () => {
+test("a dismissed swap-paid Top-Up is cancelled: no transaction is built for it again and it keeps its place in the cap, but one built before still pays it", async () => {
   const SOL_ID = "ad1e2d1d642de1e151c749df291187b0f92b4aad725f7fac726709a85f87e5cf"
   const PAYER = wallet()
   const f = oreSwaps()
@@ -1089,7 +1089,6 @@ test("a dismissed swap-paid Top-Up is cancelled: no transaction is built for it 
       const before = (yield* t.swapTx(SOL_ID, "dq-1", "solana")).transaction
       const full = yield* ore()
       yield* t.dismiss(SOL_ID, "dq-1")
-      const room = yield* ore() // dq-11
       const stillFull = yield* ore()
       const refused = [yield* said(t.swapTx(SOL_ID, "dq-1", "solana")), yield* said(t.solanaPay("dq-1", PAYER))]
       const listed = (yield* t.transfers(SOL_ID)).map((x) => x.depositAddress)
@@ -1099,17 +1098,74 @@ test("a dismissed swap-paid Top-Up is cancelled: no transaction is built for it 
       yield* t.trackNow
       const back = (yield* t.transfers(SOL_ID)).find((x) => x.depositAddress === "dq-1")
       const paid = yield* said(t.dismiss(SOL_ID, "dq-1"))
-      return { before, full, room, stillFull, refused, listed, back, paid }
+      return { before, full, stillFull, refused, listed, back, paid }
     })
   )
   assert.equal(r.before, "tx-1")
   assert.match(r.full, /several quotes open already/)
-  assert.equal(r.room, "ok", "cancelled, it holds no place at once, not ten minutes past its deadline")
-  assert.match(r.stillFull, /several quotes open already/, "one place came free, no more")
+  assert.match(r.stillFull, /several quotes open already/, "cancelled, it keeps its place until its deadline is past: each quote costs a Jupiter call")
   for (const m of r.refused) assert.match(m, /cancelled/)
   assert.equal(f.built.length, 1, "nothing is built for it after")
   assert.ok(!r.listed.includes("dq-1"))
   assert.deepEqual(w.submitted, [{ txHash: "5sig", depositAddress: "dq-1" }], "the transaction built before is found on chain and passed to 1Click like any payment")
   assert.deepEqual([r.back?.phase, r.back?.depositTx, r.back?.paidWith], ["awaiting-transfer", "5sig", "0.26566 ORE"], "and it's listed again, its amount readable")
   assert.match(r.paid, /Only an unpaid Top-Up of yours/)
+})
+
+test("a dismissed Top-Up whose move-in was armed still moves into the Balance once paid; one 1Click has seen money in can't be dismissed", async () => {
+  const sent: Array<string> = []
+  const status: Record<string, SwapDetails> = { a: { status: "PENDING_DEPOSIT" }, b: { status: "PENDING_DEPOSIT" } }
+  const oneClick = Layer.succeed(OneClick, OneClick.of({
+    tokens: Effect.succeed([]),
+    quote: () => Effect.die("quote was not expected"),
+    status: (a) => Effect.succeed(status[a]!.status),
+    details: (a) => Effect.sync(() => status[a]!),
+    submitDeposit: () => Effect.void
+  }))
+  const relay = Layer.succeed(Relay, Relay.of({
+    available: () => Effect.succeed(true),
+    send: () => Effect.die("relay.send was not expected"),
+    sendIntent: (account) => Effect.sync(() => (sent.push(account), { hash: "tx" })),
+    settings: Effect.die("relay.settings was not expected"),
+    configure: () => Effect.die("relay.configure was not expected")
+  }))
+  const alerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: () => Effect.succeed(true) }))
+  const moveIn = {
+    standard: "erc191",
+    payload: intentPayload({
+      signer: EVM,
+      intentsId: "intents.test",
+      deadline: new Date(Date.now() + 3_600_000),
+      nonce: randomBytes(32).toString("base64"),
+      intents: [moveInIntent({ usdcId: "usdc.test", contractId: "app.test", account: EVM, amount: "2500000" })]
+    }),
+    signature: "x"
+  }
+  const r = await Effect.runPromise(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const t = yield* TopUp
+    for (const d of ["a", "b"]) {
+      yield* sql`INSERT INTO intents_swaps ${
+        sql.insert({ deposit_address: d, account_id: EVM, direction: "in", usdc: 2_500_000, symbol: "USDC", chain: "base", amount_in: "2.52", deadline: new Date(Date.now() + 20 * 60_000), move: "waiting" })
+      }`
+      yield* sql`UPDATE intents_swaps SET move_in = ${JSON.stringify(moveIn)}::jsonb WHERE deposit_address = ${d}`
+    }
+    yield* Effect.sleep("100 millis") // the start-up pass is done
+    yield* t.dismiss(EVM, "a")
+    const hidden = (yield* t.transfers(EVM)).map((x) => x.depositAddress)
+    // Sent anyway: 1Click delivers a; it has seen money in b.
+    status.a = { status: "SUCCESS" }
+    status.b = { status: "PROCESSING" }
+    yield* sql`UPDATE intents_swaps SET checked_at = NULL`
+    yield* t.trackNow
+    const late = yield* t.dismiss(EVM, "b").pipe(Effect.flip, Effect.map((e) => e.message))
+    const [a] = yield* sql<{ move: string }>`SELECT move FROM intents_swaps WHERE deposit_address = 'a'`
+    const listed = (yield* t.transfers(EVM)).map((x) => [x.depositAddress, x.phase])
+    return { hidden, move: a?.move, listed, late }
+  }).pipe(Effect.provide(TopUp.layer.pipe(Layer.provideMerge(Layer.mergeAll(oneClick, Layer.succeed(Near, fakeNear()), relay, alerts, DbMemory, noSwaps))))))
+  assert.deepEqual(r.hidden, ["b"], "dismissed, it leaves the list")
+  assert.deepEqual(sent, [EVM], "its armed move-in is sent once its money landed")
+  assert.equal(r.move, "moved")
+  assert.ok(r.listed.some(([d, p]) => d === "a" && p === "done"), "and it's listed again, done")
+  assert.match(r.late, /Only an unpaid Top-Up of yours/)
 })

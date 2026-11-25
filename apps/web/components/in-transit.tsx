@@ -45,8 +45,12 @@ const titleOf = (t: Transfer) =>
     : t.direction === "back"
     ? `${capital(receivedAmount(t.amountOut ?? t.amountIn ?? "", t.symbol))} ${t.symbol} to ${walletOn(t.chain)}`
     : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
+/** The server builds no swap transaction in the last 2 minutes before a swap-paid Top-Up's deadline (SWAP_DEADLINE_MARGIN_MS). */
+const SWAP_MARGIN_MS = 2 * 60_000
+/** When it can last be paid: its deadline, or for a swap-paid one the last moment a transaction is still built. */
+const payBy = (t: Transfer) => Date.parse(t.deadline ?? "") - (t.paidWith ? SWAP_MARGIN_MS : 0)
 /** Still before the deadline, so the rest of a short payment can be sent. */
-const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
+const open = (t: Transfer) => t.deadline !== undefined && payBy(t) > Date.now()
 
 /**
  * Money on its way (Top-Ups from other chains and withdrawals to them), read from the server so it
@@ -155,7 +159,7 @@ function Row({ t }: { t: Transfer }) {
   // A quote nobody has paid into yet keeps its address behind a tap: it's often one the customer started and left.
   const unpaid = t.phase === "awaiting-transfer" && !t.depositTx
   // Ticks, so the time left stays current and the row turns over at its deadline.
-  const left = useLeft(Date.parse(t.deadline ?? ""))
+  const left = useLeft(payBy(t))
   const waiting = unpaid && open(t)
   const [shown, setShown] = useState(false)
   const [dismissing, setDismissing] = useState(false)
@@ -164,7 +168,11 @@ function Row({ t }: { t: Transfer }) {
     setDismissing(true)
     try {
       await api((c) => c.topup.dismiss({ payload: { depositAddress: t.depositAddress } }), token)
-      toast.success(t.paidWith ? "Top-Up cancelled" : "Dismissed. Money already sent to it still arrives, and shows here again.")
+      toast.success(
+        t.paidWith
+          ? "Cancelled. A payment your wallet already approved still arrives, and shows here again."
+          : "Dismissed. Money already sent to it still arrives, and shows here again."
+      )
       await qc.invalidateQueries({ queryKey: ["transfers"] })
     } catch (e) {
       toast.error(errorMessage(e))
@@ -310,7 +318,8 @@ function say(t: Transfer, intents: boolean, canDeposit: boolean) {
   switch (t.phase) {
     case "awaiting-transfer":
       if (t.depositTx) {
-        return open(t)
+        // Paid: 1Click has until the deadline itself to see it.
+        return Date.parse(t.deadline ?? "") > Date.now()
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
       }

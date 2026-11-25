@@ -421,15 +421,13 @@ export class TopUp extends Context.Service<TopUp, {
           quoting.add(accountId)
           return Effect.gen(function*() {
             // The rows the tracking pass still follows that 1Click has seen no money in (see trackPass), less the
-            // swap-paid ones some minutes past their deadline (SWAP_CAP_GRACE_MS) or cancelled (dismiss).
-            // ponytail: quoting and cancelling over and over keeps more of one account's swap quotes tracked than
-            // MOST_OPEN (each until SWAP_LATE_GRACE_MS past its deadline); one quote at a time and the per-IP limit
-            // bound it. Count cancelled ones for an hour if that's ever abused.
+            // swap-paid ones some minutes past their deadline (SWAP_CAP_GRACE_MS). A cancelled one (dismiss) keeps its
+            // place until then: every swap quote costs a call on the Jupiter key all customers share, so quoting and
+            // cancelling in a loop must still run into this cap.
             const [{ open = 0 } = {}] = yield* sql<{ open: number }>`
               SELECT count(*)::int AS open FROM intents_swaps
               WHERE account_id = ${accountId} AND ${unseen} AND created_at > now() - interval '3 days'
-                AND NOT (deposit_tx IS NULL AND (coalesce(deadline, created_at + interval '30 minutes') < now() - ${grace(SWAP_CAP_GRACE_MS)}
-                                                 OR ${cancelled}))`.pipe(Effect.orDie)
+                AND NOT (deposit_tx IS NULL AND coalesce(deadline, created_at + interval '30 minutes') < now() - ${grace(SWAP_CAP_GRACE_MS)})`.pipe(Effect.orDie)
             if (open >= MOST_OPEN) return yield* fail("You have several quotes open already. Use one of them, or try again in a couple of hours.")
             return yield* make
             // Only the request that took the guard gives it back.
