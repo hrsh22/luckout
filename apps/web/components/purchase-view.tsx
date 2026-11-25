@@ -4,7 +4,7 @@ import { GiftCard } from "@/components/gift-card"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { usd, usdDown, usdUp } from "@/lib/format"
+import { backText, usd, usdDown, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
@@ -63,14 +63,15 @@ const headline = (p: Purchase) =>
     : p.draw.finalPrice === 0
     ? "100% off!"
     : p.draw.cashback > 0
-    ? `${usdDown(p.draw.cashback)} back`
+    ? backText(p.draw.cashback)
     : "No cashback this time"
 
 /** The card right after buying: the result as a voucher with a cashback stub, then the code. */
 export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => void }) {
   // Until its Draw is recorded, a Lucky Buy has cost its Maximum Price.
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
-  const below = p.draw && p.draw.finalPrice < p.referencePrice
+  // Below the price by a whole cent or more, rounded down: a saving is never shown as more than it is, nor as $0.00.
+  const below = p.draw && p.referencePrice - p.draw.finalPrice >= 10_000
   const pal = modePalette(p.mode)
   const r = redemptionShown(p.redemption)
   const refunded = p.status === "failed" || p.status === "rejected"
@@ -88,7 +89,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
         <h2 className="font-display mt-4 text-5xl leading-none font-extrabold">{headline(p)}</h2>
         {p.status === "delivered" && (
           <p className="mt-2 text-[17px] opacity-85">
-            You paid <b>{usdUp(paid)}</b> for a {usd(p.referencePrice)} card{below ? `, ${usd(p.referencePrice - paid)} less than the price` : ""}.
+            You paid <b>{usdUp(paid)}</b> for a {usd(p.referencePrice)} card{below ? `, ${usdDown(p.referencePrice - paid)} less than the price` : ""}.
             {drawPending(p) && " Draw result pending."}
           </p>
         )}
@@ -345,7 +346,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
             : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
-              {p.draw.finalPrice === 0 ? "100% off" : `${usdDown(p.draw.cashback)} back`}
+              {p.draw.finalPrice === 0 ? "100% off" : backText(p.draw.cashback)}
             </span>
           )}
           {p.draw && p.draw.cashback === 0 && <span className="text-xs text-muted">No cashback</span>}

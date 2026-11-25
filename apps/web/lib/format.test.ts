@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { cartCents, centsUp, dollars, limitsText, receivedAmount, safeLink, shownOutcomes, tokenAmount, toMicro, toYocto, typedAmount, usd, usdDown, usdUp } from "./format.ts"
+import { backText, cartCents, centsUp, dollars, limitsText, receivedAmount, safeLink, shownOutcomes, tokenAmount, toMicro, toYocto, typedAmount, usd, usdDown, usdUp } from "./format.ts"
 import { type ModeInfo, MODES, pricedOutcomes, simpleQuote } from "./modes.ts"
 
 test("token amounts read at a sensible precision, rounded the safe way", () => {
@@ -57,6 +57,13 @@ test("what a customer pays rounds up to the cent, what they hold rounds down, an
   assert.equal(usd(1_234_567_890_000), "$1,234,567.89", "thousands are grouped")
   assert.equal(usdUp(1), "$0.01", "the smallest price is never shown as free")
   assert.equal(usdDown(9_999), "$0.00", "less than a cent held is shown as nothing, not a cent")
+})
+
+test("a Draw's Cashback reads in whole cents rounded down, and one under a cent says so instead of $0.00 back", () => {
+  assert.equal(backText(25_000), "$0.02 back", "never more than was credited")
+  assert.equal(backText(10_000), "$0.01 back")
+  assert.equal(backText(9_999), "Under $0.01 back")
+  assert.equal(backText(1), "Under $0.01 back")
 })
 
 test("only plain https links from Redemption Data become clickable", () => {

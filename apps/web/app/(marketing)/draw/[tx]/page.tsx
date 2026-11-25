@@ -49,7 +49,8 @@ export default async function DrawProof({ params, searchParams }: Props) {
   const { draw, version, time } = d
   const ref = Number(draw.reference_price)
   const paid = Number(draw.final_price)
-  const diff = paid - ref
+  // Below the price by a whole cent or more, rounded down: a saving is never shown as more than it is, nor as $0.00.
+  const below = ref - paid >= 10_000
   // When only part of the price played (the Lucky Amount), the table's shares are of that part, not of the whole price.
   const lucky = Number(draw.lucky_amount)
   const part = lucky < ref
@@ -69,11 +70,11 @@ export default async function DrawProof({ params, searchParams }: Props) {
         </p>
       </div>
 
-      <dl className={`relative grid grid-cols-2 gap-6 rounded-[2rem] p-7 sm:grid-cols-4 ${diff < 0 ? "bg-gold text-gold-ink" : "card"}`}>
+      <dl className={`relative grid grid-cols-2 gap-6 rounded-[2rem] p-7 sm:grid-cols-4 ${below ? "bg-gold text-gold-ink" : "card"}`}>
         <Stat label="Price" value={usd(ref)} />
         <Stat label="Paid up front" value={usdUp(draw.max_price)} />
         <Stat label="Cashback" value={usdDown(draw.cashback)} />
-        <Stat label={diff < 0 ? `Paid, ${usd(-diff)} below the price` : "Paid"} value={usdUp(paid)} strong />
+        <Stat label={below ? `Paid, ${usdDown(ref - paid)} below the price` : "Paid"} value={usdUp(paid)} strong />
       </dl>
 
       <section className="flex flex-col gap-4">
