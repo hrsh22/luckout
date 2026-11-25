@@ -81,6 +81,11 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
   run(Effect.gen(function*() {
     yield* purchase("00000000-0000-4000-8000-000000000001", "settled", null, 5)
     yield* purchase("00000000-0000-4000-8000-000000000002", "stuck", "Bitrefill order outcome unknown; check the Bitrefill account")
+    // Two relays the caps count, and a Top-Up's move-in they don't.
+    const sql = yield* SqlClient.SqlClient
+    for (const [hash, counted] of [["r1", true], ["r2", true], ["move-in", false]] as const) {
+      yield* sql`INSERT INTO relays (delegate_hash, account_id, signed_tx, counted) VALUES (${hash}, 'alice.testnet', '{}'::jsonb, ${counted})`
+    }
     const o = yield* (yield* Admin).overview
     assert.equal(o.contract.owner, "luckout.testnet")
     assert.equal(o.reserve.free, 1_000_000_000)
@@ -88,6 +93,8 @@ test("the overview reads the contract, gas, relays, purchases and Bitrefill", ()
     assert.equal(o.reserve.customers, 120_000_000, "what the contract holds minus the reserve and proceeds")
     assert.deepEqual(o.gas.map((g) => [g.role, BigInt(g.spendable) < BigInt(g.alertBelow) ? "low" : "ok"]), [["operator", "ok"], ["relayer", "low"], ["contract", "ok"]])
     assert.equal(o.relay.settings.enabled, true)
+    assert.equal(o.relay.usedToday, 2, "only what the caps count")
+    assert.deepEqual(o.relay.topAccounts, [{ accountId: "alice.testnet", count: 2 }])
     assert.equal(o.purchases.today, 2)
     assert.equal(o.purchases.deliveredToday, 1)
     assert.deepEqual(o.purchases.attention.map((a) => [a.step, a.retryable]), [["stuck", false]])
