@@ -1,14 +1,14 @@
 "use client"
 
-import { NoPage } from "@/components/admin/panel"
 import { ModeChip } from "@/components/purchase-view"
 import { AdminTabs, ago, basescan, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
+import { NoPage } from "@/components/site-chrome"
 import { Button } from "@/components/ui/button"
 import { heldByAll, purchaseIdIn } from "@/lib/admin-lists"
 import { api, errorMessage } from "@/lib/api"
 import { explorer, explorerAccount } from "@/lib/chain"
-import { dollars, limitsText, usd } from "@/lib/format"
+import { dollars, limitsText, usd, usdDown, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { useSession } from "@/lib/session"
 import { ADMIN_LIST_LIMIT, type AdminPurchase, type AdminUser } from "@luckout/api"
@@ -127,7 +127,8 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
           <span className="min-w-0 flex-1 font-semibold">{p.voucherName} {p.value}{p.currency ? ` ${p.currency}` : ""}</span>
           <span className="truncate text-sm text-muted sm:max-w-56">{p.accountId}</span>
           <ModeChip mode={p.mode} />
-          <span className="w-20 text-right font-medium tabular-nums">{usd(p.paid ?? p.maxPrice ?? p.referencePrice)}</span>
+          {/* What the customer's own list shows for it, rounded up as charged; the details below are exact. */}
+          <span className="w-20 text-right font-medium tabular-nums">{usdUp(p.paid ?? p.maxPrice ?? p.referencePrice)}</span>
           <span className={`pill ${stepTone(p.step)}`}>{stepLabel(p.step)}</span>
           <span className="w-24 text-right text-sm text-muted">{ago(p.createdAt)}</span>
         </summary>
@@ -137,10 +138,10 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
               ["Id", p.id],
               ["Account", <Link key="a" href={`/admin/purchases?account=${encodeURIComponent(p.accountId)}`} className="underline">{p.accountId}</Link>],
               ["Mode", modeName(p.mode)],
-              ["Reference price", usd(p.referencePrice)],
-              p.maxPrice !== undefined && ["Max price", usd(p.maxPrice)],
-              p.paid !== undefined && ["Paid", usd(p.paid)],
-              p.cashback !== undefined && ["Cashback", usd(p.cashback)],
+              ["Reference price", `${dollars(p.referencePrice)} USDC`],
+              p.maxPrice !== undefined && ["Max price", `${dollars(p.maxPrice)} USDC`],
+              p.paid !== undefined && ["Paid", `${dollars(p.paid)} USDC`],
+              p.cashback !== undefined && ["Cashback", `${dollars(p.cashback)} USDC`],
               p.error !== undefined && ["Error", <span key="e" className="text-bad">{p.error}</span>],
               ["Attempts", p.attempts],
               p.invoiceId !== undefined && ["Bitrefill invoice", p.invoiceId],
@@ -203,16 +204,17 @@ function UserRow({ u }: { u: AdminUser }) {
           <span className="min-w-0 flex-1 truncate font-semibold">{u.accountId}</span>
           {u.telegram && <span className="pill bg-lilac-soft! text-ink">TG {u.telegram}</span>}
           <span className="text-sm text-ink-soft">{u.delivered}/{u.purchases} delivered</span>
-          <span className="w-24 text-right font-medium tabular-nums">{u.balance === undefined ? "—" : usd(u.balance)}</span>
+          {/* As the customer's own balance shows, rounded down; the details below are exact. */}
+          <span className="w-24 text-right font-medium tabular-nums">{u.balance === undefined ? "—" : usdDown(u.balance)}</span>
           <span className="w-24 text-right text-sm text-muted">{u.lastPurchaseAt ? ago(u.lastPurchaseAt) : "no buys"}</span>
         </summary>
         <div className="border-t border-soft p-4">
           <Facts
             items={[
-              ["Balance", u.balance === undefined ? "NEAR didn't answer" : usd(u.balance)],
+              ["Balance", u.balance === undefined ? "NEAR didn't answer" : `${dollars(u.balance)} USDC`],
               u.perPurchaseLimit !== undefined && u.dailyLimit !== undefined && ["Spending limits", limitsText(u.perPurchaseLimit, u.dailyLimit)],
-              ["Spent on delivered cards", usd(u.spent)],
-              ["Cashback received", usd(u.cashback)],
+              ["Spent on delivered cards", `${dollars(u.spent)} USDC`],
+              ["Cashback received", `${dollars(u.cashback)} USDC`],
               ["Purchases", <Link key="p" href={`/admin/purchases?account=${encodeURIComponent(u.accountId)}`} className="underline">{u.purchases} ({u.delivered} delivered)</Link>],
               u.telegram !== undefined && ["Telegram", u.telegram],
               ["Checkout Email", u.checkoutEmail ? "Given" : "None yet"],

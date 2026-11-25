@@ -15,6 +15,12 @@ export const usdUp = (micro: number | string) => usdCents(centsUp(Number(micro))
 /** A balance, rounded down to the cent: never show more than is there (prices round up, so the two add up). */
 export const usdDown = (micro: number | string) => fmt.format(Math.floor(Number(micro) / 10_000) / 100)
 
+/**
+ * A Draw's Cashback (above zero) as its label: whole cents rounded down, so never more than was credited, and one
+ * under a cent said as such rather than a gold "$0.00 back".
+ */
+export const backText = (micro: number) => (micro < 10_000 ? "Under $0.01 back" : `${usdDown(micro)} back`)
+
 /** micro-USDC (never negative) → whole cents, rounded down, in integers only. */
 const centsDown = (micro: number) => (micro - (micro % 10_000)) / 10_000
 

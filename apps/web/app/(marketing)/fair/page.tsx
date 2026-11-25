@@ -1,7 +1,7 @@
 import { DailyReset } from "@/components/local-time"
 import { api } from "@/lib/api"
 import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
-import { usd } from "@/lib/format"
+import { usd, usdDown } from "@/lib/format"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import { ChevronDown } from "lucide-react"
 import type { Metadata } from "next"
@@ -61,7 +61,7 @@ export default async function Fair() {
           <div className="grid gap-4 sm:grid-cols-3">
             <Figure label="Free" value={usd(reserve.free)} />
             <Figure label="Locked for purchases in progress" value={usd(reserve.locked)} />
-            <Figure label="Most cashback one purchase can get now" value={usd(reserve.max_cashback)} />
+            <Figure label="Most cashback one purchase can get now" value={usdDown(reserve.max_cashback)} />
           </div>
           <p className="text-ink-soft">
             Each lucky buy locks what its biggest possible cashback would cost before it starts, so every cashback is already covered. One
