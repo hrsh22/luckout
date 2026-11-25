@@ -184,3 +184,44 @@ test("an account whose balance can't be read keeps its turn in the solvency chec
   const read = await solvencyRound({ held: "0", balances: {}, seed: Effect.flatMap(SqlClient.SqlClient, signups) })
   assert.deepEqual(read.checked, ["signup1.test", "signup2.test", "signup3.test"])
 })
+
+test("a low balance is said when it drops and once a day while it lasts, not at each restart; recovered, the next drop is said again", async () => {
+  let amount = 5n * 10n ** 23n // 0.5 NEAR: under every line
+  const near = fakeNear({
+    account: () => Effect.sync(() => ({ amount, storageUsage: 0 })),
+    view: <A>(method: string) =>
+      Effect.succeed((method === "ft_balance_of" ? "0" : method === "get_reserve" ? { free: "0", locked: "0", proceeds: "0" } : null) as A)
+  })
+  const alerts: Array<string> = []
+  const deps = Layer.mergeAll(
+    Layer.succeed(Near, near),
+    Layer.succeed(Base, fakeBase({ configured: false })),
+    Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
+  )
+  // One server start: its first round runs at once.
+  const start = Effect.scoped(Effect.gen(function*() {
+    yield* Layer.build(Monitor.pipe(Layer.provide(deps)))
+    yield* Effect.sleep("300 millis")
+  }))
+  const said = () => alerts.filter((a) => a.includes("free for storage")).length
+  const r = await Effect.runPromise(
+    Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* start
+      const dropped = said()
+      yield* start
+      const restarted = said()
+      amount = 10n ** 26n
+      yield* start
+      const recovered = said()
+      amount = 5n * 10n ** 23n
+      yield* start
+      const droppedAgain = said()
+      // A day after it was last said, still low.
+      yield* sql`UPDATE settings SET value = jsonb_set(value, '{contract}', '0'::jsonb) WHERE key = 'low_balances'`
+      yield* start
+      return { dropped, restarted, recovered, droppedAgain, dayLater: said() }
+    }).pipe(Effect.provide(DbMemory), Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } }))))
+  )
+  assert.deepEqual(r, { dropped: 1, restarted: 1, recovered: 1, droppedAgain: 2, dayLater: 3 })
+})
