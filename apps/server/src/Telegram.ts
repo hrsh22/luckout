@@ -328,7 +328,8 @@ export const replaceCheckoutEmail = (
       return "Your card email changed since I asked, so I left it. Ask me again if you still want to change it."
     }
     const saved = yield* purchases.setCheckoutEmail(accountId, change.to)
-    return `Done: your cards are now also emailed to ${saved.email}.`
+    // The Agent can't act on a tap, so nothing is prepared after this one: say what to do next in code, not by the model.
+    return `Done: your cards are now also emailed to ${saved.email}. Tell me what you'd like to buy and I'll set it up.`
   }).pipe(Effect.catch((e) => Effect.succeed(e.message)))
 
 /** A new link for the account. Earlier ones stop working, so only the latest link can connect Telegram. */
