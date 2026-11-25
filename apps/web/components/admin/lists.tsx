@@ -1,9 +1,9 @@
 "use client"
 
-import { NoPage } from "@/components/admin/panel"
 import { ModeChip } from "@/components/purchase-view"
 import { AdminTabs, ago, basescan, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
+import { NoPage } from "@/components/site-chrome"
 import { Button } from "@/components/ui/button"
 import { heldByAll, purchaseIdIn } from "@/lib/admin-lists"
 import { api, errorMessage } from "@/lib/api"

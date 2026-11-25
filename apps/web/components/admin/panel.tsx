@@ -11,7 +11,8 @@ import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
 import { AdminTabs, LastFigures, type Tx } from "@/components/admin/shared"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { NoPage } from "@/components/site-chrome"
+import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { api, cancelled, errorMessage } from "@/lib/api"
 import { capText, maxCashbackAt } from "@/lib/cashback-cap"
@@ -23,7 +24,6 @@ import { oneAtATime } from "@/lib/utils"
 import type { AdminOverview, ShopStatus } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, Pause, Plus, ShieldCheck } from "lucide-react"
-import Link from "next/link"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -57,16 +57,6 @@ export function AdminPanel() {
       {q.error && <LastFigures error={q.error} className="mb-4" />}
       <Dashboard o={q.data} />
     </>
-  )
-}
-
-export function NoPage() {
-  return (
-    <div className="flex max-w-xl flex-col gap-6 py-10">
-      <h1 className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]">No page here</h1>
-      <p className="text-lg text-ink-soft">The link may be mistyped, or the page has moved.</p>
-      <Link href="/shop" className={buttonVariants({ size: "lg", className: "self-start" })}>Go to the shop</Link>
-    </div>
   )
 }
 

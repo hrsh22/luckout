@@ -1,17 +1,13 @@
 import { Wordmark } from "@/components/brand"
-import { buttonVariants } from "@/components/ui/button"
-import Link from "next/link"
+import { NoPage } from "@/components/site-chrome"
 
+// A URL no route matches: only the root layout is around it, so this brings its own Wordmark. A notFound() inside the
+// app or the marketing pages uses that group's not-found instead, under the group's header.
 export default function NotFound() {
   return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center gap-6 px-6">
+    <main className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center px-6">
       <Wordmark />
-      <h1 className="font-display text-6xl leading-none font-extrabold tracking-[-0.03em]">No page here</h1>
-      <p className="text-lg text-ink-soft">The link may be mistyped, or the page has moved.</p>
-      <div className="flex flex-wrap gap-3">
-        <Link href="/shop" className={buttonVariants({ size: "lg" })}>Go to the shop</Link>
-        <Link href="/" className={buttonVariants({ size: "lg", variant: "light" })}>About Luckout</Link>
-      </div>
+      <NoPage />
     </main>
   )
 }
