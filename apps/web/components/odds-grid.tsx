@@ -1,7 +1,7 @@
 "use client"
 
 import { slabColor, Spacers } from "@/components/odds"
-import { usd, usdUp } from "@/lib/format"
+import { usdDown, usdUp } from "@/lib/format"
 import { AMPLE_RESERVE, MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
 import { motion } from "motion/react"
@@ -14,7 +14,7 @@ const label = (o: PricedOutcome, whole: boolean) =>
   o.price === 0
     ? "got it all back: 100% off"
     : o.cashback > 0
-    ? `got ${whole ? `${o.pct}%` : usd(o.cashback)} back, paid ${usdUp(o.price)}`
+    ? `got ${whole ? `${o.pct}%` : usdDown(o.cashback)} back, paid ${usdUp(o.price)}`
     : `no cashback, paid ${usdUp(o.price)}`
 
 /** The odds, drawn: 100 buyers of a $20 card with all of it in the Draw, each dot what one of them paid. */

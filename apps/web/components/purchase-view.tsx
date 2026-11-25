@@ -4,7 +4,7 @@ import { GiftCard } from "@/components/gift-card"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { usd, usdUp } from "@/lib/format"
+import { usd, usdDown, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
 import { contractId, explorer, view } from "@/lib/near"
 import { useSession } from "@/lib/session"
@@ -63,7 +63,7 @@ const headline = (p: Purchase) =>
     : p.draw.finalPrice === 0
     ? "100% off!"
     : p.draw.cashback > 0
-    ? `${usd(p.draw.cashback)} back`
+    ? `${usdDown(p.draw.cashback)} back`
     : "No cashback this time"
 
 /** The card right after buying: the result as a voucher with a cashback stub, then the code. */
@@ -100,7 +100,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
             <div className="perforation mt-6 -mx-6 opacity-70" aria-hidden="true" />
             <dl className="mt-4 grid grid-cols-3 gap-3 text-sm">
               <div><dt className="opacity-70">Paid up front</dt><dd className="text-base font-semibold">{usdUp(p.maxPrice ?? paid)}</dd></div>
-              <div><dt className="opacity-70">Cashback</dt><dd className="text-base font-semibold">{usd(p.draw.cashback)}</dd></div>
+              <div><dt className="opacity-70">Cashback</dt><dd className="text-base font-semibold">{usdDown(p.draw.cashback)}</dd></div>
               <div><dt className="opacity-70">{modeName(p.mode)} roll</dt><dd className="text-base font-semibold">{p.draw.seed ? p.draw.roll : "—"}</dd></div>
             </dl>
           </>
@@ -345,7 +345,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
             : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className="rounded-full bg-gold px-2 py-0.5 text-xs font-bold text-gold-ink">
-              {p.draw.finalPrice === 0 ? "100% off" : `${usd(p.draw.cashback)} back`}
+              {p.draw.finalPrice === 0 ? "100% off" : `${usdDown(p.draw.cashback)} back`}
             </span>
           )}
           {p.draw && p.draw.cashback === 0 && <span className="text-xs text-muted">No cashback</span>}
@@ -365,7 +365,7 @@ export function PurchaseRow({ p, open, onToggle }: { p: Purchase; open: boolean;
               <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
                 <div><dt className="text-muted">Price</dt><dd className="font-semibold">{usd(p.referencePrice)}</dd></div>
                 <div><dt className="text-muted">Paid up front</dt><dd className="font-semibold">{usdUp(p.maxPrice ?? p.referencePrice)}</dd></div>
-                <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usd(p.draw.cashback) : drawPending(p) ? "Draw result pending" : "None"}</dd></div>
+                <div><dt className="text-muted">Cashback</dt><dd className="font-semibold">{p.draw ? usdDown(p.draw.cashback) : drawPending(p) ? "Draw result pending" : "None"}</dd></div>
                 <div><dt className="text-muted">{onItsWay ? "Paid for now" : "You paid"}</dt><dd className="font-semibold">{p.status === "delivered" || onItsWay ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
