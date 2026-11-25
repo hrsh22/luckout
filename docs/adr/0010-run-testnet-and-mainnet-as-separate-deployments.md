@@ -18,6 +18,8 @@ So the deployments never share anything that could move money:
 
 **Testnet becomes local (planned).** Once the hackathon's judging is over, the hosted testnet (its VM user, Vercel domain and the `testnet` branch) retires, and testnet runs on a developer's machine, shared over Tailscale when needed. Luckout then has no free public demo, which is accepted. Releases go feature branch → `staging` → `main`.
 
+**Amended 2026-11-25 (testnet retires at the release).** The planned retirement happens at the production release that ships `staging` to `main`: once production is healthy, the hosted testnet's server, its web domain and the `testnet` branch's deploys stop (deploy/README.md, "Releasing staging to production"). From then on testnet is used only for local development; the testnet column above describes what is retired.
+
 Guards make a mix-up fail loudly instead of quietly:
 - Each database records the network and the contract it belongs to, and a server for another deployment refuses to start against it.
 - A server refuses to start if its `.env` names accounts from the other network (`.testnet` on mainnet, `.near` on testnet).
