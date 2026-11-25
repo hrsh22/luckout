@@ -34,6 +34,14 @@ export const pricedLines = <L extends { readonly mode: Quote["mode"]; readonly k
 }
 
 /**
+ * Whether a later copy of a line (as pricedLines gives it) plays less than one card alone (`alone`, its own quote):
+ * quote_many caps each copy from the Free Reserve the copies before it leave. One card's odds and cap then aren't
+ * each copy's, and the card page says they're the first card's.
+ */
+export const laterPlayLess = (alone: Pick<Quote, "luckyAmount">, priced: { readonly normal: boolean; readonly plays: number | undefined }) =>
+  priced.normal || (priced.plays !== undefined && priced.plays < alone.luckyAmount)
+
+/**
  * One card bought exactly as its quote showed: the quote's mode (Normal when the reserve couldn't cover a Lucky card),
  * its maximum, and a Lucky Buy's Lucky Amount, which the contract plays exactly or refuses. The key makes it one
  * purchase however often it's sent.

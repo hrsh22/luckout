@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { addToCart, type CartCard, cartRoom, useCart } from "@/lib/cart"
 import { useCartQuote, useCheckout } from "@/lib/checkout"
-import { pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
+import { laterPlayLess, pricedLines, purchaseRequest, spendingCheck, totals } from "@/lib/checkout-terms"
 import { Quantity } from "@/components/quantity"
 import { api, errorMessage, isNotFound, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
@@ -387,6 +387,9 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
   const lucky = shown.luckyAmount > 0
   // "Each" holds only while every copy plays in full; otherwise the Cart's note says what the reserve did to them.
   const differ = copies && (copies.normal || copies.plays !== undefined) ? copies : undefined
+  // The odds below are one card's, which is the first copy's. When a later copy plays less, that card's cap would read
+  // as each one's: say whose chances they are instead.
+  const later = count > 1 && !!differ && laterPlayLess(shown, differ)
   const outcomes = pricedOutcomes(info, shown)
   const best = outcomes[outcomes.length - 1]!
   return (
@@ -426,11 +429,18 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
         <div className="flex flex-col gap-3 border-t border-line pt-5">
           <OddsBar outcomes={outcomes} />
           <OddsList outcomes={outcomes} whole={shown.luckyAmount === shown.referencePrice} />
-          {shown.luckyAmount < shown.referencePrice && (
-            <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
-              Cashback is capped at {usdDown(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
-            </p>
-          )}
+          {later
+            ? (
+              <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
+                These are the first card's chances{shown.luckyAmount < shown.referencePrice ? `, with ${usd(shown.luckyAmount)} of its price playing` : ""}. Each
+                card's cap comes from what the cards before it leave free in the Cashback Reserve, so later ones can play less.
+              </p>
+            )
+            : shown.luckyAmount < shown.referencePrice && (
+              <p className="rounded-2xl bg-soft p-3 text-sm text-ink-soft">
+                Cashback is capped at {usdDown(best.cashback)} right now, so only {usd(shown.luckyAmount)} of the price plays.
+              </p>
+            )}
         </div>
       )}
     </div>
