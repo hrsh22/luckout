@@ -900,8 +900,8 @@ export class Purchases extends Context.Service<Purchases, {
         return a
       })
 
-      // ponytail: in memory, one process; a restart forgets it. A lookup that finds no card still spends one of
-      // Bitrefill's 20 a minute, so an account gets only a few misses a minute.
+      // ponytail: in memory, one process; a restart forgets it. A lookup that finds no card still spends one of the
+      // 24 a minute a purchase may use (Bitrefill.ts), so an account gets only a few misses a minute.
       const misses = new Map<string, { n: number; until: number }>()
       const missed = (accountId: string) =>
         Effect.sync(() => {

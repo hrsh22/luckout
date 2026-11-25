@@ -440,13 +440,18 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
 
 test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, even once the minute's unknown ids are used", async () => {
   const looked: Array<string> = []
+  let added = false
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = new URL(String(input instanceof Request ? input.url : input))
+    if (url.pathname === "/v2/products/search") {
+      return Response.json({ meta: {}, data: [{ id: "amazn-us", name: "Amazn", country_code: "US", currency: "USD", recipient_type: "none" }] })
+    }
     // The catalog copy can't be read, so it stays as saved below.
     if (url.pathname !== "/mcp") return new Response("", { status: 500 })
     const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
     looked.push(id)
+    if (added) return toolResult({ id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: "10.00", payment_currency: "USD" }] })
     return new Response(`data: ${JSON.stringify({ result: { isError: true, content: [{ text: `Product '${id}' was not found.` }] } })}\n`, { status: 200 })
   }) as typeof fetch
   try {
@@ -466,7 +471,12 @@ test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, 
         // Remembered for 10 minutes only: Bitrefill may have added it since.
         yield* TestClock.adjust("10 minutes")
         const later = yield* refused("amazn-us")
-        return { typo, again, unseen, later }
+        // Bitrefill adds it and a search shows it: a card a listing knows is asked about again, memory or not.
+        added = true
+        yield* b.search("amazn")
+        yield* TestClock.adjust("10 seconds")
+        const listed = yield* b.voucher("amazn-us", { page: true })
+        return { typo, again, unseen, later, listed }
       }).pipe(
         Effect.scoped,
         Effect.provide(DbMemory),
@@ -479,7 +489,51 @@ test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, 
     assert.equal(r.again, NO_SUCH_VOUCHER, "not found, not busy")
     assert.match(r.unseen, /busy/, "an id never asked about still waits for the next minute")
     assert.equal(r.later, NO_SUCH_VOUCHER)
-    assert.deepEqual(looked, ["amazn-us", "made-up-0", "made-up-1", "amazn-us"])
+    assert.equal(r.listed.id, "amazn-us")
+    assert.deepEqual(looked, ["amazn-us", "made-up-0", "made-up-1", "amazn-us", "amazn-us"])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test("lookups never pass their budget in any 60 seconds, and Bitrefill's own limit (429) reads as busy, not as a missing card", async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input))
+    if (url.pathname !== "/mcp") return new Response("", { status: 500 })
+    const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
+    if (id === "limited") return new Response("Too Many Requests", { status: 429 })
+    return toolResult({ id, name: id, country_code: "US", currency: "USD", packages: [{ package_value: "10", payment_price: "10.00", payment_currency: "USD" }] })
+  }) as typeof fetch
+  try {
+    const r = await Effect.runPromise(
+      Effect.gen(function*() {
+        const b = Context.get(yield* Layer.build(Bitrefill.layer), Bitrefill)
+        const loads = (ids: ReadonlyArray<string>) =>
+          Effect.map(Effect.forEach(ids, (id) => Effect.option(b.voucher(id, { page: true }))), (got) => got.filter((o) => o._tag === "Some").length)
+        yield* loads(["card-0"])
+        // Browsing's 16 end late in one minute...
+        yield* TestClock.adjust("50 seconds")
+        const late = yield* loads(Array.from({ length: 15 }, (_, i) => `card-${1 + i}`))
+        // ...and the next minute starts 15 seconds on: only card-0's lookup has left the last 60 seconds.
+        yield* TestClock.adjust("15 seconds")
+        const early = yield* loads(Array.from({ length: 16 }, (_, i) => `card-${16 + i}`))
+        // A purchase still has its 8 then, by Bitrefill's count as much as ours.
+        const bought = yield* b.voucher("card-40", { purchase: true })
+        const limited = yield* b.voucher("limited", { purchase: true }).pipe(Effect.flip)
+        return { late, early, bought, limited }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(DbMemory),
+        Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(TestClock.layer())
+      )
+    )
+    assert.equal(r.late, 15)
+    assert.equal(r.early, 1, "16 within any 60 seconds, not 31")
+    assert.equal(r.bought.id, "card-40")
+    assert.match(r.limited.message, /^Prices are busy/, "so it isn't counted as a missing card, and Bitrefill's reply isn't shown")
   } finally {
     globalThis.fetch = realFetch
   }
