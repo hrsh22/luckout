@@ -682,6 +682,14 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         })
       /** The last price Bitrefill gave for each card, and when: what a page shows when no newer one can be had. */
       const lastKnown = new Map<string, { readonly product: typeof McpProduct.Type; readonly at: number }>()
+      /** When Bitrefill last said it doesn't have a card. */
+      const missing = new Map<string, number>()
+      // Re-added at the end, so the oldest entry goes first once there are too many.
+      const remember = <V>(m: Map<string, V>, id: string, v: V) => {
+        m.delete(id)
+        m.set(id, v)
+        if (m.size > 1_000) m.delete(m.keys().next().value!)
+      }
       const lookup = (id: string, limit: number, unlisted = false) =>
         spendLookup(limit, unlisted).pipe(
           Effect.andThen(mcp("get-product-details", { product_id: id, currency: "USD" }, McpProduct)),
@@ -691,13 +699,11 @@ export class Bitrefill extends Context.Service<Bitrefill, {
             if (NO_SUCH_PRODUCT.test(why) && !why.startsWith("HTTP ")) return new BitrefillUnavailable({ message: NO_SUCH_VOUCHER })
             return e._tag === "Rejected" ? unavailable(e.reason) : e
           }),
+          Effect.tapError((e) => (e.message === NO_SUCH_VOUCHER ? Effect.map(Clock.currentTimeMillis, (at) => remember(missing, id, at)) : Effect.void)),
           Effect.tap((product) =>
             Effect.map(Clock.currentTimeMillis, (at) => {
               listed.add(id)
-              // Re-added at the end, so the card priced longest ago goes first once there are too many.
-              lastKnown.delete(id)
-              lastKnown.set(id, { product, at })
-              if (lastKnown.size > 1_000) lastKnown.delete(lastKnown.keys().next().value!)
+              remember(lastKnown, id, { product, at })
             })
           )
         )
@@ -713,10 +719,19 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         return last && now - last.at < LAST_PRICE_MS ? last : undefined
       }
       // Browsing's lookups, one at a time per card. A failure is kept 5 seconds, so a busy minute isn't asked again at once.
+      // A card no listing knows that Bitrefill said it doesn't have answers 404 again for 10 minutes, unasked, so a
+      // mistyped id reads "not found" even in a minute whose unknown-id lookups are used up. Not for a listed card: our
+      // catalog copy leaves out cards (other categories, out of stock when copied, newer than the copy), so it can't
+      // say a card is missing, and a listing that shows the card later lets it be asked again.
+      // ponytail: an unknown id never asked about still answers busy once the minute's 3 are used.
       const browseLookups = yield* Cache.makeWith(
         (id: string) =>
-          Effect.flatMap(Clock.currentTimeMillis, (now) =>
-            lookup(id, recent(id, now) ? BROWSE_LOOKUPS_PER_MINUTE - FIRST_VIEW_LOOKUPS : BROWSE_LOOKUPS_PER_MINUTE, !isListed(id))),
+          Effect.flatMap(Clock.currentTimeMillis, (now) => {
+            const unlisted = !isListed(id)
+            const gone = missing.get(id)
+            if (unlisted && gone !== undefined && now - gone < PAGE_PRICE_MS) return Effect.fail(new BitrefillUnavailable({ message: NO_SUCH_VOUCHER }))
+            return lookup(id, recent(id, now) ? BROWSE_LOOKUPS_PER_MINUTE - FIRST_VIEW_LOOKUPS : BROWSE_LOOKUPS_PER_MINUTE, unlisted)
+          }),
         { capacity: 1_000, timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : "5 seconds") }
       )
       // A page or quote takes a price at most `maxAge` old; past that, a new one if a lookup is free, else (or when

@@ -438,6 +438,53 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
   }
 })
 
+test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, even once the minute's unknown ids are used", async () => {
+  const looked: Array<string> = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input instanceof Request ? input.url : input))
+    // The catalog copy can't be read, so it stays as saved below.
+    if (url.pathname !== "/mcp") return new Response("", { status: 500 })
+    const id: string = JSON.parse(String(init?.body)).params.arguments.product_id
+    looked.push(id)
+    return new Response(`data: ${JSON.stringify({ result: { isError: true, content: [{ text: `Product '${id}' was not found.` }] } })}\n`, { status: 200 })
+  }) as typeof fetch
+  try {
+    const r = await Effect.runPromise(
+      Effect.gen(function*() {
+        const sql = yield* SqlClient.SqlClient
+        yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('card_logos', ${JSON.stringify({ "amazon-us": {} })}::jsonb, 'server')`
+        const b = Context.get(yield* Layer.build(Bitrefill.layer), Bitrefill)
+        const refused = (id: string) => b.voucher(id, { page: true }).pipe(Effect.flip, Effect.map((e) => e.message))
+        const typo = yield* refused("amazn-us")
+        yield* refused("made-up-0")
+        yield* refused("made-up-1")
+        // Past the 5 seconds a failed lookup is kept, still in the minute whose 3 unknown ids are used.
+        yield* TestClock.adjust("10 seconds")
+        const again = yield* refused("amazn-us")
+        const unseen = yield* refused("made-up-2")
+        // Remembered for 10 minutes only: Bitrefill may have added it since.
+        yield* TestClock.adjust("10 minutes")
+        const later = yield* refused("amazn-us")
+        return { typo, again, unseen, later }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(DbMemory),
+        Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(TestClock.layer())
+      )
+    )
+    assert.equal(r.typo, NO_SUCH_VOUCHER)
+    assert.equal(r.again, NO_SUCH_VOUCHER, "not found, not busy")
+    assert.match(r.unseen, /busy/, "an id never asked about still waits for the next minute")
+    assert.equal(r.later, NO_SUCH_VOUCHER)
+    assert.deepEqual(looked, ["amazn-us", "made-up-0", "made-up-1", "amazn-us"])
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test("a guest's cart is one order, every card also emailed to their Checkout Email as a gift", async () => {
   const sent: Array<Record<string, unknown>> = []
   await withGuestBitrefill(
