@@ -854,9 +854,18 @@ export class Purchases extends Context.Service<Purchases, {
           Effect.tapError((e) => Effect.logWarning(`quote: ${e.message}`)),
           Effect.mapError(quoteRefused)
         )
-      /** A cart's terms (ADR-0013): each card priced on the reserve the cards before it left. */
-      const contractQuotes = (items: ReadonlyArray<{ readonly referencePrice: number; readonly mode: Mode }>) =>
-        near.view<ReadonlyArray<QuoteView>>("quote_many", { items: items.map((i) => ({ reference_price: String(i.referencePrice), mode: i.mode })) }).pipe(
+      /**
+       * A cart's terms (ADR-0013): each card priced on the reserve the cards before it left. A card's confirmed Lucky
+       * Amount, when the reserve still covers it, is what it plays and locks, as admission would.
+       */
+      const contractQuotes = (items: ReadonlyArray<{ readonly referencePrice: number; readonly mode: Mode; readonly luckyAmount?: number | undefined }>) =>
+        near.view<ReadonlyArray<QuoteView>>("quote_many", {
+          items: items.map((i) => ({
+            reference_price: String(i.referencePrice),
+            mode: i.mode,
+            ...(i.luckyAmount === undefined ? {} : { lucky_amount: String(i.luckyAmount) })
+          }))
+        }).pipe(
           Effect.tapError((e) => Effect.logWarning(`quote_many: ${e.message}`)),
           Effect.mapError(quoteRefused)
         )
@@ -993,9 +1002,10 @@ export class Purchases extends Context.Service<Purchases, {
         )
         // The contract's own admission checks, made here first against what it will debit: the Reference Price in
         // Normal, the quote's maximum in a Lucky Buy, each card priced on the reserve the cards before it left
-        // (quote_many). The contract still checks all of it.
+        // (quote_many). Each card goes with its confirmed Lucky Amount, so the cards after it are priced on what admission
+        // will lock for it, not on the most the reserve would let it play now. The contract still checks all of it.
         const modes = priced.map((p) => p.input.mode ?? account.default_mode)
-        const quotes = yield* contractQuotes(priced.map((p, i) => ({ referencePrice: p.referencePrice, mode: modes[i]! })))
+        const quotes = yield* contractQuotes(priced.map((p, i) => ({ referencePrice: p.referencePrice, mode: modes[i]!, luckyAmount: confirmedLucky[i] })))
         // A refusal after signing costs the operator gas and counts against the customer (MAX_RECENT_REFUSALS), so a
         // price that rose since they confirmed is refused here, before anything is signed; one that fell buys at today's.
         const debits: Array<number> = []
@@ -1011,9 +1021,9 @@ export class Purchases extends Context.Service<Purchases, {
             if (typeof q.mode !== "object" || (lucky !== undefined && lucky > Number(q.lucky_amount))) {
               return yield* about(i, voucher.name)(invalid("That quote is out of date; please confirm again."))
             }
-            // A smaller Lucky Amount than the live quote's (the reserve grew, or the price rose, since the customer's
-            // quote) is debited today's price plus that amount's premium, as the contract works it out from the Game
-            // Version (quote_at: the premium rounded up).
+            // A smaller Lucky Amount than the live quote's (a contract from before quote_many read confirmed amounts
+            // quotes the most the reserve allows) is debited today's price plus that amount's premium, as the contract
+            // works it out from the Game Version (quote_at: the premium rounded up).
             if (lucky !== undefined && lucky !== Number(q.lucky_amount)) {
               versions ??= yield* near.view<ReadonlyArray<GameVersion>>("get_game_versions").pipe(Effect.mapError(quoteRefused))
               const premium = versions[mode.lucky]?.premium_bps
