@@ -127,13 +127,15 @@ test("junk ids spend no lookups, and browsing can never use up the ones a purcha
         const bought = yield* b.voucher("amazon-us", { purchase: true })
         // That price is then cached for browsing too.
         const browsed = yield* b.voucher("amazon-us")
-        return { junk, busy, bought, browsed }
+        const underscored = yield* b.voucher("papa-john_s-usa", { purchase: true })
+        return { junk, busy, bought, browsed, underscored }
       }), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
     assert.match(r.junk.message, /No such voucher/)
+    assert.equal(r.underscored.id, "papa-john_s-usa", "Bitrefill's own ids can hold an underscore")
     assert.match(r.busy.message, /busy/)
     assert.equal(r.bought.packages[0]?.priceMicroUsdc, 10_000_000)
     assert.equal(r.browsed.id, "amazon-us")
-    assert.equal(looked.length, 13, "twelve for browsing, one for the purchase, none for the junk id or the cached price")
+    assert.equal(looked.length, 14, "twelve for browsing, one for each purchase, none for the junk id or the cached price")
   } finally {
     globalThis.fetch = realFetch
   }
