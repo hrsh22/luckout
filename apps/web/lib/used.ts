@@ -21,6 +21,13 @@ export const shelfCounts = (purchases: ReadonlyArray<Purchase>): Record<Shelf, n
 /** Opens on the cards still to use; with none, on everything rather than an empty shelf. */
 export const firstShelf = (counts: Record<Shelf, number>): Shelf => (counts.unused > 0 ? "unused" : "all")
 
+/** When a card was last marked used or unused here: a list read that started before it mustn't write over it. */
+let markedAt = 0
+export const marked = () => {
+  markedAt = Date.now()
+}
+export const markedSince = (t: number) => markedAt >= t
+
 /** The server's copy of one purchase, in place of the old one wherever it's cached: the list's pages, or the card itself. */
 export const withPurchase = <D extends InfiniteData<PurchasePage, unknown> | Purchase | undefined>(data: D, p: Purchase): D =>
   !data

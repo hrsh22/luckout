@@ -11,7 +11,7 @@ import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
 import { purchasePollMs } from "@/lib/purchase-poll"
 import { redemptionShown } from "@/lib/redemption"
-import { withPurchase } from "@/lib/used"
+import { marked, withPurchase } from "@/lib/used"
 import type { Purchase, PurchasePage } from "@luckout/api"
 import { type InfiniteData, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Check, CheckCheck, ChevronDown, Copy, ExternalLink, LifeBuoy, Link2, LoaderCircle, ShieldCheck, Undo2 } from "lucide-react"
@@ -264,6 +264,7 @@ function UsedToggle({ p, onChange }: { p: Purchase; onChange?: ((id: string) => 
     setBusy(true)
     try {
       const fresh = await api((c) => c.purchases.setUsed({ params: { id: p.id }, payload: { used: to } }), token)
+      marked()
       qc.setQueriesData<InfiniteData<PurchasePage, string> | Purchase>({ queryKey: ["purchases"] }, (d) => withPurchase(d, fresh))
       onChange?.(p.id)
       const card = `${p.voucherName}, ${faceValue(p)}`
@@ -290,7 +291,7 @@ function UsedToggle({ p, onChange }: { p: Purchase; onChange?: ((id: string) => 
         aria-busy={busy || undefined}
         onClick={() => !busy && token && void set(!used)}
         // The shared button turns the outline off; keyboard focus gets the app's ring back here.
-        className="focus-visible:outline-solid max-sm:w-full"
+        className="max-sm:w-full"
       >
         {busy ? <LoaderCircle className="animate-spin" /> : used ? <Undo2 /> : <Check />}
         {used ? "Mark as unused" : "Mark as used"}

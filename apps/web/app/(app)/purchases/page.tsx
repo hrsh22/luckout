@@ -48,14 +48,14 @@ function Purchases() {
   const shelf = picked ?? firstShelf(counts)
   const shown = purchases?.filter((p) => onShelf(p, shelf) || kept.has(p.id))
   const pick = (s: Shelf) => (setPicked(s), setKept(new Set()))
-  const keep = (id: string) => (setPicked(shelf), setKept((k) => new Set(k).add(id)))
+  const keep = (id: string) => (setPicked((s) => s ?? shelf), setKept((k) => new Set(k).add(id)))
 
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">Purchases</h1>
-          <p className="mt-3 text-lg text-ink-soft">Every card you've bought, its code and its Draw.</p>
+          <p className="mt-3 text-lg text-ink-soft">Every card you've bought, its code and its Draw. Refunded ones are under All.</p>
         </div>
         {delivered.length > 0 && (
           <div className="flex flex-wrap gap-2">

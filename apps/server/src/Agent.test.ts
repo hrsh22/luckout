@@ -116,7 +116,7 @@ test("voucher codes never reach the model", async () => {
   model.close()
   assert.ok(!JSON.stringify(model.seen).includes("SECRET-CODE-123"))
   assert.ok(JSON.stringify(model.seen).includes("Test Gift Card Code"), "the tool result itself did reach the model")
-  assert.ok(JSON.stringify(model.seen).includes(String.raw`\"status\":\"used\"`), "a card the customer marked used says so")
+  assert.ok(JSON.stringify(model.seen).includes(String.raw`\"status\":\"delivered\",\"used\":true`), "a card the customer marked used says so")
 })
 
 test("each turn's prompt starts with the previous turn's exact messages, so it hits the cache", async () => {
