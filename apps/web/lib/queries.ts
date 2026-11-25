@@ -6,6 +6,7 @@ import { api } from "./api"
 import { contractId, view } from "./chain"
 import { modeSlug, type ReserveView } from "./modes"
 import { withNewest } from "./purchase-poll"
+import { markedSince } from "@/lib/used"
 
 // Every server read goes through here, so the catalog, a card and its history share one cache:
 // going back to results is instant, and hovering a card has already fetched it.
@@ -130,8 +131,10 @@ export const usePurchases = (token: string | undefined) => {
   useQuery({
     queryKey: ["purchases-newest", token],
     queryFn: async () => {
+      const started = Date.now()
       const newest = await api((c) => c.purchases.list({ query: {} }), token)
-      qc.setQueryData<InfiniteData<PurchasePage, string>>(["purchases", token], (d) => d && { ...d, pages: withNewest(d.pages, newest) })
+      // Read before a card was marked used or unused: it would put the old state back. The next read brings the rest.
+      if (!markedSince(started)) qc.setQueryData<InfiniteData<PurchasePage, string>>(["purchases", token], (d) => d && { ...d, pages: withNewest(d.pages, newest) })
       return newest
     },
     enabled: every !== false,

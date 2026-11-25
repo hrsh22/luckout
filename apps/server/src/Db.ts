@@ -376,6 +376,12 @@ export const migrationSteps = {
   "0028_swap_dismissed": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN dismissed_at TIMESTAMPTZ`
+  }),
+  // When the customer marked a delivered card used, to tell it from the ones they haven't used. Only their own note: it
+  // changes nothing about money, the Draw, Cashback or Reclaim, and clearing it marks the card unused again.
+  "0029_purchase_used": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE purchases ADD COLUMN used_at TIMESTAMPTZ`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

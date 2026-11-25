@@ -112,6 +112,10 @@ _Avoid_: Expiry guarantee, validity
 The private code, PIN, link, or instructions needed to use a Voucher. It is shown only to the customer in the Web App, sent in their private Telegram chat, and emailed by Bitrefill to their Checkout Email; it never appears in public.
 _Avoid_: Voucher, public metadata, onchain token
 
+**Used**:
+A delivered card the customer has marked as used, to tell it from the ones they haven't. It's only their own note: it changes nothing about money, the Draw, Cashback or Reclaim, its Redemption Data stays shown, and they can mark it unused again.
+_Avoid_: Redeemed (we can't know that), archived, spent
+
 **Game Version**:
 An immutable table of Cashback slabs and probabilities that a customer accepts before a Lucky Buy, stored onchain as Final Price percentages. The live versions are Lite (+10%), Classic (+20%), and Jackpot (+50%); all share the same Target Gross Margin and differ only in how much extra is paid up front and how often and how big the Cashback is.
 _Avoid_: Live odds, mutable configuration, difficulty

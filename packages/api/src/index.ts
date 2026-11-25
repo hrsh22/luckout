@@ -243,7 +243,9 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   settleTx: Schema.optional(Schema.String),
   /** The purchase's id in the contract, once admitted: what reclaim and retry_draw take. */
   contractPurchaseId: Schema.optional(Schema.Int),
-  createdAt: Schema.String
+  createdAt: Schema.String,
+  /** When the customer marked this delivered card used (ISO); absent while unused. Only their own note. */
+  usedAt: Schema.optional(Schema.String)
 }) {}
 
 /** One page of a customer's purchases, newest first. `next` is the `before` of the following page; absent on the last. */
@@ -424,6 +426,16 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.get("get", "/purchases/:id", { params: { id: Schema.String }, success: Purchase, error: NotFound }),
   /** Cancels a purchase still waiting for credit; nothing was charged. */
   HttpApiEndpoint.post("cancel", "/purchases/:id/cancel", { params: { id: Schema.String }, success: Purchase, error: [NotFound, PurchaseInvalid] }),
+  /**
+   * Marks the customer's own delivered card used, or unused again. Their own note: it changes nothing about money, the
+   * Draw, Cashback or Reclaim. Marking it used again keeps when it was first marked.
+   */
+  HttpApiEndpoint.put("setUsed", "/purchases/:id/used", {
+    params: { id: Schema.String },
+    payload: Schema.Struct({ used: Schema.Boolean }),
+    success: Purchase,
+    error: [NotFound, PurchaseInvalid]
+  }),
   HttpApiEndpoint.get("checkoutEmail", "/checkout-email", { success: CheckoutEmail }),
   HttpApiEndpoint.put("setCheckoutEmail", "/checkout-email", {
     payload: Schema.Struct({ email: Schema.String }),
