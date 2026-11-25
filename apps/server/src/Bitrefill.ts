@@ -410,8 +410,11 @@ export const isTestMerchant = (p: { readonly id: string; readonly name: string; 
 const sellable = (p: { id: string; name: string; country_code: string; recipient_type?: string | undefined; in_stock?: boolean | undefined }) =>
   (p.recipient_type ?? "none") === "none" && p.in_stock !== false && !isTestMerchant(p)
 
-/** What a Bitrefill product id looks like; anything else is refused before spending a lookup. */
-const PRODUCT_ID = /^[a-z0-9][a-z0-9-]{0,99}$/
+/**
+ * What a Bitrefill product id looks like; anything else is refused before spending a lookup. Some carry an underscore
+ * where the brand's name has an apostrophe or a dot (papa-john_s-usa, battle_net-usa).
+ */
+const PRODUCT_ID = /^[a-z0-9][a-z0-9_-]{0,99}$/
 /**
  * A CSS hex colour: "#" and 3, 4, 6 or 8 hex digits. A card's `logo_background` ends up in a `background` style
  * on every shop tile, where anything else (a `url(...)`, say) would make each visitor's browser fetch an
