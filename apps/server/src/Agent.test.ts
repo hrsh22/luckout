@@ -224,6 +224,27 @@ test("an address in a forwarded message isn't one the customer typed", async () 
   assert.match(String(model.seen[1]!.messages.at(-1)!.content), /Not saved/)
 })
 
+test("a photo reaches the model for its own turn only, and an address in it isn't typed", async () => {
+  let email: string | undefined = "me@example.com"
+  const purchases = {
+    ...(deps as unknown as { purchases: object }).purchases,
+    checkoutEmail: () => Effect.sync(() => new CheckoutEmail({ needed: true, ...(email ? { email } : {}) })),
+    setCheckoutEmail: (_: string, e: string) => Effect.sync(() => new CheckoutEmail({ needed: true, email: (email = e) }))
+  }
+  const model = await fakeModel([call("set_checkout_email", { email: "someone-else@example.com" }), { role: "assistant", content: "₹924 at Swiggy." }])
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: false, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const photo = "data:image/jpeg;base64,AAAA"
+  // The caption is typed; whatever the photo says isn't.
+  const first = await agent("alice.near", [], "cover this", "cover this", photo)
+  await agent("alice.near", first.history, "thanks")
+  model.close()
+  assert.deepEqual(model.seen[0]!.messages.at(-1)!.content, [{ type: "text", text: "cover this" }, { type: "image_url", image_url: { url: photo } }])
+  assert.equal(email, "me@example.com", "unchanged")
+  assert.match(String(model.seen[1]!.messages.at(-1)!.content), /Not saved/)
+  assert.ok(!JSON.stringify(model.seen[2]).includes(photo), "a later turn doesn't resend the photo")
+  assert.deepEqual(first.history[0], { role: "user", content: "[sent a photo] cover this" })
+})
+
 test("an address counts as typed only as a whole word of the customer's message", () => {
   assert.ok(typedByCustomer("me@example.com", "me@example.com"))
   assert.ok(typedByCustomer("My email is Me@Example.com.", " me@example.com "), "case, spaces and a full stop don't matter")
