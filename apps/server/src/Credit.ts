@@ -15,18 +15,22 @@ import { readSetting, writeSetting } from "./Settings.ts"
 // One lock covers "is there credit for this card?" and recording the answer, so two purchases can
 // never both count on the same dollars. Test cards are free and never touch any of this.
 
+/** The smallest refill until an admin sets one (`CreditSettings.minRefill`): smaller ones cost relatively more. */
+export const MIN_REFILL = 10_000_000
+/** A swap tops the Base wallet up by at least this, so its fixed fees stay small; no refill may be set smaller. */
+export const MIN_SWAP = 2_000_000
+/** The smallest refill these settings allow. */
+export const minRefillOf = (s: Pick<CreditSettings, "minRefill">) => s.minRefill ?? MIN_REFILL
+
 /**
  * Until an admin changes them. Idle credit stays small (it can't be refunded); no order is refused
  * for its size: a big one waits, uncharged, for a refill sized for it, for up to a day.
  */
 export const CREDIT_DEFAULTS = {
-  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 300_000_000, waitMinutes: 1440, baseFloat: 50_000_000 }),
+  mainnet: new CreditSettings({ autoRefill: true, floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 300_000_000, waitMinutes: 1440, baseFloat: 50_000_000, minRefill: MIN_REFILL }),
   // Refills don't run on testnet, so neither does the float.
-  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, dailyRefill: 1_000_000_000, waitMinutes: 1440, baseFloat: 0 })
+  testnet: new CreditSettings({ autoRefill: true, floor: 100_000_000, ceiling: 500_000_000, dailyRefill: 1_000_000_000, waitMinutes: 1440, baseFloat: 0, minRefill: MIN_REFILL })
 } as const
-
-/** Smaller refills cost relatively more and churn invoices. */
-export const MIN_REFILL = 10_000_000
 
 /** Micro-USDC as dollars, for alerts and messages. */
 export const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed(2)}`
@@ -49,14 +53,18 @@ export const floatOf = (s: Pick<CreditSettings, "baseFloat">) => s.baseFloat ?? 
 const targetDays = (s: Pick<CreditSettings, "baseFloat">) => (floatOf(s) > 0 ? 1 : 2)
 
 /** Why settings are refused, or undefined when they hang together. */
-export const settingsProblem = (s: CreditSettings) =>
-  s.floor > s.ceiling
+export const settingsProblem = (s: CreditSettings) => {
+  const min = minRefillOf(s)
+  return s.floor > s.ceiling
     ? "The floor can't be above the ceiling."
-    : s.dailyRefill < MIN_REFILL
-    ? "The daily refill limit must be at least $10, the smallest refill."
-    : (s.refillBelow ?? 0) > 0 && (s.refillBelow ?? 0) > s.floor - MIN_REFILL
-    ? "Refill when below must be at least $10 under the amount refills top up to."
+    : min < MIN_SWAP
+    ? `The smallest refill must be at least ${usd(MIN_SWAP)}, the smallest swap.`
+    : s.dailyRefill < min
+    ? `The daily refill limit must be at least ${usd(min)}, the smallest refill.`
+    : (s.refillBelow ?? 0) > 0 && (s.refillBelow ?? 0) > s.floor - min
+    ? `Refill when below must be at least ${usd(min)} under the amount refills top up to.`
     : undefined
+}
 
 /**
  * The credit to aim for, and the line below which a refill starts. The target covers two days of
@@ -65,9 +73,10 @@ export const settingsProblem = (s: CreditSettings) =>
  * admin's own line, so cards of that size buy at once. Both stay within the floor and the ceiling, and
  * the line stays a refill's worth under the target.
  */
-export const levels = (s: Pick<CreditSettings, "floor" | "ceiling" | "baseFloat" | "refillBelow">, avgDaily: number, biggest: number) => {
-  const target = Math.min(s.ceiling, Math.max(s.floor, targetDays(s) * avgDaily, biggest + MIN_REFILL))
-  const refillBelow = Math.max(Math.floor(target / 2), Math.min(Math.max(biggest, s.refillBelow ?? 0), target - MIN_REFILL))
+export const levels = (s: Pick<CreditSettings, "floor" | "ceiling" | "baseFloat" | "refillBelow" | "minRefill">, avgDaily: number, biggest: number) => {
+  const min = minRefillOf(s)
+  const target = Math.min(s.ceiling, Math.max(s.floor, targetDays(s) * avgDaily, biggest + min))
+  const refillBelow = Math.max(Math.floor(target / 2), Math.min(Math.max(biggest, s.refillBelow ?? 0), target - min))
   return { target, refillBelow }
 }
 
@@ -128,8 +137,12 @@ export class Credit extends Context.Service<Credit, {
 
       const settings = readSetting("credit", CreditSettings, CREDIT_DEFAULTS[network]).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
-        // Settings saved before the float existed get the network's default for it, keeping the rest.
-        Effect.map((s) => (s.baseFloat === undefined ? new CreditSettings({ ...s, baseFloat: CREDIT_DEFAULTS[network].baseFloat }) : s))
+        // Settings saved before the float or the smallest refill existed get the defaults for them, keeping the rest.
+        Effect.map((s) =>
+          s.baseFloat === undefined || s.minRefill === undefined
+            ? new CreditSettings({ ...s, baseFloat: s.baseFloat ?? CREDIT_DEFAULTS[network].baseFloat, minRefill: minRefillOf(s) })
+            : s
+        )
       )
       const configure = (next: CreditSettings, by: string) =>
         writeSetting("credit", CreditSettings, next, by).pipe(Effect.provideService(SqlClient.SqlClient, sql))

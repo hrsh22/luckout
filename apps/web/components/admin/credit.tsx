@@ -17,6 +17,9 @@ import { motion } from "motion/react"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 
+/** The smallest refill when none is saved; the server always sends one, so this only covers the type. */
+const MIN_REFILL = 10_000_000
+
 // Bitrefill credit, the treasury and refills (ADR-0009); with guest checkout (ADR-0012), the Base Float
 // instead, since credit is retired. Credit settings and "refill now" are server actions any admin can
 // take; the treasury's mode and moving proceeds into it are contract calls the owner signs in their own wallet.
@@ -202,7 +205,7 @@ function CreditCard({ c, guest, ordersToday, cap }: { c: Credit; guest: boolean;
 
 function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClose: () => void; s: CreditSettings; guest: boolean }) {
   const save = useSaveCredit()
-  const [f, setF] = useState({ floor: "", ceiling: "", refillBelow: "", dailyRefill: "", waitMinutes: "", baseFloat: "" })
+  const [f, setF] = useState({ floor: "", ceiling: "", refillBelow: "", minRefill: "", dailyRefill: "", waitMinutes: "", baseFloat: "" })
   const [busy, setBusy] = useState(false)
   useEffect(() => {
     if (open) {
@@ -210,6 +213,7 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
         floor: dollars(s.floor),
         ceiling: dollars(s.ceiling),
         refillBelow: dollars(s.refillBelow ?? 0),
+        minRefill: dollars(s.minRefill ?? MIN_REFILL),
         dailyRefill: dollars(s.dailyRefill),
         waitMinutes: String(s.waitMinutes),
         baseFloat: dollars(s.baseFloat ?? 0)
@@ -220,11 +224,12 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
     floor: toMicro(f.floor),
     ceiling: toMicro(f.ceiling),
     refillBelow: toMicro(f.refillBelow),
+    minRefill: toMicro(f.minRefill),
     dailyRefill: toMicro(f.dailyRefill),
     waitMinutes: Number(f.waitMinutes),
     baseFloat: toMicro(f.baseFloat)
   }
-  const valid = [next.floor, next.ceiling, next.refillBelow, next.dailyRefill, next.baseFloat].every((v) => v >= 0 && v <= 2_000_000_000) &&
+  const valid = [next.floor, next.ceiling, next.refillBelow, next.minRefill, next.dailyRefill, next.baseFloat].every((v) => v >= 0 && v <= 2_000_000_000) &&
     Number.isInteger(next.waitMinutes) && next.waitMinutes >= 5 && next.waitMinutes <= 1440
   // With guest checkout these govern the Base Float itself, so its separate "Keep ready on Base" is hidden (and saved unchanged).
   const it = guest ? "the float" : "credit"
@@ -238,7 +243,13 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
         : "The most that can sit unused at Bitrefill. A refill for orders already waiting may go past it: that credit is spent within minutes.",
       dollars: true
     },
-    { key: "refillBelow", label: "Refill when below", hint: `A refill starts once ${it} falls under this, so a big card's worth stays ready and small sales don't each start one. At least $10 under the first number; 0 refills at half the target.`, dollars: true },
+    { key: "refillBelow", label: "Refill when below", hint: `A refill starts once ${it} falls under this, so a big card's worth stays ready and small sales don't each start one. At least the smallest refill under the first number; 0 refills at half the target.`, dollars: true },
+    {
+      key: "minRefill",
+      label: "Smallest refill",
+      hint: "No refill is for less, so the treasury needs this much in it (plus 1% for the swap) before one starts. Smaller ones cost relatively more in swap fees. At least $2.",
+      dollars: true
+    },
     { key: "dailyRefill", label: "Refill at most, per day", hint: "Across all refills in 24 hours. Big orders wait for room here.", dollars: true },
     { key: "waitMinutes", label: "Minutes an order may wait", hint: "Up to 1440 (a day). Then it's cancelled, and the customer pays nothing.", dollars: false },
     {
@@ -283,7 +294,8 @@ function CreditSettingsSheet({ open, onClose, s, guest }: { open: boolean; onClo
 function RefillNowSheet({ open, onClose, c, guest }: { open: boolean; onClose: () => void; c: Credit; guest: boolean }) {
   const { token } = useSession()
   const qc = useQueryClient()
-  const suggested = Math.max(10_000_000, Math.min(c.settings.ceiling, c.target + c.waitingTotal) - c.free)
+  const min = c.settings.minRefill ?? MIN_REFILL
+  const suggested = Math.max(min, Math.min(c.settings.ceiling, c.target + c.waitingTotal) - c.free)
   const [amount, setAmount] = useState("")
   const [busy, setBusy] = useState(false)
   useEffect(() => {
@@ -299,7 +311,7 @@ function RefillNowSheet({ open, onClose, c, guest }: { open: boolean; onClose: (
           onChange={setAmount}
           picks={[{ label: `Suggested ${usd(suggested)}`, micro: Math.ceil(suggested / 10_000) * 10_000 }, { label: "$25", micro: 25_000_000 }, { label: "$100", micro: 100_000_000 }]}
         />
-        <Button size="lg" loading={busy} disabled={!(micro >= 10_000_000)} onClick={async () => {
+        <Button size="lg" loading={busy} disabled={!(micro >= min)} onClick={async () => {
           setBusy(true)
           try {
             const r = await api((x) => x.admin.refill({ payload: { amount: micro } }), token)
@@ -311,7 +323,7 @@ function RefillNowSheet({ open, onClose, c, guest }: { open: boolean; onClose: (
           }
           setBusy(false)
         }}>
-          {micro >= 10_000_000 ? `Refill ${usd(micro)}` : "At least $10"}
+          {micro >= min ? `Refill ${usd(micro)}` : `At least ${usd(min)}`}
         </Button>
       </div>
     </Sheet>

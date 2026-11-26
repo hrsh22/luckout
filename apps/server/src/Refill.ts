@@ -6,7 +6,7 @@ import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
 import { Base, type BasePayment, BaseUnavailable, GAS_RESERVE } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit, floatOf, MIN_REFILL, usd } from "./Credit.ts"
+import { Credit, floatOf, MIN_SWAP, minRefillOf, usd } from "./Credit.ts"
 import { spendable } from "./Monitor.ts"
 import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Signed, TREASURY_GAS, TxExpired, upfront } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
@@ -46,8 +46,6 @@ export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bd
 /** The most a refill may cost above the credit it buys, slippage buffer included. */
 const MAX_COST_BPS = 100n
 const SLIPPAGE_BPS = 50
-/** A swap tops the Base wallet up by at least this, so its fixed fees stay small. */
-export const MIN_SWAP = 2_000_000
 /** Bitrefill's crypto invoices expire after 60 minutes; we start over well before. */
 const INVOICE_TTL_MS = 40 * 60_000
 /** A quote is paid within this or thrown away: solvers may not honour a stale one. */
@@ -141,12 +139,12 @@ export const floatTopUp = (float: number, walletUsdc: number) =>
  * purchases need or the smallest refill. `available`: what the treasury holds plus what it may still pull today.
  * The new amount, or undefined to keep it.
  */
-export const fundable = (o: { amount: number; walletUsdc: number; available: number; waitingNeed: number }) => {
+export const fundable = (o: { amount: number; walletUsdc: number; available: number; waitingNeed: number; minRefill: number }) => {
   // The biggest swap `available` pays for at its most (maxCost); under MIN_SWAP there's no swap at all.
   let swap = Math.floor(o.available * 10_000 / (10_000 + Number(MAX_COST_BPS)) / 10_000) * 10_000
   while (swap > 0 && maxCost(swap) > o.available) swap -= 10_000
   const can = Math.floor((Math.max(0, o.walletUsdc) + (swap >= MIN_SWAP ? swap : 0)) / 10_000) * 10_000
-  const cut = Math.max(MIN_REFILL, cents(Math.max(0, o.waitingNeed)), can)
+  const cut = Math.max(o.minRefill, cents(Math.max(0, o.waitingNeed)), can)
   return cut < o.amount ? cut : undefined
 }
 
@@ -420,7 +418,7 @@ export class Refill extends Context.Service<Refill, {
                 const pullable = t.dailyCap > 0 ? Math.max(0, Math.min(t.dailyCap - t.sweptToday, t.proceeds)) : 0
                 const c = yield* credit.view
                 // A refill that ends in the float swaps its whole amount in, so what the wallet holds pays none of it.
-                const cut = fundable({ amount, walletUsdc: endsInFloat(row) ? 0 : w.usdc, available: t.usdc + pullable, waitingNeed: c.waiting.total - Math.max(0, c.free) })
+                const cut = fundable({ amount, walletUsdc: endsInFloat(row) ? 0 : w.usdc, available: t.usdc + pullable, waitingNeed: c.waiting.total - Math.max(0, c.free), minRefill: minRefillOf(c.settings) })
                 if (cut !== undefined) {
                   yield* save(row.id, { amount: cut })
                   yield* alerts.admin(
@@ -749,6 +747,7 @@ export class Refill extends Context.Service<Refill, {
           if ((yield* credit.refresh)._tag === "None") return { amount: 0, why: bitrefill.guest ? "The Base Float's balance can't be read right now." : "Bitrefill's balance can't be read right now." }
           const c = yield* credit.view
           const s = c.settings
+          const min = minRefillOf(s)
           const free = Math.max(0, c.free)
           const room = Math.max(0, (c.snapshot?.room ?? 0))
           const left = s.dailyRefill - (yield* refilledToday)
@@ -758,21 +757,21 @@ export class Refill extends Context.Service<Refill, {
           const wanted = requested ?? c.target + c.waiting.total - free
           const due = requested !== undefined || (c.waiting.total > 0 ? wanted > 0 : free < c.refillBelow)
           if (!due || wanted <= 0) return { amount: 0, why: ABOVE_LINE }
-          const amount = Math.floor(Math.min(cents(Math.max(wanted, MIN_REFILL)), limit) / 10_000) * 10_000
-          if (amount < MIN_REFILL) {
+          const amount = Math.floor(Math.min(cents(Math.max(wanted, min)), limit) / 10_000) * 10_000
+          if (amount < min) {
             const why = limit === left
               ? `today's refills have reached the ${usd(s.dailyRefill)} daily limit. It carries on as the 24-hour window frees up, or raise the limit in ${section} → Settings.`
               : limit === room
               ? "Bitrefill's account holds as much credit as it allows. Ask Bitrefill to raise the account limit."
               : `the ceiling. Raise it in ${section} → Settings.`
-            return { amount: 0, why: `A refill would be under ${usd(MIN_REFILL)}: ${why}` }
+            return { amount: 0, why: `A refill would be under ${usd(min)}: ${why}` }
           }
           // Today's limit held it below what waiting purchases need: said as it starts, not once it lands, when the
           // next refill would only find the limit used up.
           const need = c.waiting.total - free
           // The limit to suggest leaves room for the rest, and for at least the smallest refill: a second refill for
           // less is never sent.
-          const enough = cents(s.dailyRefill - left + amount + Math.max(need - amount, MIN_REFILL))
+          const enough = cents(s.dailyRefill - left + amount + Math.max(need - amount, min))
           const short = limit === left && need > amount
             ? `Today's limit of ${usd(s.dailyRefill)} holds this refill to ${usd(amount)}, ${usd(need - amount)} short of what waiting purchases need. ` +
               `Raise "Refill at most, per day" in ${section} → Settings to at least ${usd(enough)}, and a second refill covers the rest as soon as this one lands.`

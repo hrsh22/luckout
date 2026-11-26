@@ -648,7 +648,7 @@ test("quotes are checked against exactly what we asked for", () => {
 
 test("mainnet keeps idle credit between $10 and $30, refills up to $300 a day, and lets a purchase wait up to a day", () => {
   const m = CREDIT_DEFAULTS.mainnet
-  assert.deepEqual([m.floor, m.ceiling, m.dailyRefill, m.waitMinutes], [10_000_000, 30_000_000, 300_000_000, 1440])
+  assert.deepEqual([m.floor, m.ceiling, m.dailyRefill, m.waitMinutes, m.minRefill], [10_000_000, 30_000_000, 300_000_000, 1440, MIN_REFILL])
 })
 
 test("the refill line never sits below the biggest card bought lately, so cards of the usual size buy at once", () => {
@@ -666,6 +666,13 @@ test("an admin's refill line keeps a big card's worth ready, a refill's worth un
   assert.deepEqual(levels(s, 280_000_000, 550_000), { target: 280_000_000, refillBelow: 160_000_000 }, "a busy day lifts the target, not the line")
   assert.deepEqual(levels({ ...s, refillBelow: 250_000_000 }, 0, 0), { target: 200_000_000, refillBelow: 190_000_000 }, "never closer than $10 to the target")
   assert.deepEqual(levels({ ...s, refillBelow: 0 }, 0, 0), { target: 200_000_000, refillBelow: 100_000_000 }, "0: half the target, as before")
+})
+
+test("an admin's smallest refill sets how close the line may sit to the target, and how far a card lifts the target", () => {
+  const s = { floor: 10_000_000, ceiling: 30_000_000, minRefill: 2_000_000 }
+  assert.deepEqual(levels({ ...s, refillBelow: 9_500_000 }, 0, 0), { target: 10_000_000, refillBelow: 8_000_000 }, "$2 under the target, not $10")
+  assert.deepEqual(levels(s, 0, 15_000_000), { target: 17_000_000, refillBelow: 15_000_000 }, "a $15 card: the target is $2 over it")
+  assert.deepEqual(levels({ floor: 10_000_000, ceiling: 30_000_000 }, 0, 15_000_000), { target: 25_000_000, refillBelow: 15_000_000 }, "unset: $10, as before")
 })
 
 test("a refill for purchases already waiting may go past the ceiling: that credit is spent within minutes", async () => {
@@ -836,11 +843,13 @@ test("the float is topped up only once the wallet holds under half of it, and wi
 })
 
 test("a refill the treasury can't fund in full is cut to what it can, never below what waiting purchases need", () => {
-  const cut = (o: Partial<Parameters<typeof fundable>[0]>) => fundable({ amount: 200_000_000, walletUsdc: 0, available: 100_000_000, waitingNeed: 70_000_000, ...o })
+  const cut = (o: Partial<Parameters<typeof fundable>[0]>) =>
+    fundable({ amount: 200_000_000, walletUsdc: 0, available: 100_000_000, waitingNeed: 70_000_000, minRefill: MIN_REFILL, ...o })
   assert.equal(cut({}), 99_000_000, "all $100 can fund: a swap of $99.00 costs at most $99.99")
   assert.equal(cut({ walletUsdc: 5_000_000 }), 104_000_000, "USDC already in the Base wallet counts too")
   assert.equal(cut({ available: 20_000_000 }), 70_000_000, "short even of what customers need: cut to that, and it waits for less")
   assert.equal(cut({ available: 0, waitingNeed: 0 }), MIN_REFILL, "never under the smallest refill")
+  assert.equal(cut({ available: 0, waitingNeed: 0, minRefill: 2_000_000 }), 2_000_000, "an admin's smaller one")
   assert.equal(cut({ available: 1_000_000_000 }), undefined, "it can all be funded: unchanged")
   assert.equal(cut({ amount: 60_000_000, available: 0 }), undefined, "never raised")
 })
@@ -885,6 +894,30 @@ test("the resume pass coming by a refill that is still running never starts a se
 })
 
 // ---------- guest checkout (ADR-0012): every refill ends in the Base Float ----------
+
+test("a smaller smallest refill lets a short treasury top the Base Float up with what the proceeds hold now", async () => {
+  // $4 in the float, under its $5 line, and $6 of proceeds. With the $10 smallest refill it waits for $10.10.
+  const run = (minRefill: number) => {
+    const w = world({ guest: true, walletUsdc: 4_000_000, treasuryUsdc: 0, proceeds: 6_000_000, cap: 1_000_000_000 })
+    return w.run(Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      const credit = yield* Credit
+      yield* credit.configure(new CreditSettings({ ...(yield* credit.settings), floor: 10_000_000, ceiling: 30_000_000, dailyRefill: 10_000_000, minRefill }), "boss.testnet")
+      yield* Effect.flatMap(Refill, (r) => r.kick)
+      yield* Effect.sleep("100 millis")
+      const [row] = yield* sql<{ id: string }>`SELECT id FROM refills WHERE reason = 'target'`
+      const r = yield* drive(row!.id)
+      const [after] = yield* sql<{ amount: string }>`SELECT amount::text AS amount FROM refills WHERE id = ${row!.id}`
+      return { step: r.step, error: r.error, amount: Number(after!.amount) }
+    }))
+  }
+  const small = await run(2_000_000)
+  assert.equal(small.step, "done", small.error ?? "")
+  assert.equal(small.amount, 5_940_000, "the $6 the float is short of, cut to what $6 of proceeds can fund")
+  const usual = await run(MIN_REFILL)
+  assert.deepEqual([usual.step, usual.amount], ["fund", MIN_REFILL], usual.error ?? "")
+  assert.match(usual.error ?? "", /needs \$10\.10 more/)
+})
 
 test("with guest checkout, a refill swaps its whole amount into the Base Wallet and ends there: Bitrefill is never asked for anything", async () => {
   // An empty Base Float, and a cap and proceeds that cover the whole refill.
