@@ -15,6 +15,7 @@ import {
   fundedCheck,
   makeOffers,
   messageLimits,
+  photoSize,
   privateOnly,
   purchaseItems,
   purchaseLines,
@@ -183,6 +184,16 @@ test("a forwarded or inline-bot message wasn't typed by the customer", () => {
   assert.equal(typedText({ text: "me@example.com" }), "me@example.com")
   assert.equal(typedText({ text: "me@example.com", forward_origin: { type: "user" } }), "")
   assert.equal(typedText({ text: "me@example.com", via_bot: { id: 1 } }), "")
+  assert.equal(typedText({ caption: "me@example.com" }), "me@example.com", "a photo's caption is typed")
+  assert.equal(typedText({ caption: "me@example.com", forward_origin: { type: "user" } }), "")
+  assert.equal(typedText({}), "", "a photo with no caption")
+})
+
+test("the model gets a photo's largest size up to 1280 px", () => {
+  const s = (width: number, height: number) => ({ width, height })
+  assert.deepEqual(photoSize([s(41, 90), s(148, 320), s(370, 800), s(591, 1280), s(1170, 2532)]), s(591, 1280))
+  assert.deepEqual(photoSize([s(1170, 2532), s(148, 320)]), s(148, 320), "in any order")
+  assert.deepEqual(photoSize([s(1600, 3000)]), s(1600, 3000), "the only size there is")
 })
 
 const card = (over: Partial<Pending> = {}): Pending => ({

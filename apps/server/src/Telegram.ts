@@ -2,6 +2,7 @@ import { AgentAttestation, LinkInvalid, MAX_CART, NewPurchase, NotFound, type Pu
 import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
 import { SqlClient } from "effect/sql"
 import { Bot, GrammyError, InlineKeyboard } from "grammy"
+import type { PhotoSize } from "grammy/types"
 import { randomBytes, randomUUID } from "node:crypto"
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions"
 import { dateText, makeAgent, modeName, type Offer, type Pending, trimHistory, usd, usdUp, worksIn } from "./Agent.ts"
@@ -139,9 +140,18 @@ export const privateOnly = async (ctx: { readonly chat?: { readonly type: string
   if (ctx.chat?.type === "private") await next()
 }
 
-/** What the customer wrote themselves: nothing for a forwarded message, or one sent through an inline bot (ADR-0007). */
-export const typedText = (m: { readonly text: string; readonly forward_origin?: unknown; readonly via_bot?: unknown }) =>
-  m.forward_origin || m.via_bot ? "" : m.text
+/**
+ * What the customer wrote themselves (a photo's caption counts, the photo doesn't): nothing for a forwarded message, or
+ * one sent through an inline bot (ADR-0007).
+ */
+export const typedText = (m: { readonly text?: string; readonly caption?: string; readonly forward_origin?: unknown; readonly via_bot?: unknown }) =>
+  m.forward_origin || m.via_bot ? "" : m.text ?? m.caption ?? ""
+
+/** The size of a photo to send the model: the largest up to 1280 px, plenty for a screenshot and fewer tokens than full size. */
+export const photoSize = <P extends { readonly width: number; readonly height: number }>(sizes: ReadonlyArray<P>): P | undefined => {
+  const fit = sizes.filter((s) => Math.max(s.width, s.height) <= 1280)
+  return fit.length ? fit.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a)) : sizes[0]
+}
 
 interface Held {
   readonly offer: Offer
@@ -515,7 +525,19 @@ export class Telegram extends Context.Service<Telegram, {
       // So the operator can find their chat id for ALERT_TELEGRAM_CHAT_ID.
       bot.command("chatid", (ctx) => ctx.reply(`This chat's id is ${ctx.chat.id}.`))
 
-      bot.on("message:text", (ctx) => inChat(ctx.chat.id, async () => {
+      /** A photo as the model takes it: a data URL (Telegram stores photos as JPEG). */
+      const photoUrl = async (sizes: ReadonlyArray<PhotoSize>) => {
+        const file = await bot.api.getFile(photoSize(sizes)!.file_id)
+        if (!file.file_path) throw new Error("Telegram gave no file path")
+        // The URL holds the bot token: never log it.
+        const res = await fetch(`https://api.telegram.org/file/bot${bot.token}/${file.file_path}`, { signal: AbortSignal.timeout(20_000) })
+        if (!res.ok) throw new Error(`Telegram file download answered ${res.status}`)
+        return `data:image/jpeg;base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`
+      }
+
+      // ponytail: each photo of an album arrives as its own message, so it gets its own reply; group them by
+      // media_group_id if people send albums.
+      bot.on(["message:text", "message:photo"], (ctx) => inChat(ctx.chat.id, async () => {
         if (limits.check(ctx.from.id)) return void ctx.reply("That's a lot of messages; give me a minute.")
         const accountId = await linkedAccount(ctx.from.id)
         if (!accountId) return void ctx.reply("Send /start to link your NEAR account first.")
@@ -534,10 +556,13 @@ export class Telegram extends Context.Service<Telegram, {
           ))
         }
         if (over) return void ctx.reply(funded ? capped : `That's all I can chat today until you add funds at ${webOrigin}/wallet. You can browse cards at ${webOrigin}/shop`)
+        const photo = ctx.message.photo
+        const image = photo && await photoUrl(photo).catch((e) => void console.error("telegram photo download failed:", describe(e)))
+        if (photo && !image) return void ctx.reply("I couldn't open that photo. Try sending it again.")
         let failure: unknown
         // A forwarded message, or one sent through an inline bot, was written by someone else: the model
-        // reads it, but it can't set the Checkout Email (ADR-0007).
-        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text, typedText(ctx.message)).catch((e) => {
+        // reads it, but it can't set the Checkout Email (ADR-0007). Nor can a photo: only its caption is typed.
+        const turn = await agent(accountId, history.get(ctx.chat.id)?.messages ?? [], ctx.message.text ?? ctx.message.caption ?? "", typedText(ctx.message), image).catch((e) => {
           failure = e
           console.error("agent error", e)
           return undefined
