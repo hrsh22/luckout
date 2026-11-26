@@ -668,6 +668,16 @@ test("an admin's refill line keeps a big card's worth ready, a refill's worth un
   assert.deepEqual(levels({ ...s, refillBelow: 0 }, 0, 0), { target: 200_000_000, refillBelow: 100_000_000 }, "0: half the target, as before")
 })
 
+test("credit settings saved before the smallest refill existed read as $10 and keep the rest", async () => {
+  const w = world()
+  const s = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`UPDATE settings SET value = jsonb_set(value - 'minRefill', '{floor}', '12000000') WHERE key = 'credit'`
+    return yield* Effect.flatMap(Credit, (c) => c.settings)
+  }))
+  assert.deepEqual([s.minRefill, s.floor], [MIN_REFILL, 12_000_000])
+})
+
 test("an admin's smallest refill sets how close the line may sit to the target, and how far a card lifts the target", () => {
   const s = { floor: 10_000_000, ceiling: 30_000_000, minRefill: 2_000_000 }
   assert.deepEqual(levels({ ...s, refillBelow: 9_500_000 }, 0, 0), { target: 10_000_000, refillBelow: 8_000_000 }, "$2 under the target, not $10")

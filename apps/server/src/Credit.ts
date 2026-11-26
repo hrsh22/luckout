@@ -57,8 +57,11 @@ export const settingsProblem = (s: CreditSettings) => {
   const min = minRefillOf(s)
   return s.floor > s.ceiling
     ? "The floor can't be above the ceiling."
-    : min < MIN_SWAP
-    ? `The smallest refill must be at least ${usd(MIN_SWAP)}, the smallest swap.`
+    : min < MIN_SWAP || min % 10_000 !== 0
+    ? `The smallest refill must be whole cents, at least ${usd(MIN_SWAP)} (the smallest swap).`
+    // Under that, a refill brought down to the ceiling is smaller than the smallest one, so none ever starts.
+    : s.ceiling < 2 * min
+    ? `The ceiling must be at least ${usd(2 * min)}, twice the smallest refill.`
     : s.dailyRefill < min
     ? `The daily refill limit must be at least ${usd(min)}, the smallest refill.`
     : (s.refillBelow ?? 0) > 0 && (s.refillBelow ?? 0) > s.floor - min
