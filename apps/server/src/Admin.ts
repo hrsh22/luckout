@@ -3,7 +3,7 @@ import { Config, Context, Effect, Layer, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Credit, settingsProblem } from "./Credit.ts"
+import { Credit, minRefillOf, settingsProblem } from "./Credit.ts"
 import { BASE_GAS_ALERT, GAS_ALERT, spendable } from "./Monitor.ts"
 import { Near, Network } from "./Near.ts"
 import { GUEST_COUNTED_AT, OPEN_STEPS, retryPurchase, retryStep } from "./Purchases.ts"
@@ -349,7 +349,7 @@ export class Admin extends Context.Service<Admin, {
           const saved = yield* credit.configure(next, by)
           yield* alerts.admin(
             `${by} set ${bitrefill.guest ? "the Base Float" : "Bitrefill credit"}: auto-refill ${next.autoRefill ? "on" : "off"}, top up to at least ${usd(next.floor)}, hold at most ${usd(next.ceiling)}, ` +
-              `refill when below ${next.refillBelow ? usd(next.refillBelow) : "half the target"}, ` +
+              `refill when below ${next.refillBelow ? usd(next.refillBelow) : "half the target"}, refill at least ${usd(minRefillOf(next))} at a time, ` +
               `refill at most ${usd(next.dailyRefill)} a day, wait up to ${next.waitMinutes} min`
           )
           return saved

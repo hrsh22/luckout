@@ -754,10 +754,15 @@ export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings
   baseFloat: Schema.optional(Usd),
   /**
    * A refill starts once credit falls under this, so a big card's worth stays ready without every small
-   * sale starting a refill. Kept at least $10 under the target. Missing or 0: half the target, or the
-   * biggest recent card if that's more.
+   * sale starting a refill. Kept at least the smallest refill under the target. Missing or 0: half the target,
+   * or the biggest recent card if that's more.
    */
-  refillBelow: Schema.optional(Usd)
+  refillBelow: Schema.optional(Usd),
+  /**
+   * The smallest refill: one for less costs relatively more in swap fees. At least $2, the smallest swap.
+   * Missing (saved before it existed): $10.
+   */
+  minRefill: Schema.optional(Usd)
 }) {}
 
 /** What an admin changes in the credit settings: only the fields sent, as with RelayChange. */
