@@ -81,10 +81,22 @@ test("the overview reads the program's Config and Vault, the fee payer's SOL, th
       [["feePayer", world.feePayer.publicKey.toBase58(), "ok"], ["payWallet", world.payWalletUsdc.toBase58(), "low"]],
       "the fee payer has its SOL; the Pay Wallet has no float yet"
     )
-    assert.deepEqual(o.paying, { daily: 0, monthly: 0, limits: { daily: 10_000 * USDC, monthly: 50_000 * USDC } })
+    assert.deepEqual(o.paying, { daily: 0, monthly: 0, limits: { daily: 10_000 * USDC, monthly: 50_000 * USDC } }, "test cards are free")
     assert.equal(o.purchases.today, 2)
     assert.equal(o.purchases.deliveredToday, 1)
     assert.deepEqual(o.purchases.attention.map((a) => [a.step, a.retryable]), [["stuck", false]])
+  })))
+
+test("our paying address counts every card the Pay Wallet paid: a guest's and one on a customer's own Bitrefill account", () =>
+  run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    for (const [key, price, buyer, emailKey] of [["g", 10, "guest", "ek"], ["a", 20, "account", null]] as const) {
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id)
+                 INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, buyer, email_key, invoice_id, ordered_at)
+                 VALUES ((SELECT id FROM co), ${alice}, ${key}, 'amazon-us', 'Card', '10', ${price * USDC}, 'settled', ${buyer}, ${emailKey}, 'inv', now())`
+    }
+    const o = yield* (yield* Admin).overview
+    assert.deepEqual([o.paying.daily, o.paying.monthly], [30 * USDC, 30 * USDC])
   })))
 
 /** A checkout at `step` with its cards, each `[id, step, error]`, as the reconciler and giveUp leave them. */

@@ -178,9 +178,9 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
 
 ## Bitrefill's limits and client secret
 
-- **`Luckout's paying address reached Bitrefill's limit ($10000.00 a day, $50000.00 a month); new guest checkouts are refused until it frees up`.**
-  - Bitrefill tagged our paying address with these limits. Every guest card counts against them, whatever its Checkout Email.
-  - New guest checkouts are refused until the 24-hour and 30-day windows move on. Admin → Our paying address shows where it stands.
+- **`Luckout's paying address reached Bitrefill's limit ($10000.00 a day, $50000.00 a month); new checkouts are refused until it frees up`.**
+  - Bitrefill tagged our paying address with these limits. Every card the Pay Wallet pays counts against them: a guest's, whatever its Checkout Email, and one on a customer's own Bitrefill account.
+  - New checkouts are refused until the 24-hour and 30-day windows move on. Admin → Our paying address shows where it stands.
   - Only Bitrefill can raise the limits.
 - **`the Bitrefill client secret expires on <date>, in N day(s): …`**, said daily from two weeks before.
   - Register a new client and replace the `BITREFILL_CLIENT_*` values (`deploy/README.md`, "A Bitrefill client for guest checkout"), then `pm2 restart luckout-api`.

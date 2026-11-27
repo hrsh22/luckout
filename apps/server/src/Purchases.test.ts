@@ -1203,6 +1203,26 @@ test("a connected customer's card is ordered on their own Bitrefill account, wit
   assert.equal(w.usdcOf(w.payees[0]!), 10_000_000n, "paid once from the Pay Wallet, as any card")
 })
 
+test("our paying address's limits count every card the Pay Wallet paid, on customers' own Bitrefill accounts too", async () => {
+  const w = world({ real: true, guest: true })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // $9,995 of cards bought today on someone's own Bitrefill account: no Checkout Email, but paid from the Pay Wallet.
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id)
+               INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, buyer, invoice_id, ordered_at)
+               VALUES ((SELECT id FROM co), ${w.bob.id}, 'big', 'amazon-us', 'Card', '10000', 9995000000, 'settled', 'account', 'inv-big', now())`
+    yield* connectAs(w.alice.id)
+    const connected = yield* w.buy().pipe(Effect.flip)
+    yield* withEmail("bob@example.com", w.bob.id)
+    const guest = yield* w.buy(undefined, w.bob.id).pipe(Effect.flip)
+    return { connected, guest }
+  }))
+  assert.match(r.connected.message, /as many cards as Bitrefill allows us/)
+  assert.match(r.guest.message, /as many cards as Bitrefill allows us/)
+  assert.deepEqual(w.calls, [], "nothing signed or ordered")
+  assert.match(w.alerts.at(-1) ?? "", /paying address reached Bitrefill's limit/)
+})
+
 test("a lapsed Bitrefill login falls back to a guest order with the Checkout Email, or with none fails and refunds in full", async () => {
   // The login from connecting ends within a minute, so the order renews it first, and Bitrefill refuses.
   const oauth = fakeBitrefillOAuth(60)

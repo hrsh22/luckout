@@ -18,7 +18,7 @@ import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { LOW_LINES } from "./Monitor.ts"
-import { GUEST_COUNTED_AT, OPEN_STEPS, PAYING_LIMITS, retryPurchase, retryStep } from "./Purchases.ts"
+import { GUEST_COUNTED_AT, OPEN_STEPS, PAYING_LIMITS, payingUse, retryPurchase, retryStep } from "./Purchases.ts"
 import { Sales } from "./Sales.ts"
 import { maxCashback } from "./Program.ts"
 import { Solana } from "./Solana.ts"
@@ -103,13 +103,7 @@ export class Admin extends Context.Service<Admin, {
               WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
                 AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)
               GROUP BY email_key) per_email`,
-          // Every guest card, whatever its email: what our paying address has used of its own limits.
-          sql<{ daily: string; monthly: string }>`
-            SELECT COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '1 day'), 0)::text AS daily,
-                   COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '30 days'), 0)::text AS monthly
-            FROM purchases
-            WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
-              AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`
+          payingUse(sql)
         ], { concurrency: "unbounded" })
         const p = purchases[0] ?? { today: 0, delivered: 0 }
         const held = vault ? Number(vault.data.readBigUInt64LE(64)) : 0
@@ -177,7 +171,7 @@ export class Admin extends Context.Service<Admin, {
             limits: { orders: GUEST_LIMITS.orders, daily: GUEST_LIMITS.daily, monthly: GUEST_LIMITS.monthly },
             busiest: { orders: checkout[0]?.orders ?? 0, daily: Number(checkout[0]?.daily ?? 0), monthly: Number(checkout[0]?.monthly ?? 0) }
           },
-          paying: { daily: Number(paying[0]?.daily ?? 0), monthly: Number(paying[0]?.monthly ?? 0), limits: PAYING_LIMITS }
+          paying: { ...paying, limits: PAYING_LIMITS }
         })
       }).pipe(Effect.orDie)
 

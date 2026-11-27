@@ -122,7 +122,7 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   - **Accounts and sessions:** a customer's account id is their Privy wallet's address. Privy's tokens are checked once, at sign-in. After that our own session cookie carries it, bound to the cluster and the program.
   - **Transactions a customer signs:** we build each one with our fee payer and hand it out unsigned with a token that binds its bytes (`/transactions/*`). The fee payer signs only those bytes, and only once the customer has signed them.
   - **A short float:** a checkout the Pay Wallet's float can't cover waits uncharged, and the owner is told. It goes ahead once the float covers it, or is cancelled after 60 minutes. A charged one is refunded in full.
-  - **Our paying address's limits:** checked when a checkout is placed, against every guest card ($10k a day, $50k a month).
+  - **Our paying address's limits:** checked when a checkout is placed, against every card the Pay Wallet pays, guest or Connect ($10k a day, $50k a month).
   - **Deposits:** a sweep every two minutes, plus Alchemy's signed webhook (`ALCHEMY_WEBHOOK_SIGNING_KEY`).
   - **Gone:** withdrawals to other chains through 1Click. Withdrawals go to any Solana address.
   - **Test cards:** off mainnet, only Bitrefill's test cards are sold.

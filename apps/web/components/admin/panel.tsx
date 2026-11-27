@@ -349,7 +349,7 @@ function KeyTile({ k }: { k: AdminOverview["keys"][number] }) {
 function LimitsCard({ o }: { o: AdminOverview }) {
   const c = o.checkout
   const groups: ReadonlyArray<[string, ReactNode, ReadonlyArray<{ label: string; used: number; cap: number; show: (n: number) => string }>]> = [
-    ["Our paying address", "Every guest card counts against the limits Bitrefill set for the address that pays all our invoices.", [
+    ["Our paying address", "Every card counts against the limits Bitrefill set for the address that pays all our invoices, a guest's or one on a customer's own Bitrefill account.", [
       { label: "Last 24 hours", used: o.paying.daily, cap: o.paying.limits.daily, show: usd },
       { label: "Last 30 days", used: o.paying.monthly, cap: o.paying.limits.monthly, show: usd }
     ]],

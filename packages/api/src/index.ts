@@ -738,7 +738,7 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
     busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
   }),
-  /** What every guest card has used of our paying address's own limits at Bitrefill (ADR-0015). */
+  /** What every card the Pay Wallet paid, a guest's or on a customer's own Bitrefill account, has used of our paying address's own limits at Bitrefill (ADR-0015). */
   paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
 }) {}
 
