@@ -205,6 +205,28 @@ export const useTransfers = (token: string | undefined) =>
     refetchInterval: (q) => (q.state.data?.some((t) => ACTIVE_PHASES.has(t.phase)) ? 8000 : 60_000)
   })
 
+/**
+ * The customer's Deposit Address, whether its one-time approval stands, the USDC waiting there and any USDT or ORE
+ * there (ADR-0015). Read again every 20 seconds while it's on screen: deposits land by themselves.
+ */
+export const useDepositAddress = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["deposit-address", token],
+    queryFn: () => api((c) => c.deposits.address(), token),
+    enabled: !!token,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: true
+  })
+
+/** The tokens a Top-Up takes: 1Click's from other chains, and the swap-paid ones (USDT, ORE) at the Deposit Address. */
+export const useTopUpAssets = (token: string | undefined) =>
+  useQuery({
+    queryKey: ["topup-assets", token],
+    queryFn: () => api((c) => c.topup.assets(), token),
+    enabled: !!token,
+    staleTime: 5 * 60_000
+  })
+
 /** Whether the signed-in account may open the admin panel; decides the menu link. */
 export const useIsAdmin = (token: string | undefined) =>
   useQuery({

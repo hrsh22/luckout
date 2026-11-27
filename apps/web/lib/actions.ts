@@ -1,6 +1,6 @@
 "use client"
 
-import type { Mode, PreparedTransaction } from "@luckout/api"
+import type { HeldToken, Mode, PreparedTransaction } from "@luckout/api"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
 import { limitsText, usd } from "./format"
@@ -19,7 +19,7 @@ export function useWalletActions() {
   const submit = useSubmitPrepared()
 
   /** `tapped` is false for a request the app makes by itself, which stays quiet if another is open. */
-  const run = (pending: string, done: string, prepare: () => Promise<PreparedTransaction>, tapped = true) =>
+  const run = (pending: string, done: string, prepare: () => Promise<Pick<PreparedTransaction, "transaction" | "token">>, tapped = true) =>
     // One at a time: a second tap while this one is open answers false and signs nothing.
     oneAtATime(async () => {
       if (!accountId) return false
@@ -55,6 +55,12 @@ export function useWalletActions() {
     /** From the Balance to any Solana address (its USDC account is opened if it has none). */
     withdraw: (micro: number, to: string) =>
       run(`Withdrawing ${usd(micro)}`, `${usd(micro)} sent`, () => api((c) => c.deposits.withdrawal({ payload: { amount: micro, to } }), token)),
+    /**
+     * USDT or ORE at the Deposit Address into the Balance: all of it, swapped by Jupiter and deposited in one
+     * transaction, with a minimum out the chain enforces (ADR-0014, ADR-0015).
+     */
+    swap: (h: Pick<HeldToken, "assetId" | "symbol">) =>
+      run(`Swapping your ${h.symbol}`, `${h.symbol} swapped into your balance`, () => api((c) => c.topup.swap({ payload: { assetId: h.assetId } }), token)),
     /** A card neither delivered nor failed within 24 hours: the full amount comes back. The program checks the time. */
     reclaim: (purchaseId: string) =>
       run("Reclaiming your purchase", "The full amount is back in your balance", () =>
