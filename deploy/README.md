@@ -71,7 +71,7 @@ Once per environment. Needs the Solana CLI (Agave 4.4.1) and `solana-verify` on 
    The program starts unpaused, with a $500 daily repay cap, a 2.5 USDC smallest Lucky Checkout, a Cashback Cap of the lower of $50 and 20% of the free reserve, and an empty reserve.
 6. **Money in place:**
    - the fee payer: about 0.1 SOL for staging (each new customer's account costs about 0.0017 SOL of rent, and each Draw 0.0018 SOL for ORAO's request);
-   - the Pay Wallet: USDC for about a day of sales (its float) and about 0.01 SOL;
+   - the Pay Wallet: USDC for about a day of sales (its float); the fee payer pays its fees;
    - the reserve, from the owner's USDC, in the Admin panel (Fund).
 7. **The server** ([Server settings](#server-settings)), then merge the release into the branch and turn its `DEPLOY_*` variable `on`.
 8. **Prove it** with small money: a deposit from an exchange and from a wallet, a Normal card, a Lucky card and a Cart of two, a card through the bot, a Top-Up from another chain, a withdrawal, and the owner actions in the Admin panel.
