@@ -147,10 +147,9 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Bought** a $20 card on Classic, then a two-card Lucky Cart ($10 + $10 on Classic, $24 in one payment). Each card was delivered with its code, and each Draw finished from ORAO.
 - **Draw Proofs:** the pages for card 1 and card 2 of the Cart recomputed everything in the browser and matched.
 - **Withdrew** $5 to a fresh Solana address, its USDC account opened for it.
-- **Admin panel:** the control room reads the program live.
+- **Admin panel:** the control room reads the program live. Every owner action was signed from it and landed, in a Wallet Standard wallet holding the devnet owner key (as Phantom would) and in a Privy wallet: pause and resume, the repay cap, the smallest Lucky Checkout, the Cashback Cap, funding and withdrawing the reserve, withdrawing Proceeds, changing the operator and the Pay Wallet, and handing ownership over and back. The server now refuses to start if any of its keys is the owner's.
 - **Carried into Phase 4:**
   - Google, Telegram and Phantom sign-in need a person to click through them
-  - owner actions signed in the owner's wallet in a browser
   - quotes on the server, and so the Agent, don't apply the smallest Lucky Checkout yet. The web app does.
   - the bot's refund-address question for 1Click, and `deploy/README.md`, carried from Phase 2
 
