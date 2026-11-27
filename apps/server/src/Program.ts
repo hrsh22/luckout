@@ -380,6 +380,9 @@ export const programError = (code: number) => idl.errors.find((e) => e.code === 
 
 // ---------- base58, for keys and signatures ----------
 
+/** A Solana transaction signature: 64 bytes in base58. */
+export const isSignature = (text: string) => /^[1-9A-HJ-NP-Za-km-z]{86,88}$/.test(text) && base58.decode(text).length === 64
+
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 export const base58 = {

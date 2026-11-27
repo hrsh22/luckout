@@ -235,17 +235,20 @@ export class AgentAttestation extends Schema.Class<AgentAttestation>("AgentAttes
   replies: Schema.Struct({ verified: Schema.Number, refused: Schema.Number })
 }) {}
 
+/** A Game Version's table: its premium, and every Final Price on the Lucky Amount with its chance (basis points). */
+const GameVersionTable = Schema.Struct({
+  name: Schema.String,
+  premiumBps: Schema.Int,
+  outcomes: Schema.Array(Schema.Struct({ finalBps: Schema.Int, chanceBps: Schema.Int }))
+})
+
 /** The program's public state, for pages anyone can open (ADR-0015). Read on the server and kept about 30 seconds. */
 export class ProgramInfo extends Schema.Class<ProgramInfo>("ProgramInfo")({
   cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
   programId: Schema.String,
   usdcMint: Schema.String,
-  /** The Game Versions, by number: each one's premium, and every Final Price on the Lucky Amount with its chance (basis points). */
-  versions: Schema.Array(Schema.Struct({
-    name: Schema.String,
-    premiumBps: Schema.Int,
-    outcomes: Schema.Array(Schema.Struct({ finalBps: Schema.Int, chanceBps: Schema.Int }))
-  })),
+  /** The Game Versions, by number. */
+  versions: Schema.Array(GameVersionTable),
   reserve: Schema.Struct({
     free: MicroUsdc,
     /** Held for Lucky Buys in progress, until their Draws run. */
@@ -267,10 +270,62 @@ export class ChainUnavailable extends Schema.TaggedError<ChainUnavailable>()(
   { httpApiStatus: 503 }
 ) {}
 
+/**
+ * One card's Draw, as the program recorded it with `emit_cpi!` (ADR-0015), and what it takes to check it: ORAO's
+ * request as Solana has it now, and the Game Version's table. Bytes are hex; addresses and signatures base58.
+ */
+export const CardDrawProof = Schema.Struct({
+  checkout: Schema.String,
+  customer: Schema.String,
+  /** The card's place in its Checkout, from 0. */
+  card: Schema.Int,
+  /** Which of the Checkout's randomness requests it read: 0 at settle, one more for each request made again. */
+  round: Schema.Int,
+  seed: Schema.String,
+  randomness: Schema.String,
+  random: Schema.String,
+  roll: Schema.Int,
+  gameVersion: Schema.Int,
+  referencePrice: MicroUsdc,
+  luckyAmount: MicroUsdc,
+  maxPrice: MicroUsdc,
+  finalBps: Schema.Int,
+  finalPrice: MicroUsdc,
+  cashback: MicroUsdc,
+  request: Schema.Struct({
+    address: Schema.String,
+    /** What ORAO's request account holds now: the 64-byte value its oracles filled in, or null. */
+    value: Schema.NullOr(Schema.String),
+    /** The transaction that asked for it: the settle that confirmed delivery, or a later request_again. */
+    requestedBy: Schema.optional(Schema.String),
+    /** ORAO's oracles' transactions that filled it in, oldest first: the last one completed it. */
+    filledBy: Schema.Array(Schema.String)
+  }),
+  version: GameVersionTable
+})
+export type CardDrawProof = typeof CardDrawProof.Type
+
+/** The Draws one `finish_draw` transaction recorded: a Draw Proof page's data (ADR-0005). Never changes once landed. */
+export class DrawProof extends Schema.Class<DrawProof>("DrawProof")({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  programId: Schema.String,
+  signature: Schema.String,
+  /** When it landed (Unix seconds), if the chain says. */
+  time: Schema.optional(Schema.Int),
+  draws: Schema.Array(CardDrawProof)
+}) {}
+
 export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).add(
   HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent }),
   HttpApiEndpoint.get("status", "/status", { success: ShopStatus }),
   HttpApiEndpoint.get("program", "/program", { success: ProgramInfo, error: ChainUnavailable }),
+  /** NotFound for anything that isn't a landed transaction with a Draw (of that card, if one is named). */
+  HttpApiEndpoint.get("drawProof", "/draws/:signature", {
+    params: { signature: Schema.String },
+    query: { card: Schema.optional(Schema.NumberFromString) },
+    success: DrawProof,
+    error: [NotFound, ChainUnavailable]
+  }),
   /** NotFound while the Agent is off (no bot or NEAR AI key) or before its first check. */
   HttpApiEndpoint.get("attestation", "/attestation", { success: AgentAttestation, error: NotFound })
 ) {}
