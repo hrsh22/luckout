@@ -19,6 +19,8 @@ import { type RawAccount, Solana, SolanaUnavailable } from "./Solana.ts"
 /** The program's minimum deposit: what a deposit's fee is worth moving for. */
 export const MIN_DEPOSIT = 1_000_000n
 const MAX_APPROVAL = 2n ** 64n - 1n
+/** Failed deposits in a row before an account's alert: a blip or two (the RPC, a busy minute) isn't one. */
+const FAILURES_BEFORE_ALERT = 3
 
 /** A token account's balance and delegate (SPL Token's 165-byte layout). */
 export const tokenAccount = (a: RawAccount) => ({
@@ -126,6 +128,19 @@ export class Deposits extends Context.Service<Deposits, {
           })
         ], [], () => Effect.void)
 
+      // ponytail: in memory, so a restart counts afresh; fine for one process (ADR-0006).
+      const failures = new Map<string, number>()
+      // Each alert reads the same for its account every time, so Alerts sends it at most once an hour while it lasts.
+      const depositFailed = (accountId: string, message: string) =>
+        Effect.gen(function*() {
+          yield* Effect.logWarning(`deposit for ${accountId} failed: ${message}`)
+          const n = (failures.get(accountId) ?? 0) + 1
+          failures.set(accountId, n)
+          if (n >= FAILURES_BEFORE_ALERT) {
+            yield* alerts.admin(`deposits for ${accountId} keep failing, so the USDC at their Deposit Address isn't reaching their Balance; the log says why (deposit for … failed)`)
+          }
+        })
+
       const sweep = Effect.gen(function*() {
         const config = yield* solana.config
         const rows = yield* sql<{ account_id: string; approval_lost_at: Date | string | null }>`SELECT account_id, approval_lost_at FROM known_accounts`.pipe(Effect.orDie)
@@ -146,14 +161,16 @@ export class Deposits extends Context.Service<Deposits, {
           const movable = ours ? (t.amount < t.delegated ? t.amount : t.delegated) : 0n
           if (movable >= MIN_DEPOSIT) {
             yield* depositFor(c.wallet, c.usdc).pipe(
+              Effect.andThen(Effect.sync(() => failures.delete(c.account_id))),
               Effect.andThen(alerts.customer(c.account_id, `$${(Number(movable) / 1e6).toFixed(2)} arrived in your Luckout balance.`)),
-              Effect.catch((e) => Effect.logWarning(`deposit for ${c.account_id} failed: ${e.message}`))
+              Effect.catch((e) => depositFailed(c.account_id, e.message))
             )
           }
           // Another app's approval replaced ours: what arrives stays at the address until they approve again.
           if (!ours && t.amount >= MIN_DEPOSIT && !c.approval_lost_at) {
             yield* sql`UPDATE known_accounts SET approval_lost_at = now() WHERE account_id = ${c.account_id}`.pipe(Effect.orDie)
             yield* alerts.customer(c.account_id, "USDC is waiting at your Deposit Address, but its approval for Luckout was replaced. Open Wallet in the app to approve it again.")
+            yield* alerts.admin(`another app's approval replaced ours at ${c.account_id}'s Deposit Address: what arrives waits there until they approve again in Wallet`)
           }
           if (ours && c.approval_lost_at) yield* sql`UPDATE known_accounts SET approval_lost_at = NULL WHERE account_id = ${c.account_id}`.pipe(Effect.orDie)
         }

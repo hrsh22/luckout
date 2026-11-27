@@ -149,8 +149,8 @@ The server moves USDC from each Deposit Address into its customer's Balance (`de
 Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (everyone who has signed in) are swept.
 
 - **No approval yet:** the customer hasn't made the one-time approval. The Wallet page asks for it.
-- **Another app's approval replaced ours:** what arrives stays at the address. The customer is told once in Telegram, if linked, to approve again in Wallet. To find them: `SELECT account_id, approval_lost_at FROM known_accounts WHERE approval_lost_at IS NOT NULL`.
-- **The sweep fails:** the log says `deposit for <wallet> failed: …` or `deposit sweep failed`. Usually the fee payer or the RPC.
+- **Another app's approval replaced ours** (alert `another app's approval replaced ours at <wallet>'s Deposit Address: …`): what arrives stays at the address. The customer is told once in Telegram, if linked, to approve again in Wallet. To find them: `SELECT account_id, approval_lost_at FROM known_accounts WHERE approval_lost_at IS NOT NULL`.
+- **The sweep fails:** the log says `deposit for <wallet> failed: …` or `deposit sweep failed`. Usually the fee payer or the RPC. After three failures in a row for one wallet, the alert `deposits for <wallet> keep failing, …` comes, then hourly while it lasts.
 - **USDT** isn't swept. The customer taps to swap it in, in Wallet.
 
 ## Stopping purchases

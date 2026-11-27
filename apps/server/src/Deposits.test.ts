@@ -15,11 +15,12 @@ const USDC = 1_000_000n
 const setup = () => {
   const world = solanaWorld()
   const told: Array<[string, string]> = []
-  const alerts = Layer.succeed(Alerts, Alerts.of({ admin: () => Effect.void, customer: (a, t) => Effect.sync(() => (told.push([a, t]), true)) }))
+  const alerted: Array<string> = []
+  const alerts = Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerted.push(t)), customer: (a, t) => Effect.sync(() => (told.push([a, t]), true)) }))
   // One database and one Deposits for the whole test, as in the server.
   const runtime = ManagedRuntime.make(Deposits.layer.pipe(Layer.provideMerge(Layer.mergeAll(solanaLayer(world), DbMemory, alerts))))
   const run = <A, E>(f: Effect.Effect<A, E, Deposits | Solana | SqlClient.SqlClient>) => runtime.runPromise(f)
-  return { world, told, run, done: () => runtime.dispose() }
+  return { world, told, alerted, run, done: () => runtime.dispose() }
 }
 
 /** What the customer's wallet does with a prepared transaction: signs it, and hands it back. */
@@ -109,8 +110,8 @@ test("the fee payer signs only a transaction we prepared, unchanged, and signed 
   await done()
 })
 
-test("an approval another app replaced is noticed once: what arrives waits, and the customer is told", async () => {
-  const { world, told, run, done } = setup()
+test("an approval another app replaced is noticed once: what arrives waits, and the customer and the admin are told", async () => {
+  const { world, told, alerted, run, done } = setup()
   const wallet = await approved(run)
   const usdc = usdcOf(world, wallet.publicKey)
   // Another app's approval: the delegate is someone else now.
@@ -124,8 +125,46 @@ test("an approval another app replaced is noticed once: what arrives waits, and 
   await run(Effect.flatMap(Deposits, (d) => d.sweep))
   assert.equal(world.tokens(usdc), 2n * USDC, "nothing moved")
   assert.equal(told.filter(([, t]) => /approval for Luckout was replaced/.test(t)).length, 1, "told once")
+  assert.deepEqual(alerted.filter((t) => t.includes(wallet.publicKey.toBase58())).map((t) => /replaced/.test(t)), [true], "the admin hears once")
   const status = await run(Effect.flatMap(Deposits, (d) => d.status(wallet.publicKey.toBase58())))
   assert.equal(status.approved, false)
+  await done()
+})
+
+test("a deposit that keeps failing alerts the admin, in the same words for the account each time, so at most hourly", async () => {
+  const { world, alerted, run, done } = setup()
+  const wallet = await approved(run)
+  const usdc = usdcOf(world, wallet.publicKey)
+  world.give(usdc, 2n * USDC)
+  // A frozen USDC account: every deposit_for from it fails.
+  const setState = (state: number) => {
+    const a = world.svm.getAccount(usdc.toBase58() as never)
+    if (!a.exists) throw new Error("no USDC account")
+    const data = Buffer.from(a.data)
+    data[108] = state
+    world.svm.setAccount({ ...a, data })
+  }
+  setState(2)
+  const sweep = () => run(Effect.flatMap(Deposits, (d) => d.sweep))
+  const about = () => alerted.filter((t) => t.includes(wallet.publicKey.toBase58()))
+  await sweep()
+  await sweep()
+  assert.deepEqual(about(), [], "a failure or two may be a blip")
+  await sweep()
+  await sweep()
+  assert.equal(about().length, 2)
+  assert.match(about()[0]!, /keep failing/)
+  assert.equal(new Set(about()).size, 1, "one text, so Alerts sends it at most once an hour")
+  // It works again: the count starts over.
+  setState(1)
+  // A new blockhash, as the chain moves on: the same deposit under the old one would be a duplicate of the failed one.
+  world.expire()
+  await sweep()
+  assert.equal(world.tokens(usdc), 0n)
+  world.give(usdc, 2n * USDC)
+  setState(2)
+  await sweep()
+  assert.equal(about().length, 2)
   await done()
 })
 
