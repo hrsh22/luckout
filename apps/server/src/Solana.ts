@@ -442,6 +442,12 @@ export class Solana extends Context.Service<Solana, {
 export const checkKeys = Effect.gen(function*() {
   const solana = yield* Solana
   const config = yield* solana.config.pipe(Effect.catch((e) => Effect.die(`couldn't read the program's Config (${e.message})`)))
+  // The owner's key never goes on the server (ADR-0015): a server that was broken into would hold every owner power.
+  for (const [name, key] of [["SOLANA_FEE_PAYER_SECRET_KEY", solana.feePayer], ["SOLANA_OPERATOR_SECRET_KEY", solana.operator], ["SOLANA_PAY_WALLET_SECRET_KEY", solana.payWallet]] as const) {
+    if (key && (config.owner.equals(key) || config.pending_owner?.equals(key))) {
+      return yield* Effect.die(`${name} is the program's ${config.owner.equals(key) ? "owner" : "proposed owner"}. The owner's key stays in the owner's wallet, never on the server.`)
+    }
+  }
   if (solana.operator && !config.operator.equals(solana.operator)) {
     return yield* Effect.die(`SOLANA_OPERATOR_SECRET_KEY is ${solana.operator.toBase58()}, but the program's operator is ${config.operator.toBase58()}`)
   }

@@ -83,6 +83,10 @@ test("checkKeys refuses an operator, or a Pay Wallet, that isn't the program's",
   const payWallet = await check({ SOLANA_PAY_WALLET_SECRET_KEY: secret() })
   assert.ok(payWallet._tag === "Failure")
   assert.match(String(Cause.squash(payWallet.cause)), /SOLANA_PAY_WALLET_SECRET_KEY doesn't own the program's Pay Wallet account/)
+  // The owner's key never goes on the server (ADR-0015), not even as the fee payer.
+  const owner = await check({ SOLANA_FEE_PAYER_SECRET_KEY: base58.encode(world.owner.secretKey) })
+  assert.ok(owner._tag === "Failure")
+  assert.match(String(Cause.squash(owner.cause)), /SOLANA_FEE_PAYER_SECRET_KEY is the program's owner/)
 })
 
 // The catalog endpoints exactly as main.ts handles them, with Bitrefill faked.
