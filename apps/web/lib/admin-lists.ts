@@ -12,7 +12,7 @@ export const purchaseIdIn = (filter: string) => {
 }
 
 /**
- * What the listed customers hold in all. A balance NEAR didn't answer for is missing, so the sum is then only
+ * What the listed customers hold in all. A balance Solana didn't answer for is missing, so the sum is then only
  * a floor: `partial` says so.
  */
 export const heldByAll = (users: ReadonlyArray<{ readonly balance?: number | undefined }>) => ({

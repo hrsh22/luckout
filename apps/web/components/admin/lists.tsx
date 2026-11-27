@@ -1,7 +1,7 @@
 "use client"
 
 import { ModeChip } from "@/components/purchase-view"
-import { AdminTabs, ago, basescan, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
+import { AdminTabs, ago, LastFigures, stepLabel, TONE } from "@/components/admin/shared"
 import { SignInCard } from "@/components/sign-in-card"
 import { NoPage } from "@/components/site-chrome"
 import { Button } from "@/components/ui/button"
@@ -21,7 +21,7 @@ import { type ReactNode, useState } from "react"
 // The admin's read-only Purchases and Users pages: a glance at who bought what and who holds what.
 // Same gate as the Control room: the server answers admins only, everyone else sees "No page here".
 
-/** `poll`: read again every 30 seconds. The users list doesn't: each load reads every listed customer's balance from NEAR. */
+/** `poll`: read again every 30 seconds. The users list doesn't: each load reads every listed customer's account from Solana. */
 function useAdminList<A>(key: ReadonlyArray<unknown>, f: (token: string) => Promise<A>, poll: boolean) {
   const { accountId, token, ready } = useSession()
   const q = useQuery({
@@ -32,7 +32,7 @@ function useAdminList<A>(key: ReadonlyArray<unknown>, f: (token: string) => Prom
     retry: false
   })
   const gate = ready && !accountId
-    ? <SignInCard title="Sign in to continue" body="Sign in with your NEAR wallet." />
+    ? <SignInCard title="Sign in to continue" body="Sign in with your admin account." />
     : (q.error as { _tag?: string } | null)?._tag === "NotFound"
     ? <NoPage />
     : !q.data
@@ -145,8 +145,8 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
               p.error !== undefined && ["Error", <span key="e" className="text-bad">{p.error}</span>],
               ["Attempts", p.attempts],
               p.invoiceId !== undefined && ["Bitrefill invoice", p.invoiceId],
-              p.payAmount !== undefined && ["Paid to Bitrefill", `${dollars(p.payAmount)} USDC from the Base Float, for all of checkout ${p.checkoutId.slice(0, 8)}…`],
-              p.payTx !== undefined && ["Base payment", <Ext key="b" href={basescan(`tx/${p.payTx}`)}>{p.payTx.slice(0, 12)}…</Ext>],
+              p.payAmount !== undefined && ["Paid to Bitrefill", `${dollars(p.payAmount)} USDC from the Pay Wallet, for all of checkout ${p.checkoutId.slice(0, 8)}…`],
+              p.payTx !== undefined && ["Payment tx", <Ext key="b" href={explorer(p.payTx)}>{p.payTx.slice(0, 12)}…</Ext>],
               p.admitTx !== undefined && ["Admit tx", <Ext key="x" href={explorer(p.admitTx)}>{p.admitTx.slice(0, 12)}…</Ext>],
               p.settleTx !== undefined && ["Settle tx", <Ext key="s" href={explorer(p.settleTx)}>{p.settleTx.slice(0, 12)}…</Ext>],
               ["Created", new Date(p.createdAt).toLocaleString()],
@@ -160,8 +160,8 @@ function PurchaseRow({ p }: { p: AdminPurchase }) {
 }
 
 export function AdminUsers() {
-  // Loaded on open and on Refresh only: each load reads every listed customer's balance from NEAR, through the
-  // same RPC providers that admit and confirm purchases.
+  // Loaded on open and on Refresh only: each load reads every listed customer's account from Solana, through the
+  // same RPC that admits and settles purchases.
   const { data, gate, stale, refresh, refreshing } = useAdminList(["users"], (token) => api((c) => c.admin.users(), token), false)
   const [q, setQ] = useState("")
   const shown = data?.filter((u) => matches(q, u.accountId, u.telegram)) ?? []
@@ -173,11 +173,11 @@ export function AdminUsers() {
         ? (
           <>
             {data.length >= ADMIN_LIST_LIMIT ? `The ${ADMIN_LIST_LIMIT} most recent accounts` : `${data.length} accounts`}, holding{" "}
-            {held.partial ? "at least " : ""}<b className="text-ink">{usd(held.micro)}</b> in all{held.partial ? " (NEAR didn't answer for some)" : ""}. Most recent
+            {held.partial ? "at least " : ""}<b className="text-ink">{usd(held.micro)}</b> in all{held.partial ? " (Solana didn't answer for some)" : ""}. Most recent
             buyers first.
           </>
         )
-        : "Every account that signed in, bought, relayed or linked Telegram."}
+        : "Every account that signed in, bought or linked Telegram."}
     >
       {gate ?? (
         <>
@@ -211,7 +211,7 @@ function UserRow({ u }: { u: AdminUser }) {
         <div className="border-t border-soft p-4">
           <Facts
             items={[
-              ["Balance", u.balance === undefined ? "NEAR didn't answer" : `${dollars(u.balance)} USDC`],
+              ["Balance", u.balance === undefined ? "Solana didn't answer" : `${dollars(u.balance)} USDC`],
               u.perPurchaseLimit !== undefined && u.dailyLimit !== undefined && ["Spending limits", limitsText(u.perPurchaseLimit, u.dailyLimit)],
               ["Spent on delivered cards", `${dollars(u.spent)} USDC`],
               ["Cashback received", `${dollars(u.cashback)} USDC`],
@@ -220,7 +220,7 @@ function UserRow({ u }: { u: AdminUser }) {
               ["Checkout Email", u.checkoutEmail ? "Given" : "None yet"],
               ["Bitrefill account", u.bitrefillConnected ? "Connected" : "Not connected"],
               ["First seen", new Date(u.firstSeen).toLocaleString()],
-              ["Explorer", <Ext key="x" href={explorerAccount(u.accountId)}>nearblocks</Ext>]
+              ["Wallet", <Ext key="x" href={explorerAccount(u.accountId)}>Solana Explorer</Ext>]
             ]}
           />
         </div>
