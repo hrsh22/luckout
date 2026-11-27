@@ -57,7 +57,7 @@ psql -h 127.0.0.1 -U <role> <db> -c "SELECT p.id, p.checkout_id, p.position, p.s
   `closed` means every card ended and the account closed. Its transactions (`https://explorer.solana.com/address/<address>`) show how.
 - **Bitrefill:** guest orders aren't in our Bitrefill account. Bitrefill support can look one up from the invoice id and the payment's signature. Bitrefill also emails each guest card's code to its Checkout Email.
 
-A `Gave up after 12 attempts at <step>: …` error carries only what the checkout last saved. The cause of each failed try is in the logs, as `checkout <id> paused: …`.
+A `Gave up after 12 attempts at <step>: …` error, and the alert `checkout <id> stuck after 12 attempts at <step>: …`, end with why the last try failed. Every try's cause is in the logs, as `checkout <id> paused: …`.
 
 | Error or step | Means | Do |
 |---|---|---|

@@ -1495,12 +1495,15 @@ test("a guest order Bitrefill never took is refunded in full once the retries ru
     const p = yield* paid.buy()
     yield* sql`UPDATE checkouts SET attempts = 12`
     yield* reconcilePass
-    return yield* settled(p.id)
+    const [card] = yield* sql<{ error: string }>`SELECT error FROM purchases WHERE id = ${p.id}`
+    return { step: yield* settled(p.id), error: card!.error }
   }))
-  assert.equal(after, "stuck")
+  assert.equal(after.step, "stuck")
   assert.equal(paid.usdcOf(paid.payees[0]!), 10_000_000n)
   assert.ok(!paid.calls.includes("settle"), "never refunded while Bitrefill may still deliver")
-  assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery/)
+  // Both say why: the last try's failure.
+  assert.match(after.error, /^Gave up after 12 attempts at delivery: invoice \S+ is still pending$/)
+  assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery: invoice \S+ is still pending/)
 })
 
 test("a busy minute at Bitrefill isn't counted against the account as cards it couldn't find", async () => {

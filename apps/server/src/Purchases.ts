@@ -15,7 +15,7 @@ import {
 } from "@luckout/api"
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
 import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
-import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule, Semaphore } from "effect"
+import { Cause, Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomUUID } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
@@ -962,6 +962,9 @@ export class Purchases extends Context.Service<Purchases, {
       }
       const notify = (checkoutId: string) => Effect.flatMap(loadCheckout(checkoutId), (co) => Effect.flatMap(cardsIn(co.id), (rows) => tell(co.account_id, rows)))
 
+      /** Keeps why a try failed on the checkout, so giving up can say it (giveUp). Not a step: updated_at stays. */
+      const lastFailure = (id: string, message: string) =>
+        sql`UPDATE checkouts SET error = ${message} WHERE id = ${id}`.pipe(Effect.asVoid, Effect.catchCause(() => Effect.void))
       const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>
         Effect.suspend(() => {
           // Another run has this checkout: leave it, and leave its guard alone. Only the run that set the
@@ -973,9 +976,12 @@ export class Purchases extends Context.Service<Purchases, {
             while (yield* Effect.flatMap(loadCheckout(id), (co) => step(co, resumed && first))) first = false
             if (notifyAfter) yield* notify(id)
           }).pipe(
-            Effect.catch((e: Unknown) => Effect.logWarning(`checkout ${id} paused: ${e.message}`)),
+            Effect.catch((e: Unknown) => Effect.andThen(Effect.logWarning(`checkout ${id} paused: ${e.message}`), lastFailure(id, e.message))),
             // Anything unexpected (database, decryption) pauses this checkout only; the reconciler retries it.
-            Effect.catchCause((cause) => Effect.logError(`checkout ${id} paused`, cause)),
+            Effect.catchCause((cause) => {
+              const e = Cause.squash(cause)
+              return Effect.andThen(Effect.logError(`checkout ${id} paused`, cause), lastFailure(id, e instanceof Error ? e.message : String(e)))
+            }),
             Effect.ensuring(Effect.sync(() => running.delete(id)))
           )
         }).pipe(
@@ -1427,7 +1433,7 @@ export class Purchases extends Context.Service<Purchases, {
           // Each card says the step it was at, so Retry now can send it back there where that's safe (GAVE_UP_AT).
           const each = open.map((c) => [c, { step: "stuck" as const, error: gaveUp(c.step) }] as const)
           if (!(yield* move(co, { step: "stuck", error: gaveUp(co.step) }, undefined, each))) return
-          yield* alerts.admin(`checkout ${id} stuck after ${MAX_ATTEMPTS} attempts at ${co.step}`)
+          yield* alerts.admin(`checkout ${id} stuck after ${MAX_ATTEMPTS} attempts at ${co.step}: ${co.error ?? "no failure was recorded"}`)
           yield* notify(id)
         })
 
