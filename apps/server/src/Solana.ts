@@ -218,6 +218,8 @@ export class Solana extends Context.Service<Solana, {
   resume(signed: Signed): Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | TxExpired>
   balance(key: PublicKey): Effect.Effect<bigint, SolanaUnavailable>
   signatures(key: PublicKey, limit: number): Effect.Effect<Array<string>, SolanaUnavailable>
+  /** A landed transaction's events, if it succeeded. */
+  transaction(signature: string): Effect.Effect<Outcome | undefined, SolanaUnavailable>
 }>()("luckout/Solana") {
   static readonly layer = Layer.effect(
     Solana,
@@ -310,7 +312,13 @@ export class Solana extends Context.Service<Solana, {
         send,
         resume: deliver,
         balance: chain.balance,
-        signatures: chain.signatures
+        signatures: chain.signatures,
+        transaction: (signature) =>
+          chain.landed(signature).pipe(
+            Effect.map((ran) =>
+              ran && !ran.error ? { signature, events: decodeEvents(ran.logs, ran.inner), returnData: ran.returnData, units: ran.units } : undefined
+            )
+          )
       })
     })
   )

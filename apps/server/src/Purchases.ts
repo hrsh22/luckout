@@ -13,44 +13,66 @@ import {
   Quote,
   redemptionFields
 } from "@luckout/api"
-import type { GameVersion } from "@luckout/api/draw"
-import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule } from "effect"
+import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
+import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
+import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomUUID } from "node:crypto"
-import type { Hex } from "viem"
 import { Alerts } from "./Alerts.ts"
-import { Base, BaseUnavailable, type SignedPayment } from "./Base.ts"
 import { Bitrefill, type Card, MIN_PRICE, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
-import { Credit, usd, WAITING_STEPS } from "./Credit.ts"
-import { Refill } from "./Refill.ts"
+import {
+  type Card as ChainCard,
+  decodeReturn,
+  type DrawEvent,
+  filledRandomness,
+  type Mode as ProgramMode,
+  ORAO_NETWORK_STATE,
+  ORAO_VRF,
+  oraoRequest,
+  oraoTreasury,
+  type Quote as ChainQuote
+} from "./Program.ts"
 import { json, stepRows } from "./Rows.ts"
 import { closedMessage, Sales } from "./Sales.ts"
 import { SealKey, sealWith, unsealWith } from "./Seal.ts"
-import { ContractRejected, Near, NearUnavailable, Network, type Signed, TxExpired } from "./Near.ts"
+import { type Outcome, ProgramRejected, type Signed, Solana, SolanaUnavailable, type TxExpired } from "./Solana.ts"
 
-// A checkout is the cards a customer confirmed together: one card for Buy, up to 15 for a Cart (ADR-0013). Each card
-// is a purchase of its own in the contract, with its own Draw, refund and Reclaim; the checkout carries what its cards
-// share, one step at a time (ADR-0001):
-//   (waiting →) admit → ordering → (pay →) delivery ⇄ settle → done
+// A checkout is the cards a customer confirmed together: one card for Buy, up to 15 for a Cart. It is one numbered
+// Checkout account in the program (ADR-0015), and each card in it has its own Draw, refund and Reclaim:
+//   (waiting →) admit → ordering → (pay →) delivery ⇄ settle → (draw →) done
 //                    ↘ every card fails → settle            (admit refused → rejected)
-// admit:    one `purchase_many`, every card or none.
-// ordering: one Bitrefill invoice for every card. A guest invoice (ADR-0012) is unpaid, and paid from the Base Float at
+// admit:    one `admit` under the customer's next Checkout number, every card or none.
+// ordering: one Bitrefill invoice for every card. A guest invoice (ADR-0012) is unpaid, and paid from the Pay Wallet at
 //           "pay": creating one moves no money, so an unknown outcome there is simply ordered again, and the payment is
 //           saved before it's sent, so it's only ever sent again as the same transaction.
 // delivery: each card's code, matched to its order. A card Bitrefill delivers goes to "confirm", one it won't to "fail".
-// settle:   one `settle` for the cards that got that far; the rest go back to delivery, so a slow card never holds
-//           the others' codes.
-// Until delivery every card is at its checkout's step; from there each card goes on by itself
-// (confirm/fail → settled/failed). Every step is saved before its side effect, so after a crash the reconciler resumes
-// it without buying or charging twice. A checkout our float can't cover yet starts as "waiting": nothing is charged, a
-// refill starts, and it goes on once the money is there, or is cancelled after waitMinutes (ADR-0009). If Bitrefill
-// says the credit is too low at ordering, or a Base payment reverts, it waits as "restock" (charged, not yet ordered)
-// and is refunded in full if the money doesn't come in time. "ordering" found by the reconciler on store credit means
-// we may have paid Bitrefill without saving the invoice id; it becomes "stuck" for a human, and the customer can still
-// Reclaim after 24h. The reconciler backs off on each retry and gives up (stuck, with an alert) after MAX_ATTEMPTS.
-type Step = "waiting" | "admit" | "ordering" | "restock" | "pay" | "delivery" | "confirm" | "fail" | "settled" | "failed" | "rejected" | "stuck"
-type CheckoutStep = "waiting" | "admit" | "ordering" | "restock" | "pay" | "delivery" | "settle" | "done" | "rejected" | "stuck"
+// settle:   one `settle` for the cards that got that far. It repays the Pay Wallet, and asks ORAO once for the delivered
+//           Lucky cards, which wait as "drawing"; the rest go back to delivery, so a slow card never holds the others.
+// draw:     each Draw is finished once ORAO's randomness is in (by us, though anyone could), or asked again after an hour.
+// Until delivery every card is at its checkout's step; from there each card goes on by itself (confirm/fail → drawing
+// → settled, or failed). Every step is saved before its side effect, so after a crash the reconciler resumes it without
+// buying or charging twice. A checkout the Pay Wallet's float can't cover yet starts as "waiting": nothing is charged,
+// the owner hears of it, and it goes on once the float covers it, or is cancelled after WAIT_MINUTES. A payment that
+// fails (the float ran short) waits as "restock" (charged, not yet ordered) and is refunded in full if the money doesn't
+// come in time. "ordering" found by the reconciler on store credit means we may have paid Bitrefill without saving the
+// invoice id; it becomes "stuck" for a human, and the customer can still Reclaim after 24h. The reconciler backs off on
+// each retry and gives up (stuck, with an alert) after MAX_ATTEMPTS, except on a Draw, which only ever waits for ORAO.
+type Step =
+  | "waiting"
+  | "admit"
+  | "ordering"
+  | "restock"
+  | "pay"
+  | "delivery"
+  | "confirm"
+  | "fail"
+  | "drawing"
+  | "settled"
+  | "failed"
+  | "rejected"
+  | "stuck"
+type CheckoutStep = "waiting" | "admit" | "ordering" | "restock" | "pay" | "delivery" | "settle" | "draw" | "done" | "rejected" | "stuck"
 
 /** One card. */
 interface Row {
@@ -70,8 +92,9 @@ interface Row {
   error: string | null
   /** Its checkout's admission, once it went through. */
   admit_tx: Signed | null
+  /** Its index in its Checkout account, once admitted. */
   contract_purchase_id: number | string | bigint | null
-  /** The contract's record at admission; `created_at` (nanoseconds) is when Reclaim's 24 hours start. */
+  /** The program's record at admission; `created_at` (seconds) is when Reclaim's 24 hours start. */
   admitted: { mode: Mode; max_price: string; lucky_amount: string; created_at?: number | string } | null
   /** A Lucky Buy's Lucky Amount when it was accepted: admission plays exactly it, or is refused. */
   quoted_lucky_amount: number | string | bigint | null
@@ -84,8 +107,10 @@ interface Row {
   redemption: string | null
   /** The card's use-by date, from its Redemption Data (ISO), kept outside the sealed data. */
   use_by: string | null
-  /** The settlement that closed it: its Draw is in there. */
+  /** The settlement that confirmed or failed it. */
   settle_tx: Signed | null
+  /** A Lucky card's randomness request, once settled. */
+  round: number | null
   draw: Record<string, unknown> | null
   /** When the customer marked it used; null while unused. */
   used_at: Date | string | null
@@ -110,7 +135,10 @@ interface CheckoutRow {
   invoice_at: Date | string | null
   pay_to: string | null
   pay_amount: number | string | bigint | null
-  pay_tx: SignedPayment | null
+  pay_tx: Signed | null
+  /** Its Checkout account's number and address, saved with the admission that takes them. */
+  number: number | string | bigint | null
+  address: string | null
   /** The Checkout Email it was placed under, sealed (bound to the checkout); null on the customer's own Bitrefill account. */
   email: string | null
   created_at: Date | string
@@ -124,21 +152,19 @@ interface QuoteView {
   max_price: string
 }
 
-/** A purchase as the contract records it (`get_purchase`). */
-interface OnchainPurchase {
-  status: string
-  mode: Mode
-  max_price: string
-  cashback: string
-}
-
 /** Thrown on to stop a run; the reconciler picks the checkout up again later. */
-type Unknown = NearUnavailable | BitrefillUnavailable | BaseUnavailable
+type Unknown = SolanaUnavailable | BitrefillUnavailable
 
 /** A card's steps that are still on their way (for alerts, the admin panel and the per-account limit). */
-export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "fail"]
+export const OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "confirm", "fail", "drawing"]
 /** A checkout's steps the reconciler resumes. */
-export const CHECKOUT_OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "settle"]
+export const CHECKOUT_OPEN_STEPS = ["admit", "ordering", "pay", "delivery", "settle", "draw"]
+/** Steps where a card or checkout waits for the Pay Wallet's float. */
+export const WAITING_STEPS = ["waiting", "restock"]
+export const usd = (micro: number | bigint) => `$${(Number(micro) / 1e6).toFixed(2)}`
+/** How long a checkout may wait for the float before it's cancelled (uncharged) or refunded (charged).
+ * ponytail: fixed; make it an admin setting if the owner wants to tune it. */
+const WAIT_MINUTES = 60
 /**
  * Why Bitrefill would refuse `count` more cards costing `price` (micro-USDC) in all for a Checkout Email that has
  * `used` this much of its limits (GUEST_LIMITS), if it would; undefined if they fit.
@@ -215,7 +241,7 @@ export const retryPurchase = Effect.fn("Purchases.retry")(function*(id: string) 
 })
 /** Bitrefill's invoices expire after 60 minutes; one we haven't paid within 40 is asked for again. */
 const INVOICE_TTL_MS = 40 * 60_000
-/** This long after its invoice, a Base payment is never sent or signed again: the invoice expires at 60 minutes. Base is only asked where it is. */
+/** This long after its invoice, a payment is never signed again: the invoice expires at 60 minutes. */
 const PAY_SEND_LIMIT_MS = 50 * 60_000
 /** Why a card couldn't be ordered: their Bitrefill login lapsed, and there's no Checkout Email to fall back on. */
 const LOGIN_LAPSED = "Your Bitrefill login expired. Connect again or add an email in Wallet."
@@ -244,7 +270,7 @@ const time = (v: Date | string) => new Date(v).getTime()
 /** When the contract admitted (and so charged) a checkout's cards; its creation for one saved without it. */
 const admittedAt = (co: CheckoutRow, cards: ReadonlyArray<Row>) => {
   const at = cards[0]?.admitted?.created_at
-  return at ? Number(at) / 1e6 : time(co.created_at)
+  return at ? Number(at) * 1000 : time(co.created_at)
 }
 /** A charged checkout that is refunded rather than tried again: it has waited `waitMinutes`, or the customer could soon Reclaim it. */
 const overdue = (co: CheckoutRow, cards: ReadonlyArray<Row>, waitMinutes: number) =>
@@ -254,24 +280,37 @@ const total = (cards: ReadonlyArray<Row>) => cards.reduce((s, c) => s + Number(c
 const cardsOf = (cards: ReadonlyArray<Row>): Array<Card> =>
   cards.map((c) => ({ id: c.voucher_id, value: c.package_value, ...(c.order_id ? { orderId: c.order_id } : {}) }))
 
-/**
- * A Lucky Buy delivered onchain whose draw event we never saw (say, the customer re-ran the Draw):
- * the amount paid and the Cashback as the contract records them. Its seed and roll aren't known here.
- */
-const chainDraw = (p: OnchainPurchase) =>
-  typeof p.mode === "object"
-    ? { game_version: p.mode.lucky, final_price: String(Number(p.max_price) - Number(p.cashback)), cashback: p.cashback }
-    : null
+/** A Lucky card drawn by a transaction we didn't record (anyone may finish a Draw): what the program keeps of it. */
+const chainDraw = (c: ChainCard) =>
+  c.mode.kind === "Lucky" ? { game_version: c.mode.fields[0], final_price: String(c.max_price - c.cashback), cashback: String(c.cashback) } : null
 
-/** The contract's view of a customer (amounts in micro-USDC strings). */
-interface ContractAccount {
-  balance: string
-  per_purchase_limit: string
-  daily_limit: string
-  day: number
-  spent_today: string
-  default_mode: Mode
-}
+const toProgramMode = (m: Mode): ProgramMode => (m === "normal" ? { kind: "Normal" } : { kind: "Lucky", fields: [m.lucky] })
+const fromProgramMode = (m: ProgramMode): Mode => (m.kind === "Normal" ? "normal" : { lucky: m.fields[0] })
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
+/** A Draw Proof as kept with its card: the program's record, its request, and the transactions that filled and finished it. */
+const proofOf = (d: DrawEvent, finish: string, fill: string | undefined) => ({
+  game_version: d.game_version,
+  seed: hex(d.seed),
+  random: hex(d.random),
+  roll: d.roll,
+  final_bps: d.final_bps,
+  final_price: String(d.final_price),
+  cashback: String(d.cashback),
+  randomness: hex(d.randomness),
+  request: d.request.toBase58(),
+  round: d.round,
+  finish,
+  ...(fill ? { fill } : {})
+})
+/** Where a checkout goes once no card waits at its own step. */
+const onward = (steps: ReadonlyArray<Step>): CheckoutStep =>
+  steps.some((s) => s === "confirm" || s === "fail")
+    ? "settle"
+    : steps.includes("delivery")
+    ? "delivery"
+    : steps.includes("drawing")
+    ? "draw"
+    : "done"
 
 /** One card to price in a Cart: what `quoteCart` takes. */
 export interface CartLine {
@@ -311,16 +350,20 @@ export class Purchases extends Context.Service<Purchases, {
     Purchases,
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
-      const near = yield* Near
+      const solana = yield* Solana
+      const program = solana.program
       const bitrefill = yield* Bitrefill
-      const base = yield* Base
-      const credit = yield* Credit
-      const refill = yield* Refill
       const sales = yield* Sales
       const alerts = yield* Alerts
       const connect = yield* Connect
       const key = yield* SealKey
-      const testnet = (yield* Network) === "testnet"
+      // Off mainnet only Bitrefill's test cards are sold: balances there are test money.
+      const testnet = solana.cluster !== "mainnet"
+      /** One admission at a time: each takes the customer's next Checkout number (ADR-0015).
+       * ponytail: one lock for every customer; per-customer locks if admissions ever queue. */
+      const admitLock = yield* Semaphore.make(1)
+      /** Deciding "go or wait" on the float and recording it happen under one lock, so two checkouts never count on the same money. */
+      const floatLock = yield* Semaphore.make(1)
       const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
       /** How long a buy request waits for its cards before answering "pending" (under Cloudflare's 100 s). */
       const requestWait = yield* Config.Number("PURCHASE_REQUEST_WAIT_MS").pipe(Config.withDefault(60_000))
@@ -405,19 +448,109 @@ export class Purchases extends Context.Service<Purchases, {
       const failAll = (co: CheckoutRow, error: string, also: Record<string, unknown> = {}) =>
         move(co, { step: "settle", error, ...also }, { step: "fail", error, ...also })
 
-      /** Sends (or resumes) one contract call whose signed transaction lives in the checkout's `column`. */
-      const submit = (co: CheckoutRow, column: "admit_tx" | "settle_tx", method: string, args: object) => {
-        const fresh = near.call(method, args, (signed) => saveCheckout(co.id, { [column]: signed }))
-        const saved = co[column]
-        return (saved ? near.resume(saved) : fresh).pipe(
-          Effect.catchTag("TxExpired", (_: TxExpired) => fresh)
+      /** Sends (or resumes) one operator transaction whose signed bytes live in the checkout's `column`. */
+      const submit = (
+        co: CheckoutRow,
+        column: "admit_tx" | "settle_tx",
+        build: Effect.Effect<{ readonly ix: TransactionInstruction; readonly also?: Record<string, unknown> }, Unknown | ProgramRejected>
+      ) => {
+        const fresh: Effect.Effect<Outcome, ProgramRejected | Unknown> = Effect.flatMap(
+          build,
+          ({ ix, also }) => solana.send([ix], ["operator"], (signed) => saveCheckout(co.id, { [column]: signed, ...also }))
         )
+        const saved = co[column]
+        const sent: Effect.Effect<Outcome, ProgramRejected | Unknown | TxExpired> = saved ? solana.resume(saved) : fresh
+        return sent.pipe(Effect.catchTag("TxExpired", () => fresh))
       }
-      /** The event `name` this outcome logged for one purchase. */
-      const eventFor = (events: ReadonlyArray<{ event: string; data: ReadonlyArray<unknown> }>, name: string, purchaseId: number) =>
-        events.find((e) => e.event === name && Number((e.data[0] as { purchase_id?: unknown } | undefined)?.purchase_id) === purchaseId)?.data[0] as
-          | Record<string, unknown>
-          | undefined
+
+      /** USDC the Pay Wallet can still spend: its balance, less what checkouts on their way are yet to pay. */
+      const freeFloat = Effect.gen(function*() {
+        const config = yield* solana.config
+        const account = yield* solana.account(config.pay_wallet)
+        const balance = account ? Number(account.data.readBigUInt64LE(64)) : 0
+        const [r] = yield* sql<{ owed: string }>`
+          SELECT COALESCE(sum(reference_price), 0)::text AS owed FROM purchases
+          WHERE step IN ('admit', 'ordering', 'pay') AND voucher_id NOT LIKE 'test-%'`.pipe(Effect.orDie)
+        return balance - Number(r?.owed ?? 0)
+      })
+      /** Runs `f` with the free float, under the float's lock. An unreadable float counts as empty: the checkout waits. */
+      const floatGuard = <A, E>(f: (free: number) => Effect.Effect<A, E>) =>
+        floatLock.withPermits(1)(Effect.flatMap(freeFloat.pipe(Effect.orElseSucceed(() => 0)), f))
+
+      /**
+       * Finishes the Draws of a checkout's cards waiting on randomness: each request ORAO has filled in is finished (by
+       * us, though anyone could), and one still empty an hour after it was made is asked again. True if a card moved.
+       */
+      const finishDraws = (co: CheckoutRow, all: ReadonlyArray<Row>) =>
+        Effect.gen(function*() {
+          const drawing = all.filter((c) => c.step === "drawing")
+          if (drawing.length === 0) return false
+          const address = new PublicKey(co.address!)
+          const wallet = new PublicKey(co.account_id)
+          const onchain = yield* solana.checkout(address)
+          let moved = false
+          if (!onchain) {
+            // Closed: someone else finished the last Draws. Their transactions on the account still hold the proofs.
+            for (const signature of yield* solana.signatures(address, 20)) {
+              const tx = yield* solana.transaction(signature)
+              for (const e of tx?.events.filter((ev) => ev.name === "Draw") ?? []) {
+                const d = e.data as unknown as DrawEvent
+                const c = drawing.find((r) => r.position === d.card)
+                if (c && (yield* cards.move(c, { step: "settled", round: d.round, draw: proofOf(d, signature, undefined) }))) moved = true
+              }
+            }
+            return moved
+          }
+          for (const c of drawing) {
+            const card = onchain.cards[c.position]!
+            if (card.status.kind === "Delivered" && (yield* cards.move(c, { step: "settled", draw: chainDraw(card) }))) moved = true
+          }
+          const waiting = drawing.filter((c) => onchain.cards[c.position]!.status.kind === "Drawing")
+          for (const round of new Set(waiting.map((c) => onchain.cards[c.position]!.round))) {
+            const request = oraoRequest(address, round)
+            const value = filledRandomness((yield* solana.account(request))?.data ?? Buffer.alloc(0))
+            if (value) {
+              const out = yield* solana.send([
+                program.instruction("finish_draw", {
+                  config: program.config,
+                  customer: program.customer(wallet),
+                  checkout: address,
+                  randomness: request,
+                  checkout_payer: onchain.payer,
+                  event_authority: program.eventAuthority,
+                  program: program.id
+                }, { round })
+              ], [], () => Effect.void).pipe(Effect.catchTag("ProgramRejected", (e) => Effect.succeed(e)))
+              // Finished by someone else meanwhile: the next pass reads it from the account.
+              if (out instanceof ProgramRejected) continue
+              const settled = new Set(waiting.flatMap((c) => (c.settle_tx ? [c.settle_tx.signature] : [])))
+              const fill = (yield* solana.signatures(request, 5)).find((s) => s !== out.signature && !settled.has(s))
+              for (const e of out.events.filter((ev) => ev.name === "Draw")) {
+                const d = e.data as unknown as DrawEvent
+                const c = waiting.find((r) => r.position === d.card)
+                if (c && (yield* cards.move(c, { step: "settled", round, draw: proofOf(d, out.signature, fill) }))) moved = true
+              }
+            } else if (Date.now() / 1000 >= Number(onchain.requested_at) + 3600) {
+              const state = yield* solana.account(ORAO_NETWORK_STATE)
+              if (!state) continue
+              yield* solana.send([
+                program.instruction("request_again", {
+                  payer: solana.feePayer,
+                  checkout: address,
+                  old_request: request,
+                  vrf: ORAO_VRF,
+                  network_state: ORAO_NETWORK_STATE,
+                  treasury: oraoTreasury(state.data),
+                  request: oraoRequest(address, onchain.rounds)
+                }, { round })
+              ], [], () => Effect.void).pipe(
+                Effect.catchTag("ProgramRejected", (e) => Effect.logWarning(`checkout ${co.id}: request_again refused (${e.message})`))
+              )
+              yield* alerts.admin(`checkout ${co.id}: ORAO hadn't filled round ${round} after an hour; asked again`)
+            }
+          }
+          return moved
+        })
 
       /** One step forward. Returns false when the checkout is finished or must wait. */
       const step = (co: CheckoutRow, resumed: boolean): Effect.Effect<boolean, Unknown> =>
@@ -444,39 +577,56 @@ export class Purchases extends Context.Service<Purchases, {
                 }
                 if (changed) return true
               }
-              // Each card's id is its order id, which makes admission idempotent onchain: re-sending never debits twice.
-              const outcome = yield* submit(co, "admit_tx", "purchase_many", {
-                customer: co.account_id,
-                items: all.map((c) => ({
-                  reference_price: String(c.reference_price),
-                  mode: c.requested_mode,
-                  order_id: c.id,
-                  max_debit: String(c.max_debit ?? c.reference_price),
-                  ...(c.quoted_lucky_amount !== null ? { lucky_amount: String(c.quoted_lucky_amount) } : {})
-                }))
-              }).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
-              const signed = (yield* loadCheckout(co.id)).admit_tx
+              const wallet = new PublicKey(co.account_id)
+              // One at a time, each under the customer's next Checkout number: that makes admission idempotent onchain (a
+              // retry of an admitted checkout can't debit twice, even after its account has closed).
+              const outcome = yield* admitLock.withPermits(1)(
+                submit(
+                  co,
+                  "admit_tx",
+                  Effect.gen(function*() {
+                    const customer = yield* solana.customer(wallet)
+                    if (!customer) return yield* new ProgramRejected({ message: "No balance yet; add funds first" })
+                    const address = program.checkout(wallet, customer.checkouts)
+                    const ix = program.instruction("admit", {
+                      operator: solana.operator,
+                      payer: solana.feePayer,
+                      config: program.config,
+                      customer: program.customer(wallet),
+                      checkout: address
+                    }, {
+                      number: customer.checkouts,
+                      cards: all.map((c) => ({
+                        reference_price: BigInt(c.reference_price),
+                        mode: c.requested_mode === null ? null : toProgramMode(c.requested_mode),
+                        max_debit: BigInt(c.max_debit ?? c.reference_price),
+                        lucky_amount: c.quoted_lucky_amount === null ? null : BigInt(c.quoted_lucky_amount)
+                      }))
+                    })
+                    return { ix, also: { number: String(customer.checkouts), address: address.toBase58() } }
+                  })
+                ).pipe(Effect.catchTag("ProgramRejected", (e: ProgramRejected) => Effect.succeed(e)))
+              )
+              const saved = yield* loadCheckout(co.id)
               // Refused, e.g. the price or the Cashback Reserve moved since the customer confirmed: their words, nothing charged.
-              if (outcome instanceof ContractRejected) {
-                yield* move(co, { step: "rejected", error: outcome.message }, { step: "rejected", error: outcome.message, admit_tx: signed })
+              if (outcome instanceof ProgramRejected) {
+                yield* move(co, { step: "rejected", error: outcome.message }, { step: "rejected", error: outcome.message, admit_tx: saved.admit_tx })
                 return false
               }
-              // A `purchase` sent before carts (resumed after an upgrade) answered one id.
-              const ids = Array.isArray(outcome.value) ? outcome.value.map(Number) : [Number(outcome.value)]
-              // A repeated admission logs no event; read each purchase back from the contract.
-              const each: Array<readonly [Row, Record<string, unknown> & { step: Step }]> = []
-              for (const [i, c] of all.entries()) {
-                const purchaseId = ids[i]!
-                const admitted = eventFor(outcome.events, "purchase", purchaseId)?.purchase ?? (yield* near.view("get_purchase", { purchase_id: purchaseId }))
-                each.push([c, { step: "ordering", contract_purchase_id: purchaseId, admitted, admit_tx: signed }])
-              }
+              const onchain = yield* solana.checkout(new PublicKey(saved.address!))
+              if (!onchain) return yield* new SolanaUnavailable({ message: `checkout ${co.id}: its account isn't visible yet` })
+              const each = all.map((c) => {
+                const card = onchain.cards[c.position]!
+                const admitted = { mode: fromProgramMode(card.mode), max_price: String(card.max_price), lucky_amount: String(card.lucky_amount), created_at: String(onchain.created_at) }
+                return [c, { step: "ordering" as const, contract_purchase_id: c.position, admitted, admit_tx: saved.admit_tx }] as const
+              })
               return yield* move(co, { step: "ordering" }, undefined, each)
             }
             case "ordering": {
               if (bitrefill.guest) {
                 // Charged long ago and still not paid for (Base or Bitrefill kept failing): nothing was signed, so
                 // refund it now rather than order again, and a late card never races a Reclaim.
-                if (!co.pay_tx && overdue(co, all, (yield* credit.settings).waitMinutes)) {
+                if (!co.pay_tx && overdue(co, all, WAIT_MINUTES)) {
                   yield* alerts.admin(`checkout ${co.id} couldn't be ordered and paid for in time; refunding it in full`)
                   return yield* failAll(co, "We couldn't order and pay for this card in time")
                 }
@@ -526,7 +676,6 @@ export class Purchases extends Context.Service<Purchases, {
               if (order._tag === "NoCredit") {
                 // Nothing was ordered or paid: wait for credit instead of refunding straight away.
                 yield* move(co, { step: "restock", error: order.reason }, { step: "restock", error: order.reason })
-                yield* Effect.all([credit.refresh, refill.kick], { discard: true })
                 return false
               }
               return yield* failAll(co, `Bitrefill refused: ${"reason" in order ? order.reason : order._tag}`)
@@ -539,66 +688,64 @@ export class Purchases extends Context.Service<Purchases, {
                   invoice_id: null
                 })
               }
-              // Saved only over the payment this run was handed (none, or the lost one it replaces). A run that
-              // loaded the checkout before another saved its payment stops here, before sending a second one.
-              // Saved only while the invoice is fresh, too (PAY_SEND_LIMIT_MS): signing can wait on the wallet's lock
-              // or on Chain Signatures past the check below, and a payment that isn't saved is never sent. With
-              // nothing saved, the next pass asks for a fresh invoice.
-              const savePayment = (p: SignedPayment) =>
+              if (!solana.payWallet || !solana.feePayer) return yield* new SolanaUnavailable({ message: "the Pay Wallet's or fee payer's key isn't set" })
+              const payWallet = solana.payWallet
+              const feePayer = solana.feePayer
+              // Saved before it's sent, and only over the payment this run was handed (none, or the lost one it replaces),
+              // while the invoice is fresh: a run that loaded the checkout before another saved its payment stops here.
+              const savePayment = (p: Signed) =>
                 sql<{ id: string }>`
                   UPDATE checkouts SET pay_tx = ${JSON.stringify(p)}::jsonb, updated_at = now()
-                  WHERE id = ${co.id} AND step = 'pay' AND pay_tx->>'hash' IS NOT DISTINCT FROM ${co.pay_tx?.hash ?? null}
+                  WHERE id = ${co.id} AND step = 'pay' AND pay_tx->>'signature' IS NOT DISTINCT FROM ${co.pay_tx?.signature ?? null}
                     AND invoice_at > now() - interval '50 minutes'
                   RETURNING id`.pipe(
                   Effect.orDie,
                   Effect.flatMap((saved) =>
-                    saved.length === 1 ? Effect.void : Effect.flatMap(loadCheckout(co.id), (current) =>
-                      Effect.die(
-                        current.step === "pay" && current.invoice_at && Date.now() - time(current.invoice_at) > PAY_SEND_LIMIT_MS
-                          ? `checkout ${co.id}: its Base payment was signed after invoice ${current.invoice_id} neared expiry; neither saved nor sent`
-                          : `checkout ${co.id}: another run saved a Base payment first; not sending a second`
-                      ))
+                    saved.length === 1
+                      ? Effect.void
+                      : Effect.die(`checkout ${co.id}: another run saved a payment first, or invoice ${co.invoice_id} neared expiry; not sending`)
                   )
                 )
-              // Once the invoice is about to expire nothing is sent, not even again, and nothing new is signed for
-              // it: Base is only asked where the saved payment is. Paying an expired invoice would leave our USDC
-              // at Bitrefill with no card. `base.pay` checks the limit again under the wallet's lock, right before
-              // sending: waiting on the lock can outlast it.
-              const late = co.pay_tx !== null && Date.now() - time(co.invoice_at!) > PAY_SEND_LIMIT_MS
-              const status = yield* (late
-                ? base.status(co.pay_tx!.hash)
-                : base.pay(co.pay_to as Hex, Number(co.pay_amount), co.pay_tx, savePayment, time(co.invoice_at!) + PAY_SEND_LIMIT_MS).pipe(
-                  Effect.catchTag("ContractRejected", (e) => Effect.fail(new BaseUnavailable({ message: `Chain Signatures refused: ${e.message}` })))
-                ))
-              if (status === "pending") {
-                if (late && !co.error) {
-                  // Said on the cards too, where the admin panel shows it.
-                  const error = `Base payment ${co.pay_tx!.hash} wasn't mined before invoice ${co.invoice_id} neared expiry, so it isn't sent again`
-                  yield* saveCheckout(co.id, { error })
-                  yield* sql`UPDATE purchases SET error = ${error}, updated_at = now() WHERE checkout_id = ${co.id} AND step = 'pay'`.pipe(Effect.orDie)
-                }
-                return false
+              const fresh = Effect.gen(function*() {
+                const config = yield* solana.config
+                const payee = new PublicKey(co.pay_to!)
+                const payeeUsdc = getAssociatedTokenAddressSync(config.usdc_mint, payee, true)
+                return yield* solana.send([
+                  createAssociatedTokenAccountIdempotentInstruction(feePayer, payeeUsdc, payee, config.usdc_mint),
+                  createTransferCheckedInstruction(config.pay_wallet, config.usdc_mint, payeeUsdc, payWallet, BigInt(co.pay_amount!), 6)
+                ], ["payWallet"], savePayment)
+              })
+              // A payment that never landed is signed again while the invoice is fresh; past that, the invoice is asked for again.
+              const sent: Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | TxExpired> = co.pay_tx ? solana.resume(co.pay_tx) : fresh
+              const result: Outcome | ProgramRejected | "late" = yield* sent.pipe(
+                Effect.catchTag("TxExpired", (): Effect.Effect<Outcome | "late", ProgramRejected | SolanaUnavailable> =>
+                  Date.now() - time(co.invoice_at!) < PAY_SEND_LIMIT_MS ? fresh : Effect.succeed("late" as const)),
+                Effect.catchTag("ProgramRejected", (e) => Effect.succeed(e))
+              )
+              if (result === "late") {
+                return yield* move(co, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null, pay_tx: null }, {
+                  step: "ordering",
+                  invoice_id: null
+                })
               }
-              if (status === "reverted") {
+              if (result instanceof ProgramRejected) {
                 // Nothing moved (say, the float ran short): wait for money like any other, then order afresh.
-                const error = "The Base payment reverted; nothing was paid"
+                const error = `The payment failed, so nothing was paid: ${result.message}`
                 yield* move(co, { step: "restock", error, pay_tx: null, invoice_id: null, invoice_token: null, invoice_at: null }, {
                   step: "restock",
                   error,
                   invoice_id: null
                 })
-                yield* alerts.admin(`checkout ${co.id}: its Base payment to Bitrefill reverted (nothing moved); it waits for the float`)
-                yield* Effect.all([credit.refresh, refill.kick], { discard: true })
+                yield* alerts.admin(`checkout ${co.id}: its payment to Bitrefill failed (${result.message}); it waits for the Pay Wallet's float`)
                 return false
               }
-              // `ordered_at` marks the money leaving the Base Float, which is when the payment is mined, not when it's
-              // signed: Credit counts the cards as held until then and as spent from then, so a float read while the
-              // payment was still on its way never looks like money gone missing.
               const at = new Date().toISOString()
               return yield* move(co, { step: "delivery", ordered_at: at }, { step: "delivery", ordered_at: at })
             }
             case "delivery": {
-              if (shared.length === 0) return yield* move(co, { step: all.some((c) => c.step === "confirm" || c.step === "fail") ? "settle" : "done" })
+              // Cards already settled may be waiting for their Draws: finish those first, so a slow card never holds them.
+              if (yield* finishDraws(co, all)) return true
+              if (shared.length === 0) return yield* move(co, { step: onward(all.map((c) => c.step)) })
               const token = co.invoice_token ? String(unseal(`invoice:${co.id}`, co.invoice_token)) : undefined
               // Bitrefill is asked about every card of the invoice, in the order they were ordered (the cards it was
               // ordered for keep its id), so each is matched to its own order. Asked about alone, a card still on its
@@ -639,9 +786,9 @@ export class Purchases extends Context.Service<Purchases, {
               // Every card still waiting is still on its way: asked again after the reconciler's backoff, not round settle at once.
               if (each.length === 0) return yield* new BitrefillUnavailable({ message: `invoice ${co.invoice_id} is still on its way` })
               if (undelivered.length > 0 && co.pay_tx) {
-                // We paid this invoice from the Base Float: the customer is refunded in full, and the money is ours to recover.
+                // We paid this invoice from the Pay Wallet: the customer is refunded in full, and the money is ours to claim back.
                 yield* alerts.admin(
-                  `checkout ${co.id}: Bitrefill didn't deliver ${undelivered.join(", ")} on paid invoice ${co.invoice_id}; Base payment ${co.pay_tx.hash}. Ask Bitrefill support for a refund.`
+                  `checkout ${co.id}: Bitrefill didn't deliver ${undelivered.join(", ")} on paid invoice ${co.invoice_id}; payment ${co.pay_tx.signature}. Claim the refund to the Pay Wallet.`
                 )
               }
               const moved = yield* move(co, { step: "settle" }, undefined, each)
@@ -655,34 +802,60 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "settle": {
               const due = all.filter((c) => c.step === "confirm" || c.step === "fail")
-              const next: CheckoutStep = all.some((c) => c.step === "delivery") ? "delivery" : "done"
-              if (due.length === 0) return yield* move(co, { step: next, settle_tx: null })
+              if (due.length === 0) return yield* move(co, { step: onward(all.map((c) => c.step)), settle_tx: null })
               const delivered = due.filter((c) => c.step === "confirm")
               const failed = due.filter((c) => c.step === "fail")
-              const outcome = yield* submit(co, "settle_tx", "settle", {
-                delivered: delivered.map((c) => Number(c.contract_purchase_id)),
-                failed: failed.map((c) => Number(c.contract_purchase_id))
-              }).pipe(Effect.catchTag("ContractRejected", (e: ContractRejected) => Effect.succeed(e)))
-              if (outcome instanceof ContractRejected) {
+              const address = new PublicKey(co.address!)
+              const wallet = new PublicKey(co.account_id)
+              const lucky = (c: Row) => typeof c.admitted?.mode === "object"
+              const outcome = yield* submit(
+                co,
+                "settle_tx",
+                Effect.gen(function*() {
+                  const [config, onchain, state] = yield* Effect.all([solana.config, solana.checkout(address), solana.account(ORAO_NETWORK_STATE)])
+                  if (!onchain) return yield* new ProgramRejected({ message: "Its Checkout account has closed" })
+                  // Delivered Lucky cards share one randomness request, under the Checkout's next seed.
+                  const randomness = delivered.some(lucky) && state
+                    ? { vrf: ORAO_VRF, network_state: ORAO_NETWORK_STATE, treasury: oraoTreasury(state.data), request: oraoRequest(address, onchain.rounds) }
+                    : {}
+                  const ix = program.instruction("settle", {
+                    operator: solana.operator,
+                    payer: solana.feePayer,
+                    config: program.config,
+                    customer: program.customer(wallet),
+                    checkout: address,
+                    vault: program.vault,
+                    vault_authority: program.vaultAuthority,
+                    pay_wallet: config.pay_wallet,
+                    checkout_payer: onchain.payer,
+                    ...randomness
+                  }, { delivered: Buffer.from(delivered.map((c) => c.position)), failed: Buffer.from(failed.map((c) => c.position)) })
+                  return { ix }
+                })
+              ).pipe(Effect.catchTag("ProgramRejected", (e: ProgramRejected) => Effect.succeed(e)))
+              if (outcome instanceof ProgramRejected) {
                 // Refused as a whole, say one card was reclaimed meanwhile: read each card onchain before telling the
                 // customer anything, close the ones that are closed, and settle the rest with a fresh transaction.
                 yield* Effect.logWarning(`settlement of checkout ${co.id} refused (${outcome.message})`)
+                const onchain = yield* solana.checkout(address)
                 let closed = 0
                 for (const c of due) {
-                  const onchain = yield* near.view<OnchainPurchase | null>("get_purchase", { purchase_id: Number(c.contract_purchase_id) })
-                  const status = onchain?.status
-                  // Not closed yet, e.g. the Draw callback failed: settled again with a fresh transaction.
-                  if (status === "Pending" || status === "Drawing") continue
+                  // An account that has closed holds no open card: the ones we never settled were reclaimed.
+                  const card = onchain?.cards[c.position]
+                  const status = card?.status.kind ?? "Reclaimed"
+                  if (status === "Pending") continue
                   closed++
                   const confirm = c.step === "confirm"
+                  if (status === "Drawing") {
+                    yield* cards.move(c, { step: "drawing", round: card!.round })
+                    continue
+                  }
                   if (status === "Delivered") {
                     if (confirm) {
-                      // A Lucky Buy drawn by another transaction (say, the customer's retry_draw): record its result
-                      // from the chain. That transaction isn't known here, so no settle_tx stands in as its proof.
-                      const draw = chainDraw(onchain!)
+                      const draw = chainDraw(card!)
                       yield* cards.move(c, { step: "settled", error: outcome.message, ...(draw ? { draw, settle_tx: null } : {}) })
                     } else {
-                      yield* cards.move(c, { step: "stuck", error: `fail_purchase refused, delivered onchain: ${outcome.message}` })
+                      yield* cards.move(c, { step: "stuck", error: `failing it was refused, delivered onchain: ${outcome.message}` })
                       yield* alerts.admin(`purchase ${c.id} is delivered onchain but we tried to fail it`)
                     }
                     continue
@@ -696,11 +869,22 @@ export class Purchases extends Context.Service<Purchases, {
                 return closed > 0
               }
               const signed = (yield* loadCheckout(co.id)).settle_tx
-              const drawOf = (c: Row) => eventFor(outcome.events, "draw", Number(c.contract_purchase_id)) ?? null
-              return yield* move(co, { step: next, settle_tx: null }, undefined, [
-                ...delivered.map((c) => [c, { step: "settled" as const, draw: drawOf(c), settle_tx: signed }] as const),
+              const round = Number(outcome.events.find((e) => e.name === "DrawRequested")?.data.round ?? 0)
+              const after = [
+                ...delivered.map((c) => [c, lucky(c) ? { step: "drawing" as const, round, settle_tx: signed } : { step: "settled" as const, settle_tx: signed }] as const),
                 ...failed.map((c) => [c, { step: "failed" as const, settle_tx: signed }] as const)
-              ])
+              ]
+              const steps = all.map((c) => after.find(([a]) => a.id === c.id)?.[1].step ?? c.step)
+              return yield* move(co, { step: onward(steps), settle_tx: null }, undefined, after)
+            }
+            case "draw": {
+              if (!all.some((c) => c.step === "drawing")) return yield* move(co, { step: onward(all.map((c) => c.step)) })
+              // ORAO fills a request in 4-20 s: wait for it here a little, then leave it to the reconciler.
+              for (let i = 0; i < 15; i++) {
+                if (yield* finishDraws(co, all)) return true
+                yield* Effect.sleep("2 seconds")
+              }
+              return false
             }
             default:
               return false
@@ -777,7 +961,7 @@ export class Purchases extends Context.Service<Purchases, {
       }
 
       const view = (row: Row): Purchase => {
-        const status = row.step === "settled"
+        const status = row.step === "settled" || row.step === "drawing"
           ? "delivered"
           : row.step === "failed" || row.step === "rejected"
           ? row.step
@@ -829,9 +1013,9 @@ export class Purchases extends Context.Service<Purchases, {
               })
             }
             : {}),
-          ...(row.redemption && row.step === "settled" ? openRedemption(row) : {}),
-          ...(row.admit_tx ? { admitTx: row.admit_tx.hash } : {}),
-          ...(row.settle_tx ? { settleTx: row.settle_tx.hash } : {}),
+          ...(row.redemption && (row.step === "settled" || row.step === "drawing") ? openRedemption(row) : {}),
+          ...(row.admit_tx ? { admitTx: row.admit_tx.signature } : {}),
+          ...(row.settle_tx ? { settleTx: row.settle_tx.signature } : {}),
           ...(row.contract_purchase_id !== null ? { contractPurchaseId: Number(row.contract_purchase_id) } : {}),
           createdAt: new Date(row.created_at).toISOString(),
           ...(row.used_at && row.step === "settled" ? { usedAt: new Date(row.used_at).toISOString() } : {})
@@ -846,34 +1030,40 @@ export class Purchases extends Context.Service<Purchases, {
           return { voucher, referencePrice: pkg.priceMicroUsdc }
         })
 
-      /** The RPC's own error text (endpoint, upstream reply) stays in our logs; the contract's own refusal is the customer's answer. */
-      const quoteRefused = (e: { message: string }) =>
+      /** The RPC's own error text stays in our logs; the program's own refusal is the customer's answer. */
+      const quoteRefused = (e: SolanaUnavailable | ProgramRejected) =>
         new PurchaseInvalid({
-          message: e.message.includes("Reserve too small")
-            ? "The reserve is too small for a Lucky Buy right now; use Normal"
-            : /Smart contract panicked: ([^"\\]+)/.exec(e.message)?.[1] ?? "Couldn't get a price from NEAR right now. Try again in a moment."
+          message: e._tag === "ProgramRejected"
+            ? e.message.includes("Reserve too small") ? "The reserve is too small for a Lucky Buy right now; use Normal" : e.message
+            : "Couldn't get a price right now. Try again in a moment."
         })
-      // The contract's own terms (ADR-0004): the server never works out a Lucky Amount itself.
-      const contractQuote = (referencePrice: number, mode: Mode) =>
-        near.view<QuoteView>("quote", { reference_price: String(referencePrice), mode }).pipe(
-          Effect.tapError((e) => Effect.logWarning(`quote: ${e.message}`)),
-          Effect.mapError(quoteRefused)
-        )
       /**
-       * A cart's terms (ADR-0013): each card priced on the reserve the cards before it left. A card's confirmed Lucky
-       * Amount, when the reserve still covers it, is what it plays and locks, as admission would.
+       * A cart's terms (ADR-0013), from simulating the program's `quote_many`: each card priced on the reserve the cards
+       * before it left. A card's confirmed Lucky Amount, when the reserve still covers it, is what it plays and locks, as
+       * admission would. The server never works out a Lucky Amount itself (ADR-0004).
        */
       const contractQuotes = (items: ReadonlyArray<{ readonly referencePrice: number; readonly mode: Mode; readonly luckyAmount?: number | undefined }>) =>
-        near.view<ReadonlyArray<QuoteView>>("quote_many", {
-          items: items.map((i) => ({
-            reference_price: String(i.referencePrice),
-            mode: i.mode,
-            ...(i.luckyAmount === undefined ? {} : { lucky_amount: String(i.luckyAmount) })
-          }))
-        }).pipe(
+        solana.simulate([
+          program.instruction("quote_many", { config: program.config }, {
+            items: items.map((i) => ({
+              reference_price: BigInt(i.referencePrice),
+              mode: toProgramMode(i.mode),
+              lucky_amount: i.luckyAmount === undefined ? null : BigInt(i.luckyAmount)
+            }))
+          })
+        ]).pipe(
+          Effect.map((o) =>
+            decodeReturn<Array<ChainQuote>>("quote_many", o.returnData ?? Buffer.alloc(0)).map((q): QuoteView => ({
+              mode: fromProgramMode(q.mode),
+              reference_price: String(q.reference_price),
+              lucky_amount: String(q.lucky_amount),
+              max_price: String(q.max_price)
+            }))
+          ),
           Effect.tapError((e) => Effect.logWarning(`quote_many: ${e.message}`)),
           Effect.mapError(quoteRefused)
         )
+      const contractQuote = (referencePrice: number, mode: Mode) => Effect.map(contractQuotes([{ referencePrice, mode }]), (qs) => qs[0]!)
       const toQuote = (q: QuoteView) =>
         new Quote({ mode: q.mode, referencePrice: Number(q.reference_price), luckyAmount: Number(q.lucky_amount), maxPrice: Number(q.max_price) })
 
@@ -906,8 +1096,8 @@ export class Purchases extends Context.Service<Purchases, {
             AND created_at > now() - interval '10 minutes'`.pipe(Effect.orDie)
         // Each admission the contract refuses costs the operator a fee and the customer nothing.
         if ((n?.refused ?? 0) >= MAX_RECENT_REFUSALS) return yield* invalid("Several of your purchases were just refused; wait a few minutes and try again")
-        const a = yield* near.view<ContractAccount | null>("get_account", { account_id: accountId }).pipe(
-          Effect.mapError(() => invalid("Couldn't read your balance from NEAR; try again in a moment"))
+        const a = yield* solana.customer(new PublicKey(accountId)).pipe(
+          Effect.mapError(() => invalid("Couldn't read your balance; try again in a moment"))
         )
         if (!a) return yield* invalid("No balance yet; add funds first")
         if (Number(a.balance) < MIN_PRICE) return yield* invalid("Insufficient balance; add funds first")
@@ -969,21 +1159,8 @@ export class Purchases extends Context.Service<Purchases, {
           ))
         const real = priced.filter((p) => p.real)
         const sum = real.reduce((s, p) => s + p.referencePrice, 0)
-        // No checkout is refused for its size: one our money can't cover waits, uncharged, for a refill sized for it.
-        // Only one bigger than Bitrefill lets our account hold could never be bought.
-        if (real.length > 0) {
-          // Read Bitrefill first if we haven't yet; unreadable, the checkout simply waits like any other.
-          if (!(yield* credit.view).snapshot) yield* credit.refresh
-          const c = yield* credit.view
-          const most = Math.max(0, c.free) + (c.snapshot?.room ?? Number.POSITIVE_INFINITY)
-          if (sum > most) {
-            return yield* invalid(
-              inputs.length === 1
-                ? `That card is bigger than we can buy right now (up to ${usd(most)}). Please choose a smaller one.`
-                : `This cart is bigger than we can buy right now (up to ${usd(most)} in all). Please remove a card or two.`
-            )
-          }
-        }
+        // No checkout is refused for its size: one the Pay Wallet's float can't cover waits, uncharged, while the owner
+        // tops it up (or the cards before it settle and repay it).
         // A guest order needs the customer's Checkout Email, and stays within Bitrefill's limits for it (ADR-0012).
         // One on the customer's own Bitrefill account is under that account's limits, which Bitrefill checks.
         const asGuest = real.length > 0 && bitrefill.guest && !(yield* connect.connected(accountId))
@@ -1009,12 +1186,12 @@ export class Purchases extends Context.Service<Purchases, {
         // Normal, the quote's maximum in a Lucky Buy, each card priced on the reserve the cards before it left
         // (quote_many). Each card goes with its confirmed Lucky Amount, so the cards after it are priced on what admission
         // will lock for it, not on the most the reserve would let it play now. The contract still checks all of it.
-        const modes = priced.map((p) => p.input.mode ?? account.default_mode)
+        const modes = priced.map((p) => p.input.mode ?? fromProgramMode(account.default_mode))
         const quotes = yield* contractQuotes(priced.map((p, i) => ({ referencePrice: p.referencePrice, mode: modes[i]!, luckyAmount: confirmedLucky[i] })))
         // A refusal after signing costs the operator gas and counts against the customer (MAX_RECENT_REFUSALS), so a
         // price that rose since they confirmed is refused here, before anything is signed; one that fell buys at today's.
         const debits: Array<number> = []
-        let versions: ReadonlyArray<GameVersion> | undefined
+        let versions: ReadonlyArray<{ readonly premium_bps: number }> | undefined
         for (const [i, { input, voucher, referencePrice }] of priced.entries()) {
           const q = quotes[i]!
           const mode = modes[i]!
@@ -1030,7 +1207,7 @@ export class Purchases extends Context.Service<Purchases, {
             // quotes the most the reserve allows) is debited today's price plus that amount's premium, as the contract
             // works it out from the Game Version (quote_at: the premium rounded up).
             if (lucky !== undefined && lucky !== Number(q.lucky_amount)) {
-              versions ??= yield* near.view<ReadonlyArray<GameVersion>>("get_game_versions").pipe(Effect.mapError(quoteRefused))
+              versions ??= (yield* solana.config.pipe(Effect.mapError(quoteRefused))).versions
               const premium = versions[mode.lucky]?.premium_bps
               if (premium === undefined) return yield* about(i, voucher.name)(invalid("That quote is out of date; please confirm again."))
               debit = referencePrice + Math.ceil(lucky * premium / 10_000)
@@ -1043,13 +1220,13 @@ export class Purchases extends Context.Service<Purchases, {
         if (Number(account.balance) < debitTotal) return yield* invalid("Insufficient balance; add funds first")
         const over = debits.findIndex((d) => Number(account.per_purchase_limit) < d)
         if (over >= 0) return yield* about(over, priced[over]!.voucher.name)(invalid("Over the per-purchase spending limit"))
-        const spent = account.day === Math.floor(Date.now() / DAY_MS) ? Number(account.spent_today) : 0
+        const spent = Number(account.day) === Math.floor(Date.now() / DAY_MS) ? Number(account.spent_today) : 0
         if (spent + debitTotal > Number(account.daily_limit)) return yield* invalid("Over the daily spending limit")
         // The Lucky Amount each card is accepted under: the customer's, or (an older client) the contract's quote now.
         const luckyAmounts = priced.map(({ input }, i) => (typeof input.mode !== "object" ? null : confirmedLucky[i] ?? Number(quotes[i]!.lucky_amount)))
         // Deciding "go or wait" and recording it happen under one lock, so two checkouts can never both count on the
         // same money.
-        const placed = yield* credit.guard((free) =>
+        const placed = yield* floatGuard((free) =>
           Effect.gen(function*() {
             // The same cards sent twice at once: the copy that waited for the lock finds the first's, and returns it
             // rather than count it against itself. (Every checkout is recorded under this lock; the keys' unique index
@@ -1089,8 +1266,10 @@ export class Purchases extends Context.Service<Purchases, {
           })
         )
         if ("again" in placed) return yield* sentBefore(placed.again)
-        if (placed.waiting) yield* refill.kick
         const after = yield* byKey
+        if (placed.waiting) {
+          yield* alerts.admin(`checkout ${after[0]!.checkout_id} waits for the Pay Wallet: its float can't cover ${usd(sum)} yet. Top it up, or it's cancelled after ${WAIT_MINUTES} minutes.`)
+        }
         return { checkoutId: after[0]!.checkout_id, ids: after.map((r) => r.id), go: !placed.waiting }
       })
 
@@ -1171,6 +1350,12 @@ export class Purchases extends Context.Service<Purchases, {
       const giveUp = (id: string) =>
         Effect.gen(function*() {
           const co = yield* loadCheckout(id)
+          // A Draw needs nothing but ORAO's randomness, which finishing or asking again gets: it's never given up.
+          if (co.step === "draw") {
+            yield* alerts.admin(`checkout ${id}: a Draw is still unfinished after ${MAX_ATTEMPTS} tries`)
+            yield* sql`UPDATE checkouts SET attempts = 0 WHERE id = ${id}`.pipe(Effect.orDie)
+            return yield* advance(id, true)
+          }
           // A guest order that never got as far as a payment cost us nothing (an unpaid invoice just expires): the
           // customer is refunded in full now, rather than left "stuck" for a human until they can Reclaim.
           if (bitrefill.guest && co.step === "ordering" && !co.pay_tx) {
@@ -1217,7 +1402,7 @@ export class Purchases extends Context.Service<Purchases, {
       // new ones), or is cancelled after waitMinutes: uncharged if it never reached admission, refunded in full
       // through `settle` if it did.
       const promote = Effect.gen(function*() {
-        const { waitMinutes } = yield* credit.settings
+        const waitMinutes = WAIT_MINUTES
         // While sales are closed, nothing new is admitted; waiting checkouts keep their place (and their timer).
         // At Bitrefill's order limit, charged ones wait too, rather than be refused and refunded.
         const shop = yield* sales.status
@@ -1235,18 +1420,15 @@ export class Purchases extends Context.Service<Purchases, {
             if (co.step === "waiting") {
               const error = "We couldn't get this card ready in time, so we cancelled it. You weren't charged."
               if (yield* move(co, { step: "rejected", error }, { step: "rejected", error })) yield* notify(co.id)
-            } else if (yield* failAll(co, "Bitrefill credit didn't arrive in time")) {
+            } else if (yield* failAll(co, "The Pay Wallet's float didn't cover it in time")) {
               yield* FiberSet.run(workflows, advance(co.id, false, true))
             }
             continue
           }
           if ((co.step === "waiting" && !shop.open) || (co.step === "restock" && shop.reason === "limit")) continue
           const next = co.step === "waiting" ? "admit" : "ordering"
-          // Bitrefill refused a restock checkout for credit: order it again only on a balance read since then, never
-          // on the estimate that was already wrong (that would re-order every 10 seconds, spending Bitrefill calls).
-          const fresh = (readAt: Date | undefined) => co.step === "waiting" || (readAt !== undefined && readAt.getTime() >= time(co.updated_at))
-          const go = yield* credit.guard((free, readAt) =>
-            free >= total(all) && fresh(readAt) ? move(co, { step: next, error: null }, { step: next, error: null }) : Effect.succeed(false)
+          const go = yield* floatGuard((free) =>
+            free >= total(all) ? move(co, { step: next, error: null }, { step: next, error: null }) : Effect.succeed(false)
           )
           // The customer may have left: tell them in Telegram how it ended.
           if (go) yield* FiberSet.run(workflows, advance(co.id, false, true))
@@ -1256,15 +1438,19 @@ export class Purchases extends Context.Service<Purchases, {
 
       // A stuck card the customer reclaimed (or that was failed) onchain is over: say so here too.
       const settleClosed = Effect.gen(function*() {
-        const rows = yield* sql<Row>`SELECT * FROM purchases WHERE step = 'stuck' AND contract_purchase_id IS NOT NULL LIMIT 50`.pipe(Effect.orDie)
+        const rows = yield* sql<Row & { checkout_address: string }>`
+          SELECT p.*, c.address AS checkout_address FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+          WHERE p.step = 'stuck' AND c.address IS NOT NULL LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
-          const onchain = yield* near.view<OnchainPurchase | null>("get_purchase", { purchase_id: Number(row.contract_purchase_id) })
-          if (onchain?.status === "Reclaimed" || onchain?.status === "Failed") {
-            if (yield* cards.move(row, { step: "failed", error: onchain.status === "Reclaimed" ? "Reclaimed" : row.error })) yield* tell(row.account_id, [yield* load(row.id)])
+          // An account that has closed holds no open card: one we gave up on was reclaimed.
+          const card = (yield* solana.checkout(new PublicKey(row.checkout_address)))?.cards[row.position]
+          const status = card?.status.kind ?? "Reclaimed"
+          if (status === "Reclaimed" || status === "Failed") {
+            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) yield* tell(row.account_id, [yield* load(row.id)])
           }
-          // Delivered after we gave up (say, the customer re-ran the Draw): their code is ready, so show it.
-          if (onchain?.status === "Delivered" && row.redemption !== null) {
-            const draw = chainDraw(onchain)
+          // Delivered after we gave up (say, someone else finished its Draw): their code is ready, so show it.
+          if (status === "Delivered" && row.redemption !== null) {
+            const draw = card ? chainDraw(card) : null
             if (yield* cards.move(row, { step: "settled", ...(draw ? { draw, settle_tx: null } : {}) })) yield* tell(row.account_id, [yield* load(row.id)])
           }
         }

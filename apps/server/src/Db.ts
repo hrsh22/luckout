@@ -382,6 +382,14 @@ export const migrationSteps = {
   "0029_purchase_used": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE purchases ADD COLUMN used_at TIMESTAMPTZ`
+  }),
+  // Solana (ADR-0015): a checkout is one numbered Checkout account, and a Lucky card waits on one of its randomness
+  // requests (its round) between settle and its Draw.
+  // ponytail: appended while Phase 2 runs; squashed into one migration for the fresh Solana database before it deploys.
+  "0030_solana_checkouts": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE checkouts ADD COLUMN number BIGINT, ADD COLUMN address TEXT`
+    yield* sql`ALTER TABLE purchases ADD COLUMN round SMALLINT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

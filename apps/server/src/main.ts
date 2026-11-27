@@ -20,6 +20,7 @@ import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
 import { checkOperatorKey, Near, Network, otherNetworkAccounts } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
+import { Chain, Solana } from "./Solana.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
@@ -213,7 +214,7 @@ const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.laye
   // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
   Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer)),
   Layer.provideMerge(Base.layer),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Swap.layer, Alerts.layer)),
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Swap.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
 
