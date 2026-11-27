@@ -200,7 +200,7 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
 - **`SOLANA_OPERATOR_SECRET_KEY is …, but the program's operator is …`:** put the operator's key in `.env`. If the owner changed the operator, put the new key in.
 - **`SOLANA_PAY_WALLET_SECRET_KEY doesn't own the program's Pay Wallet account …`:** the same, for the Pay Wallet.
 - **`Another Luckout server is already running against this database`:** `pm2 list`, and stop the extra process. Exactly one may run.
-- **`This database belongs to …, but SOLANA_PROGRAM_ID is …`** (or `SOLANA_CLUSTER`), or **`This database belongs to the NEAR deployment …`:** `DATABASE_URL` points at another deployment's database (`DeploymentLock`). Point it at this site's own.
+- **`This database belongs to …, but SOLANA_PROGRAM_ID is …`** (or `SOLANA_CLUSTER`), or **`This database belongs to the NEAR deployment …`:** `DATABASE_URL` points at another deployment's database (`DeploymentLock`), which was left as it was: the check comes before any migration. Point it at this site's own.
 - `SOLANA_CLUSTER` must be `localnet`, `devnet` or `mainnet`. Anything else stops the start.
 
 ## Rolling back a release
@@ -213,7 +213,7 @@ A release goes in this order: the program (upgraded by hand, staging's first), t
   - Put back the server that goes with that program too.
 - **The server:**
   - A failed deploy prints the command to go back: `bash deploy/remote-deploy.sh <branch> <earlier commit>`.
-  - If the server was refused at its key check, nothing was migrated, and going back is safe.
+  - If the server was refused at its key check or its database check (`This database belongs to …`), nothing was migrated, and going back is safe.
   - Otherwise its migrations stay. Check `git diff <earlier> <failed> -- apps/server/src/Db.ts` first. A new table, or a new nullable or defaulted column, doesn't bother the old code. Anything else means fixing forward: revert or fix on `staging` by PR, then release.
 - **The web:**
   - Vercel's Instant Rollback brings back the previous production deployment. On the Hobby plan it only goes back one.

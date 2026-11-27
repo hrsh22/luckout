@@ -23,14 +23,36 @@ test("a database stays with the deployment that first used it: staging and produ
   assert.deepEqual(exits.map(Exit.isSuccess), [true, true, false, false])
 })
 
-test("the NEAR deployment's database is refused: the Solana one starts on a fresh database", async () => {
-  const { SqlClient } = await import("effect/sql")
-  const exit = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
-    const sql = yield* SqlClient.SqlClient
-    yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('contract', '"app.luckout.near"'::jsonb, 'server')`
-    return yield* Effect.exit(start({ SOLANA_CLUSTER: "mainnet", SOLANA_PROGRAM_ID: PRODUCTION }))
-  })).pipe(Effect.provide(DbMemory)))
-  assert.equal(Exit.isSuccess(exit), false)
+test("another deployment's database, or NEAR's, is refused before any migration touches it", async () => {
+  const { PGlite } = await import("@electric-sql/pglite")
+  const { PgliteClient } = await import("@effect/sql-pglite")
+  const { Migrator, SqlClient } = await import("effect/sql")
+  const { migrationSteps } = await import("./Db.ts")
+  /** A database migrated up to (not including) `upTo`, with `settings` rows; then a mainnet server for PRODUCTION starts on it. */
+  const startOn = async (upTo: string, settings: Record<string, string>) => {
+    const pg = await PGlite.create()
+    const result = await Effect.runPromise(Effect.gen(function*() {
+      const sql = yield* SqlClient.SqlClient
+      yield* Migrator.make({})({ loader: Migrator.fromRecord(Object.fromEntries(Object.entries(migrationSteps).filter(([name]) => name < upTo))) })
+      for (const [key, value] of Object.entries(settings)) {
+        yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')`
+      }
+      const exit = yield* Effect.exit(Effect.scoped(start({ SOLANA_CLUSTER: "mainnet", SOLANA_PROGRAM_ID: PRODUCTION })))
+      const [last] = yield* sql<{ id: number }>`SELECT max(migration_id)::int AS id FROM effect_sql_migrations`
+      const [codes] = yield* sql<{ t: string | null }>`SELECT to_regclass('telegram_link_codes')::text AS t`
+      return { started: Exit.isSuccess(exit), last: last?.id, codes: codes?.t ?? null }
+    }).pipe(Effect.provide(PgliteClient.layer({ liveClient: pg }))))
+    await pg.close()
+    return result
+  }
+  // The NEAR deployment's last migration was 0029, and it recorded its network and contract. The Solana migrations
+  // after it would drop its telegram_link_codes.
+  assert.deepEqual(await startOn("0030", { network: "mainnet", contract: "app.luckout.near" }), { started: false, last: 29, codes: "telegram_link_codes" })
+  assert.deepEqual(await startOn("0030", { network: "testnet" }), { started: false, last: 29, codes: "telegram_link_codes" }, "one from before it recorded its contract")
+  // Staging's database, one migration behind: refused as it stands.
+  assert.deepEqual(await startOn("0033", { cluster: "mainnet", program: STAGING }), { started: false, last: 32, codes: null })
+  // This deployment's own, one migration behind: migrated.
+  assert.deepEqual(await startOn("0033", { cluster: "mainnet", program: PRODUCTION }), { started: true, last: 33, codes: null })
 })
 
 test("every purchase made before carts becomes a checkout of its own, under its own id, with its invoice and payment", async () => {
