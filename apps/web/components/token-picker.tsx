@@ -1,7 +1,6 @@
 "use client"
 
-import type { Holding } from "@/lib/balances"
-import { CHAIN_NAMES } from "@/lib/evm"
+import type { Holding } from "@/lib/holdings"
 import { Select } from "@base-ui/react/select"
 import type { TopUpAsset } from "@luckout/api"
 import { Check, ChevronDown } from "lucide-react"
@@ -11,6 +10,9 @@ import { Check, ChevronDown } from "lucide-react"
 const TOKENS = new Set(["usdc", "usdt", "eth", "btc", "sol", "near"])
 const CHAINS = new Set(["base", "eth", "arb", "pol", "bsc", "sol", "btc", "near"])
 const OTHER_CHAINS: Record<string, string> = { sol: "Solana", btc: "Bitcoin", near: "NEAR" }
+
+/** The chains 1Click Top-Ups come from, as the page names them. */
+export const CHAIN_NAMES: Record<string, string> = { eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana" }
 
 export const chainLabel = (chain: string) => CHAIN_NAMES[chain] ?? OTHER_CHAINS[chain] ?? chain
 const tokenIcon = (symbol: string) => {

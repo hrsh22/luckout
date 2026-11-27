@@ -1,5 +1,13 @@
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
-import { TransferReverted } from "./evm.ts"
+
+// TODO(phase3-wallet): written for Top-Ups sent from a connected EVM or Solana wallet; rework for the Deposit Address.
+
+/** The wallet's transfer was mined and reverted: nothing left the wallet, so sending it again is safe. */
+export class TransferReverted extends Error {
+  constructor() {
+    super("Your wallet's transfer failed on its chain. Nothing reached Luckout.")
+  }
+}
 
 /**
  * What the wallet is asked to transfer for an EVM or Solana Top-Up. The token comes from the asset the quote was asked for
@@ -8,7 +16,7 @@ import { TransferReverted } from "./evm.ts"
  */
 export const transferFor = (
   asset: Pick<TopUpAsset, "symbol" | "chain" | "contract" | "decimals">,
-  q: Pick<TopUpQuote, "symbol" | "chain" | "depositAddress" | "amountIn" | "swap">
+  q: Pick<TopUpQuote, "symbol" | "chain" | "depositAddress" | "amountIn"> & { swap?: boolean | undefined }
 ) => {
   // A swap-paid Top-Up's deposit address takes only USDC: the token itself sent there would be lost.
   if (q.swap) throw new Error("This Top-Up is paid through a swap. Nothing was sent: start the top-up again.")
@@ -16,7 +24,7 @@ export const transferFor = (
   return { chain: q.chain, contract: asset.contract, decimals: asset.decimals, to: q.depositAddress, amount: q.amountIn }
 }
 
-type Priced = Pick<TopUpQuote, "symbol" | "chain" | "amountInFormatted" | "swap">
+type Priced = Pick<TopUpQuote, "symbol" | "chain" | "amountInFormatted"> & { swap?: boolean | undefined }
 
 /**
  * Whether the real quote is the price the customer was shown: the same token on the same chain, at most half a

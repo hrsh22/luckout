@@ -1,7 +1,7 @@
 "use client"
 
 import { errorMessage } from "@/lib/api"
-import { network } from "@/lib/chain"
+import { cluster } from "@/lib/chain"
 import { motion } from "motion/react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
@@ -62,7 +62,8 @@ export const stepLabel = (step: string) => (step === "pay" ? "Paying Bitrefill" 
 export const eth = (wei: string) => (Number(BigInt(wei) / 10n ** 12n) / 1e6).toFixed(5).replace(/0+$/, "").replace(/\.$/, "")
 
 /** An address or transaction on Basescan (Base Sepolia on testnet), e.g. basescan(`tx/${hash}`). */
-export const basescan = (path: string) => `https://${network === "testnet" ? "sepolia." : ""}basescan.org/${path}`
+// TODO(phase3-admin): payments are on Solana now; link the Solana explorer instead.
+export const basescan = (path: string) => `https://${cluster === "mainnet" ? "" : "sepolia."}basescan.org/${path}`
 
 export function AdminTabs() {
   const path = usePathname()

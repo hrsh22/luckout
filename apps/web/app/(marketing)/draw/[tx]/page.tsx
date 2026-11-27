@@ -1,10 +1,10 @@
 import { shortAccount } from "@/components/avatar"
 import { BrowserCheck } from "@/components/browser-check"
 import { LocalTime } from "@/components/local-time"
-import { contractId, explorer, NotOnChain } from "@/lib/chain"
+import { explorer } from "@/lib/chain"
 import { usd, usdDown, usdUp } from "@/lib/format"
 import { cashbackPct } from "@/lib/modes"
-import { loadDrawAt, TX_HASH } from "@/lib/proof"
+import { loadDrawAt, NotOnChain, TX_HASH } from "@/lib/proof"
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
 import { cache } from "react"
@@ -127,8 +127,7 @@ export default async function DrawProof({ params, searchParams }: Props) {
       </section>
 
       <p className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-muted">
-        <a className="underline underline-offset-4" href={explorer(tx)} target="_blank" rel="noreferrer">The transaction on NearBlocks</a>
-        <span>Contract {contractId}</span>
+        <a className="underline underline-offset-4" href={explorer(tx)} target="_blank" rel="noreferrer">The transaction on Solana Explorer</a>
       </p>
     </main>
   )

@@ -1,3 +1,4 @@
+// @ts-nocheck TODO(phase3-wallet): NEAR and Reown Top-Ups, reached from nothing now (components/funds.tsx is a stub); rebuild on Solana or delete.
 "use client"
 
 import { AmountField } from "@/components/amount-field"

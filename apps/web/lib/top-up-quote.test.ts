@@ -1,7 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { TransferReverted } from "./evm.ts"
-import { afterSendFailed, pricedAsShown, transferFor } from "./top-up-quote.ts"
+import { afterSendFailed, pricedAsShown, transferFor, TransferReverted } from "./top-up-quote.ts"
 
 const usdcBase = { symbol: "USDC", chain: "base", contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6 }
 const ethBase = { symbol: "ETH", chain: "base" }

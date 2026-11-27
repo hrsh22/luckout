@@ -1,248 +1,34 @@
 "use client"
 
+// TODO(phase3-wallet): rebuild on Solana (ADR-0015): the Deposit Address after the one-time approval
+// (useWalletActions().approve), a tap for USDT that has arrived, 1Click Top-Ups from other chains, and withdrawal to any
+// Solana address (useWalletActions().withdraw). The NEAR version is at `git show 9313693:apps/web/components/funds.tsx`.
+
 import { AmountField } from "@/components/amount-field"
-import { shortAccount } from "@/components/avatar"
-import { sortAssets, TokenPicker } from "@/components/token-picker"
-import { TopUp } from "@/components/top-up"
-import { TopUpWallet } from "@/components/top-up-wallet"
-import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { useWalletActions } from "@/lib/actions"
-import { api } from "@/lib/api"
-import { walletChain } from "@/lib/evm"
-import { dollars, toMicro, usd, usdUp } from "@/lib/format"
-import { MIN_GAS_NEAR, network } from "@/lib/near"
-import { pendingMode } from "@/lib/onboarding"
-import { useSession, WALLET_NAMES } from "@/lib/session"
-import type { TopUpAsset } from "@luckout/api"
-import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
-import { toast } from "sonner"
-import { useEffect, useState } from "react"
 
 export { AmountField }
 
+const SOON = "Adding and withdrawing funds is being rebuilt for Solana."
+
 /** Add funds without leaving the page, as a sheet. */
-export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onOpenChange: (o: boolean) => void; need?: number }) {
+export function AddFundsSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void; need?: number }) {
   return (
-    <Sheet
-      open={open}
-      onOpenChange={onOpenChange}
-      title="Add funds"
-      description={need ? `You need ${usdUp(need)} more for this card.` : "Your balance pays for cards. Withdraw what you don't spend any time."}
-    >
-      <AddFundsPanel key={need ?? 0} need={need} onDone={(ok) => ok && onOpenChange(false)} onContinue={() => onOpenChange(false)} />
+    <Sheet open={open} onOpenChange={onOpenChange} title="Add funds">
+      <p className="text-ink-soft">{SOON}</p>
     </Sheet>
   )
 }
 
-/**
- * Test USDC on testnet, a deposit from the wallet, or (on mainnet) a top-up from any chain. A mode
- * chosen before the first deposit is saved right after it, with one more approval. A top-up from another chain
- * takes minutes and lands by itself: once it's sent, `onContinue` lets the customer go on without waiting for it.
- */
-export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | undefined; onDone: (ok: boolean) => void; onContinue?: () => void }) {
-  const { accountId, walletUsdc, walletNear, gasFree, intents, wallet } = useSession()
-  // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
-  const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
-  const actions = useWalletActions()
-  const inWallet = Number(walletUsdc ?? 0)
-  // What's needed for the card, or else $25, or all of it when the wallet holds less (and at least the $1 minimum).
-  const [amount, setAmount] = useState(() =>
-    need
-      ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000)
-      : inWallet >= 1_000_000 && inWallet < 25_000_000
-      ? dollars(Math.floor(inWallet / 10_000) * 10_000)
-      : "25"
-  )
-  const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
-  // An EVM or Solana wallet tops up from its own chain; "wallet" is then the USDC already in its NEAR Intents account.
-  const [tab, setTab] = useState<"wallet" | "chain">(intents ? "chain" : "wallet")
-  const micro = toMicro(amount)
-
-  const done = async (ok: boolean) => {
-    if (ok && accountId && pendingMode(accountId)) {
-      setBusy("mode")
-      await actions.savePendingMode()
-    }
-    setBusy(undefined)
-    onDone(ok)
-  }
-
-  return (
-    <div className="flex flex-col gap-6">
-      {noGas && accountId && <GasNotice accountId={accountId} />}
-      {network === "testnet" && (
-        <div className="flex flex-col gap-3 rounded-[1.5rem] bg-gold-soft p-5 text-gold-ink">
-          <p className="flex items-center gap-2 font-semibold"><Droplets size={18} aria-hidden="true" />This is the testnet</p>
-          <p className="text-[15px]">Get 100 free test USDC, deposited straight into your balance in one {intents ? "signature" : "approval"}.</p>
-          <Button variant="gold" size="lg" loading={busy === "faucet" || busy === "mode"} disabled={!!busy || noGas} onClick={() => (setBusy("faucet"), actions.faucet().then(done))}>
-            {busy === "mode" ? "Saving your default mode" : "Get 100 test USDC"}
-          </Button>
-        </div>
-      )}
-
-      {network === "mainnet" && (
-        <div role="tablist" className="flex rounded-full bg-soft p-1">
-          {(intents ? (["chain", "wallet"] as const) : (["wallet", "chain"] as const)).map((t) => (
-            <button
-              key={t}
-              role="tab"
-              type="button"
-              aria-selected={tab === t}
-              onClick={() => setTab(t)}
-              className="h-10 flex-1 rounded-full text-sm font-semibold text-muted transition-colors aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-card"
-            >
-              {t === "wallet" ? (intents ? "From NEAR Intents" : "From your NEAR wallet") : intents ? `From your ${WALLET_NAMES[wallet!]} wallet` : "From another chain"}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {tab === "chain" && network === "mainnet"
-        ? intents ? <TopUpWallet need={need} onDone={done} onContinue={onContinue} /> : <TopUp need={need} onDone={done} onContinue={onContinue} />
-        // Testnet with nothing to deposit: the faucet above is the whole story.
-        : network === "testnet" && inWallet < 1_000_000
-        ? null
-        : (
-          <div className="flex flex-col gap-4">
-            {network === "testnet" && <p className="font-semibold">{intents ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
-            <AmountField
-              label="Amount to deposit in USDC"
-              value={amount}
-              onChange={setAmount}
-              picks={[
-                ...(need ? [{ label: `Exactly ${usdUp(Math.max(need, 1_000_000))}`, micro: Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 }] : []),
-                { label: "$10", micro: 10_000_000 },
-                { label: "$25", micro: 25_000_000 },
-                { label: "$50", micro: 50_000_000 },
-                ...(inWallet >= 1_000_000 ? [{ label: "All of it", micro: inWallet }] : [])
-              ]}
-            />
-            <p className="text-sm text-muted">
-              {accountId && (intents ? `Your NEAR Intents account has ${usd(inWallet)} USDC. ` : `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `)}
-              Deposits start at $1.{gasFree && " No network fee: Luckout pays it."}
-            </p>
-            <Button
-              size="lg"
-              loading={busy === "deposit"}
-              disabled={!!busy || noGas || !(micro >= 1_000_000) || micro > inWallet}
-              onClick={() => (setBusy("deposit"), actions.deposit(micro).then(done))}
-            >
-              {micro > inWallet
-                ? `More than your ${intents ? "NEAR Intents account" : "wallet"} holds`
-                : `${intents ? "Move" : "Deposit"} ${micro >= 1_000_000 ? usd(micro) : ""}${intents ? " into Luckout" : ""}`}
-            </Button>
-          </div>
-        )}
-    </div>
-  )
-}
-
-/** The wallet has no NEAR for fees: how to get some, then check again without reloading. */
-function GasNotice({ accountId }: { accountId: string }) {
-  const { refresh } = useSession()
-  const [checking, setChecking] = useState(false)
-  return (
-    <div className="flex flex-col gap-3 rounded-[1.5rem] bg-warn-soft p-5 text-warn">
-      <p className="flex items-center gap-2 font-semibold"><Fuel size={18} aria-hidden="true" />Your wallet needs a little NEAR first</p>
-      <p className="text-[15px]">
-        Every NEAR transaction costs a tiny fee in NEAR (about 0.03), and {shortAccount(accountId)} has none yet.{" "}
-        {network === "testnet" ? "Get free testnet NEAR from the official faucet, then check again." : "Send it about 0.1 NEAR, then check again."}
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {network === "testnet" && (
-          <a href="https://docs.near.org/getting-started/faucet" target="_blank" rel="noreferrer" className={buttonVariants({ size: "sm" })}>
-            Open the faucet<ExternalLink />
-          </a>
-        )}
-        <Button variant="light" size="sm" onClick={() => navigator.clipboard.writeText(accountId).then(() => toast.success("Account copied"))}>
-          <Copy />Copy account
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          loading={checking}
-          onClick={async () => {
-            setChecking(true)
-            await refresh().catch(() => {})
-            setChecking(false)
-          }}
-        >
-          Check again
-        </Button>
-      </div>
-    </div>
-  )
+/** Adding funds, inline (Welcome's step); `need` is what's missing for a purchase. */
+export function AddFundsPanel(_: { need?: number | undefined; onDone: (ok: boolean) => void; onContinue?: () => void }) {
+  return <p className="text-ink-soft">{SOON}</p>
 }
 
 export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { account, accountId, intents, wallet, token } = useSession()
-  const actions = useWalletActions()
-  const [amount, setAmount] = useState("")
-  const [busy, setBusy] = useState(false)
-  // EVM and Solana wallets on mainnet pick where it lands (ADR-0011); "" keeps it in their NEAR Intents account.
-  const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>([])
-  const [to, setTo] = useState("")
-  const balance = Number(account?.balance ?? 0)
-  const micro = toMicro(amount)
-  const outward = intents && network === "mainnet"
-
-  useEffect(() => {
-    if (open) setAmount(dollars(balance))
-  }, [open, balance])
-
-  useEffect(() => {
-    if (!open || !outward || !token) return
-    api((c) => c.topup.assets(), token).then((all) => {
-      const usdc = sortAssets(all.filter((a) => walletChain(wallet === "solana" ? "solana" : "evm", a.chain) && (a.symbol === "USDC" || a.symbol === "USDT")))
-      setAssets(usdc)
-      setTo((t) => t || (usdc.find((a) => a.symbol === "USDC" && a.chain === (wallet === "solana" ? "sol" : "base"))?.assetId ?? ""))
-    }, () => {})
-  }, [open, outward, token, wallet])
-  const destination = assets.find((a) => a.assetId === to)
-  // A swap to another chain starts at $1: no quick pick offers less than can be sent.
-  const least = destination ? 1_000_000 : 1
-
   return (
-    <Sheet
-      open={open}
-      onOpenChange={onOpenChange}
-      title="Withdraw"
-      description={`${
-        outward
-          ? "USDC goes to your own address on the chain you pick, or stays in your NEAR Intents account."
-          : intents
-          ? `USDC goes to your NEAR Intents account, where your ${WALLET_NAMES[wallet!]} wallet controls it.`
-          : `USDC goes back to ${accountId ? shortAccount(accountId) : "your wallet"}.`
-      } Money locked in a purchase in progress stays until it finishes.`}
-    >
-      <div className="flex flex-col gap-4">
-        <AmountField
-          label="Amount to withdraw in USDC"
-          value={amount}
-          onChange={setAmount}
-          picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }].filter((p) => p.micro >= least)}
-        />
-        {outward && (
-          <div className="flex flex-col gap-2 text-sm">
-            <span className="font-semibold text-muted">Send it to your own address, as</span>
-            <TokenPicker assets={assets} value={to} onChange={setTo} label="Send it to" none="Keep it in NEAR Intents" />
-            {destination && <span className="text-muted">Withdrawals start at $1. The swap's spread comes out of what arrives; there's no fee to Luckout and no gas for you.</span>}
-          </div>
-        )}
-        <Button
-          size="lg"
-          loading={busy}
-          disabled={busy || !(micro >= least) || micro > balance}
-          onClick={async () => {
-            setBusy(true)
-            if (await (destination ? actions.withdrawTo(micro, destination) : actions.withdraw(micro))) onOpenChange(false)
-            setBusy(false)
-          }}
-        >
-          {micro > balance ? `Your balance is ${usd(balance)}` : `Withdraw ${micro > 0 ? usd(micro) : ""}`}
-        </Button>
-      </div>
+    <Sheet open={open} onOpenChange={onOpenChange} title="Withdraw">
+      <p className="text-ink-soft">{SOON}</p>
     </Sheet>
   )
 }

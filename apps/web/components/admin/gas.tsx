@@ -1,3 +1,4 @@
+// @ts-nocheck TODO(phase3-admin): NEAR admin panel, reached from nothing now (components/admin/panel.tsx is a stub); rebuild on Solana or delete.
 "use client"
 
 import { shortAccount } from "@/components/avatar"
