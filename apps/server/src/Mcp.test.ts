@@ -1,13 +1,16 @@
+import { PublicKey } from "@solana/web3.js"
 import { Effect, Layer } from "effect"
 import { HttpRouter } from "effect/http"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { test } from "node:test"
 import { Bitrefill } from "./Bitrefill.ts"
-import { drawEvent, McpRoute, respond, type Tool, ToolError } from "./Mcp.ts"
-import { Near } from "./Near.ts"
+import { McpRoute, respond, type Tool, ToolError } from "./Mcp.ts"
+import type { Config, GameVersion } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
+import { type Outcome, Solana, SolanaUnavailable } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
-import { fakeBitrefill, fakeNear } from "./testing.ts"
+import { fakeBitrefill } from "./testing.ts"
 
 const tools: Array<Tool> = [
   { name: "echo", description: "", inputSchema: { type: "object" }, run: async (args) => args },
@@ -49,46 +52,85 @@ test("a call returns JSON text; a refusal says why; a crash leaks nothing", asyn
   assert.doesNotMatch(crashed.result.content[0]!.text, /hunter2/)
 })
 
-test("only our contract's successful receipts can carry a Draw", () => {
-  const log = (who: string) => `EVENT_JSON:${JSON.stringify({ standard: "luckout", version: "1.0.0", event: "draw", data: [{ purchase_id: who === "app.luckout.near" ? 10 : 99 }] })}`
-  const receipt = (executor_id: string, status: Record<string, unknown> = { SuccessValue: "" }) => ({ outcome: { executor_id, status, logs: [log(executor_id)] } })
-  assert.equal(drawEvent([receipt("evil.near"), receipt("app.luckout.near")], "app.luckout.near")?.purchase_id, 10)
-  assert.equal(drawEvent([receipt("evil.near")], "app.luckout.near"), undefined)
-  assert.equal(drawEvent([receipt("app.luckout.near", { Failure: {} })], "app.luckout.near"), undefined)
-})
+// verify_draw on a faked chain: the Draw below is worked out here, independently of draw.ts, as the program's game.rs does it.
 
-test("verify_draw tells a transaction NEAR has no record of from NEAR not answering", async () => {
-  const realFetch = globalThis.fetch
-  // The archival node, faked: whatever `archival` answers.
-  let archival = () => new Response("")
-  globalThis.fetch = (async () => archival()) as typeof fetch
+/** Classic's table, as the program's default_game_versions makes it. */
+const CLASSIC: GameVersion = {
+  name: "Classic",
+  premium_bps: 2_000,
+  outcomes: [
+    { final_bps: 0, chance_bps: 200 },
+    { final_bps: 6_000, chance_bps: 300 },
+    { final_bps: 7_200, chance_bps: 400 },
+    { final_bps: 8_400, chance_bps: 700 },
+    { final_bps: 9_600, chance_bps: 2_400 },
+    { final_bps: 12_000, chance_bps: 6_000 }
+  ]
+}
+const RANDOMNESS = Buffer.from(Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256))
+
+/** Card `card`'s Draw from RANDOMNESS on a $10 Classic card, as the program would record it. */
+const drawn = (card: number) => {
+  const random = createHash("sha256").update(Buffer.concat([RANDOMNESS, Uint8Array.of(card)])).digest()
+  const roll = Number(random.readBigUInt64LE(0) % 10_000n)
+  let cumulative = 0
+  const final_bps = CLASSIC.outcomes.find((o) => roll < (cumulative += o.chance_bps))!.final_bps
+  const [reference, lucky, max] = [10_000_000n, 10_000_000n, 12_000_000n]
+  const paid = reference - lucky + (lucky * BigInt(final_bps) + 9_999n) / 10_000n
+  const final_price = paid < max ? paid : max
+  return {
+    checkout: PublicKey.default, card, round: 0, randomness: RANDOMNESS, random, roll, game_version: 1,
+    reference_price: reference, lucky_amount: lucky, max_price: max, final_bps, final_price, cashback: max - final_price
+  }
+}
+
+const SIG = "5".repeat(87)
+
+test("verify_draw recomputes each card's Draw from the program's record, and says when there's none or Solana isn't answering", async () => {
+  // What the chain holds: undefined for no such (or a failed) transaction.
+  let landed: () => Effect.Effect<Outcome | undefined, SolanaUnavailable> = () => Effect.succeed(undefined)
+  const solana = Solana.of({
+    transaction: () => landed(),
+    config: Effect.succeed({ versions: [CLASSIC, CLASSIC, CLASSIC] } as unknown as Config)
+  } as unknown as Solana["Service"])
   const { handler, dispose } = HttpRouter.toWebHandler(
     McpRoute.pipe(Layer.provide([
       Layer.succeed(Bitrefill, fakeBitrefill()),
-      Layer.succeed(Near, fakeNear({ view: <A>() => Effect.succeed({ operator: "server.test" } as A) })),
+      Layer.succeed(Solana, solana),
       Layer.succeed(Purchases, {} as Purchases["Service"]),
       Layer.succeed(Telegram, {} as Telegram["Service"])
     ])),
     { disableLogger: true }
   )
-  const verify = async () => {
-    const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "verify_draw", arguments: { tx_hash: "4HWu4u4VAKfZZgezdYYLBYctgTdTuWbFEJ5wW6xPoSV2" } } }
+  const verify = async (args: object) => {
+    const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "verify_draw", arguments: args } }
     const res = await handler(new Request("http://luckout.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(call) }))
-    return (await res.json() as { result: { content: Array<{ text: string }> } }).result.content[0]!.text
+    const text = (await res.json() as { result: { content: Array<{ text: string }> } }).result.content[0]!.text
+    try {
+      return JSON.parse(text) as { card: number; all_match: boolean; checks: Array<{ label: string; ok: boolean }>; proof_page: string }
+    } catch {
+      return text
+    }
   }
-  const rpcError = (cause: string, status = 200) => () => Response.json({ jsonrpc: "2.0", id: 1, error: { name: "HANDLER_ERROR", cause: { name: cause } } }, { status })
+  const outcome = (events: Array<Record<string, unknown>>): Outcome => ({ signature: SIG, events: events.map((data) => ({ name: "Draw", data })), returnData: undefined, units: 0 })
   try {
-    archival = rpcError("UNKNOWN_TRANSACTION")
-    assert.equal(await verify(), "NEAR has no record of that transaction.")
-    // A hash that can't be one.
-    archival = rpcError("PARSE_ERROR", 400)
-    assert.equal(await verify(), "NEAR has no record of that transaction.")
-    archival = () => new Response("Bad Gateway", { status: 502 })
-    assert.match(await verify(), /isn't answering/)
-    archival = rpcError("TIMEOUT_ERROR")
-    assert.match(await verify(), /isn't answering/)
+    assert.match(String(await verify({ tx_hash: "not-a-signature" })), /must be a Solana transaction signature/)
+    assert.equal(await verify({ tx_hash: SIG }), "Solana has no record of that transaction, or it failed.")
+    landed = () => Effect.fail(new SolanaUnavailable({ message: "transaction: https://rpc.example/?api-key=secret timed out" }))
+    assert.equal(await verify({ tx_hash: SIG }), "Solana isn't answering right now. Try again in a moment.", "never the RPC's URL or key")
+    landed = () => Effect.succeed(outcome([]))
+    assert.equal(await verify({ tx_hash: SIG }), "That transaction has no Luckout Draw.")
+
+    // Two cards drawn together; the second's record has its Cashback changed by one base unit.
+    const forged = { ...drawn(3), cashback: drawn(3).cashback + 1n }
+    landed = () => Effect.succeed(outcome([drawn(0), forged]))
+    const first = await verify({ tx_hash: SIG })
+    assert.ok(typeof first === "object" && first.card === 0 && first.all_match, JSON.stringify(first))
+    assert.equal(typeof first === "object" && first.proof_page, `http://localhost:3000/draw/${SIG}?card=0`)
+    const second = await verify({ tx_hash: SIG, card: 3 })
+    assert.ok(typeof second === "object" && !second.all_match)
+    assert.deepEqual(typeof second === "object" && second.checks.filter((c) => !c.ok).map((c) => c.label), ["Cashback"])
   } finally {
-    globalThis.fetch = realFetch
     await dispose()
   }
 })

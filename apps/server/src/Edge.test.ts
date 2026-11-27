@@ -10,10 +10,10 @@ import { test } from "node:test"
 import { Bitrefill } from "./Bitrefill.ts"
 import { edge, MAX_BODY } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
-import { Near } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
+import { Solana } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
-import { fakeBitrefill, fakeNear } from "./testing.ts"
+import { fakeBitrefill } from "./testing.ts"
 
 // The edge exactly as main.ts serves it, on a real HTTP server at a throwaway port. Behind it: the real
 // sign-in endpoints with their handlers faked, and the real /mcp route (its tools are never called here).
@@ -31,7 +31,7 @@ const Routes = Layer.mergeAll(
   HttpApiBuilder.layer(Api).pipe(Layer.provide(AuthHandlers)),
   McpRoute.pipe(Layer.provide([
     Layer.succeed(Bitrefill, fakeBitrefill()),
-    Layer.succeed(Near, fakeNear()),
+    Layer.succeed(Solana, {} as Solana["Service"]),
     Layer.succeed(Purchases, {} as Purchases["Service"]),
     Layer.succeed(Telegram, {} as Telegram["Service"])
   ]))
