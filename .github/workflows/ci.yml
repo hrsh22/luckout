@@ -111,6 +111,55 @@ jobs:
       - run: cargo test --locked
         working-directory: contract/sandbox
 
+  # The Solana program (ADR-0015, programs/): unit tests, and LiteSVM tests that run it with ORAO's real VRF
+  # program and network state copied from mainnet (programs/fixtures.sh).
+  program:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: programs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cache/solana
+            programs/target
+          key: program-${{ hashFiles('programs/Cargo.lock', 'programs/rust-toolchain.toml') }}
+      # Agave's installer for this exact release, pinned by its sha256 as the actions are by commit.
+      - run: |
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/agave-install.sh" https://release.anza.xyz/v4.4.1/install
+          echo "21de1236fa39f6f0ad8b53968c6e80b530040bf88ab0557098f37e6becfadd2a  $RUNNER_TEMP/agave-install.sh" | sha256sum -c -
+          sh "$RUNNER_TEMP/agave-install.sh"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - run: cargo build-sbf --manifest-path luckout/Cargo.toml -- --locked
+      - run: ./fixtures.sh
+      - run: cargo test --locked
+
+  # The program built reproducibly, in the image pinned by digest below, so anyone can rebuild it byte for byte
+  # and compare it with the chain (`solana-verify verify-from-repo --mount-path programs`). Deploys use this
+  # job's build: gh run download <run id> -n luckout-so-<commit>
+  program-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: programs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/solana-verify
+          key: solana-verify-0.5.2
+      - run: command -v solana-verify || cargo install solana-verify --version 0.5.2 --locked
+      - run: solana-verify build --library-name luckout --base-image solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd
+      - run: echo "luckout.so executable hash $(solana-verify get-executable-hash target/deploy/luckout.so)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: luckout-so-${{ github.sha }}
+          path: programs/target/deploy/luckout.so
+          if-no-files-found: error
+
   # Deploys the server after both jobs pass: the testnet branch to the testnet site, staging to the
   # staging site, main to the mainnet site. Each runs only once its repository variable is "on", and the VM's forced command
   # fixes the branch per site, so this key can't deploy anything else (deploy/remote-deploy.sh).
