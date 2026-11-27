@@ -9,7 +9,8 @@ import { Suspense } from "react"
 const LINKS = [
   { href: "/#how", label: "How it works" },
   { href: "/#modes", label: "Modes" },
-  { href: "/fair", label: "Fairness" }
+  { href: "/fair", label: "Fairness" },
+  { href: "/docs", label: "Docs" }
 ]
 
 export function SiteHeader() {
@@ -31,6 +32,7 @@ export function SiteFooter({ compact = false }: { compact?: boolean }) {
         Solana {cluster}{cluster === "mainnet" ? "" : ", test cards only"}
       </span>
       <Link className={link} href="/fair">Fairness</Link>
+      <Link className={link} href="/docs">Docs</Link>
       {EXAMPLE_DRAW_HREF && <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>}
       <Suspense fallback={null}>
         <ProgramLink className={link} />

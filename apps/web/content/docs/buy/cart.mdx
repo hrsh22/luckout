@@ -1,0 +1,39 @@
+import { Note, Step, Steps } from "@/components/docs"
+import { CartSplit } from "@/components/docs-art"
+
+The Cart lets you buy up to 15 cards with one payment. Mix brands, amounts and modes: each card is still its own purchase, with its own code, its own Draw in a lucky mode, and its own refund if it can't be delivered.
+
+<CartSplit />
+
+## Fill it
+
+<Steps>
+  <Step title="Add cards" tint="sky">On a card's page, choose the amount, the mode and how many, then tap **Add to cart**. The cart icon at the top shows how many cards are in it.</Step>
+  <Step title="Check it">Open the cart to change how many of each, remove one, or change a card's mode on the [cart page](/cart). It shows the total and, for lucky cards, how much of it is the extra for a chance at cashback.</Step>
+  <Step title="Pay once" tint="gold">Tap **Checkout**, then **Pay**. The whole amount comes out of your balance in one go, and your cards follow on one page.</Step>
+</Steps>
+
+Fifteen cards is the most one Cart holds, counting each copy: three of one card and twelve of another make a full Cart. It lives in your browser, so signing out clears it.
+
+## How a Cart is bought
+
+- **All or nothing at the start.** The Cart is accepted as a whole, or not at all, and nothing is charged if it isn't.
+- **Then card by card.** A card that's slow doesn't hold up the others, and one that can't be delivered goes back to your balance in full, while the rest arrive as usual.
+- **Each lucky card has its own Draw,** with its own random result, and its own [Draw Proof](/docs/draw#draw-proofs).
+
+## Prices in a Cart
+
+Each card is priced on its own, and the Cart page keeps the prices fresh. If a price rises before you pay, you're asked to confirm again, and you're never charged more than the button showed.
+
+<Note title="Lucky cards in a big Cart">
+  The cards in a Cart share the Cashback Reserve, each priced on what the cards before it leave. On a big Cart, a later lucky card may play only part of its price, or be bought at the price in Normal. The Cart says so before you pay.
+</Note>
+
+## If you can't check out
+
+- **Your balance is short:** add funds for the difference, shown on the button.
+- **A card is over your limits:** your per-purchase limit applies to each card, and your daily limit to the whole Cart. See [Limits](/docs/limits).
+- **More than 15 of your cards are still in progress:** wait for them to finish, then check out.
+- **Bitrefill's daily limit for your email:** the Cart can have only as many cards as your email has left today. See [Bitrefill's limits](/docs/limits#bitrefills-limits).
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.

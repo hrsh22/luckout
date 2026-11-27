@@ -1,0 +1,48 @@
+import { Note, Step, Steps, Tile, Tiles } from "@/components/docs"
+
+Your balance is in USDC. Add it from the wallet you signed in with, or send almost any token from another chain or an exchange and it arrives as USDC. Everything starts on your [wallet page](/wallet), under **Add funds**.
+
+## Three ways in
+
+<Tiles>
+  <Tile title="From your wallet" href="#from-your-wallet" tint="sky">USDC already in the wallet you signed in with, moved in with one approval.</Tile>
+  <Tile title="From another chain" href="/docs/add-funds/other-chains" tint="lilac">USDC, USDT, ETH, BTC, SOL or wNEAR, from eight chains or an exchange.</Tile>
+  <Tile title="With ORE" href="/docs/add-funds/ore" tint="gold">ORE from a Solana wallet, swapped to USDC in one transaction you approve.</Tile>
+</Tiles>
+
+There are no top-up fees. Your wallet pays the sending chain's network fee, and a conversion's spread comes out of the amount, as with any exchange.
+
+## Which tab to use
+
+The **Add funds** panel has two tabs, named for the wallet you signed in with:
+
+| You signed in with | First tab | Second tab |
+|---|---|---|
+| A NEAR wallet | **From your NEAR wallet**: deposit USDC that's already in it | **From another chain**: get an address to send to from any chain or exchange |
+| An EVM or Solana wallet | **From your EVM wallet** (or Solana): pay from this wallet on any chain we take | **From NEAR Intents**: move in USDC waiting in your NEAR Intents account |
+
+The other-chain tabs are covered in [From another chain](/docs/add-funds/other-chains).
+
+## From your wallet
+
+With a NEAR wallet that already holds USDC:
+
+<Steps>
+  <Step title="Open Add funds" tint="sky">On your [wallet page](/wallet), tap **Add funds**, then **From your NEAR wallet**.</Step>
+  <Step title="Enter the amount">Type it, or tap $10, $25, $50 or **All of it**. Deposits start at $1.</Step>
+  <Step title="Approve in your wallet" tint="gold">Tap **Deposit** and approve. The USDC is in your balance as soon as the transaction lands, usually within seconds.</Step>
+</Steps>
+
+With an EVM or Solana wallet, the **From NEAR Intents** tab works the same way for USDC already in your NEAR Intents account, such as change from an earlier Top-Up. The button there says **Move into Luckout**.
+
+<Note title="If the page asks for a little NEAR">
+  Some NEAR wallets pay their own network fee, about 0.03 NEAR a transaction. If the page says your wallet needs a little NEAR first, send it about 0.1 NEAR, then tap **Check again**.
+</Note>
+
+## Your first deposit
+
+If you chose a default mode in Welcome, your first deposit saves it to your account too. If someone else's deposit opened your account first, the app asks for one more approval to save it.
+
+## Where to see it
+
+Your balance shows at the top of the [wallet page](/wallet), as **Balance in Luckout**. Money that's still on its way from another chain shows under **Money on its way** until it lands, and you can leave the page in the meantime.

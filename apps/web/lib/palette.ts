@@ -1,6 +1,10 @@
 import type { Mode } from "@luckout/api"
 import type { CSSProperties } from "react"
 
+/** Gold deepens with the cashback: pale for 10% back, full gold for 100% off. No cashback stays ink. */
+export const slabColor = (o: { cashback: number; price: number; pct: number }) =>
+  o.cashback === 0 ? "rgb(22 18 43 / 0.12)" : o.price === 0 ? "#FF9F1C" : ["#FFEBB0", "#FFE08A", "#FFD466", "#FFC53D", "#FFB21F"][Math.min(4, Math.round(o.pct / 10) - 1)]!
+
 export interface Palette {
   /** Gradient for big tiles. */
   tile: string

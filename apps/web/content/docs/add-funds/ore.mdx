@@ -1,0 +1,36 @@
+import { Flow, Note, Step, Steps } from "@/components/docs"
+
+You can pay for a Top-Up in ORE, a Solana token. 1Click doesn't take ORE directly, so Luckout builds one swap from ORE to USDC on Jupiter, and your Solana wallet approves it. From there it's like any other Top-Up: the USDC lands in your balance.
+
+<Flow
+  label="A Top-Up paid in ORE"
+  nodes={[
+    { title: "ORE in a Solana wallet", body: "Yours, or any Solana wallet you scan with." },
+    { title: "One swap you approve", body: "ORE to exactly the USDC the Top-Up needs." },
+    { title: "It lands in your balance", body: "Through 1Click, like any Top-Up.", tint: "gold" }
+  ]}
+/>
+
+## Pay with ORE
+
+<Steps>
+  <Step title="Choose ORE" tint="sky">On your [wallet page](/wallet), tap **Add funds**, open the tab for another chain, enter the USDC to receive, and pick **ORE** to pay with.</Step>
+  <Step title="Swap it">With a Solana wallet signed in, tap **Swap** and approve in your wallet. Any other way, tap **Get the code to scan** (or **Pay from a Solana wallet**) and scan the code.</Step>
+  <Step title="Approve the swap" tint="gold">Your wallet shows the swap before you approve it: the ORE going out and the USDC it buys. Then the Top-Up shows under **Money on its way** until it lands.</Step>
+</Steps>
+
+## Scanning the code
+
+The code is a Solana Pay request. Scan it with Phantom, Solflare or Backpack on your phone, or tap **Open in a wallet on this device**. It works from any Solana wallet, not only the one you signed in with, so you can pay with ORE even when you signed in with a NEAR or EVM wallet.
+
+## What it costs
+
+- **The swap takes exactly the ORE shown,** at the price you approve. Any USDC beyond what the Top-Up needs stays in the wallet that paid.
+- **The network fee** is under 0.007 SOL, paid by that wallet, including the token accounts the swap opens.
+- **No Luckout fees.** The rate includes Jupiter's and 1Click's spreads.
+
+<Note title="If the price expires">
+  A swap is priced for a short time. If it expires before you approve, nothing is sent: start the Top-Up again for a new price.
+</Note>
+
+Amounts and timing are the same as any [Top-Up from another chain](/docs/add-funds/other-chains): from 1 to 2,000 USDC, usually a few minutes.

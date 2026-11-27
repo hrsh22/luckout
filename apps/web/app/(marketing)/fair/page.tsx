@@ -54,6 +54,7 @@ export default async function Fair() {
         {EXAMPLE_DRAW_HREF
           ? <>, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.</>
           : "."}
+        {" "}How it all works, step by step: <Link href="/docs/fairness" className="font-semibold text-ink underline underline-offset-4">How Luckout stays fair</Link>.
       </p>
 
       {reserve && (

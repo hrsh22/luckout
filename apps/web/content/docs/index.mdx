@@ -1,0 +1,39 @@
+import { ExampleDraw, Step, Steps, Tile, Tiles } from "@/components/docs"
+
+Luckout sells gift cards for thousands of brands around the world, paid in USDC. Buy a card at its price, or pay a little more up front for a fair chance at cashback, sometimes the whole price back. Either way, the card is yours.
+
+## Three steps
+
+<Steps>
+  <Step title="Add funds" tint="sky">Add USDC, or send a token from Ethereum, Base, Solana, Bitcoin and other chains, and it arrives as USDC in your Luckout balance. Withdraw whatever you don't spend. [How to add funds](/docs/add-funds)</Step>
+  <Step title="Pick a card and a mode">Pay exactly the price in Normal, or choose Lite, Classic or Jackpot for a chance at cashback. You see every outcome and its chance before you buy. [The four modes](/docs/modes)</Step>
+  <Step title="Get the code, then the Draw" tint="gold">The card's code usually arrives within a minute. Then the Draw runs, and any cashback lands in your balance. [The Draw](/docs/draw)</Step>
+</Steps>
+
+Buy in the [shop](/shop), or ask the [Luckout bot in Telegram](/docs/telegram) to find a card and prepare it for you. Nothing is bought until you confirm.
+
+## What you can count on
+
+- **You always get the card you picked.** The Draw only decides the cashback. If a card can't be delivered, the whole amount goes back to your balance, with no Draw.
+- **Your money stays yours.** Your balance is held by the Luckout contract and credited to you. You can withdraw anything that isn't in a purchase, at any time.
+- **A stuck purchase comes back to you.** If we neither deliver nor cancel a purchase within 24 hours, you can take the full amount back yourself.
+- **Your limits hold.** The contract caps every purchase at the per-purchase and daily limits you set, including the ones the Telegram bot prepares.
+- **Every Draw is public.** Anyone can recompute a Draw in their browser. <ExampleDraw>See one</ExampleDraw>.
+
+## How Luckout earns
+
+Normal purchases cost exactly the price. Every lucky mode is built so that, across many purchases, buyers pay 105.6% of the price on average. That 5.6% is Luckout's only revenue: there are no top-up fees and no service fees. [How Luckout stays fair](/docs/fairness) shows how that's kept honest.
+
+## Where the cards come from
+
+Each card is bought on Bitrefill, and its code is shown to you in Luckout. Bitrefill also emails the code and its receipt to the Checkout Email you give. Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## Get started
+
+<Tiles>
+  <Tile title="Create your account" href="/docs/sign-in" tint="sky">Sign in with a NEAR, EVM or Solana wallet. It takes a minute.</Tile>
+  <Tile title="Buy your first card" href="/docs/buy" tint="lilac">Find a card for your country and choose how to pay.</Tile>
+  <Tile title="Questions?" href="/docs/faq" tint="gold">Short answers on cards, cashback, your money and the bot.</Tile>
+</Tiles>
+
+Ready now? [Create your account](/welcome), or [browse the shop](/shop) first.
