@@ -1,4 +1,5 @@
 import { BitrefillUnavailable, CatalogPage, type Category, Voucher, VoucherSummary } from "@luckout/api"
+import { PublicKey } from "@solana/web3.js"
 import { decode as decodeToon } from "@toon-format/toon"
 import { Cache, Clock, Config, Context, Data, Effect, Exit, flow, Layer, Option, Redacted, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
@@ -144,7 +145,7 @@ const about = (p: typeof McpProduct.Type) => {
   }
 }
 const McpPurchase = Schema.Struct({ response: Schema.Struct({ invoice_id: Schema.String }) })
-/** A guest invoice to pay in USDC on Base: exactly `altBasePrice` base units of `contractAddress`, to `address`. */
+/** A guest invoice to pay in USDC on Solana: exactly `altBasePrice` base units of `contractAddress` (the mint), to `address`. */
 const GuestPurchase = Schema.Struct({
   response: Schema.Struct({
     invoice_id: Schema.String,
@@ -167,8 +168,16 @@ const GuestInvoice = Schema.Struct({
   }))
 })
 const Token = Schema.Struct({ access_token: Schema.String, expires_in: Schema.Number })
-/** Native USDC on Base: the only coin a guest invoice is paid in. */
-const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+/** USDC on Solana: the only coin a guest invoice is paid in (ADR-0015), from the Pay Wallet. */
+const SOLANA_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+/** A Solana address: 32 bytes in base58. */
+const solanaAddress = (s: string) => {
+  try {
+    return new PublicKey(s).toBase58() === s
+  } catch {
+    return false
+  }
+}
 export const MCP_RESOURCE = "https://api.bitrefill.com/mcp"
 /** A guest invoice that ended without delivering; anything else unfinished is still on its way. */
 const GUEST_FAILED = /expired|refunded|blocked|error|failed|cancel/i
@@ -852,7 +861,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       // A guest's card is also sent to their Checkout Email as a Bitrefill gift, so the code reaches them outside Luckout too.
       const invoiceOrder = (cards: ReadonlyArray<Card>, buyer: Buyer) => {
         const items = cards.map((c) => ({ product_id: c.id, package_value: c.value }))
-        const args = { payment_method: "usdc_base", return_payment_link: false }
+        const args = { payment_method: "usdc_solana", return_payment_link: false }
         return ("email" in buyer
           ? asGuest("buy-products", {
             ...args,
@@ -862,8 +871,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
           : mcp("buy-products", { ...args, cart_items: items }, GuestPurchase, buyer.token)).pipe(
           Effect.flatMap(({ response: r }): Effect.Effect<Order, Rejected> => {
             const pay = r.payment_info
-            if (pay.contractAddress.toLowerCase() !== BASE_USDC) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Base` }))
-            if (!EVM_ADDRESS.test(pay.address)) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} has a malformed address` }))
+            if (pay.contractAddress !== SOLANA_USDC_MINT) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} wants ${pay.contractAddress}, not USDC on Solana` }))
+            if (!solanaAddress(pay.address)) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} has a malformed address` }))
             if (!Number.isSafeInteger(pay.altBasePrice) || pay.altBasePrice <= 0) return Effect.fail(new Rejected({ reason: `invoice ${r.invoice_id} has no usable amount` }))
             return Effect.succeed({ _tag: "Invoiced", invoiceId: r.invoice_id, accessToken: r.invoice_access_token, payTo: pay.address, amount: pay.altBasePrice })
           })

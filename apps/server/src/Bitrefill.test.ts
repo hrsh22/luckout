@@ -598,27 +598,28 @@ test("an order whose Redemption Data is null doesn't hold up the codes of the re
   assert.deepEqual(found.map((d) => (d._tag === "Delivered" ? d.redemption.code : d._tag)), ["AMZ", "Failed", "NFX"])
 })
 
-test("a guest invoice is refused unless it asks for USDC on Base, to a well-formed address, a usable amount", async () => {
+test("a guest invoice is refused unless it asks for USDC on Solana, to a well-formed address, a usable amount", async () => {
   const invoice = (payment: Record<string, unknown>) => () =>
     toolResult({
       response: {
         invoice_id: "inv-1",
         invoice_access_token: "token-1",
-        payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 10_000_000, contractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", ...payment }
+        payment_info: { address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", altBasePrice: 10_000_000, contractAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", ...payment }
       }
     })
   const order = (payment: Record<string, unknown>) =>
     withGuestBitrefill(invoice(payment), () => run((b) => b.order([{ id: "amazon-us", value: "10" }], { email: "alice@example.com" }), guestEnv))
-  assert.deepEqual(await order({}), { _tag: "Invoiced", invoiceId: "inv-1", accessToken: "token-1", payTo: `0x${"ab".repeat(20)}`, amount: 10_000_000 })
+  assert.deepEqual(await order({}), { _tag: "Invoiced", invoiceId: "inv-1", accessToken: "token-1", payTo: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", amount: 10_000_000 })
   const refused = async (payment: Record<string, unknown>, why: RegExp) => {
     const o = await order(payment)
     assert.equal(o._tag, "Refused", JSON.stringify(payment))
     assert.match("reason" in o ? o.reason : "", why)
   }
-  // USDC on another chain (Ethereum's), or another token on Base.
-  await refused({ contractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }, /not USDC on Base/)
+  // USDC on another chain (Base's), or another token on Solana (USDT).
+  await refused({ contractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" }, /not USDC on Solana/)
+  await refused({ contractAddress: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" }, /not USDC on Solana/)
   await refused({ address: "0x1234" }, /malformed address/)
-  await refused({ address: `0x${"ab".repeat(20)} ` }, /malformed address/)
+  await refused({ address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin " }, /malformed address/)
   await refused({ altBasePrice: 0 }, /no usable amount/)
   await refused({ altBasePrice: -5 }, /no usable amount/)
   await refused({ altBasePrice: 1.5 }, /no usable amount/)
@@ -641,7 +642,7 @@ test("a guest login Bitrefill stops taking (401) is renewed once and the call ma
     used.push(token)
     // The first login stops working (as when Bitrefill ends it early); the second works, until everything is refused.
     if (refuseAll || token === "login-1") return new Response("invalid_token", { status: 401 })
-    return toolResult({ response: { invoice_id: "inv-1", invoice_access_token: "t", payment_info: { address: `0x${"ab".repeat(20)}`, altBasePrice: 1, contractAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" } } })
+    return toolResult({ response: { invoice_id: "inv-1", invoice_access_token: "t", payment_info: { address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", altBasePrice: 1, contractAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" } } })
   }) as typeof fetch
   try {
     const r = await run((b) =>

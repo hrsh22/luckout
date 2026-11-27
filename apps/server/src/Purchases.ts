@@ -181,6 +181,11 @@ export const guestLimitRefusal = (used: { readonly orders: number; readonly day:
     ? `Bitrefill allows ${usd(GUEST_LIMITS.monthly)} of cards a month per email; ${these} would go over it.`
     : undefined
 }
+/**
+ * What Bitrefill lets our one paying address buy as a guest (ADR-0015): every guest card counts, whatever its email.
+ * Past it, new checkouts are refused until the window moves on; KYB is the way past it.
+ */
+export const PAYING_LIMITS = { daily: 10_000_000_000, monthly: 50_000_000_000 }
 /** A checkout's steps where every card is still at the checkout's own step. */
 const SHARED_STEPS = ["waiting", "admit", "ordering", "restock", "pay", "delivery"]
 /**
@@ -1169,6 +1174,16 @@ export class Purchases extends Context.Service<Purchases, {
           if (!email) return yield* invalid("Add the email for your cards first: Bitrefill needs one for each card (a throwaway one is fine).")
           const over = yield* overGuestLimit(email.key, sum, real.length)
           if (over) return yield* invalid(over)
+          const [paid] = yield* sql<{ day: string; month: string }>`
+            SELECT COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '1 day'), 0)::text AS day,
+                   COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '30 days'), 0)::text AS month
+            FROM purchases
+            WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
+              AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`.pipe(Effect.orDie)
+          if (Number(paid?.day ?? 0) + sum > PAYING_LIMITS.daily || Number(paid?.month ?? 0) + sum > PAYING_LIMITS.monthly) {
+            yield* alerts.admin(`Luckout's paying address reached Bitrefill's limit (${usd(PAYING_LIMITS.daily)} a day, ${usd(PAYING_LIMITS.monthly)} a month); new guest checkouts are refused until it frees up`)
+            return yield* invalid("Luckout has bought as many cards as Bitrefill allows us for now. Please try again later.")
+          }
         }
         // A Lucky Buy is admitted at the Lucky Amount it's accepted under, or refused: it may wait a day for money
         // while the reserve moves. The quote the customer saw carries it; without one, the contract's quote now. One
