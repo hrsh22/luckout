@@ -2,6 +2,7 @@
 
 import { AmountField } from "@/components/amount-field"
 import { shortAccount } from "@/components/avatar"
+import { HelpLink } from "@/components/help-link"
 import { sortAssets, TokenPicker } from "@/components/token-picker"
 import { TopUp } from "@/components/top-up"
 import { TopUpWallet } from "@/components/top-up-wallet"
@@ -134,6 +135,9 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
             </Button>
           </div>
         )}
+      <p className="text-sm text-muted">
+        <HelpLink href="/docs/add-funds">Every way to add funds</HelpLink>, with what each costs.
+      </p>
     </div>
   )
 }

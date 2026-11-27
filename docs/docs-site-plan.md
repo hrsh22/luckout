@@ -153,6 +153,18 @@ The voucher pages (`/shop/[id]`, such as "Swiggy gift card with USDC") are what 
   - Every `/docs` link and `#section` anchor on the docs and landing pages resolves (`~/.luckout/test-tools/browser-staging/docs-links.mjs`).
   - No page scrolls sideways at 375 or 1280 px.
 
+**Phase 3 done** (2026-11-28, branch `docs-links`):
+- **In the app,** `components/help-link.tsx` opens the docs in a new tab, so a half-finished purchase, a Welcome step or an open sheet stays where it was:
+  - the mode picker on a card's page, in Welcome and on the wallet page → `/docs/modes`
+  - the Checkout Email form → `/docs/sign-in#your-email-for-cards` (the email lives on that page, not on Limits)
+  - Bitrefill's limits → `/docs/limits#bitrefills-limits`; Connect Bitrefill → `/docs/limits#connect-bitrefill`
+  - Spending limits on the wallet page → `/docs/limits#your-spending-limits`
+  - Add funds (the sheet and Welcome) → `/docs/add-funds`
+  - a late purchase's Reclaim line → `/docs/refunds#reclaim`
+  - the Draw Proof page → `/docs/draw`, in the same tab, as `/fair` links `/docs/fairness`
+- **In the bot:** the Agent's prompt lists eight pages and `@hrsh22`. On the real model, "how does the draw work", "how do you make money", "my code isn't working" and "lite vs jackpot" each got a short answer and the one right page; plain buy requests got none.
+- **The test:** every `/docs` link in the web app, the Agent's prompt and the MDX pages must reach a listed page and an existing `#section` (a heading or a folded question). It fails on a planted `/docs/modes#nope`.
+
 **Still open:**
-- **A support email.** `/docs/support` and the FAQ give Telegram `@hrsh22` for now (2026-11-28); a support email comes later.
-- **Phase 3:** the in-app links, the Agent's prompt, and your Search Console step.
+- **A support email.** `/docs/support`, the FAQ and the bot give Telegram `@hrsh22` for now (2026-11-28); a support email comes later.
+- **Your step:** add `https://www.luckout.wtf/sitemap.xml` in Google Search Console once the docs are on production.

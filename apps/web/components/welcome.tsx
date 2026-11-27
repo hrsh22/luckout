@@ -4,6 +4,7 @@ import { SignInButton } from "@/components/app-nav"
 import { Avatar, shortAccount } from "@/components/avatar"
 import { CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsPanel } from "@/components/funds"
+import { HelpLink } from "@/components/help-link"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { TelegramLink } from "@/components/telegram-link"
@@ -136,7 +137,8 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               />
               <ModePicker value={mode} onChange={setMode} label="Default mode" compact />
               <p className="text-sm text-muted">
-                Every lucky mode averages 5.6% above the price over many purchases, and any cashback leaves you below it. Odds shown for a $20 card.
+                Every lucky mode averages 5.6% above the price over many purchases, and any cashback leaves you below it. Odds shown for a $20 card.{" "}
+                <HelpLink href="/docs/modes">How the modes work</HelpLink>
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <Button size="lg" loading={saving} onClick={confirmMode}>Continue with {modeName(mode)}</Button>
