@@ -1,5 +1,6 @@
 "use client"
 
+import { HelpLink } from "@/components/help-link"
 import { Button } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { usd } from "@/lib/format"
@@ -49,7 +50,12 @@ export function CheckoutEmailForm({ label = "Save", onSaved, titled = false }: {
       </div>
       {save.error
         ? <p role="alert" className="text-sm font-medium text-bad">{errorMessage(save.error)}</p>
-        : <p className="text-sm text-muted">Each card and its receipt are emailed here too. A throwaway address is fine.</p>}
+        : (
+          <p className="text-sm text-muted">
+            Each card and its receipt are emailed here too. A throwaway address is fine.{" "}
+            <HelpLink href="/docs/sign-in#your-email-for-cards">Why we ask</HelpLink>
+          </p>
+        )}
     </form>
   )
 }
@@ -117,7 +123,8 @@ export function BitrefillAccount() {
         <p className="text-[15px] text-ink-soft">
           {connected
             ? "Cards are bought on your Bitrefill account, under its limits. We still pay for every card."
-            : "Buy under your own Bitrefill account's higher limits. We still pay for every card."}
+            : "Buy under your own Bitrefill account's higher limits. We still pay for every card."}{" "}
+          <HelpLink href="/docs/limits#connect-bitrefill">How it works</HelpLink>
         </p>
       </div>
       {connected
@@ -165,7 +172,9 @@ export function BitrefillLimits() {
           <Meter label="Spent, last 24 hours" used={used.day} of={GUEST_LIMITS.daily} text={`${usd(used.day)} of ${whole(GUEST_LIMITS.daily)}`} />
           <Meter label="Spent, last 30 days" used={used.month} of={GUEST_LIMITS.monthly} text={`${usd(used.month)} of ${whole(GUEST_LIMITS.monthly)}`} />
         </div>
-        <p className="text-sm text-muted">Cards you buy on Bitrefill itself with this email count too.</p>
+        <p className="text-sm text-muted">
+          Cards you buy on Bitrefill itself with this email count too. <HelpLink href="/docs/limits#bitrefills-limits">About these limits</HelpLink>
+        </p>
       </div>
     )
   }

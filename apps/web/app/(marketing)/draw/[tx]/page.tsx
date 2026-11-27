@@ -6,6 +6,7 @@ import { usd, usdDown, usdUp } from "@/lib/format"
 import { cashbackPct } from "@/lib/modes"
 import { loadDrawAt, TX_HASH } from "@/lib/proof"
 import type { Metadata } from "next"
+import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cache } from "react"
 import { PurchasesLink } from "./purchases-link"
@@ -92,6 +93,9 @@ export default async function DrawProof({ params, searchParams }: Props) {
           </li>
         </ol>
         <BrowserCheck tx={tx} purchase={Number(draw.purchase_id)} />
+        <p className="text-ink-soft">
+          Why nobody can retry a Draw, and how to read this page: <Link href="/docs/draw" className="font-semibold text-ink underline underline-offset-4">The Draw</Link>.
+        </p>
       </section>
 
       <section className="flex flex-col gap-3">

@@ -4,6 +4,7 @@ import { SignInButton } from "@/components/app-nav"
 import { CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet } from "@/components/funds"
 import { GiftCard } from "@/components/gift-card"
+import { HelpLink } from "@/components/help-link"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
 import { OddsBar, OddsList } from "@/components/odds"
@@ -220,7 +221,7 @@ function Voucher() {
           <section className="flex flex-col gap-4" aria-labelledby="mode">
             <div>
               <h2 id="mode" className="font-display text-2xl font-extrabold">How do you want to pay?</h2>
-              <p className="mt-1 text-ink-soft">Pay the price, or add a little for a chance at cashback.</p>
+              <p className="mt-1 text-ink-soft">Pay the price, or add a little for a chance at cashback. <HelpLink href="/docs/modes">How the modes work</HelpLink></p>
               {unknownDefault && <p className="mt-1 text-sm text-muted">Your default mode isn't offered on this page yet, so it opens on Normal.</p>}
             </div>
             <ModePicker value={fellBack ? "normal" : mode} onChange={(m) => choose({ mode: m })} price={pkg?.priceMicroUsdc} savedDefault={account?.default_mode} />
