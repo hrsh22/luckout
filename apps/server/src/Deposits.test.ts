@@ -113,3 +113,24 @@ test("an approval another app replaced is noticed once: what arrives waits, and 
   assert.equal(status.approved, false)
   await done()
 })
+
+test("a withdrawal goes to any Solana address, its USDC account opened for it; Spending Limits change only as the customer signs", async () => {
+  const { world, run, done } = setup()
+  const wallet = await approved(run)
+  world.give(usdcOf(world, wallet.publicKey), 5n * USDC)
+  await run(Effect.flatMap(Deposits, (d) => d.sweep))
+  const friend = Keypair.generate().publicKey
+  const customer = await run(Effect.gen(function*() {
+    const deposits = yield* Deposits
+    const solana = yield* Solana
+    const w = yield* deposits.withdrawal(wallet.publicKey.toBase58(), 2_000_000, friend.toBase58())
+    yield* solana.cosign(signAs(wallet, w.transaction), w.token)
+    const l = yield* deposits.limits(wallet.publicKey.toBase58(), 50_000_000n, 2n ** 64n - 1n)
+    yield* solana.cosign(signAs(wallet, l.transaction), l.token)
+    return yield* solana.customer(wallet.publicKey)
+  }))
+  assert.equal(world.tokens(usdcOf(world, friend)), 2n * USDC)
+  assert.equal(customer?.balance, 3n * USDC)
+  assert.equal(customer?.per_purchase_limit, 50_000_000n)
+  await done()
+})

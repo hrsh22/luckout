@@ -26,6 +26,10 @@ export const tokenAccount = (a: RawAccount) => ({
   delegated: a.data.readBigUInt64LE(121)
 })
 
+export interface Prepared { readonly transaction: string; readonly token: string }
+
+const programMode = (m: Mode) => (m === "normal" ? { kind: "Normal" } : { kind: "Lucky", fields: [m.lucky] })
+
 export interface DepositStatus {
   /** The customer's Deposit Address: their Privy wallet. */
   readonly address: string
@@ -43,6 +47,13 @@ export class Deposits extends Context.Service<Deposits, {
   readonly sweep: Effect.Effect<void>
   /** Runs a sweep soon, once, however many webhooks ask for one at once. */
   readonly nudge: Effect.Effect<void>
+  /** A withdrawal of `amount` from the Balance to any Solana address (its USDC account opened if it has none). */
+  withdrawal(wallet: string, amount: number, to: string): Effect.Effect<Prepared, SolanaUnavailable>
+  /** New Spending Limits; u64's maximum is "No limit". */
+  limits(wallet: string, perPurchase: bigint, daily: bigint): Effect.Effect<Prepared, SolanaUnavailable>
+  defaultMode(wallet: string, mode: Mode): Effect.Effect<Prepared, SolanaUnavailable>
+  /** Takes back a card nobody confirmed or failed within 24 hours (the program checks the time). */
+  reclaim(wallet: string, purchaseId: string): Effect.Effect<Prepared, SolanaUnavailable>
 }>()("luckout/Deposits") {
   static readonly layer = Layer.effect(
     Deposits,
@@ -65,7 +76,7 @@ export class Deposits extends Context.Service<Deposits, {
           ]
           if (!(yield* solana.customer(wallet))) {
             ixs.push(program.instruction("open", { wallet, payer: solana.feePayer, config: program.config, customer: program.customer(wallet) }, {
-              default_mode: mode === "normal" ? { kind: "Normal" } : { kind: "Lucky", fields: [mode.lucky] }
+              default_mode: programMode(mode)
             }))
           }
           return yield* solana.prepare(ixs, wallet)
@@ -136,8 +147,43 @@ export class Deposits extends Context.Service<Deposits, {
         return Effect.forkDetach(Effect.sleep("3 seconds").pipe(Effect.andThen(Effect.sync(() => void (pending = false))), Effect.andThen(sweep)))
       }).pipe(Effect.asVoid)
 
+      const customerAccounts = (wallet: PublicKey) => ({ wallet, config: program.config, customer: program.customer(wallet) })
+      const withdrawal = (walletText: string, amount: number, toText: string) =>
+        Effect.gen(function*() {
+          const wallet = new PublicKey(walletText)
+          const to = yield* Effect.try({ try: () => new PublicKey(toText), catch: () => new SolanaUnavailable({ message: "That isn't a Solana address" }) })
+          if (!solana.feePayer) return yield* new SolanaUnavailable({ message: "the fee payer isn't set" })
+          const { mint } = yield* usdcOf(wallet)
+          const toUsdc = getAssociatedTokenAddressSync(mint, to, true)
+          return yield* solana.prepare([
+            createAssociatedTokenAccountIdempotentInstruction(solana.feePayer, toUsdc, to, mint),
+            program.instruction("withdraw", { ...customerAccounts(wallet), vault: program.vault, vault_authority: program.vaultAuthority, to: toUsdc }, { amount: BigInt(amount) })
+          ], wallet)
+        })
+      const limits = (walletText: string, perPurchase: bigint, daily: bigint) => {
+        const wallet = new PublicKey(walletText)
+        return solana.prepare([program.instruction("set_limits", customerAccounts(wallet), { per_purchase: perPurchase, daily })], wallet)
+      }
+      const defaultMode = (walletText: string, mode: Mode) => {
+        const wallet = new PublicKey(walletText)
+        return solana.prepare([program.instruction("set_default_mode", customerAccounts(wallet), { mode: programMode(mode) })], wallet)
+      }
+      const reclaim = (walletText: string, purchaseId: string) =>
+        Effect.gen(function*() {
+          const [row] = yield* sql<{ position: number; address: string | null }>`
+            SELECT p.position, c.address FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+            WHERE p.id = ${purchaseId} AND p.account_id = ${walletText}`.pipe(Effect.orDie)
+          if (!row?.address) return yield* new SolanaUnavailable({ message: "That purchase can't be reclaimed" })
+          const wallet = new PublicKey(walletText)
+          const checkout = yield* solana.checkout(new PublicKey(row.address))
+          if (!checkout) return yield* new SolanaUnavailable({ message: "That purchase is already closed" })
+          return yield* solana.prepare([
+            program.instruction("reclaim", { ...customerAccounts(wallet), checkout: new PublicKey(row.address), checkout_payer: checkout.payer }, { card: row.position })
+          ], wallet)
+        })
+
       yield* sweep.pipe(Effect.repeat(Schedule.spaced("2 minutes")), Effect.forkScoped)
-      return Deposits.of({ approval, status, sweep, nudge })
+      return Deposits.of({ approval, status, sweep, nudge, withdrawal, limits, defaultMode, reclaim })
     })
   )
 }

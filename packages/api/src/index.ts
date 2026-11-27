@@ -1031,7 +1031,19 @@ export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature:
 export class DepositsApi extends HttpApiGroup.make("deposits").add(
   HttpApiEndpoint.get("address", "/deposits/address", { success: DepositAddress, error: PurchaseInvalid }),
   HttpApiEndpoint.post("approval", "/deposits/approval", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
-  HttpApiEndpoint.post("submit", "/transactions/submit", { payload: PreparedTransaction, success: Submitted, error: PurchaseInvalid })
+  HttpApiEndpoint.post("submit", "/transactions/submit", { payload: PreparedTransaction, success: Submitted, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("withdrawal", "/transactions/withdrawal", {
+    payload: Schema.Struct({ amount: Schema.Int.check(Schema.isGreaterThan(0)), to: Schema.String.check(Schema.isMaxLength(64)) }),
+    success: PreparedTransaction,
+    error: PurchaseInvalid
+  }),
+  HttpApiEndpoint.post("limits", "/transactions/limits", {
+    payload: Schema.Struct({ perPurchase: Schema.String.check(Schema.isPattern(/^\d{1,20}$/)), daily: Schema.String.check(Schema.isPattern(/^\d{1,20}$/)) }),
+    success: PreparedTransaction,
+    error: PurchaseInvalid
+  }),
+  HttpApiEndpoint.post("defaultMode", "/transactions/default-mode", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("reclaim", "/transactions/reclaim", { payload: Schema.Struct({ purchaseId: Schema.String.check(Schema.isMaxLength(64)) }), success: PreparedTransaction, error: PurchaseInvalid })
 ).middleware(Authorization) {}
 
 export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi).add(DepositsApi) {}

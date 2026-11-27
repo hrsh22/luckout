@@ -107,6 +107,8 @@ const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
     const deposits = yield* Deposits
     const solana = yield* Solana
     const invalid = (e: { readonly message: string }) => new PurchaseInvalid({ message: e.message })
+    const prepared = <E extends { readonly message: string }>(f: (accountId: string) => Effect.Effect<{ transaction: string; token: string }, E>) =>
+      CurrentAccount.use((a) => f(a.accountId)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid))
     return handlers.handleAll({
       address: () => CurrentAccount.use((a) => deposits.status(a.accountId)).pipe(Effect.map((d) => new DepositAddress(d)), Effect.mapError(invalid)),
       approval: ({ payload }) =>
@@ -116,7 +118,11 @@ const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
           Effect.tap(() => deposits.nudge),
           Effect.map((o) => new Submitted({ signature: o.signature })),
           Effect.mapError(invalid)
-        )
+        ),
+      withdrawal: ({ payload }) => prepared((a) => deposits.withdrawal(a, payload.amount, payload.to)),
+      limits: ({ payload }) => prepared((a) => deposits.limits(a, BigInt(payload.perPurchase), BigInt(payload.daily))),
+      defaultMode: ({ payload }) => prepared((a) => deposits.defaultMode(a, payload.mode)),
+      reclaim: ({ payload }) => prepared((a) => deposits.reclaim(a, payload.purchaseId))
     })
   })
 )
