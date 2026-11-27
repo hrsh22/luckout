@@ -120,7 +120,8 @@ function Voucher() {
   const copies = card && many ? pricedLines([{ ...card, keys }], cartQuote)[0] : undefined
   const live = usePolledPurchase(buy.data, token)
   // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
-  const quote = useQuote(id, value, played, !live && !buy.isPending)
+  // Asked in the mode chosen, so the server says why a Lucky card is at Normal (its reserve, or the smallest Lucky Checkout).
+  const quote = useQuote(id, value, mode, !live && !buy.isPending)
   // The server's quote replaces the local one in a moment, under the same rule (its reserve may be fresher).
   const served = quote.data && luckyCheckout([playable(quote.data)], min)[0]
   const shown: Quote | undefined = served ?? local
