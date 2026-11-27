@@ -141,6 +141,19 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 **Done when** a customer on a local validator signs in with email, deposits, buys a Lucky Cart, sees its Draw Proofs and withdraws.
 
+**Done 2026-11-28, on branch `solana-server`,** on devnet rather than a local validator: the devnet program, a test USDC mint, ORAO's devnet oracles and Bitrefill's test cards. The server's 258 tests and the web app's 65 pass, and the web app builds. In a browser:
+- **Signed in** with a Privy test account (email). The one-time approval was signed with no prompt, our fee payer paying.
+- **Deposited:** USDC sent to the Deposit Address was swept into the Balance in 36 s.
+- **Bought** a $20 card on Classic, then a two-card Lucky Cart ($10 + $10 on Classic, $24 in one payment). Each card was delivered with its code, and each Draw finished from ORAO.
+- **Draw Proofs:** the pages for card 1 and card 2 of the Cart recomputed everything in the browser and matched.
+- **Withdrew** $5 to a fresh Solana address, its USDC account opened for it.
+- **Admin panel:** the control room reads the program live.
+- **Carried into Phase 4:**
+  - Google, Telegram and Phantom sign-in need a person to click through them
+  - owner actions signed in the owner's wallet in a browser
+  - quotes on the server, and so the Agent, don't apply the smallest Lucky Checkout yet. The web app does.
+  - the bot's refund-address question for 1Click, and `deploy/README.md`, carried from Phase 2
+
 ## Phase 4: staging on mainnet
 
 - **Deploy** the staging program, with a small Cashback Reserve and float. The staging Pay Wallet's first card is a small one.
