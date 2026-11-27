@@ -544,9 +544,10 @@ export class Purchases extends Context.Service<Purchases, {
                   request: oraoRequest(address, onchain.rounds)
                 }, { round })
               ], [], () => Effect.void).pipe(
+                // Only once it went through: the chain's clock may lag ours, and this runs every 2 seconds.
+                Effect.andThen(alerts.admin(`checkout ${co.id}: ORAO hadn't filled round ${round} after an hour; asked again`)),
                 Effect.catchTag("ProgramRejected", (e) => Effect.logWarning(`checkout ${co.id}: request_again refused (${e.message})`))
               )
-              yield* alerts.admin(`checkout ${co.id}: ORAO hadn't filled round ${round} after an hour; asked again`)
             }
           }
           return moved
