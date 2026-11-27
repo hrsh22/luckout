@@ -3,7 +3,7 @@ import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } fr
 
 // NEAR Intents 1Click (https://1click.chaindefuser.com/docs/v0/openapi.yaml): swaps between chains
 // through a one-time deposit address. Top-ups use it inward (any chain → USDC on Solana, at the customer's
-// Deposit Address) and refills outward (USDC on NEAR → exactly the USDC Bitrefill asked for, on Base).
+// Deposit Address).
 
 export class OneClickUnavailable extends Data.TaggedError("OneClickUnavailable")<{ readonly message: string }> {}
 
@@ -71,9 +71,8 @@ export interface QuoteRequest {
 /**
  * Why a quote must not be used, or undefined when 1Click's echo says it does exactly what was asked: pays that
  * recipient, refunds to that address, swaps those tokens and that amount, each in the way asked. A customer pays
- * into the deposit address on our word, so none of it is taken on trust (refills check theirs the same way:
- * Refill.ts, quoteProblem). Only an EVM address compares without case (it may come back checksummed): a base58 one
- * (Solana, Tron, Bitcoin) is another address in another case.
+ * into the deposit address on our word, so none of it is taken on trust. Only an EVM address compares without case
+ * (it may come back checksummed): a base58 one (Solana, Tron, Bitcoin) is another address in another case.
  */
 export const echoProblem = (echo: QuoteResponse["quoteRequest"], asked: QuoteRequest): string | undefined => {
   if (!echo) return "1Click didn't confirm what it quoted"

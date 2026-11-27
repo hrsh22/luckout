@@ -21,9 +21,6 @@ export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
     voucher: unused("bitrefill.voucher"),
     order: unused("bitrefill.order"),
     delivery: unused("bitrefill.delivery"),
-    credit: Effect.die("bitrefill.credit was not expected in this test"),
-    deposit: unused("bitrefill.deposit"),
-    depositState: unused("bitrefill.depositState"),
     orderLimit: () => Effect.succeed({ used: 0, reopensAt: undefined }),
     ...overrides
   })

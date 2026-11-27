@@ -45,11 +45,7 @@ export const secretWarning = (expiresAt: number, now: number) => {
     : `the Bitrefill client secret expires on ${day}, in ${Math.ceil(left / 86_400_000)} day(s): register a new client before then (deploy/README.md), or cards stop being sold`
 }
 
-/**
- * Every 10 minutes, the things that quietly stop purchases if nobody notices. Bitrefill's USD credit
- * isn't checked here: Credit.ts reads it every two minutes (and alerts on unexplained drops), and
- * Refill.ts tops it up or says why it can't.
- */
+/** Every 10 minutes, the things that quietly stop purchases if nobody notices. */
 export const Monitor = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient

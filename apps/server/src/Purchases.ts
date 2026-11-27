@@ -664,7 +664,7 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "ordering": {
               if (bitrefill.guest) {
-                // Charged long ago and still not paid for (Base or Bitrefill kept failing): nothing was signed, so
+                // Charged long ago and still not paid for (Solana or Bitrefill kept failing): nothing was signed, so
                 // refund it now rather than order again, and a late card never races a Reclaim.
                 if (!co.pay_tx && overdue(co, all, WAIT_MINUTES)) {
                   yield* alerts.admin(`checkout ${co.id} couldn't be ordered and paid for in time; refunding it in full`)
@@ -1346,7 +1346,7 @@ export class Purchases extends Context.Service<Purchases, {
       })
 
       /**
-       * Starts a checkout's run. A guest checkout can take over a minute (Base payment, then Bitrefill), and Cloudflare
+       * Starts a checkout's run. A guest checkout can take over a minute (the payment, then Bitrefill), and Cloudflare
        * drops a request at 100 s: stop waiting at requestWait and answer "pending". The run carries on; the web follows
        * it, and Telegram hears when it ends.
        */

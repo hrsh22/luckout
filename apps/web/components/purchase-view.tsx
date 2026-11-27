@@ -125,7 +125,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
   )
 }
 
-/** An honest wait: no fake steps, just time passing. Bitrefill sends the code once it sees our payment on Base, usually within a minute (ADR-0012). */
+/** An honest wait: no fake steps, just time passing. Bitrefill sends the code once it sees our payment on Solana, usually within a minute (ADR-0015). */
 export function Progress() {
   const [seconds, setSeconds] = useState(0)
   useEffect(() => {

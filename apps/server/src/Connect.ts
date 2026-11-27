@@ -8,7 +8,7 @@ import { SealKey, sealWith, unsealWith } from "./Seal.ts"
 
 // Connect Bitrefill (ADR-0012): a customer logs in to their own Bitrefill account from our site, and from then
 // on their cards are ordered on it, under its limits instead of a guest's. We still pay every invoice from the
-// Base Wallet. One Bitrefill Connection per account, its tokens sealed. An access token lasts 6 hours and a
+// Pay Wallet. One Bitrefill Connection per account, its tokens sealed. An access token lasts 6 hours and a
 // refresh token 7 days; a refresh token works once, and the reply carries the next one, saved before use.
 
 const Tokens = Schema.Struct({ access_token: Schema.String, refresh_token: Schema.String, expires_in: Schema.Number })
