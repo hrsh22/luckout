@@ -416,6 +416,11 @@ export const migrationSteps = {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`
     yield* sql`DROP TABLE telegram_link_codes`
+  }),
+  // Where 1Click refunds a Top-Up: an address on its source chain, which the customer gives (ADR-0015).
+  "0033_swap_refund_to": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN refund_to TEXT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

@@ -468,7 +468,7 @@ export class TelegramApi extends HttpApiGroup.make("telegram").add(
   HttpApiEndpoint.post("unlink", "/telegram/unlink", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}
 
-// ---------- top-ups (NEAR Intents 1Click, mainnet) ----------
+// ---------- top-ups (ADR-0015): 1Click from other chains, swaps from the customer's own wallet ----------
 
 export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   assetId: Schema.String,
@@ -477,114 +477,69 @@ export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   /** The token's contract on an EVM chain (its mint on Solana), so the wallet can send it; absent for the chain's own coin. */
   contract: Schema.optional(Schema.String),
   decimals: Schema.optional(Schema.Number),
-  /** 1Click's price in USD, for showing what a wallet's holding is worth. */
+  /** 1Click's price in USD (Jupiter's for a swapped token), for showing what a wallet's holding is worth. */
   price: Schema.optional(Schema.Number),
   /**
-   * Paid through a swap Luckout builds (ADR-0014): a Solana wallet signs one transaction that swaps it into the USDC
-   * 1Click needs, from the app or by scanning a Solana Pay code. Never sent to a deposit address as it is.
+   * Swapped from the customer's own wallet (their Deposit Address) by a transaction they sign (TopUpApi.swap): sent
+   * there as it is, never to a 1Click address.
    */
   swap: Schema.optional(Schema.Boolean)
 }) {}
 
 export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
-  /** Send exactly `amountIn` of `symbol` on `chain` here. */
+  /** Send `amountIn` of `symbol` on `chain` here (empty for a price check). */
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
   amountIn: Schema.String,
   amountInFormatted: Schema.String,
+  /** The least that is swapped (base units): anything above it is, the extra included; less goes back to `refundTo`. */
+  minAmountIn: Schema.optional(Schema.String),
   symbol: Schema.String,
   chain: Schema.String,
-  /** USDC (micro) that lands in the customer's NEAR account, or their NEAR Intents account for an EVM wallet. */
+  /** USDC (micro) that `amountIn` delivers to the customer's Deposit Address, which moves it into their Balance. */
   usdcOut: MicroUsdc,
   timeEstimateSeconds: Schema.Number,
   deadline: Schema.String,
-  /**
-   * A swap-paid token (TopUpAsset.swap): `amountIn` is exactly what the swap takes. `depositAddress` names the Top-Up
-   * but takes only USDC: never show it as somewhere to send the token.
-   */
-  swap: Schema.optional(Schema.Boolean)
+  /** Where 1Click sends back what it can't swap, on `chain`. */
+  refundTo: Schema.String
 }) {}
 
-/** A swap-paid Top-Up's transaction (ADR-0014), built and simulated by Luckout, for the customer's Solana wallet to sign and send. */
+/** A swap of a token in the customer's wallet into their Balance, for them to sign and send to /transactions/submit. */
 export class SwapTx extends Schema.Class<SwapTx>("SwapTx")({
-  /** Base64 of the unsigned v0 transaction. */
   transaction: Schema.String,
-  /** Past this block height it can never land. */
-  lastValidBlockHeight: Schema.Number
+  token: Schema.String,
+  /** Exactly what it swaps (base units of the token). */
+  spend: Schema.String,
+  /** USDC (micro) the route gives, and the least it may, or nothing happens. */
+  usdcOut: MicroUsdc,
+  minUsdcOut: MicroUsdc
 }) {}
 
-/** Where an EVM customer's money leaves for (ADR-0011): send `usdcIn` from their NEAR Intents account to `depositAddress`. */
-export class ExitQuote extends Schema.Class<ExitQuote>("ExitQuote")({
-  depositAddress: Schema.String,
-  usdcIn: MicroUsdc,
-  amountOutFormatted: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  timeEstimateSeconds: Schema.Number
-}) {}
-
-/** 1Click's status, and for an EVM Top-Up, whether its USDC has moved on into Luckout. */
-export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({
-  status: Schema.String,
-  move: Schema.optional(Schema.Literals(["waiting", "moved", "failed"]))
-}) {}
+export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({ status: Schema.String }) {}
 
 /**
- * Where a Top-Up or a withdrawal is, in the customer's words: their money is never out of sight.
- * awaiting-transfer: we're waiting for them to send. swapping: 1Click has it and is converting it.
- * moving: it landed in their NEAR Intents account and is moving into Luckout. in-wallet: it landed in
- * their NEAR wallet, ready to deposit. in-intents: it's in their NEAR Intents account. done: in their
- * Luckout balance (Top-Up) or on the chain they picked (withdrawal). refunded: 1Click sent it back.
+ * Where a Top-Up is, in the customer's words: their money is never out of sight. awaiting-transfer: we're waiting for
+ * them to send. incomplete: 1Click got less than the quote's minimum and waits for the rest until the deadline, then
+ * sends it back. swapping: 1Click has it and is converting it. done: delivered to their Deposit Address, from where it
+ * moves into their Balance. refunded: 1Click sent it back to the refund address.
  */
-/** incomplete: 1Click got less than the quote asked for and waits for the rest until the deadline, then sends it back. */
-export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete", "swapping", "moving", "in-wallet", "in-intents", "done", "refunded"])
+export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete", "swapping", "done", "refunded"])
 export type TransferPhase = typeof TransferPhase.Type
 
-/** One of the customer's 1Click swaps: a Top-Up on its way in, or a withdrawal on its way out. */
-/**
- * A token in the customer's own NEAR Intents account that Luckout doesn't use as balance: 1Click returns the
- * extra a customer sent, and refunds, in the token they paid with. (A NEAR wallet's USDC there is listed too.)
- */
-export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
-  assetId: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  /** Formatted, in the token's own units. */
-  amount: Schema.String,
-  /** Luckout can send it to their own wallet: an EVM wallet's on its own chain, a NEAR wallet's as USDC. */
-  sendable: Schema.Boolean
-}) {}
-
-/** Sends a held token to the customer's own wallet: move all `amount` (base units) of `assetId` to `depositAddress`. */
-export class SendBackQuote extends Schema.Class<SendBackQuote>("SendBackQuote")({
-  depositAddress: Schema.String,
-  assetId: Schema.String,
-  amount: Schema.String,
-  amountOutFormatted: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  timeEstimateSeconds: Schema.Number
-}) {}
-
+/** One of the customer's 1Click Top-Ups. */
 export class Transfer extends Schema.Class<Transfer>("Transfer")({
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
-  /** in: a Top-Up. out: a withdrawal from Luckout. back: something held in their NEAR Intents account, sent to their own wallet. */
-  direction: Schema.Literals(["in", "out", "back"]),
-  /** USDC (micro): what lands for a Top-Up, what leaves Luckout for a withdrawal. */
+  /** USDC (micro) it delivers. */
   usdc: MicroUsdc,
-  /** The other side: the token and chain it comes from (Top-Up) or goes to (withdrawal). */
+  /** The token and chain it comes from. */
   symbol: Schema.String,
   chain: Schema.String,
-  /** What the customer sends, formatted (a Top-Up). */
+  /** What the customer sends, formatted. */
   amountIn: Schema.optional(Schema.String),
-  /** A Top-Up paid with a swap (ADR-0014): what the customer swaps, readable and rounded up, e.g. "0.26566 ORE". symbol/amountIn are then USDC on Solana. */
-  paidWith: Schema.optional(Schema.String),
-  /** What arrives on the other chain, formatted (a withdrawal). */
-  amountOut: Schema.optional(Schema.String),
-  /** What 1Click has received so far, formatted (a Top-Up short of its amount). */
+  /** What 1Click has received so far, formatted (a Top-Up short of its minimum). */
   deposited: Schema.optional(Schema.String),
-  /** The customer's own transfer to the deposit address, when the app sent it (a Top-Up from an EVM wallet). */
+  /** The customer's own transfer to the deposit address, when the app sent it. */
   depositTx: Schema.optional(Schema.String),
   phase: TransferPhase,
   /** Taking longer than usual: safe, but say so. */
@@ -593,12 +548,11 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   /** Until when 1Click takes the deposit (a Top-Up awaiting the customer's transfer). */
   deadline: Schema.optional(Schema.String),
   timeEstimateSeconds: Schema.optional(Schema.Number),
-  /** The delivery on the other chain (a withdrawal). */
+  /** The delivery to the Deposit Address, on Solana. */
   deliveredTx: Schema.optional(Schema.String),
-  /** What 1Click sent back, formatted, and why. */
+  /** What 1Click sent back, formatted, where, and why. */
   refunded: Schema.optional(Schema.String),
-  /** A Top-Up whose refund (and any extra sent) goes back to the wallet it came from, not to their NEAR Intents account. */
-  refundsToWallet: Schema.optional(Schema.Boolean),
+  refundTo: Schema.optional(Schema.String),
   detail: Schema.optional(Schema.String),
   /** NEAR Intents explorer page for this swap. */
   explorer: Schema.String
@@ -612,9 +566,14 @@ export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
 
 export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("assets", "/topup/assets", { success: Schema.Array(TopUpAsset), error: TopUpUnavailable }),
-  /** `dry`: a preview only, with no deposit address and nothing recorded. */
+  /** `dry`: a price check only, with no deposit address and nothing recorded. `refundTo`: an address on the token's chain. */
   HttpApiEndpoint.post("quote", "/topup/quote", {
-    payload: Schema.Struct({ originAsset: Schema.String, usdc: MicroUsdc, dry: Schema.optional(Schema.Boolean) }),
+    payload: Schema.Struct({
+      originAsset: Schema.String,
+      usdc: MicroUsdc,
+      refundTo: Schema.String.check(Schema.isMaxLength(128)),
+      dry: Schema.optional(Schema.Boolean)
+    }),
     success: TopUpQuote,
     error: TopUpUnavailable
   }),
@@ -623,15 +582,9 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: TopUpStatus,
     error: TopUpUnavailable
   }),
-  /** EVM wallets: the signed intent that moves this Top-Up into Luckout once it lands; the server sends it then. */
-  HttpApiEndpoint.post("move", "/topup/move", {
-    payload: Schema.Struct({ depositAddress: Schema.String, signed: SignedIntent }),
-    success: HttpApiSchema.NoContent,
-    error: TopUpUnavailable
-  }),
-  /** Solana wallets, a swap-paid Top-Up (ADR-0014): the transaction that pays it, for their wallet to sign and send. */
-  HttpApiEndpoint.post("swapTx", "/topup/swap-tx", {
-    payload: Schema.Struct({ depositAddress: Schema.String }),
+  /** USDT or ORE in the customer's wallet into their Balance: `amount` in the token's base units, all of it by default. */
+  HttpApiEndpoint.post("swap", "/topup/swap", {
+    payload: Schema.Struct({ assetId: Schema.String, amount: Schema.optional(Schema.String.check(Schema.isPattern(/^[1-9]\d{0,29}$/))) }),
     success: SwapTx,
     error: TopUpUnavailable
   }),
@@ -641,33 +594,14 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
-  /**
-   * A Top-Up the customer hasn't paid into leaves their list; a swap-paid one is cancelled. Money sent anyway still
-   * arrives, and the Top-Up is listed again.
-   */
+  /** A Top-Up the customer hasn't paid into leaves their list. Money sent anyway still arrives, and it's listed again. */
   HttpApiEndpoint.post("dismiss", "/topup/dismiss", {
     payload: Schema.Struct({ depositAddress: Schema.String }),
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
-  /** The customer's Top-Ups and withdrawals still on their way, and those that ended in the last day. */
-  HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable }),
-  /** What else is in the customer's NEAR Intents account: change and refunds from 1Click, in the token paid with. */
-  HttpApiEndpoint.get("held", "/topup/held", { success: Schema.Array(HeldToken), error: TopUpUnavailable }),
-  /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
-  HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
-  /** A held token (see HeldToken.sendable), all of it, to the customer's own wallet. */
-  HttpApiEndpoint.post("sendBack", "/topup/send-back", {
-    payload: Schema.Struct({ assetId: Schema.String }),
-    success: SendBackQuote,
-    error: TopUpUnavailable
-  }),
-  /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
-  HttpApiEndpoint.post("exit", "/topup/exit", {
-    payload: Schema.Struct({ destinationAsset: Schema.String, usdc: MicroUsdc }),
-    success: ExitQuote,
-    error: TopUpUnavailable
-  })
+  /** The customer's Top-Ups still on their way, and those that ended in the last day. */
+  HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable })
 ).middleware(Authorization) {}
 
 // ---------- relayer (NEP-366, ADR-0008) ----------

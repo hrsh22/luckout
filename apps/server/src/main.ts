@@ -23,7 +23,7 @@ import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
-import { SolanaPayRoute, TopUp } from "./TopUp.ts"
+import { TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -179,17 +179,13 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
     const topup = yield* TopUp
     return handlers.handleAll({
       assets: () => topup.assets,
-      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.dry ?? false, a.wallet)),
+      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.refundTo, payload.dry ?? false)),
       status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
-      move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
-      faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId, a.wallet)),
+      // The transaction it answers is signed in the app and sent to /transactions/submit, like any the customer signs.
+      swap: ({ payload }) => CurrentAccount.use((a) => topup.swap(a.accountId, payload.assetId, payload.amount)),
       transfers: () => CurrentAccount.use((a) => topup.transfers(a.accountId)),
-      held: () => CurrentAccount.use((a) => topup.held(a.accountId, a.wallet)),
       sent: ({ payload }) => CurrentAccount.use((a) => topup.sent(a.accountId, payload.depositAddress, payload.txHash)),
-      dismiss: ({ payload }) => CurrentAccount.use((a) => topup.dismiss(a.accountId, payload.depositAddress)),
-      swapTx: ({ payload }) => CurrentAccount.use((a) => topup.swapTx(a.accountId, payload.depositAddress, a.wallet)),
-      sendBack: ({ payload }) => CurrentAccount.use((a) => topup.sendBack(a.accountId, payload.assetId, a.wallet)),
-      exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc, a.wallet))
+      dismiss: ({ payload }) => CurrentAccount.use((a) => topup.dismiss(a.accountId, payload.depositAddress))
     })
   })
 )
@@ -230,9 +226,10 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
 )
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
-  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer, Deposits.layer)),
+  // Swap builds on Solana (prepare, simulate), as Deposits does.
+  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer, Deposits.layer, Swap.layer)),
   Layer.provideMerge(Layer.mergeAll(Sales.layer, Connect.layer)),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Swap.layer, Alerts.layer)),
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
 
@@ -283,8 +280,6 @@ const Routes = Layer.mergeAll(
     return HttpRouter.add("GET", "/bitrefill/callback", (request) =>
       Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
   })),
-  // Solana Pay transaction requests (ADR-0014): no session (TopUp.ts).
-  SolanaPayRoute,
   DepositsWebhook
 ).pipe(Layer.provide(Services))
 

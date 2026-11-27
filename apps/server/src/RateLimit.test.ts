@@ -24,7 +24,7 @@ test("a URL is limited as the route the router matches it to, whatever its case,
   const limits: Record<string, number> = {
     "/auth/challenge": 20, "/auth/verify": 20, "/auth/verify-evm": 20,
     "/telegram/link-code": 20, "/telegram/unlink": 20, "/relay": 20, "/relay/intent": 20,
-    "/topup/swap-tx": 20, "/solana-pay/:depositAddress": 20, "/topup/quote": 120,
+    "/topup/swap": 20, "/topup/quote": 120,
     "/catalog": 60, "/catalog/:id": 60, "/quote": 60, "/quote/cart": 60, "/browse": 60, "/mcp": 60,
     "/telegram": 120, "/purchases": 120, "/purchases/:id": 120
   }
@@ -34,7 +34,7 @@ test("a URL is limited as the route the router matches it to, whatever its case,
     // The last slash doubled, and the first letter percent-encoded ("/%61uth/challenge").
     path.replace(/\/(?=[^/]*$)/, "//"), `/%${path.charCodeAt(1).toString(16)}${path.slice(2)}`, `http://host${path}`
   ]
-  for (const path of ["/auth/challenge", "/auth/verify-evm", "/telegram/link-code", "/relay", "/relay/intent", "/catalog", "/catalog/amazon-us", "/quote", "/quote/cart", "/browse", "/mcp", "/telegram", "/purchases", "/purchases/abc", "/topup/swap-tx", "/solana-pay/7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj", "/topup/quote"]) {
+  for (const path of ["/auth/challenge", "/auth/verify-evm", "/telegram/link-code", "/relay", "/relay/intent", "/catalog", "/catalog/amazon-us", "/quote", "/quote/cart", "/browse", "/mcp", "/telegram", "/purchases", "/purchases/abc", "/topup/swap", "/topup/quote"]) {
     for (const url of variants(path)) {
       const route = router.find("GET", url)?.handler
       assert.ok(route, `the router matches ${url}`)
