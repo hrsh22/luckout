@@ -14,6 +14,7 @@ import { accountOf, Deposits } from "./Deposits.ts"
 import { Purchases } from "./Purchases.ts"
 import { closedMessage, Sales } from "./Sales.ts"
 import { Cluster, Solana, SolanaUnavailable } from "./Solana.ts"
+import { TopUp } from "./TopUp.ts"
 
 /** How long a button under the Agent's reply works (ADR-0007). */
 const OFFER_TTL_MS = 10 * 60 * 1000
@@ -135,13 +136,28 @@ export const buySummary = (cards: ReadonlyArray<Pending>, short = 0) => {
   return [...cards.map((c, i) => `${i + 1}. ${cardLine(c)}`), `${cards.length} cards: ${usdUp(total)} in all.${receipt}${wait}`].join("\n")
 }
 
-/** The code-written lines for a Deposit Address: the address alone on the last, so it copies whole. */
-export const depositLines = (d: DepositTo) => [
-  `Send at least ${usdUp(d.amount)} of ${d.token} on ${d.chain} to your Deposit Address below. It reaches your balance by itself${
-    d.tapInApp ? " after one tap in the app" : " within a few minutes"
-  }.`,
-  d.address
-]
+/**
+ * The code-written lines for a Deposit Address, or for 1Click's address for another chain's token: the address alone on
+ * the last, so it copies whole.
+ */
+export const depositLines = (d: DepositTo, now = Date.now()) => {
+  const c = d.oneClick
+  if (!c) {
+    return [
+      `Send at least ${usdUp(d.amount)} of ${d.token} on ${d.chain} to your Deposit Address below. It reaches your balance by itself${
+        d.tapInApp ? " after one tap in the app" : " within a few minutes"
+      }.`,
+      d.address
+    ]
+  }
+  const until = Date.parse(c.until)
+  return [
+    `Send ${c.send} ${d.token} on ${d.chain} to 1Click's address below within ${Math.max(1, Math.round((until - now) / 60_000))} minutes (by ${utc(until)}), and about ${usd(d.amount)} lands in your balance. Only ${d.token} on ${d.chain}: another token or network can't be swapped.`,
+    `More is fine, it's all swapped${c.least ? `, but at least ${c.least} ${d.token} must arrive` : ""}. If the swap fails, 1Click refunds it to ${c.refundTo} on ${d.chain}.`,
+    ...(c.memo ? [`Include this memo, or 1Click can't match your transfer: ${c.memo}`] : []),
+    d.address
+  ]
+}
 const cardLine = (p: Pending) =>
   (p.maxPrice === p.referencePrice
     ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}` +
@@ -512,6 +528,7 @@ export class Telegram extends Context.Service<Telegram, {
           purchases,
           account: (accountId) => Effect.map(customer(accountId), accountOf),
           deposits,
+          topUp: yield* TopUp,
           shopClosed: Effect.map((yield* Sales).status, (st) => (st.open ? undefined : closedMessage(st))),
           testnet,
           web: webOrigin,

@@ -151,7 +151,8 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Carried into Phase 4:**
   - Google, Telegram and Phantom sign-in need a person to click through them
   - quotes on the server, and so the Agent, don't apply the smallest Lucky Checkout yet. The web app does.
-  - the bot's refund-address question for 1Click, and `deploy/README.md`, carried from Phase 2
+  - `deploy/README.md`, carried from Phase 2
+- **Since:** the bot gives a 1Click address for another chain's token once the customer has typed their refund address there; USDC and USDT on Solana still go to the Deposit Address.
 
 ## Phase 4: staging on mainnet
 

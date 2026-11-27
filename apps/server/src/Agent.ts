@@ -1,9 +1,10 @@
-import { BITREFILL_ACCOUNT_LIMITS, DEFAULT_LIMITS, GUEST_LIMITS, MAX_CART, type Mode, noLimit } from "@luckout/api"
+import { BITREFILL_ACCOUNT_LIMITS, DEFAULT_LIMITS, GUEST_LIMITS, MAX_CART, minimumOf, type Mode, noLimit, tokenAmount } from "@luckout/api"
 import { Effect } from "effect"
 import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
 import { type Account, type Deposits, MIN_DEPOSIT as MIN_DEPOSIT_UNITS } from "./Deposits.ts"
 import { guestLimitRefusal, type Purchases } from "./Purchases.ts"
+import { chainName, type TopUp } from "./TopUp.ts"
 
 // The Agent (ADR-0001, ADR-0006): a plain tool-calling loop on NEAR AI Cloud's
 // OpenAI-compatible API. Safety is structural, not prompt-based:
@@ -11,7 +12,8 @@ import { guestLimitRefusal, type Purchases } from "./Purchases.ts"
 //   and the program's Spending Limits still bound every purchase;
 // - a purchase over the customer's limits is never offered as a button; one their Balance can't cover yet waits for
 //   their money after the tap, until its quote expires, and is bought only if the money covers it (ADR-0015);
-// - a Deposit Address reaches the customer in a line the code writes, never retyped by the model;
+// - a Deposit Address, or 1Click's address for another chain, reaches the customer in a line the code writes, never
+//   retyped by the model; 1Click refunds a failed swap only to an address the customer typed (typedAddress);
 // - on testnet the catalog itself only holds test cards (Bitrefill.ts), so the model can't offer others;
 // - Redemption Data never enters the model's context (the bot sends codes itself);
 // - the one thing the model can write is the Checkout Email, and only to an address the customer
@@ -59,6 +61,18 @@ export interface DepositTo {
   readonly amount: number
   /** USDT arrives at the address but needs one tap in the app to move into the Balance. */
   readonly tapInApp: boolean
+  /** 1Click's address for another chain's token (ADR-0015); `amount` is then about what lands in the Balance. */
+  readonly oneClick?: {
+    /** Exactly how much of the token to send, e.g. "20.21". */
+    readonly send: string
+    /** The least that's swapped: less waits for the rest, then goes back to `refundTo`. */
+    readonly least?: string
+    readonly memo?: string
+    /** ISO: when refunds begin. */
+    readonly until: string
+    /** The customer's own address on that chain. */
+    readonly refundTo: string
+  }
 }
 
 const MIN_DEPOSIT = Number(MIN_DEPOSIT_UNITS)
@@ -117,11 +131,12 @@ export const TOOLS = [
   ),
   tool(
     "deposit_address",
-    "Where the customer sends money to add to their balance. Ask first which token and chain they'll pay with, and how much: at least what they're short, and at least $1.",
+    "Where the customer sends money to add to their balance. Ask first which token and chain they'll pay with, and how much: at least what they're short, and at least $1. USDC or USDT on Solana go to their Deposit Address; another token or chain goes through 1Click, which also needs their own address on that chain for refunds.",
     {
       token: { type: "string", description: "The token they'll send, e.g. USDC or USDT" },
-      chain: { type: "string", description: "The chain they'll send it on, e.g. Solana" },
-      amount: { type: "number", description: "How many US dollars of it they'll send" }
+      chain: { type: "string", description: "The chain they'll send it on, e.g. Solana, Base or Tron" },
+      amount: { type: "number", description: "How many US dollars of it they'll send" },
+      refund_address: { type: "string", description: "Not for Solana USDC or USDT. Their own address on that chain, exactly as they typed it: 1Click refunds a failed swap there" }
     },
     ["token", "chain", "amount"]
   ),
@@ -212,6 +227,13 @@ export const typedByCustomer = (message: string, email: string) => {
   return wanted !== "" && message.toLowerCase().split(/[^a-z0-9@._+'-]+/).some((word) => word.replace(/^'+|['.]+$/g, "") === wanted)
 }
 
+/**
+ * Whether the customer typed this address in `message`, exactly and as a whole word (typedByCustomer, for an address on
+ * a chain: case counts, since a base58 address in another case is another address).
+ */
+export const typedAddress = (message: string, address: string) =>
+  address !== "" && message.split(/[^A-Za-z0-9._-]+/).some((word) => word.replace(/\.+$/, "") === address)
+
 /** What a turn's tools leave under the reply: a button, and where to send money. */
 interface Turn {
   offer?: Offer | undefined
@@ -224,11 +246,8 @@ export const makeAgent = (deps: {
   /** The customer's account onchain (accountOf). */
   account: (accountId: string) => Effect.Effect<Account | null, { message: string }>
   deposits: Pick<Deposits["Service"], "status">
-  /**
-   * Where to send another chain's token through 1Click (ADR-0015): a deposit address for it, with the amount, deadline
-   * and memo. Not wired until TopUp's 1Click quotes to the Deposit Address land; until then only Solana USDC and USDT.
-   */
-  oneClick?: (accountId: string, token: string, chain: string, usdc: number) => Effect.Effect<Record<string, unknown>, { message: string }>
+  /** 1Click Top-Ups to the Deposit Address from other chains (ADR-0015), as the app makes them. */
+  topUp: Pick<TopUp["Service"], "assets" | "quote">
   /** Why new purchases can't start right now (sales stopped, program paused, Bitrefill's order limit), or undefined. */
   shopClosed: Effect.Effect<string | undefined>
   testnet: boolean
@@ -404,19 +423,53 @@ export const makeAgent = (deps: {
             : {})
         }
       })),
-    deposit_address: ({ token, chain, amount }: { token: string; chain: string; amount: number }) =>
+    deposit_address: ({ token, chain, amount, refund_address }: { token: string; chain: string; amount: number; refund_address?: string }) =>
       run(Effect.gen(function*() {
         const usdc = Math.round(Number(amount) * 1e6)
         if (!Number.isFinite(usdc) || usdc < MIN_DEPOSIT) return { error: "Deposits start at $1.00. Ask for at least that, and at least what they're short." }
         const t = String(token ?? "").trim().toUpperCase()
         const c = String(chain ?? "").trim().toLowerCase()
-        if (c !== "solana" || (t !== "USDC" && t !== "USDT")) {
-          if (deps.oneClick) return yield* deps.oneClick(accountId, t, c, usdc)
-          return { error: "For now they can add only USDC or USDT on Solana. Most exchanges send either; ask if they can." }
+        // Anything but USDC or USDT on Solana: a token 1Click swaps into USDC at the Deposit Address.
+        const assets = (c === "solana" || c === "sol") && (t === "USDC" || t === "USDT") ? undefined : (yield* deps.topUp.assets).filter((a) => !a.swap)
+        const asset = assets?.find((a) => a.symbol.toUpperCase() === t && (a.chain === c || chainName(a.chain).toLowerCase() === c))
+        if (assets && !asset) {
+          return { error: `${t} on ${chain} can't be added. They can send USDC or USDT on Solana, or ${assets.map((a) => `${a.symbol} on ${chainName(a.chain)}`).join(", ")}.` }
         }
+        // Either way it lands at the Deposit Address, which moves it into the Balance only once approved.
         const d = yield* deps.deposits.status(accountId)
         if (!d.approved) {
           return { approve_first: `Their Deposit Address needs a one-time approval in the app first; it's free and takes one tap: ${deps.web}/wallet. Give them that link and ask them to come back once it's done.` }
+        }
+        if (asset) {
+          const on = chainName(asset.chain)
+          const refundTo = String(refund_address ?? "").trim()
+          if (!refundTo) {
+            return { ask_first: `Ask for their own address on ${on}: 1Click sends the ${asset.symbol} back there if the swap fails. Then call deposit_address again with it as refund_address.` }
+          }
+          // Where a failed swap's money goes: only an address they typed, never one the model read elsewhere (a photo, a forward).
+          if (!typedAddress(text, refundTo)) {
+            return { error: `Not used: that refund address isn't in the customer's latest message. Ask them to type their address on ${on}.` }
+          }
+          // TopUp checks the address is on that chain, and that 1Click quotes exactly what was asked.
+          const q = yield* deps.topUp.quote(accountId, asset.assetId, usdc, refundTo)
+          const least = minimumOf(q, asset.decimals)
+          turn.deposit = {
+            address: q.depositAddress,
+            token: q.symbol,
+            chain: on,
+            amount: q.usdcOut,
+            tapInApp: false,
+            oneClick: {
+              send: tokenAmount(q.amountInFormatted, q.symbol, "up"),
+              ...(least ? { least: tokenAmount(least, q.symbol, "up") } : {}),
+              ...(q.depositMemo ? { memo: q.depositMemo } : {}),
+              until: q.deadline,
+              refundTo: q.refundTo
+            }
+          }
+          return {
+            shown: `Under your reply the customer sees 1Click's address, exactly how much ${q.symbol} on ${on} to send, the least that's swapped, the 30-minute deadline, and where a failed swap refunds. Reply in one short line without the address or amounts.`
+          }
         }
         turn.deposit = { address: d.address, token: t, chain: "Solana", amount: usdc, tapInApp: t === "USDT" }
         return {

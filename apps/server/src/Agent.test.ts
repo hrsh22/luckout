@@ -1,11 +1,12 @@
-import { CheckoutEmail, Purchase, PurchasePage, Quote, Voucher } from "@luckout/api"
+import { CheckoutEmail, Purchase, PurchasePage, Quote, TopUpAsset, TopUpQuote, TopUpUnavailable, Voucher } from "@luckout/api"
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { NO_LIMIT } from "@luckout/api"
-import { blocker, makeAgent, type Offer, overLimits, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
+import { blocker, makeAgent, type Offer, overLimits, trimHistory, typedAddress, typedByCustomer, usdUp } from "./Agent.ts"
+import { refundProblem } from "./TopUp.ts"
 
 /** The cards behind a turn's Buy button, if it has one. */
 const cards = (turn: { offer?: Offer | undefined }) => (turn.offer && "cards" in turn.offer ? turn.offer.cards : undefined)
@@ -170,48 +171,132 @@ test("over a Spending Limit there's no Buy button, short of balance or not", asy
 
 const ADDRESS = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
 
-/** One turn where the model asks for a Deposit Address with `args`; `approved` is the customer's one-time approval. */
-const depositTurn = async (args: object, o: { approved?: boolean; oneClick?: unknown } = {}) => {
+const TRON = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+const TRON_USDT = "nep141:tron-usdt.omft.near"
+/** 1Click's one-time address for a Tron Top-Up. */
+const ONECLICK = "TQ1c1ickDepositAddressXXXXXXXXXXXX"
+const UNTIL = "2026-11-28T12:30:00.000Z"
+
+/**
+ * TopUp as the Agent sees it: what 1Click takes (and USDT swapped from the wallet, which isn't 1Click's), and a quote
+ * that records what it was asked and checks the refund address the way TopUp.quote does.
+ */
+const fakeTopUp = () => {
+  const asked: Array<Array<unknown>> = []
+  const topUp = {
+    assets: Effect.succeed([
+      new TopUpAsset({ assetId: TRON_USDT, symbol: "USDT", chain: "tron", decimals: 6 }),
+      new TopUpAsset({ assetId: "nep141:base-usdc", symbol: "USDC", chain: "base", decimals: 6 }),
+      new TopUpAsset({ assetId: "swap:usdt", symbol: "USDT", chain: "sol", decimals: 6, swap: true })
+    ]),
+    quote: (accountId: string, assetId: string, usdc: number, refundTo: string) => {
+      asked.push([accountId, assetId, usdc, refundTo])
+      const wrong = refundProblem(assetId === TRON_USDT ? "tron" : "base", refundTo)
+      return wrong
+        ? Effect.fail(new TopUpUnavailable({ message: wrong }))
+        : Effect.succeed(new TopUpQuote({
+          depositAddress: ONECLICK, amountIn: "20210000", amountInFormatted: "20.21", minAmountIn: "20009000", symbol: "USDT", chain: "tron",
+          usdcOut: 20_000_000, timeEstimateSeconds: 60, deadline: UNTIL, refundTo
+        }))
+    }
+  }
+  return { asked, topUp }
+}
+
+/**
+ * One turn where the model asks for a Deposit Address with `args`, the customer having typed `say`; `approved` is their
+ * one-time approval. `asked`: what 1Click was asked to quote.
+ */
+const depositTurn = async (args: object, o: { approved?: boolean; say?: string } = {}) => {
   const model = await fakeModel([call("deposit_address", args), { role: "assistant", content: "Send it there." }])
+  const { asked, topUp } = fakeTopUp()
   const agent = makeAgent({
     ...(deps as object),
     deposits: { status: () => Effect.succeed({ address: ADDRESS, approved: o.approved ?? true, waiting: 0 }) },
-    ...(o.oneClick ? { oneClick: o.oneClick } : {}),
+    topUp,
     testnet: false,
     apiKey: "test",
     baseURL: model.url,
     model: "fake"
   } as never)
-  const turn = await agent(ADDRESS, [], "I'll send USDC")
+  const turn = await agent(ADDRESS, [], o.say ?? "I'll send USDC")
   model.close()
-  return { turn, result: String(model.seen[1]!.messages.at(-1)!.content), seen: JSON.stringify(model.seen) }
+  return { turn, asked, result: String(model.seen[1]!.messages.at(-1)!.content), seen: JSON.stringify(model.seen) }
 }
+/** What the model saw after the customer's message: the tool results. */
+const afterAsking = (seen: string) => seen.slice(seen.indexOf('"tool"'))
 
-test("USDC or USDT on Solana gets their Deposit Address under the reply, which the model never sees", async () => {
-  const usdc = await depositTurn({ token: "usdc", chain: "Solana", amount: 15 })
+test("USDC or USDT on Solana gets their Deposit Address under the reply, which the model never sees; 1Click isn't asked", async () => {
+  const usdc = await depositTurn({ token: "usdc", chain: "Solana", amount: 15, refund_address: ADDRESS }, { say: ADDRESS })
   assert.deepEqual(usdc.turn.deposit, { address: ADDRESS, token: "USDC", chain: "Solana", amount: 15_000_000, tapInApp: false })
   assert.match(usdc.result, /without the address/)
-  assert.ok(!usdc.seen.slice(usdc.seen.indexOf('"tool"')).includes(ADDRESS), "no tool result carries the address")
+  assert.ok(!afterAsking(usdc.seen).includes(ADDRESS), "no tool result carries the address")
   const usdt = await depositTurn({ token: "USDT", chain: "solana", amount: 2.5 })
   assert.equal(usdt.turn.deposit?.tapInApp, true)
   assert.match(usdt.result, /USDT needs one tap in the app/)
+  assert.deepEqual([...usdc.asked, ...usdt.asked], [])
 })
 
-test("before the one-time approval, the deposit tool sends them to the app to make it", async () => {
+test("before the one-time approval, the deposit tool sends them to the app to make it, a 1Click Top-Up too", async () => {
   const r = await depositTurn({ token: "USDC", chain: "Solana", amount: 15 }, { approved: false })
   assert.equal(r.turn.deposit, undefined)
   assert.match(r.result, /one-time approval.*https:\/\/luckout\.test\/wallet/)
+  const tron = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { approved: false, say: TRON })
+  assert.equal(tron.turn.deposit, undefined)
+  assert.match(tron.result, /one-time approval/, "a 1Click Top-Up lands at the Deposit Address too")
+  assert.deepEqual(tron.asked, [])
 })
 
-test("deposits start at $1, and other chains wait for 1Click", async () => {
+test("deposits start at $1, and a token or chain 1Click doesn't take is refused with what they can send", async () => {
   assert.match((await depositTurn({ token: "USDC", chain: "Solana", amount: 0.5 })).result, /start at \$1\.00/)
-  const eth = await depositTurn({ token: "ETH", chain: "Base", amount: 20 })
-  assert.equal(eth.turn.deposit, undefined)
-  assert.match(eth.result, /only USDC or USDT on Solana/)
-  const asked: Array<unknown> = []
-  const oneClick = (...a: Array<unknown>) => Effect.sync(() => (asked.push(a), { deposit_address: "0xabc", amount: "20 USDC" }))
-  assert.match((await depositTurn({ token: "usdc", chain: "Base", amount: 20 }, { oneClick })).result, /0xabc/)
-  assert.deepEqual(asked, [[ADDRESS, "USDC", "base", 20_000_000]])
+  const doge = await depositTurn({ token: "DOGE", chain: "Dogecoin", amount: 20 })
+  assert.equal(doge.turn.deposit, undefined)
+  assert.match(doge.result, /DOGE on Dogecoin can't be added.*USDC or USDT on Solana, or USDT on Tron, USDC on Base/)
+  assert.deepEqual(doge.asked, [])
+})
+
+test("another chain's token: the tool asks for their refund address there first, and quotes nothing until it has one", async () => {
+  const r = await depositTurn({ token: "usdt", chain: "Tron", amount: 20 })
+  assert.equal(r.turn.deposit, undefined)
+  assert.match(r.result, /their own address on Tron.*refund_address/)
+  assert.deepEqual(r.asked, [])
+  const blank = await depositTurn({ token: "USDT", chain: "tron", amount: 20, refund_address: " " })
+  assert.match(blank.result, /their own address on Tron/)
+})
+
+test("a 1Click address comes under the reply: exactly what to send, the least swapped, until when, and where a failed swap refunds", async () => {
+  const r = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: `refunds to ${TRON}.` })
+  assert.deepEqual(r.asked, [[ADDRESS, TRON_USDT, 20_000_000, TRON]], "a quote to their Deposit Address, refunding to what they typed")
+  assert.deepEqual(r.turn.deposit, {
+    address: ONECLICK,
+    token: "USDT",
+    chain: "Tron",
+    amount: 20_000_000,
+    tapInApp: false,
+    oneClick: { send: "20.21", least: "20.01", until: UNTIL, refundTo: TRON }
+  })
+  assert.match(r.result, /without the address/)
+  assert.ok(!afterAsking(r.seen).includes(ONECLICK), "the model never sees 1Click's address")
+})
+
+test("a refund address on another chain, or one the customer didn't type, is refused with a reason the model can relay", async () => {
+  const solana = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: ADDRESS }, { say: ADDRESS })
+  assert.equal(solana.turn.deposit, undefined)
+  assert.match(solana.result, /isn't an address on Tron/)
+  const untyped = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: "my usual address" })
+  assert.equal(untyped.turn.deposit, undefined)
+  assert.match(untyped.result, /isn't in the customer's latest message/)
+  assert.deepEqual(untyped.asked, [], "1Click is never asked")
+  const changed = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: TRON.toLowerCase() })
+  assert.match(changed.result, /isn't in the customer's latest message/, "case matters: a base58 address in another case is another address")
+})
+
+test("an address counts as typed only exactly, as a whole word", () => {
+  assert.ok(typedAddress(`refund to ${TRON}.`, TRON))
+  assert.ok(typedAddress("alice.near", "alice.near"))
+  assert.ok(!typedAddress(`x${TRON}`, TRON))
+  assert.ok(!typedAddress("bob.alice.near", "alice.near"))
+  assert.ok(!typedAddress("", ""))
 })
 
 test("blocker: balance first, then the per-purchase and daily limits", () => {

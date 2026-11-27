@@ -349,7 +349,9 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
   })
 )
 
-const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
+const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
+  // The bot makes 1Click Top-Ups as the app does.
+  Layer.provideMerge(TopUp.layer),
   // Swap builds on Solana (prepare, simulate), as Deposits does.
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Deposits.layer, Swap.layer)),
   Layer.provideMerge(Layer.mergeAll(Sales.layer, Connect.layer)),

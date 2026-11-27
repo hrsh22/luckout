@@ -417,6 +417,23 @@ test("a short Buy line says the tap waits for the money, and a Deposit Address s
   assert.match(depositLines({ address, token: "USDT", chain: "Solana", amount: 5_000_000, tapInApp: true })[0]!, /after one tap in the app/)
 })
 
+test("a 1Click address says exactly what to send on which chain, the least, for how long, and where a failed swap refunds", () => {
+  const refundTo = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+  const oneClick = { send: "20.21", least: "20.01", until: new Date(T + 30 * 60_000).toISOString(), refundTo }
+  const d = { address: "TQ1c1ick", token: "USDT", chain: "Tron", amount: 20_000_000, tapInApp: false, oneClick }
+  assert.deepEqual(depositLines(d, T), [
+    "Send 20.21 USDT on Tron to 1Click's address below within 30 minutes (by 12:30 UTC), and about $20.00 lands in your balance. Only USDT on Tron: another token or network can't be swapped.",
+    `More is fine, it's all swapped, but at least 20.01 USDT must arrive. If the swap fails, 1Click refunds it to ${refundTo} on Tron.`,
+    "TQ1c1ick"
+  ])
+  const memo = depositLines({ ...d, oneClick: { send: "20.21", until: oneClick.until, refundTo, memo: "1234" } }, T)
+  assert.deepEqual(memo.slice(1), [
+    `More is fine, it's all swapped. If the swap fails, 1Click refunds it to ${refundTo} on Tron.`,
+    "Include this memo, or 1Click can't match your transfer: 1234",
+    "TQ1c1ick"
+  ], "a memo before the address, which stays alone on the last line")
+})
+
 test("the bot's repeating round reads the clock each time it runs", () =>
   run(Effect.gen(function*() {
     const said: Array<string> = []

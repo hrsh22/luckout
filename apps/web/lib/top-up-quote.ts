@@ -1,4 +1,4 @@
-import type { HeldToken, TopUpAsset, TopUpQuote } from "@luckout/api"
+import { formatUnits, type HeldToken, type TopUpAsset } from "@luckout/api"
 
 // Pure helpers for adding funds (ADR-0015): the Deposit Address's QR, the swap-paid tokens sitting there, and 1Click
 // Top-Ups from other chains.
@@ -9,23 +9,8 @@ import type { HeldToken, TopUpAsset, TopUpQuote } from "@luckout/api"
  */
 export const solanaPayUri = (address: string, usdcMint: string) => `solana:${address}?spl-token=${usdcMint}`
 
-/** Base units → "12.5": exact, trailing zeros trimmed. */
-export const formatUnits = (amount: string, decimals: number) => {
-  const s = amount.replace(/^0+(?=\d)/, "").padStart(decimals + 1, "0")
-  const whole = s.slice(0, s.length - decimals)
-  const frac = s.slice(s.length - decimals).replace(/0+$/, "")
-  return frac ? `${whole}.${frac}` : whole
-}
-
-/**
- * The least a FLEX_INPUT quote swaps, formatted like `amountInFormatted`; undefined when 1Click gave none. The token's
- * decimals come from the asset, or else from the quote's own amount and its formatted form.
- */
-export const minimumOf = (q: Pick<TopUpQuote, "amountIn" | "amountInFormatted" | "minAmountIn">, decimals?: number) => {
-  if (!q.minAmountIn) return undefined
-  const d = decimals ?? Math.round(Math.log10(Number(q.amountIn) / Number(q.amountInFormatted)))
-  return Number.isInteger(d) && d >= 0 ? formatUnits(q.minAmountIn, d) : undefined
-}
+// Shared with the bot, which writes the same lines (Agent.ts).
+export { formatUnits, minimumOf } from "@luckout/api"
 
 /** What one tap would swap into the Balance: a held token, what it's worth (when its price is known), and whether that's enough. */
 export interface Tap {
