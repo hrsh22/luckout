@@ -376,11 +376,14 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
   })
 ) {}
 
+/** Privy's tokens after a sign-in (ADR-0015): the access token says who, the identity token what they linked. */
+export class PrivySignIn extends Schema.Class<PrivySignIn>("PrivySignIn")({
+  accessToken: Schema.String.check(Schema.isMaxLength(8192)),
+  identityToken: Schema.String.check(Schema.isMaxLength(16384))
+}) {}
+
 export class AuthApi extends HttpApiGroup.make("auth").add(
-  HttpApiEndpoint.post("challenge", "/auth/challenge", { success: Challenge }),
-  HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized }),
-  HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized }),
-  HttpApiEndpoint.post("verifySolana", "/auth/verify-solana", { payload: SignedSolanaChallenge, success: Session, error: Unauthorized })
+  HttpApiEndpoint.post("privy", "/auth/privy", { payload: PrivySignIn, success: Session, error: Unauthorized })
 ) {}
 
 /** Ends the session the request came with, or every session of the signed-in account, on every device (a lost phone, a shared computer). */

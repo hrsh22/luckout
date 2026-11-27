@@ -86,12 +86,15 @@ export const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =
 const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
   Effect.gen(function*() {
     const auth = yield* Auth
+    const purchases = yield* Purchases
     return handlers.handleAll({
-      challenge: () => auth.challenge,
-      // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when.
-      verify: ({ payload }) => startSession(auth.verify(payload)),
-      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload)),
-      verifySolana: ({ payload }) => startSession(auth.verifySolana(payload))
+      // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when. The login
+      // email becomes the Checkout Email if the customer has none yet (ADR-0015); they can change it in Wallet.
+      privy: ({ payload }) =>
+        startSession(Effect.tap(auth.privy(payload), (s) =>
+          s.linked.email
+            ? Effect.flatMap(purchases.checkoutEmail(s.accountId), (c) => (c.email ? Effect.void : purchases.setCheckoutEmail(s.accountId, s.linked.email!).pipe(Effect.ignore)))
+            : Effect.void))
     })
   })
 )
