@@ -12,9 +12,8 @@ import { Credit, CREDIT_DEFAULTS, levels, MIN_REFILL } from "./Credit.ts"
 import { DbMemory } from "./Db.ts"
 import { Near, NearUnavailable, type Outcome } from "./Near.ts"
 import { OneClick, OneClickUnavailable, type QuoteRequest, type QuoteResponse } from "./OneClick.ts"
-import { BASE_USDC_ASSET, floatTopUp, fundable, quoteProblem, Refill } from "./Refill.ts"
+import { BASE_USDC_ASSET, floatTopUp, fundable, NEAR_USDC_ASSET, quoteProblem, Refill } from "./Refill.ts"
 import { fakeBase, fakeBitrefill, fakeNear } from "./testing.ts"
-import { NEAR_USDC_ASSET } from "./TopUp.ts"
 
 // The refill pipeline on an in-memory database, with NEAR, our Base wallet, Bitrefill and 1Click faked.
 // Refills only run on mainnet. Every test checks where the money went: which transactions the treasury

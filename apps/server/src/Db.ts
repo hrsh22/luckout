@@ -395,6 +395,11 @@ export const migrationSteps = {
   "0031_deposit_approval": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE known_accounts ADD COLUMN approval_lost_at TIMESTAMPTZ`
+  }),
+  // Where 1Click refunds a Top-Up: an address on its source chain, which the customer gives (ADR-0015).
+  "0032_swap_refund_to": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN refund_to TEXT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

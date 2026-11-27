@@ -227,10 +227,22 @@ export const solanaWorld = (): SolanaWorld => {
         return Effect.void
       }),
     landed: (signature) => Effect.sync(() => landed.get(signature)),
-    simulate: (bytes) =>
+    simulate: (bytes, watch = []) =>
       Effect.sync(() => {
+        // As the RPC simulates: signatures unchecked, so a transaction still waiting for its signers can be tried.
+        svm.withSigverify(false)
         const res = svm.simulateTransaction(kitTx.decode(bytes))
-        return res instanceof FailedTransactionMetadata ? ranFrom(res.meta(), txError(res.err())) : ranFrom(res.meta(), undefined)
+        svm.withSigverify(true)
+        if (res instanceof FailedTransactionMetadata) return { ...ranFrom(res.meta(), txError(res.err())), accounts: watch.map(() => undefined) }
+        const post = new Map(res.postAccounts().map((a) => [String(a.address), a]))
+        return {
+          ...ranFrom(res.meta(), undefined),
+          accounts: watch.map((k) => {
+            const now = svm.getAccount(address(k.toBase58()))
+            const a = post.get(k.toBase58()) ?? (now.exists ? now : undefined)
+            return a && a.lamports > 0n ? { owner: new PublicKey(a.programAddress), lamports: BigInt(a.lamports), data: Buffer.from(a.data) } : undefined
+          })
+        }
       }),
     balance: (k) => Effect.sync(() => BigInt(svm.getBalance(address(k.toBase58())) ?? 0n)),
     signatures: () => Effect.succeed([])

@@ -7,6 +7,7 @@
  * the Pay Wallet pays Bitrefill. None is the owner, which lives in the owner's own wallet.
  */
 import {
+  type AddressLookupTableAccount,
   ComputeBudgetProgram,
   Connection,
   Keypair,
@@ -16,10 +17,11 @@ import {
   SendTransactionError,
   Transaction,
   type TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction
 } from "@solana/web3.js"
 import { Config, Context, Data, Effect, Layer, Option, Redacted } from "effect"
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
+import { createHmac, createPublicKey, randomBytes, timingSafeEqual, verify } from "node:crypto"
 import {
   base58,
   type Checkout,
@@ -69,6 +71,11 @@ export interface Signed {
   readonly lastValidBlockHeight: number
 }
 
+/** A simulation, with the watched accounts as it leaves them (undefined where one doesn't exist). */
+export interface Simulated extends Ran {
+  readonly accounts: Array<RawAccount | undefined>
+}
+
 export interface Outcome {
   readonly signature: string
   readonly events: ReadonlyArray<ProgramEvent>
@@ -84,7 +91,8 @@ export class Chain extends Context.Service<Chain, {
   submit(bytes: Uint8Array): Effect.Effect<void, SolanaUnavailable | Refused>
   /** What a landed transaction did; undefined while the chain hasn't got it. */
   landed(signature: string): Effect.Effect<Ran | undefined, SolanaUnavailable>
-  simulate(bytes: Uint8Array): Effect.Effect<Ran, SolanaUnavailable>
+  /** Runs bytes without landing them (signatures unchecked); `watch`: accounts to read back as it leaves them. */
+  simulate(bytes: Uint8Array, watch?: ReadonlyArray<PublicKey>): Effect.Effect<Simulated, SolanaUnavailable>
   balance(key: PublicKey): Effect.Effect<bigint, SolanaUnavailable>
   signatures(key: PublicKey, limit: number): Effect.Effect<Array<string>, SolanaUnavailable>
 }>()("luckout/Chain") {
@@ -139,16 +147,25 @@ export class Chain extends Context.Service<Chain, {
                 : undefined
             )
           ),
-        simulate: (bytes) =>
-          rpc("simulate", () => conn.simulateTransaction(VersionedTransaction.deserialize(bytes), { sigVerify: false, commitment: "confirmed" })).pipe(
-            Effect.map(({ value }) => ({
-              error: value.err ? txError(value.err) : undefined,
-              logs: value.logs ?? [],
-              inner: [],
-              returnData: value.returnData ? Buffer.from(value.returnData.data[0], "base64") : undefined,
-              units: value.unitsConsumed
-            }))
-          ),
+        simulate: (bytes, watch = []) =>
+          rpc("simulate", () =>
+            conn.simulateTransaction(VersionedTransaction.deserialize(bytes), {
+              sigVerify: false,
+              commitment: "confirmed",
+              ...(watch.length > 0 ? { accounts: { encoding: "base64" as const, addresses: watch.map((k) => k.toBase58()) } } : {})
+            })).pipe(
+              Effect.map(({ value }) => ({
+                error: value.err ? txError(value.err) : undefined,
+                logs: value.logs ?? [],
+                inner: [],
+                returnData: value.returnData ? Buffer.from(value.returnData.data[0], "base64") : undefined,
+                units: value.unitsConsumed,
+                accounts: watch.map((_, i) => {
+                  const a = value.accounts?.[i]
+                  return a ? { owner: new PublicKey(a.owner), lamports: BigInt(a.lamports), data: Buffer.from(a.data[0] ?? "", "base64") } : undefined
+                })
+              }))
+            ),
         balance: (key) => rpc("balance", () => conn.getBalance(key, "confirmed")).pipe(Effect.map(BigInt)),
         signatures: (key, limit) =>
           rpc("signatures", () => conn.getSignaturesForAddress(key, { limit }, "confirmed")).pipe(Effect.map((s) => s.map((x) => x.signature)))
@@ -192,6 +209,16 @@ const DEFAULT_PRIORITY = 10_000
 
 export type SignerName = "operator" | "payWallet"
 
+/** How a prepared transaction is built: its compute limit, and lookup tables, which make it a v0 transaction. */
+export interface PrepareOptions {
+  readonly units?: number
+  readonly lookupTables?: ReadonlyArray<AddressLookupTableAccount>
+}
+
+/** Whether `signature` is `key`'s Ed25519 signature of `message`. */
+const signedBy = (key: PublicKey, message: Uint8Array, signature: Uint8Array) =>
+  verify(null, message, createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), key.toBuffer()]), format: "der", type: "spki" }), signature)
+
 const rejected = (error: TxError, logs: ReadonlyArray<string>) => {
   const ours = error.code === undefined ? undefined : programError(error.code)
   const anchor = logs.map((l) => /Error Message: (.+?)\.?$/.exec(l)?.[1]).find(Boolean)
@@ -228,7 +255,13 @@ export class Solana extends Context.Service<Solana, {
    * A transaction a customer signs and we pay for (ADR-0015): built here with our fee payer, handed out unsigned with a
    * token that binds its exact bytes. Only `cosign` adds the fee payer's signature, and only to those bytes.
    */
-  prepare(ixs: ReadonlyArray<TransactionInstruction>, signer: PublicKey): Effect.Effect<{ readonly transaction: string; readonly token: string }, SolanaUnavailable>
+  prepare(
+    ixs: ReadonlyArray<TransactionInstruction>,
+    signer: PublicKey,
+    options?: PrepareOptions
+  ): Effect.Effect<{ readonly transaction: string; readonly token: string }, SolanaUnavailable>
+  /** Simulates a prepared transaction as it stands, unsigned, and reads back `watch` as it leaves them. */
+  inspect(transaction: string, watch: ReadonlyArray<PublicKey>): Effect.Effect<Simulated, SolanaUnavailable>
   /** Checks a prepared transaction came back unchanged and signed by its customer, then signs as fee payer, sends and waits. */
   cosign(transaction: string, token: string): Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | NotOurs>
 }>()("luckout/Solana") {
@@ -304,40 +337,56 @@ export class Solana extends Context.Service<Solana, {
           )
         })
 
-      const prepare: Solana["Service"]["prepare"] = (ixs, signer) =>
+      const prepare: Solana["Service"]["prepare"] = (ixs, signer, options = {}) =>
         Effect.gen(function*() {
           const payer = yield* need(feePayer, "SOLANA_FEE_PAYER_SECRET_KEY")
-          const { blockhash, lastValidBlockHeight } = yield* chain.blockhash
-          const tx = new Transaction({ feePayer: payer.publicKey, blockhash, lastValidBlockHeight }).add(
-            ComputeBudgetProgram.setComputeUnitLimit({ units: UNITS }),
-            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priority }),
-            ...ixs
-          )
-          if (!tx.instructions.some((ix) => ix.keys.some((k) => k.isSigner && k.pubkey.equals(signer)))) {
+          if (!ixs.some((ix) => ix.keys.some((k) => k.isSigner && k.pubkey.equals(signer)))) {
             return yield* new SolanaUnavailable({ message: "the customer signs nothing in this transaction" })
           }
+          const { blockhash, lastValidBlockHeight } = yield* chain.blockhash
+          const all = [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: options.units ?? UNITS }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priority }),
+            ...ixs
+          ]
+          if (options.lookupTables) {
+            const tables = options.lookupTables
+            return yield* Effect.try({
+              try: () => {
+                const message = new TransactionMessage({ payerKey: payer.publicKey, recentBlockhash: blockhash, instructions: all }).compileToV0Message([...tables])
+                return { transaction: Buffer.from(new VersionedTransaction(message).serialize()).toString("base64"), token: bind(Buffer.from(message.serialize())) }
+              },
+              catch: (e) => new SolanaUnavailable({ message: `the transaction is too big: ${e}` })
+            })
+          }
+          const tx = new Transaction({ feePayer: payer.publicKey, blockhash, lastValidBlockHeight }).add(...all)
           return {
             transaction: tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString("base64"),
             token: bind(tx.serializeMessage())
           }
         })
 
+      // Legacy and v0 alike: the message's bytes are what the token binds and what every signature signs.
       const cosign: Solana["Service"]["cosign"] = (transaction, token) =>
         Effect.gen(function*() {
           const payer = yield* need(feePayer, "SOLANA_FEE_PAYER_SECRET_KEY")
-          const tx = yield* Effect.try({ try: () => Transaction.from(Buffer.from(transaction, "base64")), catch: () => new NotOurs({ message: "That isn't a transaction" }) })
-          const message = tx.serializeMessage()
+          const tx = yield* Effect.try({
+            try: () => VersionedTransaction.deserialize(Buffer.from(transaction, "base64")),
+            catch: () => new NotOurs({ message: "That isn't a transaction" })
+          })
+          const message = Buffer.from(tx.message.serialize())
           const expected = Buffer.from(bind(message))
           const given = Buffer.from(token)
           if (given.length !== expected.length || !timingSafeEqual(given, expected)) return yield* new NotOurs({ message: "That transaction isn't the one we prepared" })
           // Every signature but ours must be there and valid: we pay only for what its customer signed.
-          const others = tx.signatures.filter((s) => !s.publicKey.equals(payer.publicKey))
-          if (others.length === 0 || others.some((s) => !s.signature) || !tx.verifySignatures(false)) {
+          const signers = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures)
+          const others = signers.flatMap((key, i) => (key.equals(payer.publicKey) ? [] : [{ key, signature: tx.signatures[i]! }]))
+          if (others.length === 0 || others.some((s) => !signedBy(s.key, message, s.signature))) {
             return yield* new NotOurs({ message: "That transaction isn't signed by its customer" })
           }
-          tx.partialSign(payer)
-          const lastValidBlockHeight = tx.lastValidBlockHeight ?? (yield* chain.blockHeight) + 150
-          return yield* deliver({ signature: base58.encode(tx.signature!), bytes: tx.serialize().toString("base64"), lastValidBlockHeight }).pipe(
+          tx.sign([payer])
+          const lastValidBlockHeight = (yield* chain.blockHeight) + 150
+          return yield* deliver({ signature: base58.encode(tx.signatures[0]!), bytes: Buffer.from(tx.serialize()).toString("base64"), lastValidBlockHeight }).pipe(
             Effect.catchTag("TxExpired", () => Effect.fail(new SolanaUnavailable({ message: "it expired before it landed; prepare it again" })))
           )
         })
@@ -372,6 +421,7 @@ export class Solana extends Context.Service<Solana, {
             )
           ),
         prepare,
+        inspect: (transaction, watch) => chain.simulate(Buffer.from(transaction, "base64"), watch),
         cosign
       })
     })

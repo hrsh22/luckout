@@ -12,7 +12,6 @@ import { ContractRejected, Near, NearUnavailable, Network, type Outcome, type Si
 import { OneClick, OneClickUnavailable, type QuoteResponse } from "./OneClick.ts"
 import { stepRows } from "./Rows.ts"
 import { USDC_REGISTRATION } from "./Relay.ts"
-import { NEAR_USDC_ASSET } from "./TopUp.ts"
 
 // Refilling our Bitrefill credit (ADR-0009). Real money moves here, so:
 //   fund → quote → send → swapping → invoice → pay → crediting → done
@@ -41,6 +40,9 @@ import { NEAR_USDC_ASSET } from "./TopUp.ts"
 //   "float" refill swaps exactly the missing amount in, through the same steps, and ends once our wallet shows
 //   it: fund → quote → send → swapping → invoice → done. It never touches Bitrefill. It waits for money quietly, and while
 //   it's still waiting at fund with nothing signed, a real refill that comes due cancels it and goes first.
+
+/** USDC on NEAR, as 1Click names it: what refills swap from. */
+export const NEAR_USDC_ASSET = "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"
 
 export const BASE_USDC_ASSET = "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"
 /** The most a refill may cost above the credit it buys, slippage buffer included. */

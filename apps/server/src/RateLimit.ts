@@ -54,8 +54,7 @@ const routePath = (url: string) => {
  */
 export const limitFor = (url: string) => {
   const path = routePath(url)
-  return path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") || path === "/topup/swap-tx" ||
-      path.startsWith("/solana-pay/")
+  return path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") || path === "/topup/swap"
     ? 20
     : path === "/catalog" || path.startsWith("/catalog/") || path === "/quote" || path === "/quote/cart" || path === "/browse" || path === "/mcp"
     ? 60
