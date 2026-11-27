@@ -340,7 +340,10 @@ function KeyTile({ k }: { k: AdminOverview["keys"][number] }) {
         <Bar value={fill} tone={low ? "warn" : "good"} />
         <span className="absolute top-[-3px] left-1/4 h-3.5 w-0.5 rounded-full bg-ink/30" aria-hidden="true" />
       </div>
-      <p className="mt-2 text-xs text-muted">Alert under {show(k.alertBelow)} · <AddressLink address={k.address} /></p>
+      <p className="mt-2 text-xs text-muted">Alert under {show(k.alertBelow)}</p>
+      <p className="mt-1 text-xs text-muted">Send {k.role === "feePayer" ? "SOL" : "USDC on Solana"} to <AddressLink address={k.address} full /></p>
+      {/* USDC sent to the token account's own address can be stranded: an exchange would make it a USDC account of its own. */}
+      {k.usdcAccount && <p className="mt-1 text-xs text-muted">Its USDC account, never to send to: <AddressLink address={k.usdcAccount} /></p>}
     </div>
   )
 }

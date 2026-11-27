@@ -714,7 +714,10 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   /** Our keys' balances and where the Monitor alerts: the fee payer's SOL (lamports), the Pay Wallet's USDC. */
   keys: Schema.Array(Schema.Struct({
     role: Schema.Literals(["feePayer", "payWallet"]),
+    /** The wallet: where to send it SOL or USDC. */
     address: Schema.String,
+    /** The Pay Wallet's USDC account, which the program pays and repays: a detail, never where to send (an exchange can strand USDC sent to it). */
+    usdcAccount: Schema.optional(Schema.String),
     balance: Schema.String,
     alertBelow: Schema.String
   })),

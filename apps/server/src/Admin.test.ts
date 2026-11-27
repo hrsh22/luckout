@@ -77,9 +77,9 @@ test("the overview reads the program's Config and Vault, the fee payer's SOL, th
     assert.equal(o.reserve.maxCashback, 50 * USDC, "the lower of the fixed $50 and 20% of the reserve")
     assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0 })
     assert.deepEqual(
-      o.keys.map((k) => [k.role, k.address, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
-      [["feePayer", world.feePayer.publicKey.toBase58(), "ok"], ["payWallet", world.payWalletUsdc.toBase58(), "low"]],
-      "the fee payer has its SOL; the Pay Wallet has no float yet"
+      o.keys.map((k) => [k.role, k.address, k.usdcAccount, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
+      [["feePayer", world.feePayer.publicKey.toBase58(), undefined, "ok"], ["payWallet", world.payWallet.publicKey.toBase58(), world.payWalletUsdc.toBase58(), "low"]],
+      "the fee payer has its SOL; the Pay Wallet has no float yet. Each shows the wallet to send to; the Pay Wallet's USDC account is only a detail"
     )
     assert.deepEqual(o.paying, { daily: 0, monthly: 0, limits: { daily: 10_000 * USDC, monthly: 50_000 * USDC } }, "test cards are free")
     assert.equal(o.purchases.today, 2)

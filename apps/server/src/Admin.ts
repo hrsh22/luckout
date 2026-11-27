@@ -141,7 +141,9 @@ export class Admin extends Context.Service<Admin, {
               : []),
             {
               role: "payWallet" as const,
-              address: config.pay_wallet.toBase58(),
+              // The program keeps the Pay Wallet's USDC account; USDC is sent to the wallet that owns it.
+              address: (payWallet ? new PublicKey(payWallet.data.subarray(32, 64)) : solana.payWallet ?? config.pay_wallet).toBase58(),
+              usdcAccount: config.pay_wallet.toBase58(),
               balance: String(payWallet ? payWallet.data.readBigUInt64LE(64) : 0n),
               alertBelow: String(LOW_LINES.float)
             }

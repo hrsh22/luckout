@@ -136,7 +136,7 @@ The Pay Wallet pays each checkout's invoice, and `settle` repays it. A new check
 **Top it up**, in any of these ways. Waiting checkouts then go ahead on their own.
 - **From Proceeds (owner):** Admin → Proceeds → Withdraw, to "the Pay Wallet, as float".
 - **Raise the daily repay cap (owner),** if the repay alert fired.
-- **Send USDC on Solana** to the Pay Wallet's own address, from any wallet or exchange. The address is in `deploy/README.md`, Environments. Don't send to the address the panel shows: that's the Pay Wallet's USDC account, not the wallet.
+- **Send USDC on Solana** to the Pay Wallet's own address, from any wallet or exchange: Admin → Paying Bitrefill → Pay Wallet float shows it under "Send USDC on Solana to" (and `deploy/README.md`, Environments, lists it). Never to its USDC account, which the panel shows below it only as a detail.
 
 While sales are stopped or the program is paused, waiting checkouts keep their place, but their 60 minutes keep running.
 
