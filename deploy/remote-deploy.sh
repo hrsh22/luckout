@@ -14,7 +14,9 @@ back="${2:-}"
 cd "$(dirname "$0")/.."
 . ~/.nvm/nvm.sh >/dev/null
 port=$(grep -E '^PORT=' .env | cut -d= -f2)
-network=$(grep -E '^NEAR_NETWORK=' .env | cut -d= -f2)
+# SOLANA_CLUSTER on Solana sites (ADR-0015); NEAR_NETWORK on NEAR ones.
+network=$(grep -E '^SOLANA_CLUSTER=' .env | cut -d= -f2)
+[ -n "$network" ] || network=$(grep -E '^NEAR_NETWORK=' .env | cut -d= -f2)
 # A site only ever runs its own branch: testnet code on mainnet (or the reverse) is refused, and so is
 # staging code on production (or the reverse), which share a network but never a site user.
 case "$branch:$network:$(id -un)" in
