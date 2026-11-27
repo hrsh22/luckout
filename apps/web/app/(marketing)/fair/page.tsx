@@ -53,6 +53,7 @@ export default async function Fair() {
       <p className="max-w-[64ch] text-ink-soft">
         Over a few dozen Draws the average swings a lot; over thousands it settles near 105.6%. Every Draw links to a Draw Proof you can
         recompute in your browser, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.
+        How it all works, step by step: <Link href="/docs/fairness" className="font-semibold text-ink underline underline-offset-4">How Luckout stays fair</Link>.
       </p>
 
       {reserve && (
