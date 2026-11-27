@@ -1,9 +1,9 @@
 "use client"
 
-import { slabColor, Spacers } from "@/components/odds"
+import { Spacers } from "@/components/odds"
 import { usdDown, usdUp } from "@/lib/format"
 import { AMPLE_RESERVE, MODES, type PricedOutcome, pricedOutcomes, simpleQuote } from "@/lib/modes"
-import { modePalette } from "@/lib/palette"
+import { modePalette, slabColor } from "@/lib/palette"
 import { motion } from "motion/react"
 import { useState } from "react"
 

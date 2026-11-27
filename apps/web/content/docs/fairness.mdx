@@ -22,7 +22,7 @@ Each mode is a Game Version: a table of cashback and chances stored in the contr
 
 So nobody can cancel a purchase after seeing its result, or run its Draw again for a better one.
 
-The Draw's random value comes from NEAR's block randomness, mixed with the purchase number, so two Draws in the same block come out different. A block producer could nudge that randomness slightly, which is one reason each purchase's cashback is capped.
+The Draw's random value comes from NEAR's block randomness, mixed with the purchase number, so two Draws in the same block come out different. A block producer could nudge that randomness slightly, which is one reason each purchase's cashback is capped. [The Draw](/docs/draw) goes through it step by step.
 
 ## Every cashback is covered first
 
@@ -32,14 +32,14 @@ One purchase can get at most the Cashback Cap: the lower of a fixed amount and a
 
 ## Check any Draw yourself
 
-Every Draw has a public Draw Proof: its transaction, random seed, purchase number and Game Version. The Draw Proof page recomputes the cashback in your browser, straight from the chain. <ExampleDraw>See one</ExampleDraw>.
+Every Draw has a public Draw Proof: its transaction, random seed, purchase number and Game Version. The Draw Proof page recomputes the cashback in your browser, straight from the chain. <ExampleDraw>See one</ExampleDraw>, or read [how to check a Draw](/docs/draw#draw-proofs).
 
 ## What the contract guarantees
 
 - Your balance is held by the contract and credited to you. Anything not locked in a purchase can be withdrawn at any time.
 - Your per-purchase and daily spending limits apply to every purchase, whoever submits it, the Telegram bot included.
 - A card that can't be delivered is refunded in full to your balance, with no Draw.
-- A purchase we neither deliver nor cancel within 24 hours can be reclaimed in full, by you.
+- A purchase we neither deliver nor cancel within 24 hours can be [reclaimed](/docs/refunds#reclaim) in full, by you.
 
 ## What you trust us for
 

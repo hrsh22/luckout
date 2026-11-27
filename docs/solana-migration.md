@@ -110,7 +110,7 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   - withdrawal to any Solana address
 - **Draw Proof page:** checks ORAO's value and recomputes the Cashback (`lib/draw.ts`, `lib/proof.ts`).
 - **Admin panel:** owner actions signed in the owner's wallet, as today.
-- **Docs** (`docs/docs-site-plan.md`): rewrite the six pages it marks as changing with Solana: sign-in, add-funds, draw, balance, refunds and telegram. Their URLs stay.
+- **Docs** (`docs/docs-site-plan.md`): rewrite the pages it marks as changing with Solana: sign-in, add-funds and add-funds/other-chains, draw, balance, refunds and telegram, and touch up the ones marked "Lightly". Their URLs stay.
 
 **Done when** a customer on a local validator signs in with email, deposits, buys a Lucky Cart, sees its Draw Proofs and withdraws.
 

@@ -1,14 +1,16 @@
-import { ExampleDraw } from "@/components/docs"
+import { ExampleDraw, Step, Steps, Tile, Tiles } from "@/components/docs"
 
 Luckout sells gift cards for thousands of brands around the world, paid in USDC. Buy a card at its price, or pay a little more up front for a fair chance at cashback, sometimes the whole price back. Either way, the card is yours.
 
 ## Three steps
 
-1. **Add funds.** Add USDC, or send a token from Ethereum, Base, Solana, Bitcoin and other chains, and it arrives as USDC in your Luckout balance. Withdraw whatever you don't spend.
-2. **Pick a card and a mode.** Pay exactly the price in Normal, or choose Lite, Classic or Jackpot for a chance at cashback. You see every outcome and its chance before you buy. [The four modes](/docs/modes) explains each one.
-3. **Get the code, then the Draw.** The card's code usually arrives within a minute. Then the Draw runs, and any cashback lands in your balance.
+<Steps>
+  <Step title="Add funds" tint="sky">Add USDC, or send a token from Ethereum, Base, Solana, Bitcoin and other chains, and it arrives as USDC in your Luckout balance. Withdraw whatever you don't spend. [How to add funds](/docs/add-funds)</Step>
+  <Step title="Pick a card and a mode">Pay exactly the price in Normal, or choose Lite, Classic or Jackpot for a chance at cashback. You see every outcome and its chance before you buy. [The four modes](/docs/modes)</Step>
+  <Step title="Get the code, then the Draw" tint="gold">The card's code usually arrives within a minute. Then the Draw runs, and any cashback lands in your balance. [The Draw](/docs/draw)</Step>
+</Steps>
 
-Buy in the [shop](/shop), or ask the Luckout bot in Telegram to find a card and prepare it for you. Nothing is bought until you confirm.
+Buy in the [shop](/shop), or ask the [Luckout bot in Telegram](/docs/telegram) to find a card and prepare it for you. Nothing is bought until you confirm.
 
 ## What you can count on
 
@@ -28,4 +30,10 @@ Each card is bought on Bitrefill, and its code is shown to you in Luckout. Bitre
 
 ## Get started
 
-[Create your account](/welcome) with a NEAR, EVM or Solana wallet. It takes a minute. Or [browse the shop](/shop) first.
+<Tiles>
+  <Tile title="Create your account" href="/docs/sign-in" tint="sky">Sign in with a NEAR, EVM or Solana wallet. It takes a minute.</Tile>
+  <Tile title="Buy your first card" href="/docs/buy" tint="lilac">Find a card for your country and choose how to pay.</Tile>
+  <Tile title="Questions?" href="/docs/faq" tint="gold">Short answers on cards, cashback, your money and the bot.</Tile>
+</Tiles>
+
+Ready now? [Create your account](/welcome), or [browse the shop](/shop) first.

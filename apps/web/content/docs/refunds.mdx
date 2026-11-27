@@ -1,0 +1,59 @@
+import { Flow, Note, Step, Steps, Tile, Tiles } from "@/components/docs"
+
+You always get the card you paid for, or your money back. Here's what happens when a card can't be delivered, when one is stuck, and when a Top-Up doesn't go through.
+
+<Flow
+  label="A purchase that goes as planned"
+  nodes={[
+    { title: "You buy", body: "The price is held from your balance." },
+    { title: "The code arrives", body: "Usually within a minute." },
+    { title: "The Draw", body: "In a lucky mode, then any cashback.", tint: "gold" }
+  ]}
+/>
+
+If something goes wrong instead:
+
+<Tiles>
+  <Tile title="It can't be delivered" href="#a-card-that-cant-be-delivered" tint="warn">The full amount goes back to your balance by itself, with no Draw.</Tile>
+  <Tile title="It isn't ready in time" href="#a-card-thats-getting-ready" tint="lilac">It's cancelled without a charge, or refunded in full.</Tile>
+  <Tile title="Nothing happens for 24 hours" href="#reclaim" tint="good">You take the full amount back yourself, with one tap.</Tile>
+</Tiles>
+
+## A card that can't be delivered
+
+If a card can't be delivered, Luckout marks it failed, and the full amount you paid, including any extra for a lucky mode, goes straight back to your balance. There's no Draw. The purchase shows **Refunded**, with the reason, such as "Bitrefill couldn't deliver this voucher." If Telegram is linked, the bot tells you too.
+
+In a [Cart](/docs/buy/cart), only that card comes back. The others are delivered as usual.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## A card that's getting ready
+
+Now and then a card shows **Getting it ready** while Luckout prepares to buy it. If you haven't been charged yet, the page says so, and you can tap **Cancel** until it's ready: "Cancelled. You weren't charged."
+
+If it isn't ready in time, Luckout cancels it without a charge, or, if you were charged, refunds the full amount before Reclaim would open.
+
+## Reclaim
+
+If Luckout has neither delivered nor refunded a purchase 24 hours after you bought it, the contract lets you take the full amount back yourself. Only you can, and only for your own purchase.
+
+<Steps>
+  <Step title="Find the purchase" tint="sky">In [Purchases](/purchases). After 10 minutes in progress, it says **Taking longer than usual** and when Reclaim opens.</Step>
+  <Step title="Tap Reclaim it">Once 24 hours have passed, the purchase says the full amount is yours to take back.</Step>
+  <Step title="Approve in your wallet" tint="gold">The full amount you paid is back in your balance. Luckout pays the network fee.</Step>
+</Steps>
+
+## Top-Up refunds
+
+If a [Top-Up from another chain](/docs/add-funds/other-chains) doesn't go through, 1Click sends the money back. Change from a Top-Up you overpaid comes back the same way.
+
+- **To the wallet that paid,** for an EVM or Solana wallet paying on Arbitrum, Base, Polygon, BNB Chain or Solana.
+- **To your NEAR Intents account** in every other case. It's your own account in NEAR Intents, controlled only by your wallet: Luckout can move money out of it only with your signature.
+
+### Send it back to your wallet
+
+Money in your NEAR Intents account shows on your [wallet page](/wallet) under **Also yours, in NEAR Intents**. Tap **Send to my wallet** (or **Send to my NEAR wallet as USDC**) and approve once. It's converted on 1Click and sent to your own wallet, and Luckout pays the network fee. With an EVM or Solana wallet, you can spend it instead: move it into your balance with the **From NEAR Intents** tab under **Add funds**.
+
+<Note title="A delivered card is final">
+  Once a delivery is confirmed, the contract runs the Draw and the purchase can't be refunded through Luckout. If a code doesn't work, see [Get help](/docs/support#a-code-doesnt-work).
+</Note>

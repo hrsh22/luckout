@@ -19,20 +19,39 @@ const STEPS = [
   { title: "Get the code, then the Draw", body: "We buy the card from Bitrefill, our supplier, and the code usually arrives within a minute. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
 ]
 
+// Each answer ends in a link to the docs page with the rest (`more`).
 const FAQ = [
-  { q: "Do I always get the card?", a: "Yes. The Draw only decides how much cashback you get. If Bitrefill can't deliver, the whole amount returns to your balance and there's no Draw." },
-  { q: "Is Luckout part of Bitrefill?", a: "No. Bitrefill is only where we source the gift cards. Luckout isn't affiliated with Bitrefill." },
-  { q: "How does Luckout make money?", a: "Every lucky mode is built so that, across many purchases, buyers pay 105.6% of the price on average. That 5.6% is our only revenue. Normal purchases cost exactly the price." },
   {
+    q: "Do I always get the card?",
+    a: "Yes. The Draw only decides how much cashback you get. If Bitrefill can't deliver, the whole amount returns to your balance and there's no Draw.",
+    more: "/docs/refunds"
+  },
+  { q: "Is Luckout part of Bitrefill?", a: "No. Bitrefill is only where we source the gift cards. Luckout isn't affiliated with Bitrefill.", more: "/docs#where-the-cards-come-from" },
+  {
+    q: "How does Luckout make money?",
+    a: "Every lucky mode is built so that, across many purchases, buyers pay 105.6% of the price on average. That 5.6% is our only revenue. Normal purchases cost exactly the price.",
+    more: "/docs/fairness"
+  },
+  {
+    more: "/docs/balance",
     q: "Where is my money while it's in Luckout?",
     a: "In the Luckout contract on NEAR, credited to your account, not in a company wallet. You can withdraw anything not locked in a purchase at any time. If we ever neither deliver nor cancel a purchase, you can take the full amount back yourself after 24 hours."
   },
   {
+    more: "/docs/draw",
     q: "How random is the Draw?",
     a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why each Draw's cashback is capped: at most the lower of a fixed amount and a share of the reserve.`
   },
-  { q: "Can the Telegram bot spend my money?", a: "Only when you tap Confirm, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it." },
-  { q: "Which wallets work?", a: "NEAR wallets (HOT, Meteor, Intear, Ledger and the others in NEAR Connect; HOT also works inside Telegram), EVM wallets like MetaMask and Rabby, and Solana wallets like Phantom and Solflare. Those need no NEAR at all. Luckout pays the NEAR fee for your deposits, withdrawals and settings, within a daily number of free actions." }
+  {
+    q: "Can the Telegram bot spend my money?",
+    a: "Only when you tap its Buy button, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it.",
+    more: "/docs/telegram/safety"
+  },
+  {
+    q: "Which wallets work?",
+    a: "NEAR wallets (HOT, Meteor, Intear, Ledger and the others in NEAR Connect; HOT also works inside Telegram), EVM wallets like MetaMask and Rabby, and Solana wallets like Phantom and Solflare. Those need no NEAR at all. Luckout pays the NEAR fee for your deposits, withdrawals and settings, within a daily number of free actions.",
+    more: "/docs/sign-in"
+  }
 ]
 
 export default async function Home() {
@@ -181,7 +200,9 @@ export default async function Home() {
                 {f.q}
                 <span className="grid size-8 shrink-0 place-items-center rounded-full bg-soft text-xl leading-none transition-transform group-open:rotate-45" aria-hidden="true">+</span>
               </summary>
-              <p className="pb-6 text-ink-soft">{f.a}</p>
+              <p className="pb-6 text-ink-soft">
+                {f.a} <Link href={f.more} className="font-semibold text-ink underline decoration-ink/25 underline-offset-4 hover:decoration-ink">More</Link>
+              </p>
             </details>
           ))}
         </div>

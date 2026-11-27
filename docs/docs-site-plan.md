@@ -10,23 +10,28 @@ Customers, not developers: how to sign in, add funds, buy, pick a mode, read a D
 
 ## Pages
 
-Flat URLs, one level under `/docs`, with no chain names in the slugs, so the URLs survive the move to Solana (ADR-0015). Section headings show only in the sidebar.
+URLs under `/docs`, with no chain names in the slugs, so the URLs survive the move to Solana (ADR-0015). A topic with distinct parts gets subpages one level down (`/docs/add-funds/ore`); its page lists them under "In this part", and the sidebar opens them while you're in that part. Section headings show only in the sidebar.
 
 | Section | URL | What it covers | Changes with Solana |
 |---|---|---|---|
 | Start | `/docs` | What Luckout is, the three steps, where to go next | |
-| | `/docs/sign-in` | Wallets that work, the Welcome steps, Default Mode, Checkout Email | Yes: Privy login |
-| | `/docs/add-funds` | Top-Ups from any chain, which tokens, ORE, how long it takes, Send-Back | Yes: Deposit Address |
-| | `/docs/buy` | The shop, a card's page, the Cart (up to 15), delivery, where the code shows, Use-By Date, Used | |
+| | `/docs/sign-in` | Wallets that work, the Welcome steps, Default Mode, Checkout Email, signing out | Yes: Privy login |
+| | `/docs/add-funds` | The three ways in, the tabs per wallet, depositing from your own wallet | Yes: Deposit Address |
+| | `/docs/add-funds/other-chains` | 1Click Top-Ups: tokens and chains, amounts, fees, each wallet's steps, Money on its way, refunds | Yes: Deposit Address |
+| | `/docs/add-funds/ore` | ORE through one Jupiter swap, the Solana Pay code, costs | Lightly |
+| Buying | `/docs/buy` | The shop, countries, a card's page, the price, what stops a purchase | |
+| | `/docs/buy/cart` | Up to 15 cards, one payment, each card its own purchase and Draw | |
+| | `/docs/buy/your-cards` | Where codes show, purchase statuses, Purchases, Used, expiry dates | |
 | Modes and cashback | `/docs/modes` | Normal, Lite, Classic, Jackpot: up-front price, odds, slabs, Lucky Amount and Cashback Cap in plain words | |
-| | `/docs/draw` | When the Draw runs, where its randomness comes from, why nobody can retry it, Draw Proofs, Win Cards | Yes: ORAO randomness |
+| | `/docs/draw` | When the Draw runs, where its randomness comes from (with a mode's roll table), why nobody can retry it, Draw Proofs, sharing | Yes: ORAO randomness |
 | | `/docs/fairness` | The 105.6% promise, our only revenue, Live Average, Cashback Reserve, what the contract guarantees and what you trust us for. Links to `/fair` for live figures | Lightly |
-| Your money | `/docs/balance` | The Balance, withdrawing, free actions (we pay the network fee) | Yes: no Relayer |
+| Your money | `/docs/balance` | The Balance, Running Total, withdrawing per wallet, free actions (we pay the network fee) | Yes: no Relayer |
 | | `/docs/limits` | Spending Limits, Bitrefill's per-email limits, Connect Bitrefill | |
-| | `/docs/refunds` | Failed Purchases, the 24-hour Reclaim, 1Click refunds and change | Yes: no Intents Account |
-| Telegram | `/docs/telegram` | Linking, what the bot can do, the Confirm tap, sending a photo of a checkout, codes in your private chat, the enclave check | Yes: linking moves to Privy |
-| Help | `/docs/faq` | The longer FAQ. The landing page keeps its short one and links here | |
-| | `/docs/support` | How to reach us, what to include (purchase ID), and Bitrefill's role | |
+| | `/docs/refunds` | Failed Purchases, Getting it ready, the 24-hour Reclaim, 1Click refunds and Send-Back | Yes: no Intents Account |
+| Telegram | `/docs/telegram` | Linking, what the bot can do, photos of a checkout, the Buy tap, codes in your private chat | Yes: linking moves to Privy |
+| | `/docs/telegram/safety` | The tap, the contract's limits, the enclave check, what the bot keeps | Lightly |
+| Help | `/docs/faq` | The longer FAQ. The landing page keeps its short one, and each answer links to its page | |
+| | `/docs/support` | A code that doesn't work, slow purchases and Top-Ups, the bot, Bitrefill's role, and how to reach us | |
 
 **Wording rules for every page:**
 - Use `CONTEXT.md`'s terms in plain customer language, as the landing page does ("cashback", "your balance").
@@ -92,7 +97,7 @@ Flat URLs, one level under `/docs`, with no chain names in the slugs, so the URL
 - **`llms.txt`.**
 - **Your step:** add `https://www.luckout.wtf/sitemap.xml` in Google Search Console, and verify the domain there first if it isn't verified yet.
 
-**At the Solana cutover:** rewrite the six pages marked "Yes" above, as listed in `docs/solana-migration.md` Phase 3 (the web app). The URLs stay the same.
+**At the Solana cutover:** rewrite the pages marked "Yes" above, as listed in `docs/solana-migration.md` Phase 3 (the web app). The URLs stay the same.
 
 ## Left out until needed
 
@@ -130,3 +135,24 @@ The voucher pages (`/shop/[id]`, such as "Swiggy gift card with USDC") are what 
   - Each page has its own title, description, canonical and `og:url`.
   - `/sitemap.xml` lists the pages, and `/docs/nope` and `/docs/index` are 404s.
   - Screenshots at 375 and 1280 px show no sideways page scroll. The modes table scrolls inside its card on a phone.
+
+**Phase 2 done** (2026-11-27, branch `docs-pages`, on staging after #215):
+- **Pages:** all 18 in the table above. Facts come from the code (file-by-file reads of the web app, server and contract), not from memory.
+- **Subpages:** the route is now `docs/[...slug]`. A subpage's eyebrow links to its parent, the parent lists its subpages, and the sidebar opens a part while you're in it.
+- **Drawn, not screenshotted** (`components/docs.tsx`, `components/docs-art.tsx`), so nothing goes stale:
+  - a card's page, a Cart split into its purchases, where money moves, and a delivered code, all priced by `MODES`;
+  - Classic's roll table, in the contract's row order;
+  - a Telegram chat in the bot's real message formats;
+  - plus steps, flows, tiles, notes and folded FAQ entries for the prose.
+- **Numbers from code:** the limits page reads `DEFAULT_LIMITS`, `GUEST_LIMITS` and `BITREFILL_ACCOUNT_LIMITS`.
+- **The landing FAQ:** each answer ends in a "More" link to its page. "Tap Confirm" is now "tap its Buy button", the bot's real label.
+- **`/llms.txt`:** done early (from Phase 3), from the same list as the sitemap.
+- **The test:** it also keeps Bitrefill out of every title and description, since a search result or `llms.txt` shows them alone, with no room for the note.
+- **Checked:**
+  - `next build` succeeds, the 75 web tests pass, and `tsc` is clean.
+  - Every `/docs` link and `#section` anchor on the docs and landing pages resolves (`~/.luckout/test-tools/browser-staging/docs-links.mjs`).
+  - No page scrolls sideways at 375 or 1280 px.
+
+**Still open:**
+- **A support email.** `/docs/support` and the FAQ give Telegram `@hrsh22` for now (2026-11-28); a support email comes later.
+- **Phase 3:** the in-app links, the Agent's prompt, and your Search Console step.

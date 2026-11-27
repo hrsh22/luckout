@@ -1,0 +1,57 @@
+import { ExampleDraw, Flow, Note } from "@/components/docs"
+import { RollTable } from "@/components/docs-art"
+
+The Draw decides how much of a lucky card's price comes back to you as cashback. The Luckout contract runs it right after your card is delivered, and anyone can check it afterwards. Normal purchases have no Draw.
+
+## When it runs
+
+<Flow
+  label="From delivery to cashback"
+  nodes={[
+    { title: "Your card is delivered", body: "Luckout confirms the delivery on chain." },
+    { title: "The Draw, a block later", body: "The contract runs it in its own step." },
+    { title: "Cashback lands", body: "In your balance, right away.", tint: "gold" }
+  ]}
+/>
+
+- **It runs once your card is delivered,** so the whole thing usually takes about a minute from tapping Buy.
+- **A Cart's lucky cards** draw together, each with its own random result.
+- **A card that can't be delivered** has no Draw. The full amount goes back to your balance.
+
+Once delivery is confirmed, the Draw is scheduled, and nothing can undo the confirmation.
+
+## Where the randomness comes from
+
+Each Draw takes NEAR's block randomness and turns it into a roll from 0 to 9,999:
+
+1. **The seed.** Every NEAR block carries a random seed. The Draw uses the seed of the block it runs in.
+2. **The random value.** The seed is mixed with your purchase number through SHA-256, so two Draws in the same block come out differently.
+3. **The roll.** The value's first 8 bytes, as a number, divided by 10,000: the remainder is the roll.
+4. **The row.** The roll picks a row of your mode's table. Each row owns as many of the 10,000 rolls as its chance: a 2% row owns 200 of them.
+
+<RollTable name="Classic" />
+
+So on Classic, a roll of 1,234 gives 30% back, and a roll of 5,000 gives no cashback. Each mode's table is fixed in the contract and can't be changed, as [The four modes](/docs/modes#why-the-odds-cant-change) explains.
+
+## Why nobody can retry it
+
+- **The result doesn't exist yet when delivery is confirmed.** The Draw runs in its own step a block later, with that block's randomness.
+- **It runs once.** A Draw that's done can't run again, and Luckout's own key can't run it.
+- **A delivered card can't be cancelled.** Once Luckout confirms a delivery, it can't turn the purchase into a refund to undo a result.
+- **Each Draw's cashback is capped.** Block producers can nudge NEAR's randomness slightly. The [Cashback Cap](/docs/modes#big-cards) limits what any one Draw is worth, so nudging one isn't worth it.
+
+## Draw Proofs
+
+Every lucky purchase has a public Draw Proof. Open it from the purchase with **Check this Draw**. <ExampleDraw>See an example</ExampleDraw>.
+
+It shows what was paid for which card, the purchase number and mode, and the mode's table with the row that came up. Under **Check it yourself**, your browser fetches the Draw's transaction straight from NEAR and recomputes the random value, the roll, the row and the cashback. When they all agree, it says **Recomputed in your browser: everything matches.**
+
+You don't have to trust the page either: the proof lists each step, and the contract and this site's code are [public on GitHub](https://github.com/hrsh22/luckout).
+
+## Share a result
+
+When a card comes back with cashback, tap **Copy share link** on the purchase. Anyone with the link can open its Draw Proof and check it, and its preview shows what you paid for the card. A Draw Proof never shows your code.
+
+<Note title="If a Draw didn't run">
+  Rarely, a card is delivered but its Draw step doesn't go through. The purchase then says **Your card is delivered, but its Draw didn't run** with a **Run the Draw** button. It's free, and the Draw still runs only once.
+</Note>

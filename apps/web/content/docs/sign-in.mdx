@@ -1,0 +1,59 @@
+import { Note, Step, Steps, Tile, Tiles } from "@/components/docs"
+
+Your Luckout account is the crypto wallet you sign in with. There's no password to make and no form to fill in: you sign one message in your wallet, which is free and sends no transaction.
+
+## Wallets that work
+
+<Tiles>
+  <Tile title="NEAR wallets" tint="sky">HOT, Meteor, Intear and the others in NEAR Connect. HOT also works inside Telegram.</Tile>
+  <Tile title="EVM wallets" tint="lilac">MetaMask, Rabby, Coinbase Wallet and more. No NEAR needed.</Tile>
+  <Tile title="Solana wallets" tint="lime">Phantom, Solflare, Backpack and more. No NEAR needed.</Tile>
+</Tiles>
+
+Each wallet is its own Luckout account, with its own balance, limits and purchases. With an EVM or Solana wallet you never need NEAR: Luckout pays the NEAR network fee for your deposits, withdrawals and settings, within a daily number of free actions. [Your balance](/docs/balance#network-fees) has the details.
+
+## Sign in
+
+<Steps>
+  <Step title="Tap Sign in" tint="sky">It's at the top of every page in the app.</Step>
+  <Step title="Choose the kind of wallet">NEAR wallet, EVM wallet or Solana wallet, then pick yours from the list.</Step>
+  <Step title="Sign the message" tint="gold">Your wallet shows a sign-in message from Luckout. Signing it proves the wallet is yours. It costs nothing and moves no money.</Step>
+</Steps>
+
+You stay signed in on that device for 7 days. If you close your wallet before signing, nothing is shared with Luckout.
+
+## The Welcome steps
+
+The first time you sign in, Welcome sets up the rest. It takes about a minute, and you can skip it and do each part later on your [wallet page](/wallet).
+
+1. **Choose a mode.** How you like to pay: Normal, Lite, Classic or Jackpot. It becomes your [default mode](#your-default-mode).
+2. **Your email.** Where your cards are sent. See [below](#your-email-for-cards).
+3. **Add funds.** Skipped if your account already has funds. See [Add funds](/docs/add-funds).
+4. **Ready.** Your balance, default mode and spending limits, and a button to [connect Telegram](/docs/telegram).
+
+## Your default mode
+
+Every purchase uses your default mode unless you pick another one for that card, on the site or in Telegram. Welcome suggests Classic. If you never choose, it's Normal: the card at its price.
+
+The mode you pick in Welcome is saved to your account with your first deposit. Until then it's kept only in that browser.
+
+To change it later, open your [wallet page](/wallet) and choose another under **Default mode**. That takes one approval in your wallet. [The four modes](/docs/modes) compares them.
+
+## Your email for cards
+
+Each card you buy carries an email, your Checkout Email. Bitrefill emails each card's code and receipt there, and can reach you there about a code that doesn't work. A throwaway address is fine.
+
+- **Where to give it:** in Welcome, or on a card's page, which asks for it before your first card.
+- **Where to change it:** your [wallet page](/wallet), under **Email for your cards**.
+- **What it's used for:** your cards' orders, and counting Bitrefill's [limits for each email](/docs/limits#bitrefills-limits). We store it encrypted.
+- **When it isn't needed:** if you [connect your own Bitrefill account](/docs/limits#connect-bitrefill), your cards are bought on it instead.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## Signing out
+
+Open the account menu at the top of the app and choose **Sign out**. **Sign out everywhere** signs out every device signed in to this account, this one included. Either way, your balance and purchases stay as they are.
+
+<Note title="Using another wallet">
+  Sign out, then sign in with the other wallet. It's a separate account, so it starts with its own empty balance.
+</Note>

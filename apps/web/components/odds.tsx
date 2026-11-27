@@ -1,12 +1,9 @@
 "use client"
 
-import { type ShownOutcome, shownOutcomes, usdCents } from "@/lib/format"
+import { shownOutcomes, usdCents } from "@/lib/format"
 import { MOST_OUTCOMES, type PricedOutcome } from "@/lib/modes"
+import { slabColor } from "@/lib/palette"
 import { motion } from "motion/react"
-
-/** Gold deepens with the cashback: pale for 10% back, full gold for 100% off. No cashback stays ink. */
-export const slabColor = (o: Pick<ShownOutcome, "cashback" | "price" | "pct">) =>
-  o.cashback === 0 ? "rgb(22 18 43 / 0.12)" : o.price === 0 ? "#FF9F1C" : ["#FFEBB0", "#FFE08A", "#FFD466", "#FFC53D", "#FFB21F"][Math.min(4, Math.round(o.pct / 10) - 1)]!
 
 /** The outcomes as every view shows them (shownOutcomes): each outcome's price plus its cashback is the Maximum Price. */
 const shown = (outcomes: ReadonlyArray<PricedOutcome>) => shownOutcomes(outcomes[0]!.price + outcomes[0]!.cashback, outcomes)

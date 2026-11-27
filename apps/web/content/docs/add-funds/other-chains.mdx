@@ -1,0 +1,81 @@
+import { Flow, Note, Step, Steps } from "@/components/docs"
+
+Send a token from another chain, or straight from an exchange, and it lands in your balance as USDC. The conversion runs on 1Click, the swap service of NEAR Intents.
+
+<Flow
+  label="A Top-Up from another chain"
+  nodes={[
+    { title: "You send a token", body: "From your wallet, another wallet or an exchange." },
+    { title: "1Click converts it", body: "Into USDC, usually in a few minutes." },
+    { title: "It lands in your balance", body: "Ready for your next card.", tint: "gold" }
+  ]}
+/>
+
+## What you can send
+
+- **Tokens:** USDC, USDT, ETH, BTC, SOL and wNEAR.
+- **Chains:** Ethereum, Arbitrum, Base, Polygon, BNB Chain, Solana, Bitcoin and NEAR, each with the tokens 1Click takes there.
+- **Amount:** from 1 to 2,000 USDC a Top-Up.
+
+The token list shows what your wallet can pay with. A NEAR wallet sees them all, an EVM wallet sees its EVM chains, and a Solana wallet sees Solana. Each also lists [ORE](/docs/add-funds/ore). USDC that's already on NEAR goes in [from your wallet](/docs/add-funds#from-your-wallet) instead.
+
+## How much you send
+
+You enter the **USDC to receive**, and the page shows what to send for it, such as "You send ≈ 0.0042 ETH on Base", and about how long it takes. Send it within 30 minutes. A little more is fine: 1Click sends the extra back.
+
+There are no Luckout fees. The rate includes 1Click's spread, and your wallet pays the sending chain's network fee:
+
+| Sending on | Network fee, roughly |
+|---|---|
+| Base, Arbitrum, Polygon, Solana, NEAR | under $0.01 |
+| BNB Chain | about $0.02 |
+| Ethereum | varies, often $0.50 or more |
+| Bitcoin | set by your wallet |
+
+A token other than SOL sent on Solana costs about 0.002 SOL more, for the deposit address's token account.
+
+## With an EVM or Solana wallet
+
+<Steps>
+  <Step title="Open Add funds" tint="sky">On your [wallet page](/wallet), tap **Add funds**, then **From your EVM wallet** (or Solana).</Step>
+  <Step title="Choose the amount and token">Enter the USDC to receive and pick what to pay with.</Step>
+  <Step title="Send it" tint="gold">Tap **Send**, such as "Send 25.10 USDC on Base". Your wallet asks you to approve the move into Luckout, then to send the token.</Step>
+</Steps>
+
+The approval lets the USDC go straight into your balance when it arrives. It's good for 24 hours.
+
+**Paying from an exchange or another wallet:** tap **Send it from an exchange or another wallet instead**. You get an address to send to. Approve the move-in now and it goes straight into your balance when it arrives. If you don't, it waits in your NEAR Intents account, which only your wallet controls, until you move it in with one tap.
+
+## With a NEAR wallet
+
+<Steps>
+  <Step title="Open Add funds" tint="sky">On your [wallet page](/wallet), tap **Add funds**, then **From another chain**.</Step>
+  <Step title="Enable USDC, once">If your NEAR account has never held USDC, tap **Enable USDC on your account** first. The fee is 0.00125 NEAR, and Luckout usually pays it.</Step>
+  <Step title="Get the address">Enter the USDC to receive, pick what to pay with, and tap **Get deposit address**.</Step>
+  <Step title="Send to it" tint="gold">Send the amount shown to that address, from any wallet or exchange. Some chains also show a **memo**: include it, or the payment can't be matched.</Step>
+  <Step title="Deposit it" tint="lime">The USDC lands in your NEAR wallet by itself. Tap **Deposit into Luckout** to move it into your balance.</Step>
+</Steps>
+
+## While it's on its way
+
+The [wallet page](/wallet) shows each Top-Up under **Money on its way**, step by step:
+
+1. **Waiting for your transfer**, with the time to send it by.
+2. **1Click has it** and is converting it to USDC.
+3. **Landed**, and moving into your balance.
+4. **In your Luckout balance.**
+
+You don't need to keep the page open: it shows when it lands wherever you are on Luckout. If you've sent it but it isn't showing, paste your transaction's hash into the box under the Top-Up to help 1Click find it.
+
+<Note title="Sent too little?">
+  If 1Click got less than the Top-Up needs, the page says how much is missing. Send the rest to the same address before the time shown, or what arrived is sent back.
+</Note>
+
+## If it doesn't go through
+
+If 1Click can't complete a Top-Up, it sends the money back, and the page says where:
+
+- **To the wallet that paid**, for an EVM or Solana wallet paying on Arbitrum, Base, Polygon, BNB Chain or Solana.
+- **To your NEAR Intents account** otherwise, including NEAR wallets and payments on Ethereum or Bitcoin. Your wallet page lists it under **Also yours, in NEAR Intents**, with a button to send it on to your wallet.
+
+A Top-Up that's slow is safe too: after a while the page says it's taking longer than usual, and 1Click either delivers it or sends it back. [Refunds and Reclaim](/docs/refunds#top-up-refunds) covers sending money back to your wallet.
