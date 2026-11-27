@@ -150,6 +150,19 @@ interface QuoteView {
   reference_price: string
   lucky_amount: string
   max_price: string
+  /** A Lucky card put at Normal by luckyCheckout. */
+  belowMin?: true
+}
+
+/**
+ * The program refuses a Checkout whose Lucky cards play less than the smallest Lucky Checkout in all (`min`): its margin
+ * must cover the Draw (ADR-0015). Such a checkout's Lucky cards are quoted and bought at Normal instead, marked
+ * `belowMin` so the web and the Agent can say why. The web's luckyCheckout (apps/web/lib/modes.ts) is the same rule.
+ */
+const luckyCheckout = (quotes: ReadonlyArray<QuoteView>, min: number): Array<QuoteView> => {
+  const plays = quotes.reduce((s, q) => s + (q.mode === "normal" ? 0 : Number(q.lucky_amount)), 0)
+  if (plays === 0 || plays >= min) return [...quotes]
+  return quotes.map((q) => (q.mode === "normal" ? q : { mode: "normal", reference_price: q.reference_price, lucky_amount: "0", max_price: q.reference_price, belowMin: true }))
 }
 
 /** Thrown on to stop a run; the reconciler picks the checkout up again later. */
@@ -1047,32 +1060,45 @@ export class Purchases extends Context.Service<Purchases, {
       /**
        * A cart's terms (ADR-0013), from simulating the program's `quote_many`: each card priced on the reserve the cards
        * before it left. A card's confirmed Lucky Amount, when the reserve still covers it, is what it plays and locks, as
-       * admission would. The server never works out a Lucky Amount itself (ADR-0004).
+       * admission would. The server never works out a Lucky Amount itself (ADR-0004). Under the smallest Lucky Checkout,
+       * read live from Config, the cards are one checkout's (luckyCheckout).
        */
       const contractQuotes = (items: ReadonlyArray<{ readonly referencePrice: number; readonly mode: Mode; readonly luckyAmount?: number | undefined }>) =>
-        solana.simulate([
-          program.instruction("quote_many", { config: program.config }, {
-            items: items.map((i) => ({
-              reference_price: BigInt(i.referencePrice),
-              mode: toProgramMode(i.mode),
-              lucky_amount: i.luckyAmount === undefined ? null : BigInt(i.luckyAmount)
-            }))
-          })
-        ]).pipe(
-          Effect.map((o) =>
-            decodeReturn<Array<ChainQuote>>("quote_many", o.returnData ?? Buffer.alloc(0)).map((q): QuoteView => ({
-              mode: fromProgramMode(q.mode),
-              reference_price: String(q.reference_price),
-              lucky_amount: String(q.lucky_amount),
-              max_price: String(q.max_price)
-            }))
+        Effect.all([
+          solana.simulate([
+            program.instruction("quote_many", { config: program.config }, {
+              items: items.map((i) => ({
+                reference_price: BigInt(i.referencePrice),
+                mode: toProgramMode(i.mode),
+                lucky_amount: i.luckyAmount === undefined ? null : BigInt(i.luckyAmount)
+              }))
+            })
+          ]),
+          solana.config
+        ], { concurrency: 2 }).pipe(
+          Effect.map(([o, config]) =>
+            luckyCheckout(
+              decodeReturn<Array<ChainQuote>>("quote_many", o.returnData ?? Buffer.alloc(0)).map((q): QuoteView => ({
+                mode: fromProgramMode(q.mode),
+                reference_price: String(q.reference_price),
+                lucky_amount: String(q.lucky_amount),
+                max_price: String(q.max_price)
+              })),
+              Number(config.min_lucky_checkout)
+            )
           ),
           Effect.tapError((e) => Effect.logWarning(`quote_many: ${e.message}`)),
           Effect.mapError(quoteRefused)
         )
       const contractQuote = (referencePrice: number, mode: Mode) => Effect.map(contractQuotes([{ referencePrice, mode }]), (qs) => qs[0]!)
       const toQuote = (q: QuoteView) =>
-        new Quote({ mode: q.mode, referencePrice: Number(q.reference_price), luckyAmount: Number(q.lucky_amount), maxPrice: Number(q.max_price) })
+        new Quote({
+          mode: q.mode,
+          referencePrice: Number(q.reference_price),
+          luckyAmount: Number(q.lucky_amount),
+          maxPrice: Number(q.max_price),
+          ...(q.belowMin ? { belowMin: true as const } : {})
+        })
 
       const quote = Effect.fn("Purchases.quote")(function*(voucherId: string, value: string, game: number | undefined) {
         const { referencePrice } = yield* price(voucherId, value)
@@ -1203,8 +1229,12 @@ export class Purchases extends Context.Service<Purchases, {
         // Normal, the quote's maximum in a Lucky Buy, each card priced on the reserve the cards before it left
         // (quote_many). Each card goes with its confirmed Lucky Amount, so the cards after it are priced on what admission
         // will lock for it, not on the most the reserve would let it play now. The contract still checks all of it.
-        const modes = priced.map((p) => p.input.mode ?? fromProgramMode(account.default_mode))
-        const quotes = yield* contractQuotes(priced.map((p, i) => ({ referencePrice: p.referencePrice, mode: modes[i]!, luckyAmount: confirmedLucky[i] })))
+        const resolved = priced.map((p) => p.input.mode ?? fromProgramMode(account.default_mode))
+        const quotes = yield* contractQuotes(priced.map((p, i) => ({ referencePrice: p.referencePrice, mode: resolved[i]!, luckyAmount: confirmedLucky[i] })))
+        // Lucky cards playing less than the smallest Lucky Checkout together are bought at Normal, as their quote says,
+        // rather than sent for the program to refuse: never a premium that can't play.
+        const requested = priced.map(({ input }, i): Mode | undefined => (quotes[i]!.belowMin ? "normal" : input.mode))
+        const modes = requested.map((m) => m ?? fromProgramMode(account.default_mode))
         // A refusal after signing costs the operator gas and counts against the customer (MAX_RECENT_REFUSALS), so a
         // price that rose since they confirmed is refused here, before anything is signed; one that fell buys at today's.
         const debits: Array<number> = []
@@ -1240,7 +1270,7 @@ export class Purchases extends Context.Service<Purchases, {
         const spent = Number(account.day) === Math.floor(Date.now() / DAY_MS) ? Number(account.spent_today) : 0
         if (spent + debitTotal > Number(account.daily_limit)) return yield* invalid("Over the daily spending limit")
         // The Lucky Amount each card is accepted under: the customer's, or (an older client) the contract's quote now.
-        const luckyAmounts = priced.map(({ input }, i) => (typeof input.mode !== "object" ? null : confirmedLucky[i] ?? Number(quotes[i]!.lucky_amount)))
+        const luckyAmounts = requested.map((m, i) => (typeof m !== "object" ? null : confirmedLucky[i] ?? Number(quotes[i]!.lucky_amount)))
         // Deciding "go or wait" and recording it happen under one lock, so two checkouts can never both count on the
         // same money.
         const placed = yield* floatGuard((free) =>
@@ -1275,7 +1305,7 @@ export class Purchases extends Context.Service<Purchases, {
                   INSERT INTO purchases (account_id, checkout_id, position, idempotency_key, voucher_id, voucher_name, package_value, currency,
                                          requested_mode, reference_price, max_debit, quoted_lucky_amount, step, email_key)
                   VALUES (${accountId}, ${id}, ${i}, ${input.idempotencyKey}, ${voucher.id}, ${voucher.name}, ${input.value}, ${voucher.currency},
-                          ${input.mode === undefined ? null : JSON.stringify(input.mode)}, ${referencePrice}, ${input.maxPrice}, ${luckyAmounts[i]}, ${first},
+                          ${requested[i] === undefined ? null : JSON.stringify(requested[i])}, ${referencePrice}, ${input.maxPrice}, ${luckyAmounts[i]}, ${first},
                           ${isReal ? email?.key ?? null : null})`
               }
               return { waiting: wait }

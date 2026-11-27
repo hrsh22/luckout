@@ -1016,6 +1016,63 @@ test("a Lucky cart confirmed under a smaller reserve is admitted as confirmed; a
   assert.deepEqual(w.admitted().map((a) => [a.lucky_amount, a.max_price]), [[4_000_000n, 10_800_000n], [3_000_000n, 10_600_000n]])
 })
 
+// $1.25 cards on Classic play their whole price: one alone plays less than the $2.50 Lucky Checkout the program starts
+// with, two reach it exactly, three are over it.
+const SMALL = 1_250_000
+const atNormal = { mode: "normal", referencePrice: SMALL, luckyAmount: 0, maxPrice: SMALL, belowMin: true }
+const plays = { mode: { lucky: 1 }, referencePrice: SMALL, luckyAmount: SMALL, maxPrice: 1_500_000 }
+const quoteOf = (n: number) =>
+  Purchases.use((s) => s.quoteCart(Array.from({ length: n }, () => ({ voucherId: "test-card", value: "10", mode: { lucky: 1 } }))))
+    .pipe(Effect.map((qs) => qs.map((q) => ({ ...q }))))
+const setMin = (w: World, amount: number) => Effect.sync(() => w.owner("set_min_lucky_checkout", { amount: BigInt(amount) }))
+
+test("Lucky cards playing less than the smallest Lucky Checkout together are quoted and bought at the normal price; at or over it they play", async () => {
+  const w = world({ mode: { lucky: 1 }, price: SMALL })
+  const p = w.sw.program
+  const r = await w.run(Effect.gen(function*() {
+    const one = { ...(yield* Purchases.use((s) => s.quote("test-card", "10", 1))) }
+    const carts = yield* Effect.forEach([1, 2, 3], quoteOf)
+    // Sent as a client that never read the quote would send them: Classic, at the Classic price.
+    const alone = yield* w.buy()
+    const two = yield* w.cart(keys(2))
+    // Classic as their Default Mode, with no mode sent: still Normal, never left to the program to refuse.
+    w.sw.send([
+      p.instruction("set_default_mode", { wallet: w.alice.wallet.publicKey, config: p.config, customer: p.customer(w.alice.wallet.publicKey) }, {
+        mode: { kind: "Lucky", fields: [1] }
+      })
+    ], [w.alice.wallet])
+    const byDefault = yield* Purchases.use((s) => s.create(w.alice.id, new NewPurchase({ voucherId: "test-card", value: "10", maxPrice: 1_500_000, idempotencyKey: crypto.randomUUID() })))
+    return { one, carts, alone, two, byDefault }
+  }))
+  assert.deepEqual(r.one, atNormal, "one card alone: the normal price, and says why")
+  assert.deepEqual(r.carts, [[atNormal], [plays, plays], [plays, plays, plays]])
+  assert.deepEqual([r.alone, ...r.two, r.byDefault].map((x) => [x.status, x.mode]), [
+    ["delivered", "normal"],
+    ["delivered", { lucky: 1 }],
+    ["delivered", { lucky: 1 }],
+    ["delivered", "normal"]
+  ])
+  assert.deepEqual(w.admitted().map((a) => [a.mode.kind, a.max_price]), [["Normal", 1_250_000n], ["Lucky", 1_500_000n], ["Lucky", 1_500_000n], ["Normal", 1_250_000n]])
+})
+
+test("the smallest Lucky Checkout is read from Config: the owner's change applies to the next quote and purchase", async () => {
+  const w = world({ mode: { lucky: 1 }, price: SMALL })
+  const r = await w.run(Effect.gen(function*() {
+    yield* setMin(w, 1_000_000)
+    const lower = yield* quoteOf(1)
+    const alone = yield* w.buy()
+    yield* setMin(w, 5_000_000)
+    const higher = yield* quoteOf(3)
+    const three = yield* w.cart(keys(3))
+    return { lower, alone, higher, three }
+  }))
+  assert.deepEqual(r.lower, [plays])
+  assert.deepEqual(r.alone.mode, { lucky: 1 })
+  assert.deepEqual(r.higher, [atNormal, atNormal, atNormal])
+  assert.deepEqual(r.three.map((x) => [x.status, x.mode]), Array.from({ length: 3 }, () => ["delivered", "normal"]))
+  assert.deepEqual(w.admitted().map((a) => a.mode.kind), ["Lucky", "Normal", "Normal", "Normal"])
+})
+
 test("a card whose price rose since it was confirmed is refused before anything is signed; a drop buys at the lower price", async () => {
   // The card is $10 now. Lucky Buys here play their whole price at a 20% premium.
   const w = world({ price: 10 * USDC })

@@ -152,6 +152,10 @@ test("a Lucky card bought at Normal says so on its Buy line", () => {
     "Amazon, 10 USD: $10.00 on Normal: the Cashback Reserve can't cover Classic right now, so there's no Draw. Works in United States only."
   )
   assert.equal(buySummary([{ ...p, requestedMode: "normal" }]), "Amazon, 10 USD: $10.00. Works in United States only.", "Normal as asked: nothing to explain")
+  assert.equal(
+    buySummary([{ ...p, luckyFrom: 2_500_000 }]),
+    "Amazon, 10 USD: $10.00 on Normal: Lucky cards play together from $2.50 a checkout, so there's no Draw. Works in United States only."
+  )
 })
 
 test("only private chats get through: the bot ignores groups and channels", async () => {
