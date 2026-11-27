@@ -17,7 +17,7 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 
 - **Config:** the owner, operator and Pay Wallet; the Game Versions and Cashback Cap; the reserve totals, Proceeds and the daily repay cap; the smallest Lucky Checkout; and the Live Average counters.
 - **Vault:** one USDC account the program owns. Every Balance, the Cashback Reserve and Proceeds sit in it.
-- **Customer account:** one per customer, belonging to their Privy wallet. Their first deposit opens it, so a sign-up that never deposits costs no rent. It holds their Balance, Spending Limits, Default Mode, Running Total and a count of their Checkouts.
+- **Customer account:** one per customer, belonging to their Privy wallet. The one-time approval opens it, with the Default Mode chosen in Welcome, for about $0.12 of rent. It holds their Balance, Spending Limits, Default Mode, Running Total and a count of their Checkouts.
 - **Checkout account:** one per Checkout, holding up to 15 cards. Each card has its own status, Lucky Amount, lock and Cashback, so each keeps its own refund and Reclaim (ADR-0013).
   - **Duplicates fail, even after closing.** The account's address comes from the customer and the Checkout's number. Admission names the number it expects, and only the customer's next number is accepted. So a retry of an admitted Checkout fails, even after its account has closed and the address is free again. This replaces the contract's `orders` map.
   - **It closes when done.** It closes when its last card is done, and its rent comes back.
@@ -67,7 +67,7 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 ## Deposits arrive by themselves
 
 - **Each customer has a Deposit Address.** It is their Privy wallet's address: permanent, any amount, from any exchange or wallet.
-- **The customer approves once.** The first time they ask for their Deposit Address, their Privy wallet signs one transaction, with no prompt, and our fee payer pays for it. It opens the wallet's USDC account and makes the program's Vault address that account's delegate. In the bot, it's a link that opens the app.
+- **The customer approves once.** The first time they ask for their Deposit Address, their Privy wallet signs one transaction, with no prompt, and our fee payer pays for it. It opens the wallet's USDC account and their Customer account, and makes the Vault's authority that USDC account's delegate. In the bot, it's a link that opens the app.
 - **The program decides where the money goes.** `deposit_for(customer)`, which anyone may call, moves USDC from that account into that customer's own Balance and nowhere else. No key of ours can send it anywhere else, whoever holds it.
 - **The server calls it.** Our RPC provider's webhook reports each transfer, and a sweep every few minutes catches any the webhook missed. Less than 1 USDC waits until more arrives.
 - **An account has one delegate.** If another app's approval replaces ours, the server notices and asks for the approval again at the next visit.
@@ -115,7 +115,7 @@ This replaces ADR-0010's testnet.
 - **Tests and development:** a local validator, with ORAO's program and a filled randomness account loaded into it. The program has no test-only path.
 - **Devnet:** only for trying the program against ORAO's devnet. Nothing runs there long-term, and it has no 1Click, Jupiter or Bitrefill.
 - **Staging and production:** mainnet, each with its own program and its own Privy app.
-- **Rent:** a program locks 5.08 SOL per MB (read from mainnet on 2026-11-26), and an upgrade borrows the same again until it finishes. A Solana build won't be the same size as today's NEAR one, so until it's measured, budget up to 10 SOL for both programs and their upgrades.
+- **Rent:** a program locks 5.08 SOL per MB (read from mainnet on 2026-11-26), and an upgrade borrows the same again until it finishes. The first build is 444 KB, about 2.26 SOL, so both programs and an upgrade's buffer need about 7 SOL.
 
 ## Running it
 

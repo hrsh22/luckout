@@ -38,17 +38,17 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 | Can the server make a Privy user from a Telegram account? | Yes, but we won't. The approval still needs the customer's wallet to sign in the app, so the bot sends new customers there to sign in once. | — |
 | What does ORAO cost, and is it on devnet? | It's the same program on devnet and mainnet. The fee is 0.0005 SOL, and each request account keeps 0.0013 SOL of rent for good (read from mainnet). About $0.13 a Draw, filled in 4–20 s. | A Draw on devnet (Phase 1) |
 | Where does 1Click refund when the sender is an exchange? | To the `refundTo` address we give it, not the sender. `FLEX_INPUT` swaps whatever arrives above the quote's minimum. | Tron and Base Top-Ups (Phase 4) |
-| Does a 15-card Checkout fit one transaction? | The limits are 1,232 bytes, 1.4M compute and 1,024 bytes of return data. v1 transactions (4,096 bytes) are live on mainnet, and only our keys sign admit and settle, so those can use them. | Measured at the first build (Phase 1) |
+| Does a 15-card Checkout fit one transaction? | Yes, measured at the first build: admit is 731 bytes and settle with ORAO's request 735, of 1,232. Finishing 13 Draws takes about 150k compute units of 1.4M. `quote_many`'s answer is 439 of 1,024 bytes. | — |
 | Can a fresh wallet pay Bitrefill, and where do failed cards' refunds go? | Guest invoices take `usdc_solana`. A failed card's refund isn't sent back by itself; we claim it, as today. | The first small card from each Pay Wallet (Phase 4) |
 | Do exchanges open a fresh address's token account? | Solana's exchange guide says they should. Binance and CoinDCX don't say. | Real withdrawals (Phase 4) |
-| How big is the program? | It needs a build. | The first build (Phase 1) |
+| How big is the program? | 444 KB at the first build, about 2.26 SOL of rent. | — |
 
 ## Phase 1: the program (needs your go for Rust)
 
 - **Build it** in `programs/luckout` with Anchor 1.x and `orao-solana-vrf` 0.8, using the accounts and instructions in ADR-0015.
 - **Port the game maths and test vectors** from `contract/src`: `draw_random`, `roll_from_random`, `final_bps_for_roll`, `final_price`, `quote_at`, `lucky_allowed` and `max_cashback_at`.
 - **Measure the first build:**
-  - its size, which sets the SOL budget (up to 10 SOL until then)
+  - its size, which sets the SOL budget
   - whether a 15-card admit and a 15-card settle with ORAO's request each fit one transaction: 1,232 bytes, or a v1 transaction's 4,096
   - whether `quote_many`'s answer fits 1,024 bytes; if not, quotes come in pages
 - **Test on a local validator,** with ORAO's program and a filled randomness account loaded in (no test-only path in the program):
@@ -68,6 +68,13 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Deploy to devnet,** with a verified build made in CI.
 
 **Done when** every test passes and a 15-card Lucky Checkout on devnet settles and draws from ORAO's devnet.
+
+**Status (2026-11-27):**
+- **Built** in `programs/luckout`, with 28 tests passing (PR #214). CI runs them, and builds the program reproducibly with `solana-verify`.
+- **Measured:** see the table above. The build uses `opt-level = "z"`, which saves 77 KB of rent for about 60% more compute.
+- **Left:**
+  - the devnet deploy and a live 15-card Draw (`apps/server/scripts/solana-devnet.ts`), waiting on devnet SOL
+  - the test of an upgrade adding a field into the spare bytes, which needs two builds, so it moves to Phase 4
 
 ## Phase 2: the server
 
@@ -163,10 +170,11 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 | Item | Needed by |
 |---|---|
+| About 5 devnet SOL, from faucet.solana.com, for the deployer key in `~/.luckout` | Phase 1 |
 | Privy development and production app IDs | Phase 2 |
 | RPC provider key, with webhooks | Phase 2 |
 | Telegram login for Privy, set up in BotFather | Phase 3 |
 | Bitrefill's tagging of the Pay Wallet addresses | Phase 4 |
 | The owner key, in a wallet you control | Phase 4 |
-| Up to 10 SOL until the program is measured: two programs, the upgrade buffer, fees, Draws (about 0.002 SOL each) and customer accounts (about $0.12 each) | Phase 4 |
+| About 7 SOL: two programs at 2.26 SOL each, an upgrade buffer of the same size, fees, Draws (about 0.002 SOL each) and customer accounts (about $0.12 each) | Phase 4 |
 | USDC for the staging reserve and float, then for production | Phases 4 and 5 |
