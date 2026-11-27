@@ -14,7 +14,20 @@ use error::LuckoutError;
 use game::*;
 use state::*;
 
+// One build per environment, each with its own program id: `--features staging` or `--features production`
+// for mainnet, none for devnet and tests.
+#[cfg(all(feature = "staging", feature = "production"))]
+compile_error!("build for staging or production, not both");
+#[cfg(not(any(feature = "staging", feature = "production")))]
 declare_id!("4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3");
+#[cfg(feature = "staging")]
+declare_id!("FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F");
+#[cfg(feature = "production")]
+declare_id!("GCeZ67ann5G1hzNijYtqFiHyAJ4dJy2mwFA6g2eQfssr");
+
+/// Circle's USDC on mainnet: the only token a mainnet build can be set up with.
+#[cfg(any(feature = "staging", feature = "production"))]
+pub const MAINNET_USDC: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 pub const DAY: i64 = 86_400;
 pub const RECLAIM_AFTER: i64 = DAY;
@@ -129,6 +142,8 @@ pub mod luckout {
     pub fn initialize(ctx: Context<Initialize>, operator: Pubkey) -> Result<()> {
         let owner = ctx.accounts.owner.key();
         require!(operator != owner && operator != crate::ID, LuckoutError::BadRole);
+        #[cfg(any(feature = "staging", feature = "production"))]
+        require_keys_eq!(ctx.accounts.usdc_mint.key(), MAINNET_USDC, LuckoutError::NotUsdc);
         ctx.accounts.config.set_inner(Config {
             layout: LAYOUT,
             bump: ctx.bumps.config,

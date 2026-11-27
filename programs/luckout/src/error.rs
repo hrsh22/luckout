@@ -78,4 +78,6 @@ pub enum LuckoutError {
     BadCashbackCap,
     #[msg("Too many game versions")]
     TooManyVersions,
+    #[msg("A mainnet build takes only Circle's USDC")]
+    NotUsdc,
 }

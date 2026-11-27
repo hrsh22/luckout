@@ -2187,6 +2187,11 @@
       "code": 6037,
       "name": "TooManyVersions",
       "msg": "Too many game versions"
+    },
+    {
+      "code": 6038,
+      "name": "NotUsdc",
+      "msg": "A mainnet build takes only Circle's USDC"
     }
   ],
   "types": [

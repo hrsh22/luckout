@@ -152,10 +152,15 @@ jobs:
           if-no-files-found: error
 
   # The program built reproducibly, in the image pinned by digest below, so anyone can rebuild it byte for byte
-  # and compare it with the chain (`solana-verify verify-from-repo --mount-path programs`). Deploys use this
-  # job's build: gh run download <run id> -n luckout-so-<commit>
+  # and compare it with the chain (`solana-verify verify-from-repo --mount-path programs`, adding
+  # `-- --features staging` or `-- --features production` for mainnet). One build per environment, each with its
+  # own program id (programs/luckout/src/lib.rs). Deploys use this job's build:
+  # gh run download <run id> -n luckout-so-<environment>-<commit>
   program-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [devnet, staging, production]
     defaults:
       run:
         working-directory: programs
@@ -166,11 +171,11 @@ jobs:
           path: ~/.cargo/bin/solana-verify
           key: solana-verify-0.5.2
       - run: command -v solana-verify || cargo install solana-verify --version 0.5.2 --locked
-      - run: solana-verify build --library-name luckout --base-image solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd
-      - run: echo "luckout.so executable hash $(solana-verify get-executable-hash target/deploy/luckout.so)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: solana-verify build --library-name luckout --base-image solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd ${{ matrix.environment != 'devnet' && format('-- --features {0}', matrix.environment) || '' }}
+      - run: echo "luckout.so (${{ matrix.environment }}) executable hash $(solana-verify get-executable-hash target/deploy/luckout.so)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: luckout-so-${{ github.sha }}
+          name: luckout-so-${{ matrix.environment }}-${{ github.sha }}
           path: programs/target/deploy/luckout.so
           if-no-files-found: error
 
