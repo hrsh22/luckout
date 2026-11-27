@@ -32,7 +32,7 @@ export function SiteFooter({ compact = false }: { compact?: boolean }) {
       <Link className={link} href="/fair">Fairness</Link>
       <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>
       <a className={link} href={explorerAccount(contractId)} target="_blank" rel="noreferrer">The contract</a>
-      <span className="sm:ml-auto">Gift cards by Bitrefill. You always get the card.</span>
+      <span className="sm:ml-auto">Gift cards sourced from Bitrefill, which isn't affiliated with Luckout. You always get the card.</span>
     </footer>
   )
 }

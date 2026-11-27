@@ -101,7 +101,7 @@ export const TOOLS = [
   }, ["email"])
 ]
 
-const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards (from Bitrefill) with the USDC balance they keep in Luckout.
+const system = (testnet: boolean, web: string) => `You're Luckout's shopping assistant on Telegram. People buy gift cards with the USDC balance they keep in Luckout. Luckout sources the cards from Bitrefill and isn't affiliated with Bitrefill; say so if they ask.
 
 What you know:
 - Normal pays exactly the price.

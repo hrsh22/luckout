@@ -30,7 +30,7 @@ Pay the price, or add a little for a provably fair chance at cashback. Either wa
 
 ## Luckout in 30 seconds
 
-- 🎁 **Real gift cards.** Thousands of brands from Bitrefill: Amazon, Steam, Swiggy and more. The code usually arrives within a minute.
+- 🎁 **Real gift cards.** Thousands of brands, sourced from Bitrefill: Amazon, Steam, Swiggy and more. The code usually arrives within a minute. Luckout isn't affiliated with Bitrefill.
 - 🎲 **Pay the price, or play for cashback.** Add 10%, 20% or 50% up front. A Draw a block later gives back nothing, part of the price or all of it. Every mode averages exactly 5.6% over the price. That margin is our only revenue.
 - 🔍 **Don't trust us, check.** Our NEAR contract runs the Draw, and every Draw has a public page that recomputes it in your browser.
 - 🌐 **Pay from eight chains, no NEAR needed.** Top up with USDC, USDT, ETH, BTC, SOL or NEAR through NEAR Intents, or with ORE on Solana. Sign in with MetaMask or Phantom if you like. Our relayer pays the gas for deposits, withdrawals and settings, within a daily number of free actions.
