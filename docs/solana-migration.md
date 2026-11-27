@@ -100,6 +100,23 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 **Done when** the server's tests pass against a local validator with Bitrefill faked.
 
+**Status (2026-11-28), on branch `solana-server`:**
+- **Built:**
+  - `Program.ts`, which codes the program's instructions, accounts, events and errors from its IDL, committed in `programs/idl`
+  - `Solana.ts`, which separates the transport (RPC, or LiteSVM in tests) from our keys. It saves every transaction before sending it and resumes it after a crash.
+  - Purchases on the program, Privy sign-in, Bitrefill in `usdc_solana`, `Deposits.ts`, and Admin and Monitor on the program
+  - the server tests, which run the real program and ORAO's on LiteSVM
+- **Left:** Top-Ups and Swap, the Agent's deposit tool, Telegram, MCP and the remaining NEAR modules (in progress), then one migration for the fresh database.
+- **Decisions made while building:**
+  - **Accounts and sessions:** a customer's account id is their Privy wallet's address. Privy's tokens are checked once, at sign-in. After that our own session cookie carries it, bound to the cluster and the program.
+  - **Transactions a customer signs:** we build each one with our fee payer and hand it out unsigned with a token that binds its bytes (`/transactions/*`). The fee payer signs only those bytes, and only once the customer has signed them.
+  - **A short float:** a checkout the Pay Wallet's float can't cover waits uncharged, and the owner is told. It goes ahead once the float covers it, or is cancelled after 60 minutes. A charged one is refunded in full.
+  - **Our paying address's limits:** checked when a checkout is placed, against every guest card ($10k a day, $50k a month).
+  - **Deposits:** a sweep every two minutes, plus Alchemy's signed webhook (`ALCHEMY_WEBHOOK_SIGNING_KEY`).
+  - **Gone:** withdrawals to other chains through 1Click. Withdrawals go to any Solana address.
+  - **Test cards:** off mainnet, only Bitrefill's test cards are sold.
+  - **One program per environment:** staging and production each need a build with their own program id. That's set up in Phase 4.
+
 ## Phase 3: the web app
 
 - **Privy login,** in Privy's own window, replaces NEAR Connect, Reown and the Solana wallet adapter. `lib/near.ts` and `lib/evm.ts` go, and `lib/solana.ts` shrinks.
