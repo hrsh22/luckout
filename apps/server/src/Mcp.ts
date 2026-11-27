@@ -123,7 +123,7 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
   const tools: Array<Tool> = [
     {
       name: "search_gift_cards",
-      description: "Search Luckout's gift cards (Bitrefill's catalog: Amazon, Steam, Swiggy and thousands more) by brand or keyword.",
+      description: "Search Luckout's gift cards (sourced from Bitrefill's catalog: Amazon, Steam, Swiggy and thousands more) by brand or keyword.",
       inputSchema: { type: "object", properties: { query: { type: "string", description: "Brand or keyword, e.g. 'amazon india'" } }, required: ["query"] },
       run: async (args) => {
         const found = await run(bitrefill.search(text(args, "query")))

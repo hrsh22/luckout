@@ -137,6 +137,7 @@ export default function WalletPage() {
       {checkout?.bitrefill !== undefined && (
         <section className="flex flex-col gap-4">
           <h2 className="font-display text-3xl font-extrabold">Bitrefill account</h2>
+          <p className="max-w-[60ch] text-ink-soft">Bitrefill is where we source our gift cards. It isn't affiliated with Luckout.</p>
           <BitrefillLimits />
           <BitrefillAccount />
         </section>

@@ -16,11 +16,12 @@ const EXAMPLE = 20_000_000
 const STEPS = [
   { title: "Add USDC", body: "Deposit USDC on NEAR, or send a token from Ethereum, Base, Solana, Bitcoin and more. Withdraw what you don't spend.", bg: "#E2F4FF" },
   { title: "Pick a card and a mode", body: "Pay exactly the price, or a little more up front for a chance at cashback. You see every outcome before you buy.", bg: "#EEE8FF" },
-  { title: "Get the code, then the Draw", body: "Bitrefill delivers the code, usually within a minute. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
+  { title: "Get the code, then the Draw", body: "We buy the card from Bitrefill, our supplier, and the code usually arrives within a minute. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
 ]
 
 const FAQ = [
   { q: "Do I always get the card?", a: "Yes. The Draw only decides how much cashback you get. If Bitrefill can't deliver, the whole amount returns to your balance and there's no Draw." },
+  { q: "Is Luckout part of Bitrefill?", a: "No. Bitrefill is only where we source the gift cards. Luckout isn't affiliated with Bitrefill." },
   { q: "How does Luckout make money?", a: "Every lucky mode is built so that, across many purchases, buyers pay 105.6% of the price on average. That 5.6% is our only revenue. Normal purchases cost exactly the price." },
   {
     q: "Where is my money while it's in Luckout?",

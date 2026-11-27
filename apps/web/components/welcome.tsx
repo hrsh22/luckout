@@ -116,7 +116,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
             <>
               <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with a NEAR, EVM or Solana wallet to start." />
               <div className="grid gap-3 sm:grid-cols-3">
-                <Point icon={Zap} tint="sky" title="Codes in about a minute" body="Bitrefill sends the code once it sees our payment." />
+                <Point icon={Zap} tint="sky" title="Codes in about a minute" body="Bitrefill, where we source the cards, sends the code once it sees our payment." />
                 <Point icon={Sparkles} tint="gold" title="Cashback by chance" body="Lucky modes can pay back part of the price, sometimes all of it." />
                 <Point icon={ShieldCheck} tint="lilac" title="Checkable" body="Every Draw is on NEAR. Anyone can recompute it." />
               </div>
@@ -149,7 +149,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
               <button type="button" onClick={() => go(1)} className="-mb-2 inline-flex items-center gap-1.5 self-start text-sm font-semibold text-muted hover:text-ink">
                 <ArrowLeft size={16} aria-hidden="true" />Back to modes
               </button>
-              <Heading title="An email for your cards" body="Bitrefill, which delivers the cards, needs one with each card you buy. You can change it later in Wallet." />
+              <Heading title="An email for your cards" body="Bitrefill, where we source the cards, needs one with each card you buy. You can change it later in Wallet." />
               <div className="card p-5 sm:p-6">
                 <CheckoutEmailForm titled label="Continue" onSaved={() => go(account ? 4 : 3)} />
               </div>
