@@ -6,7 +6,7 @@ import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
 import { backText, usd, usdDown, usdUp } from "@/lib/format"
 import { modeName } from "@/lib/modes"
-import { contractId, explorer, view } from "@/lib/near"
+import { explorer } from "@/lib/chain"
 import { useSession } from "@/lib/session"
 import { modePalette } from "@/lib/palette"
 import { purchasePollMs } from "@/lib/purchase-poll"
@@ -40,7 +40,7 @@ export function usePolledPurchase(p: Purchase | undefined, token: string | undef
 }
 
 /**
- * The contract admitted it, so its price has left the Balance. A card waiting for our gift card supply may have been
+ * The program admitted it, so its price has left the Balance. A card waiting for our gift card supply may have been
  * admitted already (the server's restock): then it can't be cancelled, and if it can't be delivered the full amount
  * returns to the Balance.
  */
@@ -137,7 +137,7 @@ export function Progress() {
       <div className="h-1.5 overflow-hidden rounded-full bg-white/50">
         <motion.div className="h-full rounded-full bg-current" initial={{ width: "4%" }} animate={{ width: "88%" }} transition={{ duration: 50, ease: [0.1, 0.6, 0.3, 1] }} />
       </div>
-      <p className="text-sm opacity-80">Bitrefill sends the code once it sees our payment, usually within a minute. Then the Draw runs on NEAR. {seconds}s</p>
+      <p className="text-sm opacity-80">Bitrefill sends the code once it sees our payment, usually within a minute. Then the Draw runs on Solana. {seconds}s</p>
     </div>
   )
 }
@@ -192,55 +192,36 @@ function Waiting({ p }: { p: Purchase }) {
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /**
- * A purchase open longer than it should be: read what the contract says, then offer the customer's
- * own way out. Undelivered for 24 hours → reclaim the full amount; delivered but its Draw never ran →
- * run it again. Both are the customer's own calls, which our relayer sends for free.
+ * A paid card open longer than it should be. Neither delivered nor failed 24 hours after it was admitted, the full
+ * amount is the customer's to take back (Reclaim), signed by them with no fee. The program checks the time itself, so
+ * one asked a little early is refused, and nothing moves. A Draw needs nothing from them: anyone can finish it, and
+ * our server does.
  */
 function SafetyNet({ p }: { p: Purchase }) {
   const actions = useWalletActions()
   const qc = useQueryClient()
   const [busy, setBusy] = useState(false)
-  const id = p.contractPurchaseId
-  const late = Date.now() - new Date(p.createdAt).getTime() > 10 * 60_000
-  const onchain = useQuery({
-    queryKey: ["onchain-purchase", id],
-    queryFn: () => view<{ status: string; created_at: number } | null>(contractId, "get_purchase", { purchase_id: id }),
-    enabled: p.status === "pending" && id !== undefined && late,
-    staleTime: 30_000
-  })
-  const o = onchain.data
-  if (!o || id === undefined) return null
-  const act = async (f: () => Promise<boolean>) => {
-    setBusy(true)
-    if (await f()) await Promise.all([qc.invalidateQueries({ queryKey: ["purchases"] }), qc.invalidateQueries({ queryKey: ["onchain-purchase", id] })])
-    setBusy(false)
-  }
-  if (o.status === "Pending") {
-    const opens = o.created_at / 1e6 + DAY_MS
-    if (Date.now() < opens) {
-      return (
-        <p className="flex items-start gap-2 text-sm text-muted">
-          <LifeBuoy size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-          Taking longer than usual. If it isn't delivered by {new Date(opens).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}, you can take back the full amount right here.
-        </p>
-      )
-    }
+  const since = Date.now() - new Date(p.createdAt).getTime()
+  if (p.status !== "pending" || !charged(p) || since < 10 * 60_000) return null
+  const opens = new Date(p.createdAt).getTime() + DAY_MS
+  if (since < DAY_MS) {
     return (
-      <div className="flex flex-col gap-3 rounded-[1.25rem] bg-warn-soft p-4 text-warn sm:flex-row sm:items-center">
-        <p className="flex-1 text-[15px] font-medium">This wasn't delivered within 24 hours, so the full amount you paid is yours to take back.</p>
-        <Button size="sm" loading={busy} onClick={() => act(() => actions.reclaim(id))}><LifeBuoy />Reclaim it</Button>
-      </div>
+      <p className="flex items-start gap-2 text-sm text-muted">
+        <LifeBuoy size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+        Taking longer than usual. If it isn't delivered by {new Date(opens).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}, you can take back the full amount right here.
+      </p>
     )
   }
-  if (o.status === "Drawing") {
-    return (
-      <div className="flex flex-col gap-3 rounded-[1.25rem] bg-lilac-soft p-4 sm:flex-row sm:items-center">
-        <p className="flex-1 text-[15px] font-medium">Your card is delivered, but its Draw didn't run. Run it now: it's free.</p>
-        <Button size="sm" loading={busy} onClick={() => act(() => actions.retryDraw(id))}>Run the Draw</Button>
-      </div>
-    )
-  }
-  return null
+  return (
+    <div className="flex flex-col gap-3 rounded-[1.25rem] bg-warn-soft p-4 text-warn sm:flex-row sm:items-center">
+      <p className="flex-1 text-[15px] font-medium">This wasn't delivered within 24 hours, so the full amount you paid is yours to take back.</p>
+      <Button size="sm" loading={busy} onClick={async () => {
+        setBusy(true)
+        if (await actions.reclaim(p.id)) await qc.invalidateQueries({ queryKey: ["purchases"] })
+        setBusy(false)
+      }}><LifeBuoy />Reclaim it</Button>
+    </div>
+  )
 }
 
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" })
@@ -390,7 +371,7 @@ export function ModeChip({ mode }: { mode: Purchase["mode"] }) {
 export function PurchaseRow({ p, open, onToggle, onUsed }: { p: Purchase; open: boolean; onToggle: () => void; onUsed?: (id: string) => void }) {
   const used = !!p.usedAt
   const paid = p.draw?.finalPrice ?? p.maxPrice ?? p.referencePrice
-  // Delivered, or still on its way after the contract took its price: either way it has left the Balance, but the
+  // Delivered, or still on its way after the program took its price: either way it has left the Balance, but the
   // second only for now (a card that can't be delivered returns it in full).
   const onItsWay = (p.status === "pending" || p.status === "waiting") && charged(p)
   return (

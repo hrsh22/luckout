@@ -173,7 +173,7 @@ export const trimHistory = (h: Array<ChatCompletionMessageParam>, max = 60, keep
   return start === -1 ? [] : h.slice(start)
 }
 
-/** A Spending Limit for the model: dollars, or "No limit" when they turned it off (u128::MAX). */
+/** A Spending Limit for the model: dollars, or "No limit" when they turned it off (u64::MAX). */
 const limit = (micro: string) => (noLimit(micro) ? "No limit" : usd(Number(micro)))
 
 /**

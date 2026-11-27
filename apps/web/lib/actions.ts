@@ -1,183 +1,63 @@
 "use client"
 
-import { type HeldToken, type Mode, mtTransferArgs, type TopUpAsset, transferIntent } from "@luckout/api"
-import { useQueryClient } from "@tanstack/react-query"
+import type { Mode, PreparedTransaction } from "@luckout/api"
 import { toast } from "sonner"
 import { api, cancelled, errorMessage } from "./api"
-import { limitsText, tokenAmount, usd } from "./format"
-import { CHAIN_NAMES } from "./evm"
-import { modeName, sameMode } from "./modes"
-import { pendingMode, setPendingMode } from "./onboarding"
-import { type Call, contractId, intentsId, usdcId, view } from "./near"
+import { limitsText, usd } from "./format"
+import { modeName } from "./modes"
 import { useSession } from "./session"
+import { useSubmitPrepared } from "./transactions"
 import { oneAtATime } from "./utils"
 
-const ONE_YOCTO = "1"
-
-/** `mode` is the Default Mode the account starts with if this deposit creates it (Welcome's pick); otherwise ignored. */
-export const depositCall = (micro: number, mode?: Mode | undefined): Call => ({
-  receiverId: usdcId,
-  method: "ft_transfer_call",
-  args: { receiver_id: contractId, amount: String(micro), msg: mode === undefined ? "" : JSON.stringify({ mode }) },
-  deposit: ONE_YOCTO,
-  tgas: 100
-})
-export const faucetCall: Call = { receiverId: usdcId, method: "faucet", args: {} }
-
 /**
- * Everything the customer signs with their wallet. Each one says what's happening in a toast,
- * re-reads the balance whatever happened, and resolves false (never throws) if the wallet refused or it failed.
+ * Everything the customer signs. The server prepares each transaction, their Privy wallet signs it with no prompt, and
+ * we pay the fee (lib/transactions.ts). Each one says what's happening in a toast, re-reads the account whatever
+ * happened, and resolves false (never throws) if it failed.
  */
 export function useWalletActions() {
-  const { accountId, token, intents, refresh, send, signIntent } = useSession()
-  const qc = useQueryClient()
+  const { accountId, token, refresh } = useSession()
+  const submit = useSubmitPrepared()
 
-  /**
-   * Each step may ask the wallet to approve or sign; the toast says what's happening throughout. `tapped` is false for
-   * a request the app makes by itself, which stays quiet if another is open.
-   */
-  const steps = (pending: string, done: string | (() => string), f: (say: (text: string) => void) => Promise<unknown>, tapped = true) =>
-    // One wallet request at a time: a second tap while this one is open answers false and asks the wallet nothing.
+  /** `tapped` is false for a request the app makes by itself, which stays quiet if another is open. */
+  const run = (pending: string, done: string, prepare: () => Promise<PreparedTransaction>, tapped = true) =>
+    // One at a time: a second tap while this one is open answers false and signs nothing.
     oneAtATime(async () => {
       if (!accountId) return false
-      const id = toast.loading(pending, { description: intents ? "Sign it in your wallet. Luckout pays the network fee." : "Approve it in your wallet." })
+      const id = toast.loading(pending, { description: "Luckout pays the network fee." })
       try {
-        await f((text) => toast.loading(text, { id }))
-        toast.success(typeof done === "string" ? done : done(), { id, description: undefined })
+        await submit(await prepare())
+        toast.success(done, { id, description: undefined })
         return true
       } catch (e) {
-        // Backing out of the wallet isn't a failure: say what happened, without the alarm.
-        if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
+        if (cancelled(e)) toast("Cancelled. Nothing was sent.", { id, description: undefined })
         else toast.error(errorMessage(e), { id, description: undefined })
         return false
       } finally {
-        // Even a failure or a timeout may have moved money: show what the chain says now.
+        // Even a failure or a timeout may have moved money: show what the program says now.
         await refresh().catch(() => {})
       }
     }, tapped)
 
-  const run = (pending: string, done: string, ...calls: Array<Call>) => steps(pending, done, () => send(...calls))
-  const setDefaultMode = (mode: Mode, tapped = true) =>
-    steps(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, () =>
-      send({
-        receiverId: contractId,
-        method: "set_default_mode",
-        args: { mode },
-        deposit: ONE_YOCTO
-      }), tapped)
-  /** Welcome's pick, made before there was an account to save it on: the first deposit carries it. */
-  const startMode = () => (accountId ? pendingMode(accountId) : undefined)
-  /**
-   * Once the first deposit has landed, Welcome's pick is done with: that deposit started the account in it. Only if
-   * someone else's deposit made the account first (a gift through NEAR Intents) did it start otherwise, and then the
-   * customer is asked to save their pick. Run by whichever end sees the deposit land first, after its own wallet request.
-   */
-  const savePendingMode = async () => {
-    const m = startMode()
-    if (!accountId || m === undefined) return
-    setPendingMode(accountId, undefined)
-    const started = await view<{ default_mode: Mode } | null>(contractId, "get_account", { account_id: accountId })
-      .then((a) => a?.default_mode, () => undefined)
-    // Started by the app, not a tap (here when a deposit lands, or from the header when a Top-Up does).
-    if (started !== undefined && !sameMode(started, m)) await setDefaultMode(m, false)
-  }
-  const withdrawCall = (micro: number): Call => ({
-    receiverId: contractId,
-    method: "withdraw",
-    args: { amount: String(micro) },
-    deposit: ONE_YOCTO,
-    tgas: 60
-  })
-
   return {
     /**
-     * Testnet only: 100 test USDC from the faucet, deposited in the same approval. An EVM or Solana wallet has no
-     * NEAR account to call the faucet from: the server puts it in its NEAR Intents account, and one
-     * signature moves it in.
+     * The one-time approval (ADR-0015): opens the customer's account on `mode`, and lets USDC sent to their Deposit
+     * Address move into their Balance by itself.
      */
-    faucet: () =>
-      intents
-        ? steps("Getting 100 test USDC", "100 test USDC added to your balance", async (say) => {
-          await api((c) => c.topup.faucet(), token)
-          say("Moving it into Luckout")
-          await send(depositCall(100_000_000, startMode()))
-        })
-        : run("Getting 100 test USDC", "100 test USDC added to your balance", faucetCall, depositCall(100_000_000, startMode())),
-    /** From the NEAR wallet, or for an EVM or Solana wallet from its NEAR Intents account. */
-    deposit: (micro: number) =>
-      run(intents ? `Moving ${usd(micro)} into Luckout` : `Depositing ${usd(micro)}`, `${usd(micro)} added to your balance`, depositCall(micro, startMode()))
-        .then(async (ok) => (ok && (await savePendingMode()), ok)),
-    withdraw: (micro: number) =>
-      run(`Withdrawing ${usd(micro)}`, intents ? `${usd(micro)} is in your NEAR Intents account` : `${usd(micro)} sent to your wallet`, withdrawCall(micro)),
-    /**
-     * EVM and Solana wallets (ADR-0011): out of Luckout into their own NEAR Intents account, then, with `asset`, on to
-     * their own address on that chain through 1Click. If the second step fails, the money waits in NEAR Intents.
-     */
-    withdrawTo: (micro: number, asset: TopUpAsset) => {
-      let arriving = ""
-      return steps(`Withdrawing ${usd(micro)}`, () => arriving, async (say) => {
-        await send(withdrawCall(micro))
-        say(`Sending it to ${asset.symbol} on ${CHAIN_NAMES[asset.chain] ?? asset.chain}`)
-        try {
-          const q = await api((c) => c.topup.exit({ payload: { destinationAsset: asset.assetId, usdc: micro } }), token)
-          void qc.invalidateQueries({ queryKey: ["transfers"] })
-          const signed = await signIntent(transferIntent({ receiverId: q.depositAddress, token: `nep141:${usdcId}`, amount: String(micro) }))
-          await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
-          arriving = `${tokenAmount(q.amountOutFormatted, q.symbol, "down")} ${q.symbol} arrives on ${CHAIN_NAMES[q.chain] ?? q.chain} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
-        } catch (e) {
-          throw new Error(`${usd(micro)} is in your NEAR Intents account, but sending it on didn't work: ${errorMessage(e)} Move it back into Luckout, or send it from near.com.`)
-        }
-      })
-    },
-    /**
-     * All of a token held in their NEAR Intents account (1Click's change or a refund), to their own wallet through
-     * 1Click: an EVM or Solana wallet gets it as it is on its own chain, a NEAR wallet as USDC. One signature; Luckout pays the fee.
-     */
-    sendBack: (h: HeldToken) => {
-      let arriving = ""
-      return steps(`Sending ${h.amount} ${h.symbol} to your wallet`, () => arriving, async () => {
-        const q = await api((c) => c.topup.sendBack({ payload: { assetId: h.assetId } }), token)
-        const to = { receiverId: q.depositAddress, token: q.assetId, amount: q.amount }
-        try {
-          if (intents) {
-            const signed = await signIntent(transferIntent(to))
-            await api((c) => c.relay.intent({ payload: { signed } }), token, "90 seconds")
-          } else {
-            await send({ receiverId: intentsId, method: "mt_transfer", args: mtTransferArgs(to), deposit: ONE_YOCTO, tgas: 30 })
-          }
-        } finally {
-          void qc.invalidateQueries({ queryKey: ["transfers"] })
-          void qc.invalidateQueries({ queryKey: ["held"] })
-        }
-        const where = q.chain === "near" ? "your NEAR wallet" : `your wallet on ${CHAIN_NAMES[q.chain] ?? q.chain}`
-        arriving = `${tokenAmount(q.amountOutFormatted, q.symbol, "down")} ${q.symbol} arrives in ${where} in about ${Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min`
-      })
-    },
-    setDefaultMode,
-    savePendingMode,
-    /** Micro-USDC strings, so "No limit" (u128::MAX) reaches the contract exactly. */
+    approve: (mode: Mode) =>
+      run("Setting up deposits", "Deposits now arrive in your balance by themselves", () => api((c) => c.deposits.approval({ payload: { mode } }), token)),
+    setDefaultMode: (mode: Mode, tapped = true) =>
+      run(`Making ${modeName(mode)} your default`, `${modeName(mode)} is your default now`, () =>
+        api((c) => c.deposits.defaultMode({ payload: { mode } }), token), tapped),
+    /** Micro-USDC strings, so "No limit" (u64::MAX) reaches the program exactly. */
     setLimits: (perPurchase: string, daily: string) =>
-      run("Saving your limits", `Limits saved: ${limitsText(perPurchase, daily)}`, {
-        receiverId: contractId,
-        method: "set_limits",
-        args: { per_purchase: perPurchase, daily },
-        deposit: ONE_YOCTO
-      }),
-    /** A purchase neither delivered nor cancelled within 24 hours: the full amount comes back. */
-    reclaim: (purchaseId: number) =>
-      run("Reclaiming your purchase", "The full amount is back in your balance", {
-        receiverId: contractId,
-        method: "reclaim",
-        args: { purchase_id: purchaseId },
-        tgas: 30
-      }),
-    /** A delivered Lucky Buy whose Draw didn't run (e.g. out of gas): run it again. */
-    retryDraw: (purchaseId: number) =>
-      run("Running the Draw again", "The Draw ran: see the result below", {
-        receiverId: contractId,
-        method: "retry_draw",
-        args: { purchase_id: purchaseId },
-        tgas: 60
-      })
+      run("Saving your limits", `Limits saved: ${limitsText(perPurchase, daily)}`, () =>
+        api((c) => c.deposits.limits({ payload: { perPurchase, daily } }), token)),
+    /** From the Balance to any Solana address (its USDC account is opened if it has none). */
+    withdraw: (micro: number, to: string) =>
+      run(`Withdrawing ${usd(micro)}`, `${usd(micro)} sent`, () => api((c) => c.deposits.withdrawal({ payload: { amount: micro, to } }), token)),
+    /** A card neither delivered nor failed within 24 hours: the full amount comes back. The program checks the time. */
+    reclaim: (purchaseId: string) =>
+      run("Reclaiming your purchase", "The full amount is back in your balance", () =>
+        api((c) => c.deposits.reclaim({ payload: { purchaseId } }), token))
   }
 }

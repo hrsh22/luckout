@@ -37,7 +37,7 @@ test("toMicro refuses what it can't hold exactly", () => {
 })
 
 test("a limit that's off is named, never shown in dollars", () => {
-  const off = "340282366920938463463374607431768211455" // u128::MAX, the contract's "no limit"
+  const off = "18446744073709551615" // u64::MAX, the program's "no limit"
   assert.equal(limitsText(off, off), "No limits")
   assert.equal(limitsText(200_000_000, off), "$200.00 a purchase, no daily limit")
   assert.equal(limitsText(off, 1_000_000_000), "No per-purchase limit, $1,000.00 a day")
