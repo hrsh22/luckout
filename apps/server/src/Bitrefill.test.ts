@@ -52,7 +52,7 @@ test("test card is delivered with Redemption Data", liveBuy, async () => {
 
 test("real vouchers are priced in USD from Bitrefill, and amounts under $0.50 aren't for sale", live, async () => {
   // Real products are only priced on mainnet.
-  const v = await run((b) => b.voucher("swiggy-money-india"), { NEAR_NETWORK: "mainnet" })
+  const v = await run((b) => b.voucher("swiggy-money-india"), { SOLANA_CLUSTER: "mainnet" })
   const p500 = v.packages.find((p) => p.value === "500")
   // ₹500 is about $5.5; a sats-derived or face-value price would be far off.
   assert.ok(p500 && p500.priceMicroUsdc > 4_000_000 && p500.priceMicroUsdc < 8_000_000, String(p500?.priceMicroUsdc))
@@ -62,9 +62,9 @@ test("real vouchers are priced in USD from Bitrefill, and amounts under $0.50 ar
 })
 
 test("on testnet only test cards are offered or priced", live, async () => {
-  const found = await run((b) => b.search("gift card"), { NEAR_NETWORK: "testnet" })
+  const found = await run((b) => b.search("gift card"), { SOLANA_CLUSTER: "localnet" })
   assert.ok(found.length > 0 && found.every((v) => v.id.startsWith("test-")), JSON.stringify(found.map((v) => v.id)))
-  await assert.rejects(run((b) => b.voucher("swiggy-money-india"), { NEAR_NETWORK: "testnet" }), (e: { message?: string }) => /only Bitrefill's test cards/.test(e.message ?? ""))
+  await assert.rejects(run((b) => b.voucher("swiggy-money-india"), { SOLANA_CLUSTER: "localnet" }), (e: { message?: string }) => /only Bitrefill's test cards/.test(e.message ?? ""))
 })
 
 test("test vouchers are priced at face value", live, async () => {
@@ -88,7 +88,7 @@ test("a refusal from Bitrefill is a definite Refused; an answer we don't recogni
       headers: { "content-type": "text/event-stream" }
     })
   // No guest client (an empty value counts as unset), so the order goes out with the API key.
-  const env = { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "" }
+  const env = { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "" }
   const order = () => run((b) => b.order([{ id: "swiggy-money-india", value: "999999" }]), env)
   try {
     answer = () => new Response(JSON.stringify({ error: "Unknown package" }), { status: 400 })
@@ -129,7 +129,7 @@ test("junk ids spend no lookups, and browsing can never use up the ones a purcha
         const browsed = yield* b.voucher("amazon-us")
         const underscored = yield* b.voucher("papa-john_s-usa", { purchase: true })
         return { junk, busy, bought, browsed, underscored }
-      }), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+      }), { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" })
     assert.match(r.junk.message, /No such voucher/)
     assert.equal(r.underscored.id, "papa-john_s-usa", "Bitrefill's own ids can hold an underscore")
     assert.match(r.busy.message, /busy/)
@@ -164,7 +164,7 @@ test("the catalog lists only cards we can deliver, filtered just by what the cus
         const again = yield* b.browse({ country: "IN", category: "games" })
         const second = yield* b.browse({ country: "IN", category: "games", start: first.next })
         return { first, again, second }
-      }), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+      }), { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" })
     // 50 listed: 30 top-ups needing a phone number and 2 out of stock are left out.
     assert.equal(r.first.items.length, 18)
     assert.ok(r.first.items.every((v) => v.countryCode === "IN" || v.countryCode === "XI"))
@@ -232,7 +232,7 @@ test("a card's brand colour from Bitrefill is passed on only when it is a hex co
       data: colours.map((logo_background, i) => ({ id: `card-${i}`, name: `Card ${i}`, country_code: "US", currency: "USD", recipient_type: "none", in_stock: true, image: "logos/card", logo_background }))
     })) as typeof fetch
   try {
-    const found = await run((b) => b.search("card"), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    const found = await run((b) => b.search("card"), { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" })
     assert.deepEqual(found.map((v) => v.background), ["#1A2B3C", "#fff", "#11223344", undefined, undefined, undefined, undefined])
     assert.ok(found.every((v) => v.image === "logos/card"), "the logo itself is kept")
   } finally {
@@ -252,14 +252,14 @@ test("a logo colour saved before the check existed is dropped when the server st
     }).pipe(
       Effect.scoped,
       Effect.provide(DbMemory),
-      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } })))
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { SOLANA_CLUSTER: "localnet" } })))
     )
   )
   assert.deepEqual(logo, [{ image: "logos/one" }, { image: "logos/two", background: "#0A0B0C" }])
 })
 
 // Guest checkout (ADR-0012), with Bitrefill faked: the guest login, then whatever `tool` answers each MCP call.
-const guestEnv = { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "client", BITREFILL_CLIENT_SECRET: "secret" }
+const guestEnv = { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key", BITREFILL_CLIENT_ID: "client", BITREFILL_CLIENT_SECRET: "secret" }
 const withGuestBitrefill = async <A>(tool: (name: string, args: Record<string, unknown>) => Response, body: () => Promise<A>) => {
   const realFetch = globalThis.fetch
   globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -322,7 +322,7 @@ test("a card's page gets Bitrefill's pitch, steps, terms and rating", async () =
     return new Response(`data: ${JSON.stringify({ result: { content: [{ text: JSON.stringify(product) }] } })}\n`, { status: 200, headers: { "content-type": "text/event-stream" } })
   }) as typeof fetch
   try {
-    const [swiggy, other] = await run((b) => Effect.all([b.voucher("swiggy-money-india"), b.voucher("other-card")]), { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" })
+    const [swiggy, other] = await run((b) => Effect.all([b.voucher("swiggy-money-india"), b.voucher("other-card")]), { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" })
     assert.equal(swiggy.subtitle, "Order meals.")
     assert.equal(swiggy.howToRedeem, "1. Open the app.\n2. Add the voucher.")
     assert.equal(swiggy.terms, "# Validity\n12 months.")
@@ -411,7 +411,7 @@ test("prices on pages and in quotes: fresh while lookups are free, the last one 
         Effect.scoped,
         Effect.provide(DbMemory),
         Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
-        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
         Effect.provide(TestClock.layer())
       )
     )
@@ -481,7 +481,7 @@ test("a mistyped card Bitrefill said it doesn't have answers 404 again unasked, 
         Effect.scoped,
         Effect.provide(DbMemory),
         Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
-        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
         Effect.provide(TestClock.layer())
       )
     )
@@ -526,7 +526,7 @@ test("lookups never pass their budget in any 60 seconds, and Bitrefill's own lim
         Effect.scoped,
         Effect.provide(DbMemory),
         Effect.provideService(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init)),
-        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { SOLANA_CLUSTER: "mainnet", BITREFILL_API_KEY: "test-key" } }))),
         Effect.provide(TestClock.layer())
       )
     )

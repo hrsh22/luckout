@@ -56,11 +56,11 @@ export const Monitor = Layer.effectDiscard(
     const solana = yield* Solana
     const alerts = yield* Alerts
 
-    // Each check stands alone: one that fails (say, a NEAR view that times out) is logged, and the rest still run.
+    // Each check stands alone: one that fails (say, an RPC read that times out) is logged, and the rest still run.
     const section = <E>(name: string, body: Effect.Effect<void, E>) =>
       body.pipe(Effect.catchCause((cause) => Effect.logError(`monitor: the ${name} check failed`, cause)))
 
-    // Reads only our database, so it runs first: a NEAR outage is exactly when purchases stall.
+    // Reads only our database, so it runs first: an RPC outage is exactly when purchases stall.
     const purchases = Effect.gen(function*() {
       const [r] = yield* sql<{ stuck: number; late: number }>`
         SELECT count(*) FILTER (WHERE step = 'stuck')::int AS stuck,

@@ -21,7 +21,7 @@ export interface DrawEvent {
 export interface GameVersion {
   name: string
   premium_bps: number
-  outcomes: Array<{ final_bps: number; chance_bps: number }>
+  outcomes: ReadonlyArray<{ final_bps: number; chance_bps: number }>
 }
 
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")
@@ -72,7 +72,43 @@ export const plainly = (value: string, unit: NonNullable<Check["unit"]>) =>
 
 /** Every step of the Draw recomputed and compared with what the contract logged. */
 export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<Check>> {
-  const random = await drawRandom(e.seed, e.purchase_id)
+  return checksFrom(e, await drawRandom(e.seed, e.purchase_id), version)
+}
+
+/**
+ * One card's Draw as the Solana program records it (ADR-0015): byte fields as hex, amounts as integer strings.
+ * `randomness` is ORAO's filled-in value (64 bytes).
+ */
+export interface CardDraw {
+  card: number
+  game_version: number
+  reference_price: string
+  lucky_amount: string
+  max_price: string
+  randomness: string
+  random: string
+  roll: number
+  final_bps: number
+  final_price: string
+  cashback: string
+}
+
+/** sha256(ORAO's value ‖ the card's index as one byte), as the program's `card_random`. */
+export async function cardRandom(randomnessHex: string, card: number): Promise<string> {
+  const input = new Uint8Array(65)
+  input.set(unhex(randomnessHex))
+  input[64] = card
+  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", input)))
+}
+
+/** Every step of a card's Draw on Solana recomputed and compared with what the program recorded. */
+export async function verifyCard(e: CardDraw, version: GameVersion): Promise<Array<Check>> {
+  return checksFrom(e, await cardRandom(e.randomness, e.card), version)
+}
+
+type Recorded = Pick<DrawEvent, "random" | "roll" | "final_bps" | "final_price" | "cashback" | "reference_price" | "lucky_amount" | "max_price">
+
+function checksFrom(e: Recorded, random: string, version: GameVersion): Array<Check> {
   const roll = rollFrom(random)
   const bps = finalBpsFor(version.outcomes, roll)
   const price = finalPrice(BigInt(e.reference_price), BigInt(e.lucky_amount), BigInt(e.max_price), bps)

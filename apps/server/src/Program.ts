@@ -355,12 +355,13 @@ const EVENT_CPI_TAG = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d]
 
 /**
  * The program's events in a transaction: `emit!` ones from its logs ("Program data: …"), and `emit_cpi!` ones
- * (the Draw Proofs) from the data of its inner self-calls, which long logs can't cut off.
+ * (the Draw Proofs) from the data of its inner self-calls, which long logs can't cut off. Any program can log
+ * "Program data: …", so a Draw found there is a look-alike and is dropped: the program records Draws only by `emit_cpi!`.
  */
 export const decodeEvents = (logs: ReadonlyArray<string>, innerData: ReadonlyArray<Uint8Array>): Array<ProgramEvent> => [
   ...logs.filter((l) => l.startsWith("Program data: ")).flatMap((l) => {
     const e = decodeEvent(Buffer.from(l.slice("Program data: ".length), "base64"))
-    return e ? [e] : []
+    return e && e.name !== "Draw" ? [e] : []
   }),
   ...innerData.filter((d) => startsWith(d, EVENT_CPI_TAG)).flatMap((d) => {
     const e = decodeEvent(d.subarray(8))

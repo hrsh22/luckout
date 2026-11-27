@@ -3,17 +3,21 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { DbMemory, DeploymentLock } from "./Db.ts"
 
+// Two made-up program addresses.
+const PRODUCTION = "11111111111111111111111111111112"
+const STAGING = "11111111111111111111111111111113"
+
 const start = (env: Record<string, string>) =>
   Layer.build(DeploymentLock).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))))
 
 test("a database stays with the deployment that first used it: staging and production never share one", async () => {
   const exits = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
-    const production = { NEAR_NETWORK: "mainnet", LUCKOUT_CONTRACT_ID: "app.luckout.near" }
+    const production = { SOLANA_CLUSTER: "mainnet", SOLANA_PROGRAM_ID: PRODUCTION }
     return [
       yield* Effect.exit(start(production)),
       yield* Effect.exit(start(production)),
-      yield* Effect.exit(start({ NEAR_NETWORK: "mainnet", LUCKOUT_CONTRACT_ID: "app.staging.luckout.near" })),
-      yield* Effect.exit(start({ NEAR_NETWORK: "testnet" }))
+      yield* Effect.exit(start({ SOLANA_CLUSTER: "mainnet", SOLANA_PROGRAM_ID: STAGING })),
+      yield* Effect.exit(start({ SOLANA_CLUSTER: "devnet", SOLANA_PROGRAM_ID: PRODUCTION }))
     ]
   })).pipe(Effect.provide(DbMemory)))
   assert.deepEqual(exits.map(Exit.isSuccess), [true, true, false, false])

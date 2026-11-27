@@ -4,7 +4,7 @@ import { PGlite } from "@electric-sql/pglite"
 import { Config, Effect, Layer, Option } from "effect"
 import { Migrator, SqlClient } from "effect/sql"
 import { mkdirSync } from "node:fs"
-import { ContractId, Network } from "./Near.ts"
+import { Cluster, ProgramId } from "./Solana.ts"
 
 // Exactly one server process per database (ADR-0006): a second one would poll Telegram twice
 // and race the operator's transaction nonces. The lock lives as long as this connection.
@@ -400,6 +400,22 @@ export const migrationSteps = {
   "0031_deposit_approval": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE known_accounts ADD COLUMN approval_lost_at TIMESTAMPTZ`
+  }),
+  // A Buy tapped in the bot while the Balance was short waits here for the money, until its quote expires (ADR-0015).
+  // Telegram is linked by signing in with it in Privy now, so the bot's link codes go.
+  "0032_pending_buys": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE pending_buys (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        cards JSONB NOT NULL,
+        balance BIGINT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    yield* sql`DROP TABLE telegram_link_codes`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)
@@ -407,16 +423,16 @@ const migrations = Migrator.fromRecord(migrationSteps)
 const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
 
 /**
- * A database belongs to one deployment for good: the first server to start records its network and
- * contract, and a server for another refuses to start against it. So testnet and mainnet data never
- * mix, and neither do staging and production, which are both on mainnet (ADR-0010).
+ * A database belongs to one deployment for good: the first server to start records its cluster and program, and a
+ * server for another refuses to start against it. So devnet and mainnet data never mix, and neither do staging and
+ * production, which are both on mainnet with programs of their own (ADR-0015).
  */
 export const DeploymentLock = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const network = yield* Network
-    const contract = yield* ContractId
-    for (const [key, value, setting] of [["network", network, "NEAR_NETWORK"], ["contract", contract, "LUCKOUT_CONTRACT_ID"]]) {
+    const cluster = yield* Cluster
+    const program = (yield* ProgramId).toBase58()
+    for (const [key, value, setting] of [["cluster", cluster, "SOLANA_CLUSTER"], ["program", program, "SOLANA_PROGRAM_ID"]]) {
       yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')
                  ON CONFLICT (key) DO NOTHING`
       const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = ${key}`
