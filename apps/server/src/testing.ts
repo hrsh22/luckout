@@ -179,8 +179,9 @@ export const solanaWorld = (): SolanaWorld => {
     }
   }
   const chain = Chain.of({
+    // Read when run, as the RPC does: Solana.config is one Effect made at start and run on every read.
     accounts: (keys) =>
-      Effect.succeed(keys.map((k) => {
+      Effect.sync(() => keys.map((k) => {
         const a = svm.getAccount(address(k.toBase58()))
         return a.exists ? { owner: new PublicKey(a.programAddress), lamports: BigInt(a.lamports), data: Buffer.from(a.data) } : undefined
       })),

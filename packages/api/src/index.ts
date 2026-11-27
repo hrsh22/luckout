@@ -1,4 +1,4 @@
-import { Context, Schema, Struct } from "effect"
+import { Context, Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 
 export * from "./intents.ts"
@@ -556,91 +556,47 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable })
 ).middleware(Authorization) {}
 
+/** A transaction the customer signs and we pay for: unsigned, with the token that binds its bytes. */
+export class PreparedTransaction extends Schema.Class<PreparedTransaction>("PreparedTransaction")({
+  transaction: Schema.String.check(Schema.isMaxLength(4096)),
+  token: Schema.String.check(Schema.isMaxLength(128))
+}) {}
+
 // ---------- admin (whitelisted accounts only; everyone else gets NotFound) ----------
-
-/** The relayer's switch and free-relay caps, changed from the admin panel. */
-export class RelaySettings extends Schema.Class<RelaySettings>("RelaySettings")({
-  enabled: Schema.Boolean,
-  /** Free relays per account per rolling day. */
-  perAccountDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
-  /** Free relays for everyone together per rolling day. */
-  allDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100_000 }))
-}) {}
-
-/**
- * What an admin changes in the relayer's settings: only the fields sent. The server keeps the rest as they are
- * now, so a panel opened before another admin's change can't undo it.
- */
-export const RelayChange = Schema.Struct(RelaySettings.fields).mapFields(Struct.map(Schema.optionalKey))
-export type RelayChange = typeof RelayChange.Type
-
-const Yocto = Schema.String
-
-const Usd = MicroUsdc.check(Schema.isBetween({ minimum: 0, maximum: 2_000_000_000 }))
-
-/** How much Bitrefill credit to keep (ADR-0009). All amounts micro-USDC. */
-export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings")({
-  /** Refill by itself; off, the panel and alerts only say when to. */
-  autoRefill: Schema.Boolean,
-  /** Refills top up to at least this, whatever sales did ("Top up to at least"). */
-  floor: Usd,
-  /**
-   * Idle credit never goes above this: the most that can sit unused at Bitrefill. A refill for
-   * purchases already waiting may go past it, since that credit is spent within minutes.
-   */
-  ceiling: Usd,
-  /** The most the server refills in a rolling day. */
-  dailyRefill: Usd,
-  /** How long a purchase may wait for credit before it's cancelled, uncharged (up to a day). */
-  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 })),
-  /**
-   * USDC kept ready in our Base wallet, so a refill pays Bitrefill in about a minute instead of waiting
-   * on a swap; topped back up in the background. 0 turns it off. Missing (saved before it existed): the
-   * network's default.
-   */
-  baseFloat: Schema.optional(Usd),
-  /**
-   * A refill starts once credit falls under this, so a big card's worth stays ready without every small
-   * sale starting a refill. Kept at least the smallest refill under the target. Missing or 0: half the target,
-   * or the biggest recent card if that's more.
-   */
-  refillBelow: Schema.optional(Usd),
-  /**
-   * The smallest refill: one for less costs relatively more in swap fees. At least $2, the smallest swap.
-   * Missing (saved before it existed): $10.
-   */
-  minRefill: Schema.optional(Usd)
-}) {}
-
-/** What an admin changes in the credit settings: only the fields sent, as with RelayChange. */
-export const CreditChange = Schema.Struct(CreditSettings.fields).mapFields(Struct.map(Schema.optionalKey))
-export type CreditChange = typeof CreditChange.Type
-
-/** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
-export class RefillView extends Schema.Class<RefillView>("RefillView")({
-  id: Schema.String,
-  amount: MicroUsdc,
-  /** target, waiting (a purchase needed it), manual, or float (tops up the Base wallet; no Bitrefill credit). */
-  reason: Schema.String,
-  /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck, resolved, or cancelled (a float top-up that gave way). */
-  step: Schema.String,
-  error: Schema.optional(Schema.String),
-  /** The treasury's NEAR transfer into the swap. */
-  sendTx: Schema.optional(Schema.String),
-  /** The swap's NEAR Intents deposit address (its explorer page). */
-  swap: Schema.optional(Schema.String),
-  /** The Base wallet's payment to Bitrefill. */
-  payTx: Schema.optional(Schema.String),
-  invoiceId: Schema.optional(Schema.String),
-  createdAt: Schema.String,
-  updatedAt: Schema.String
-}) {}
 
 export class AdminInvalid extends Schema.TaggedError<AdminInvalid>()(
   "AdminInvalid",
   { message: Schema.String },
   { httpApiStatus: 400 }
 ) {}
+
+const Address = Schema.String.check(Schema.isMaxLength(64))
+const Amount = MicroUsdc.check(Schema.isGreaterThan(0))
+const Setting = MicroUsdc.check(Schema.isGreaterThanOrEqualTo(0))
+
+/**
+ * One owner transaction for the Admin panel (ADR-0015). Each `_tag` is the program instruction it becomes: the server
+ * builds it with our fee payer, the owner's own wallet signs it (the proposed owner's, for `accept_owner`), and
+ * `/transactions/submit` sends it. Proceeds go to the owner's USDC account or the Pay Wallet's; the reserve only to
+ * the owner's, as the program allows.
+ */
+export const OwnerAction = Schema.Union([
+  Schema.TaggedStruct("set_paused", { paused: Schema.Boolean }),
+  /** `fixed` null is off; the share is required and at most 50%, as the program checks. */
+  Schema.TaggedStruct("set_cashback_cap", { fixed: Schema.NullOr(Amount), reserveBps: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5_000 })) }),
+  Schema.TaggedStruct("set_repay_cap", { daily: Setting }),
+  Schema.TaggedStruct("set_min_lucky_checkout", { amount: Setting }),
+  Schema.TaggedStruct("fund_reserve", { amount: Amount }),
+  Schema.TaggedStruct("withdraw_reserve", { amount: Amount }),
+  Schema.TaggedStruct("withdraw_proceeds", { amount: Amount, to: Schema.Literals(["owner", "payWallet"]) }),
+  Schema.TaggedStruct("set_operator", { operator: Address }),
+  /** The new Pay Wallet's own address: its USDC account is what the program keeps. */
+  Schema.TaggedStruct("set_pay_wallet", { payWallet: Address }),
+  /** null withdraws a proposal. */
+  Schema.TaggedStruct("propose_owner", { newOwner: Schema.NullOr(Address) }),
+  Schema.TaggedStruct("accept_owner", {})
+])
+export type OwnerAction = typeof OwnerAction.Type
 
 /** Rows the admin's Purchases and Users pages get at most, newest first. */
 export const ADMIN_LIST_LIMIT = 300
@@ -655,7 +611,7 @@ export class AttentionPurchase extends Schema.Class<AttentionPurchase>("Attentio
   error: Schema.optional(Schema.String),
   attempts: Schema.Int,
   createdAt: Schema.String,
-  /** "Retry now" is safe for it: an open purchase, or one that gave up at a step NEAR can repeat. */
+  /** "Retry now" is safe for it: an open purchase, or one that gave up at a step the program can repeat. */
   retryable: Schema.Boolean
 }) {}
 
@@ -727,7 +683,7 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
 export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")({
   id: Schema.String,
-  /** The checkout it was bought in. A Cart's cards share one invoice and one Base payment: `payAmount` is the checkout's. */
+  /** The checkout it was bought in. A Cart's cards share one invoice and one payment from the Pay Wallet: `payAmount` is the checkout's. */
   checkoutId: Schema.String,
   accountId: Schema.String,
   voucherName: Schema.String,
@@ -791,16 +747,12 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     params: { id: Schema.String },
     success: HttpApiSchema.NoContent,
     error: [NotFound, PurchaseInvalid]
-  })
+  }),
+  /** An owner transaction, unsigned, for the owner's wallet to sign and `/transactions/submit` to send. */
+  HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] })
 ).middleware(Authorization).annotate(OpenApi.Exclude, true) {}
 
 // ---------- deposits and customer-signed transactions (ADR-0015) ----------
-
-/** A transaction the customer signs and we pay for: unsigned, with the token that binds its bytes. */
-export class PreparedTransaction extends Schema.Class<PreparedTransaction>("PreparedTransaction")({
-  transaction: Schema.String.check(Schema.isMaxLength(4096)),
-  token: Schema.String.check(Schema.isMaxLength(128))
-}) {}
 
 /** The customer's Deposit Address (their Privy wallet), whether its one-time approval stands, and USDC waiting there. */
 export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress")({
