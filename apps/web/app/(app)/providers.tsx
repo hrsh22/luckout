@@ -5,33 +5,59 @@ import { Mark } from "@/components/brand"
 import { Welcome } from "@/components/welcome"
 import { markWelcomed, welcomed } from "@/lib/onboarding"
 import { Dialog } from "@base-ui/react/dialog"
+import { PrivyProvider } from "@privy-io/react-auth"
+import { toSolanaWalletConnectors } from "@privy-io/react-auth/solana"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MotionConfig } from "motion/react"
 import { usePathname } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
 import { Toaster } from "sonner"
 
+/** Our Privy app. Not a secret; unset, it's the staging app, for local development (production builds must set it). */
+const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID || "cmwz7cuc801kz0gjsauacf152"
+
+/**
+ * Privy is the only login (ADR-0015), in Privy's own window: only that window makes the Privy Solana wallet everyone
+ * gets, Phantom users too, and their account belongs to it.
+ */
+const PRIVY_CONFIG = {
+  loginMethods: ["email", "google", "telegram", "wallet"],
+  appearance: {
+    theme: "light",
+    // Our buttons are ink; the logo is the app icon.
+    accentColor: "#16122b",
+    logo: "/logo.png",
+    landingHeader: "Sign in to Luckout",
+    walletChainType: "solana-only",
+    walletList: ["phantom", "solflare", "backpack", "detected_solana_wallets"]
+  },
+  embeddedWallets: { ethereum: { createOnLogin: "off" }, solana: { createOnLogin: "all-users" } },
+  externalWallets: { solana: { connectors: toSolanaWalletConnectors() } }
+} satisfies React.ComponentProps<typeof PrivyProvider>["config"]
+
 export function AppProviders({ children }: { children: React.ReactNode }) {
   const [client] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } }))
   return (
-    <QueryClientProvider client={client}>
-      <MotionConfig reducedMotion="user">
-        <SessionProvider>
-          {children}
-          <WelcomeGate />
-        </SessionProvider>
-      </MotionConfig>
-      <Toaster
-        // Top: sheets rise from the bottom on phones and keep their main button there, so a toast below would cover it.
-        position="top-center"
-        toastOptions={{ className: "!rounded-2xl !font-sans !text-[15px] !shadow-[0_24px_50px_-30px_rgb(22_18_43/0.6)]" }}
-      />
-    </QueryClientProvider>
+    <PrivyProvider appId={PRIVY_APP_ID} config={PRIVY_CONFIG}>
+      <QueryClientProvider client={client}>
+        <MotionConfig reducedMotion="user">
+          <SessionProvider>
+            {children}
+            <WelcomeGate />
+          </SessionProvider>
+        </MotionConfig>
+        <Toaster
+          // Top: sheets rise from the bottom on phones and keep their main button there, so a toast below would cover it.
+          position="top-center"
+          toastOptions={{ className: "!rounded-2xl !font-sans !text-[15px] !shadow-[0_24px_50px_-30px_rgb(22_18_43/0.6)]" }}
+        />
+      </QueryClientProvider>
+    </PrivyProvider>
   )
 }
 
 /**
- * A new account (signed in, never deposited) gets Welcome once, over the page it signed in on.
+ * A new account (signed in, no approval yet) gets Welcome once, over the page it signed in on.
  * No redirect: closing it leaves the customer exactly where they were.
  */
 function WelcomeGate() {

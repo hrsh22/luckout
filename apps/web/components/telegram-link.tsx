@@ -4,50 +4,56 @@ import { Button, buttonVariants } from "@/components/ui/button"
 import { api, errorMessage } from "@/lib/api"
 import { useTelegram } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { useLinkAccount, usePrivy, useUnlinkTelegram } from "@privy-io/react-auth"
 import { Send } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { toast } from "sonner"
 
-/** Linking starts here, in the signed-in session, so only the wallet owner picks the Telegram account. */
+/**
+ * Linking Telegram happens in Privy (ADR-0015): the server reads the link from Privy's identity token at sign-in, so
+ * after linking or unlinking here we sign in to the server again with Privy's fresh tokens.
+ */
 export function TelegramLink() {
-  const { token } = useSession()
-  // Set once the bot opens in another tab: the card follows along until the link appears.
-  const [waiting, setWaiting] = useState(false)
-  // The one-time link, kept on screen while waiting: a pop-up opened after a request (Safari, in-app browsers) may be
-  // blocked without a word, and with "noopener" window.open can't tell us.
-  const [link, setLink] = useState<string>()
-  const status = useTelegram(token, waiting)
+  const { token, resync } = useSession()
+  const { user } = usePrivy()
+  const status = useTelegram(token)
   const [busy, setBusy] = useState(false)
+  const { unlink } = useUnlinkTelegram()
 
-  useEffect(() => {
-    if (!waiting || !status.data?.linked) return
-    setWaiting(false)
-    toast.success(`Telegram connected${status.data.telegramName ? ` to ${status.data.telegramName}` : ""}`)
-  }, [waiting, status.data])
-
-  // Give up after 10 minutes; the card still refreshes when the tab regains focus.
-  useEffect(() => {
-    if (!waiting) return
-    const t = setTimeout(() => setWaiting(false), 10 * 60_000)
-    return () => clearTimeout(t)
-  }, [waiting])
-
-  const connect = async () => {
-    setBusy(true)
-    try {
-      const { url } = await api((c) => c.telegram.linkCode(), token)
-      setLink(url)
-      window.open(url, "_blank", "noopener")
-      setWaiting(true)
-    } catch (e) {
-      toast.error(errorMessage(e))
+  const synced = async () => {
+    await resync()
+    return (await status.refetch()).data
+  }
+  const { linkTelegram } = useLinkAccount({
+    onSuccess: () =>
+      void synced().then(
+        (s) => toast.success(`Telegram connected${s?.telegramName ? ` to ${s.telegramName}` : ""}`),
+        (e) => toast.error(errorMessage(e))
+      ).finally(() => setBusy(false)),
+    onError: (code) => {
+      setBusy(false)
+      if (code === "linked_to_another_user") toast.error("That Telegram account is already linked to another Luckout account.")
+      else if (code !== "exited_link_flow") toast.error(`Telegram didn't connect (${code}). Try again.`)
     }
-    setBusy(false)
+  })
+
+  const connect = () => {
+    setBusy(true)
+    linkTelegram()
   }
   const disconnect = async () => {
     setBusy(true)
-    await api((c) => c.telegram.unlink(), token).then(() => toast.success("Telegram disconnected"), (e) => toast.error(errorMessage(e)))
-    await status.refetch()
+    try {
+      // The bot stops buying for them at once; unlinking in Privy keeps the next sign-in from linking it again.
+      await api((c) => c.telegram.unlink(), token)
+      const id = user?.telegram?.telegramUserId
+      if (id) await unlink({ telegramUserId: id })
+      await synced()
+      toast.success("Telegram disconnected")
+    } catch (e) {
+      toast.error(errorMessage(e))
+      await status.refetch()
+    }
     setBusy(false)
   }
 
@@ -60,20 +66,16 @@ export function TelegramLink() {
         <p className="text-[15px] text-ink-soft">
           {s?.linked
             ? "The bot buys only when you tap Confirm, always within your limits."
-            : waiting
-            ? "Tap Start in the Luckout bot. If Telegram didn't open, tap Open Telegram. This updates by itself once you do."
             : "Ask the Luckout bot for a card. Nothing is bought until you tap Confirm, and codes arrive in your private chat."}
         </p>
       </div>
       {!s
         ? <span className="skeleton h-11 w-40 rounded-full" />
         : s.linked
-        ? <Button variant="light" loading={busy} onClick={disconnect}>Disconnect</Button>
-        : waiting
         ? (
           <div className="flex shrink-0 items-center gap-1">
-            <Button variant="ghost" onClick={() => setWaiting(false)}>Cancel</Button>
-            <a href={link} target="_blank" rel="noopener noreferrer" className={buttonVariants({ variant: "light" })}>Open Telegram</a>
+            <Button variant="ghost" loading={busy} onClick={disconnect}>Disconnect</Button>
+            {s.botUrl && <a href={s.botUrl} target="_blank" rel="noopener noreferrer" className={buttonVariants({ variant: "light" })}>Open the bot</a>}
           </div>
         )
         : <Button loading={busy} onClick={connect} disabled={!s.botUrl}>{s.botUrl ? "Connect Telegram" : "Bot offline"}</Button>}

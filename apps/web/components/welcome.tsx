@@ -114,16 +114,16 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
         >
           {step === 0 && (
             <>
-              <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with a NEAR, EVM or Solana wallet to start." />
+              <Heading title="Checkout, but lucky." body="Buy gift cards from around the world with USDC. Pay the price, or add a little for a fair shot at cashback. Sign in with your email, Google, Telegram or a Solana wallet to start." />
               <div className="grid gap-3 sm:grid-cols-3">
                 <Point icon={Zap} tint="sky" title="Codes in about a minute" body="Bitrefill, where we source the cards, sends the code once it sees our payment." />
                 <Point icon={Sparkles} tint="gold" title="Cashback by chance" body="Lucky modes can pay back part of the price, sometimes all of it." />
-                <Point icon={ShieldCheck} tint="lilac" title="Checkable" body="Every Draw is on NEAR. Anyone can recompute it." />
+                <Point icon={ShieldCheck} tint="lilac" title="Checkable" body="Every Draw is on Solana. Anyone can recompute it." />
               </div>
               <div className="card flex flex-col items-start gap-3 p-6">
                 <SignInButton size="lg" label="Sign in" inline />
                 {signInError && <p role="alert" className={`text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
-                <p className="text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, Intear), EVM wallets (MetaMask, Rabby) and Solana wallets (Phantom, Solflare) all work.</p>
+                <p className="text-sm text-muted">Free, and you get your own Luckout wallet. Signing in with Phantom, Solflare or Backpack works too.</p>
               </div>
             </>
           )}
@@ -191,7 +191,7 @@ export function Welcome({ onDone }: { onDone?: () => void }) {
                   <span className="font-display text-xl leading-tight font-extrabold">
                     {limitsText(account?.per_purchase_limit ?? DEFAULT_LIMITS.perPurchase, account?.daily_limit ?? DEFAULT_LIMITS.daily)}
                   </span>
-                  <span className="text-sm text-muted">The contract enforces these, even for Telegram.</span>
+                  <span className="text-sm text-muted">The program enforces these, even for Telegram.</span>
                 </div>
               </div>
               <TelegramLink />
@@ -240,7 +240,7 @@ function ModeTile({ mode, saved }: { mode: Mode; saved: boolean }) {
     <div className="flex flex-col gap-2 rounded-[1.75rem] p-6" style={{ background: p.tile, color: p.ink }}>
       <span className="text-sm opacity-75">Default mode</span>
       <span className="font-display flex items-center gap-2 text-4xl font-extrabold">{modeName(mode)}{saved && <Check size={26} strokeWidth={3} />}</span>
-      <span className="text-sm opacity-75">{saved ? "Saved to your account" : "Saved with your first deposit"}</span>
+      <span className="text-sm opacity-75">{saved ? "Saved to your account" : "Saved when you set up deposits"}</span>
     </div>
   )
 }

@@ -3,7 +3,7 @@ import { ShopBanner } from "@/components/shop-banner"
 import { SiteFooter } from "@/components/site-chrome"
 import { AppProviders } from "./providers"
 
-// Wallet code and the API client load only in the app, never on the landing or proof pages.
+// Privy and the API client load only in the app, never on the landing or proof pages.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <AppProviders>
