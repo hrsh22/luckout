@@ -3,7 +3,6 @@ import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstr
 import { ConfigProvider, Effect, Layer } from "effect"
 import { FailedTransactionMetadata, LiteSVM, type TransactionMetadata } from "litesvm"
 import { readFileSync } from "node:fs"
-import { Base } from "./Base.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { Near } from "./Near.ts"
 import { base58, IDL_PROGRAM_ID, type Mode, ORAO_NETWORK_STATE, ORAO_VRF, oraoRequest, oraoTreasury, type Program, programAt } from "./Program.ts"
@@ -49,19 +48,6 @@ export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
     deposit: unused("bitrefill.deposit"),
     depositState: unused("bitrefill.depositState"),
     orderLimit: () => Effect.succeed({ used: 0, reopensAt: undefined }),
-    ...overrides
-  })
-
-export const fakeBase = (overrides: Partial<Base["Service"]> = {}) =>
-  Base.of({
-    configured: true,
-    address: Effect.die("base.address was not expected in this test"),
-    balances: Effect.die("base.balances was not expected in this test"),
-    prepare: unused("base.prepare"),
-    sign: unused("base.sign"),
-    send: unused("base.send"),
-    status: unused("base.status"),
-    pay: unused("base.pay"),
     ...overrides
   })
 

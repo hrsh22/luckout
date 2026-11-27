@@ -816,101 +816,55 @@ export class AttentionPurchase extends Schema.Class<AttentionPurchase>("Attentio
 }) {}
 
 export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")({
-  network: Schema.Literals(["testnet", "mainnet"]),
-  contract: Schema.Struct({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  program: Schema.Struct({
     id: Schema.String,
     owner: Schema.String,
     /** Proposed by the owner; becomes the owner when it accepts. */
     pendingOwner: Schema.optional(Schema.String),
     operator: Schema.String,
-    usdc: Schema.String,
+    usdcMint: Schema.String,
+    vault: Schema.String,
+    /** The Pay Wallet's USDC account, which `settle` repays. */
+    payWallet: Schema.String,
     paused: Schema.Boolean
   }),
-  /** An admin stopped new purchases on the server (any admin can, unlike the contract's pause). */
+  /** An admin stopped new purchases on the server (any admin can, unlike the program's pause). */
   salesStopped: Schema.Boolean,
   reserve: Schema.Struct({
     free: MicroUsdc,
     locked: MicroUsdc,
     proceeds: MicroUsdc,
-    /** The most Cashback one Lucky Buy can pay now: the lower of the Cashback Cap's limits. */
+    /** The most Cashback one card can pay now: the lower of the Cashback Cap's limits. */
     maxCashback: MicroUsdc,
-    /** The owner's Cashback Cap: a fixed amount and a share of Free Reserve (basis points); null is off. */
-    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.NullOr(Schema.Int) }),
-    /** USDC the contract holds in all. */
+    /** The owner's Cashback Cap: a fixed amount (null is off) and a share of Free Reserve (basis points). */
+    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.Int }),
+    /** A Checkout with Lucky cards plays at least this much Lucky Amount (ADR-0015). */
+    minLuckyCheckout: MicroUsdc,
+    /** USDC the Vault holds in all. */
     held: MicroUsdc,
-    /** Customers' money in the contract: what it holds minus the reserve and proceeds. Negative means it holds less than it owes. */
+    /** Customers' money in the Vault: what it holds minus the reserve and Proceeds. Negative means it holds less than it owes. */
     customers: Schema.Int
   }),
+  /** `settle` repays the Pay Wallet up to this much a day; past it, prices wait as Proceeds. */
+  repay: Schema.Struct({ dailyCap: MicroUsdc, repaidToday: MicroUsdc }),
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
-  /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
-  gas: Schema.Array(Schema.Struct({
-    role: Schema.Literals(["operator", "relayer", "treasury", "contract"]),
-    accountId: Schema.String,
-    spendable: Yocto,
-    alertBelow: Yocto
+  /** Our keys' balances and where the Monitor alerts: the fee payer's SOL (lamports), the Pay Wallet's USDC. */
+  keys: Schema.Array(Schema.Struct({
+    role: Schema.Literals(["feePayer", "payWallet"]),
+    address: Schema.String,
+    balance: Schema.String,
+    alertBelow: Schema.String
   })),
-  relay: Schema.Struct({
-    configured: Schema.Boolean,
-    settings: RelaySettings,
-    usedToday: Schema.Int,
-    topAccounts: Schema.Array(Schema.Struct({ accountId: Schema.String, count: Schema.Int }))
-  }),
   purchases: Schema.Struct({
     today: Schema.Int,
     deliveredToday: Schema.Int,
-    /** Bitrefill orders placed in the last 24 hours, against the account's daily cap. */
-    bitrefillOrders: Schema.Int,
-    bitrefillCap: Schema.Int,
     /** The oldest purchases that need a look (closest to the customer's Reclaim), at most 20 of them... */
     attention: Schema.Array(AttentionPurchase),
     /** ...and how many need one in all. */
     attentionTotal: Schema.Int
   }),
-  credit: Schema.Struct({
-    settings: CreditSettings,
-    /** Last balance Bitrefill reported, and when; missing if it hasn't answered yet. */
-    balance: Schema.optional(MicroUsdc),
-    readAt: Schema.optional(Schema.String),
-    /** How much more Bitrefill lets the account hold. */
-    room: MicroUsdc,
-    free: MicroUsdc,
-    held: MicroUsdc,
-    waitingCount: Schema.Int,
-    waitingTotal: MicroUsdc,
-    avgDaily: MicroUsdc,
-    target: MicroUsdc,
-    refillBelow: MicroUsdc,
-    refilledToday: MicroUsdc,
-    /** Why automatic refills are paused, if they are. */
-    paused: Schema.optional(Schema.String),
-    /** Refills need NEAR Intents, which only runs on mainnet. */
-    refillsAvailable: Schema.Boolean
-  }),
-  treasury: Schema.Struct({
-    /** The account the server signs refills with. */
-    accountId: Schema.optional(Schema.String),
-    /** The account the contract lets pull proceeds; it should match. */
-    contractTreasury: Schema.optional(Schema.String),
-    dailyCap: MicroUsdc,
-    sweptToday: MicroUsdc,
-    usdc: MicroUsdc,
-    /** In manual mode: what an open refill is waiting for you to move in. */
-    needs: Schema.optional(MicroUsdc),
-    /** Our Base wallet, which refills swap into and pay Bitrefill from; missing when Base doesn't answer. */
-    wallet: Schema.optional(Schema.Struct({
-      address: Schema.String,
-      usdc: MicroUsdc,
-      /** ETH for gas, in wei, and where the Monitor alerts. */
-      eth: Schema.String,
-      alertBelow: Schema.String
-    }))
-  }),
-  refills: Schema.Array(RefillView),
-  /**
-   * How cards are bought (ADR-0012). `guest`: each is a guest order on Bitrefill's MCP with the customer's
-   * Checkout Email, paid from the Base Float (credit above is then the float); otherwise from the account's
-   * store credit.
-   */
+  /** How cards are bought (ADR-0012): as a guest with the customer's Checkout Email, or on their own Bitrefill account. */
   checkout: Schema.Struct({
     guest: Schema.Boolean,
     /** Customers who have given a Checkout Email. */
@@ -921,7 +875,9 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     limits: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc }),
     /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
     busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
-  })
+  }),
+  /** What every guest card has used of our paying address's own limits at Bitrefill (ADR-0015). */
+  paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
 }) {}
 
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
@@ -944,7 +900,7 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   error: Schema.optional(Schema.String),
   attempts: Schema.Int,
   invoiceId: Schema.optional(Schema.String),
-  /** A guest order's payment from the Base Wallet (ADR-0012): its Base transaction, and the USDC it sends. */
+  /** A guest order's payment from the Pay Wallet (ADR-0015): its transaction, and the USDC it sends. */
   payTx: Schema.optional(Schema.String),
   payAmount: Schema.optional(MicroUsdc),
   admitTx: Schema.optional(Schema.String),
@@ -953,7 +909,7 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   updatedAt: Schema.String
 }) {}
 
-/** One customer as the admin's Users page lists it. `balance` is missing when NEAR didn't answer. */
+/** One customer as the admin's Users page lists it. `balance` is missing when the chain didn't answer. */
 export class AdminUser extends Schema.Class<AdminUser>("AdminUser")({
   accountId: Schema.String,
   firstSeen: Schema.String,
@@ -985,25 +941,8 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     error: NotFound
   }),
   HttpApiEndpoint.get("users", "/admin/users", { success: Schema.Array(AdminUser), error: NotFound }),
-  /** Changes only the fields sent; answers with the settings as saved. */
-  HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelayChange, success: RelaySettings, error: NotFound }),
   /** Stops or restarts new purchases on the server, at once, without the owner's wallet. */
   HttpApiEndpoint.post("sales", "/admin/sales", { payload: Schema.Struct({ open: Schema.Boolean }), success: ShopStatus, error: NotFound }),
-  /** Changes only the fields sent, and refuses settings that wouldn't hang together; answers with the settings as saved. */
-  HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditChange, success: CreditSettings, error: [NotFound, AdminInvalid] }),
-  /** Refill now, outside the schedule; `amount` defaults to what the target and waiting purchases need. */
-  HttpApiEndpoint.post("refill", "/admin/refills", {
-    payload: Schema.Struct({ amount: Schema.optional(Usd) }),
-    success: RefillView,
-    error: [NotFound, AdminInvalid]
-  }),
-  /** After checking a stuck refill by hand: closes it, which lets automatic refills run again. */
-  HttpApiEndpoint.post("resolveRefill", "/admin/refills/:id/resolve", {
-    params: { id: Schema.String },
-    payload: Schema.Struct({ note: Schema.String.check(Schema.isMinLength(3), Schema.isMaxLength(500)) }),
-    success: HttpApiSchema.NoContent,
-    error: [NotFound, AdminInvalid]
-  }),
   HttpApiEndpoint.post("retry", "/admin/purchases/:id/retry", {
     params: { id: Schema.String },
     success: HttpApiSchema.NoContent,

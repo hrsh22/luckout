@@ -1,9 +1,7 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
 import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, DepositAddress, NotFound, PopularCards, PreparedTransaction, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
-import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
-import { Refill } from "./Refill.ts"
 import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
@@ -11,7 +9,6 @@ import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
-import { Base } from "./Base.ts"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
@@ -19,9 +16,9 @@ import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { checkOperatorKey, Near, Network, otherNetworkAccounts } from "./Near.ts"
+import { Near } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
-import { Chain, Solana } from "./Solana.ts"
+import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
 import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
@@ -225,13 +222,7 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       purchases: ({ query }) =>
         Effect.andThen(signedInAdmin, query.id !== undefined && !UUID.test(query.id) ? Effect.succeed([]) : admin.purchases(query.account, query.id)),
       users: () => Effect.andThen(signedInAdmin, admin.users),
-      relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
       sales: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.setSales(payload.open, by)),
-      credit: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureCredit(payload, by)),
-      refill: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.refill(payload.amount, by)),
-      resolveRefill: ({ params, payload }) =>
-        Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | AdminInvalid> =>
-          UUID.test(params.id) ? admin.resolveRefill(params.id, payload.note, by) : Effect.fail(new NotFound())),
       retry: ({ params }) =>
         Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
           UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
@@ -241,10 +232,7 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
   Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer, Deposits.layer)),
-  Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
-  // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
-  Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer)),
-  Layer.provideMerge(Base.layer),
+  Layer.provideMerge(Layer.mergeAll(Sales.layer, Connect.layer)),
   Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Swap.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
@@ -256,15 +244,18 @@ const MAINNET_REQUIRES = [
   "WEB_ORIGIN",
   "SESSION_SECRET",
   "REDEMPTION_KEY",
-  "LUCKOUT_CONTRACT_ID",
-  "OPERATOR_ACCOUNT_ID",
-  "OPERATOR_PRIVATE_KEY",
+  // This deployment's program, a paid RPC, and our three keys (ADR-0015).
+  "SOLANA_PROGRAM_ID",
+  "SOLANA_RPC_URL",
+  "SOLANA_OPERATOR_SECRET_KEY",
+  "SOLANA_FEE_PAYER_SECRET_KEY",
+  "SOLANA_PAY_WALLET_SECRET_KEY",
+  // Sign-in (ADR-0015).
+  "PRIVY_APP_ID",
   // The key only reads the catalog and prices; orders go through the guest client (ADR-0012).
   "BITREFILL_API_KEY",
   "BITREFILL_CLIENT_ID",
   "BITREFILL_CLIENT_SECRET",
-  // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
-  "BASE_RPC_URL",
   // Real money: alerts must reach a human (through the bot), and someone must be able to open the admin panel.
   "TELEGRAM_BOT_TOKEN",
   "ALERT_TELEGRAM_CHAT_ID",
@@ -300,12 +291,10 @@ const Routes = Layer.mergeAll(
 
 const Server = Layer.unwrap(
   Effect.gen(function*() {
-    const missing = (yield* Network) === "mainnet" ? mainnetProblems(process.env) : []
-    if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
-    const mixed = otherNetworkAccounts(yield* Network, process.env)
-    if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)
-    // Before the database is touched, so a server refused here runs no migration and the previous release still fits it.
-    yield* checkOperatorKey.pipe(Effect.provide(Near.layer))
+    const missing = (yield* Cluster) === "mainnet" ? mainnetProblems(process.env) : []
+    if (missing.length > 0) return yield* Effect.die(`SOLANA_CLUSTER=mainnet also needs ${missing.join(", ")}`)
+    // Refuses to start with keys that aren't the program's: every admission, settlement and payment would fail.
+    if (process.env.SOLANA_OPERATOR_SECRET_KEY) yield* checkKeys.pipe(Effect.provide(Solana.layer.pipe(Layer.provide(Chain.layer))))
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)

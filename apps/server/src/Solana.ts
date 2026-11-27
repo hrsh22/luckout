@@ -377,3 +377,20 @@ export class Solana extends Context.Service<Solana, {
     })
   )
 }
+
+/**
+ * Refuses to start a server whose keys aren't the program's: the operator must be Config's, and the Pay Wallet must own
+ * Config's Pay Wallet account. Otherwise every admission, settlement or payment would fail, one checkout at a time. A
+ * chain that can't be asked stops the start too, as an unreachable database does; pm2 starts it again.
+ */
+export const checkKeys = Effect.gen(function*() {
+  const solana = yield* Solana
+  const config = yield* solana.config.pipe(Effect.catch((e) => Effect.die(`couldn't read the program's Config (${e.message})`)))
+  if (solana.operator && !config.operator.equals(solana.operator)) {
+    return yield* Effect.die(`SOLANA_OPERATOR_SECRET_KEY is ${solana.operator.toBase58()}, but the program's operator is ${config.operator.toBase58()}`)
+  }
+  const pay = yield* solana.account(config.pay_wallet).pipe(Effect.orDie)
+  if (solana.payWallet && pay && !new PublicKey(pay.data.subarray(32, 64)).equals(solana.payWallet)) {
+    return yield* Effect.die(`SOLANA_PAY_WALLET_SECRET_KEY doesn't own the program's Pay Wallet account ${config.pay_wallet.toBase58()}`)
+  }
+})
