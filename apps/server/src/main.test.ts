@@ -1,72 +1,83 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { BitrefillUnavailable, CatalogApi } from "@luckout/api"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/http"
 import { HttpApi, HttpApiBuilder } from "effect/http-api"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
-import { KeyPair } from "near-api-js"
+import { Keypair } from "@solana/web3.js"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { CatalogHandlers } from "./main.ts"
+import { base58 } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
-import { fakeBitrefill } from "./testing.ts"
+import { checkKeys } from "./Solana.ts"
+import { fakeBitrefill, solanaLayer, solanaWorld } from "./testing.ts"
 
 // A mainnet server refuses to start half-configured. It dies before building anything, so this
 // runs the real entry point with a made-up .env and reads why it stopped.
 
+const secret = () => base58.encode(Keypair.generate().secretKey)
 const MAINNET = {
-  NEAR_NETWORK: "mainnet",
+  SOLANA_CLUSTER: "mainnet",
   DATABASE_URL: "postgres://nobody@127.0.0.1:1/none",
   WEB_ORIGIN: "https://luckout.example",
-  LUCKOUT_CONTRACT_ID: "app.luckout.near",
-  OPERATOR_ACCOUNT_ID: "server.luckout.near",
-  OPERATOR_PRIVATE_KEY: "ed25519:none",
+  SOLANA_PROGRAM_ID: Keypair.generate().publicKey.toBase58(),
+  SOLANA_OPERATOR_SECRET_KEY: secret(),
+  SOLANA_FEE_PAYER_SECRET_KEY: secret(),
+  SOLANA_PAY_WALLET_SECRET_KEY: secret(),
+  PRIVY_APP_ID: "none",
   BITREFILL_API_KEY: "none",
   BITREFILL_CLIENT_ID: "none",
   BITREFILL_CLIENT_SECRET: "none",
   // Nothing reachable, in case it ever gets past the check.
-  BASE_RPC_URL: "http://127.0.0.1:1",
-  NEAR_RPC_URL: "http://127.0.0.1:1",
+  SOLANA_RPC_URL: "http://127.0.0.1:1",
   BITREFILL_API_URL: "http://127.0.0.1:1",
   ALERT_TELEGRAM_CHAT_ID: "1",
-  ADMIN_ACCOUNTS: "boss.near"
+  ADMIN_ACCOUNTS: "boss"
 }
-const refusal = (env: Record<string, string>) => {
+const start = (env: Record<string, string>) => {
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("./main.ts", import.meta.url))], {
     env: { PATH: process.env.PATH ?? "", ...MAINNET, ...env },
-    encoding: "utf8",
-    timeout: 30_000
-  })
-  assert.equal(r.status, 1)
-  return /also needs (.*)/.exec(r.stdout + r.stderr)?.[1]
-}
-
-test("the operator key is checked on chain before the database is touched", () => {
-  // A complete .env with a real key, and nothing reachable: it stops at the key, not at the database.
-  const r = spawnSync(process.execPath, [fileURLToPath(new URL("./main.ts", import.meta.url))], {
-    env: {
-      PATH: process.env.PATH ?? "",
-      ...MAINNET,
-      OPERATOR_PRIVATE_KEY: KeyPair.fromRandom("ed25519").toString(),
-      TELEGRAM_BOT_TOKEN: "none",
-      REDEMPTION_KEY: "ab".repeat(32),
-      SESSION_SECRET: "x".repeat(32)
-    },
     encoding: "utf8",
     timeout: 60_000
   })
   assert.equal(r.status, 1)
-  assert.match(r.stdout + r.stderr, /OPERATOR_PRIVATE_KEY: couldn't read the key on chain/)
-})
+  return r.stdout + r.stderr
+}
+const refusal = (env: Record<string, string>) => /also needs (.*)/.exec(start(env))?.[1]
 
-test("mainnet needs the bot for alerts, a 32-byte REDEMPTION_KEY and a long SESSION_SECRET", () => {
+test("SOLANA_CLUSTER=mainnet needs the bot for alerts, a 32-byte REDEMPTION_KEY and a long SESSION_SECRET", () => {
   assert.equal(
     refusal({ SESSION_SECRET: "short", REDEMPTION_KEY: "ab".repeat(31) }),
     "TELEGRAM_BOT_TOKEN, REDEMPTION_KEY as 64 hex characters, SESSION_SECRET of at least 32 characters"
   )
   assert.equal(refusal({ SESSION_SECRET: "x".repeat(32), REDEMPTION_KEY: "AB".repeat(32) }), "TELEGRAM_BOT_TOKEN", "strong keys pass")
+  assert.equal(
+    refusal({ SESSION_SECRET: "x".repeat(32), REDEMPTION_KEY: "ab".repeat(32), TELEGRAM_BOT_TOKEN: "none", SOLANA_RPC_URL: "", SOLANA_PAY_WALLET_SECRET_KEY: "" }),
+    "SOLANA_RPC_URL, SOLANA_PAY_WALLET_SECRET_KEY",
+    "a paid RPC and every key of ours"
+  )
+})
+
+test("the keys are checked against the program before the database is touched", () => {
+  // A complete .env, and nothing reachable: it stops at reading the program's Config, not at the database.
+  const out = start({ TELEGRAM_BOT_TOKEN: "none", REDEMPTION_KEY: "ab".repeat(32), SESSION_SECRET: "x".repeat(32) })
+  assert.match(out, /couldn't read the program's Config/)
+})
+
+test("checkKeys refuses an operator, or a Pay Wallet, that isn't the program's", async () => {
+  const world = solanaWorld()
+  const check = (env: Record<string, string>) => Effect.runPromiseExit(checkKeys.pipe(Effect.provide(solanaLayer({ ...world, env: { ...world.env, ...env } }))))
+  assert.equal((await check({}))._tag, "Success", "the world's own keys")
+  const operator = Keypair.generate()
+  const wrong = await check({ SOLANA_OPERATOR_SECRET_KEY: base58.encode(operator.secretKey) })
+  assert.ok(wrong._tag === "Failure")
+  assert.match(String(Cause.squash(wrong.cause)), new RegExp(`SOLANA_OPERATOR_SECRET_KEY is ${operator.publicKey.toBase58()}, but the program's operator is ${world.operator.publicKey.toBase58()}`))
+  const payWallet = await check({ SOLANA_PAY_WALLET_SECRET_KEY: secret() })
+  assert.ok(payWallet._tag === "Failure")
+  assert.match(String(Cause.squash(payWallet.cause)), /SOLANA_PAY_WALLET_SECRET_KEY doesn't own the program's Pay Wallet account/)
 })
 
 // The catalog endpoints exactly as main.ts handles them, with Bitrefill faked.

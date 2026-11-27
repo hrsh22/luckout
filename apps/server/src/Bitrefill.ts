@@ -3,8 +3,8 @@ import { PublicKey } from "@solana/web3.js"
 import { decode as decodeToon } from "@toon-format/toon"
 import { Cache, Clock, Config, Context, Data, Effect, Exit, flow, Layer, Option, Redacted, Schedule, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
-import { Network } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
+import { Cluster } from "./Solana.ts"
 
 // On mainnet, cards are bought as a guest through Bitrefill's MCP endpoint with the customer's Checkout
 // Email, or on their own Bitrefill account once they've connected it (Connect.ts), and each invoice is paid
@@ -496,7 +496,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
     Effect.gen(function*() {
       const apiKey = yield* Config.option(Config.Redacted("BITREFILL_API_KEY"))
       const restUrl = yield* Config.String("BITREFILL_API_URL").pipe(Config.withDefault("https://api.bitrefill.com/v2"))
-      const testnet = (yield* Network) === "testnet"
+      // Off mainnet only Bitrefill's free test cards are sold.
+      const testnet = (yield* Cluster) !== "mainnet"
       const isTest = (id: string) => testnet && id.startsWith("test-")
       // Our OAuth client for guest checkout (ADR-0012), registered with Bitrefill once per deployment.
       const clientId = yield* Config.option(Config.String("BITREFILL_CLIENT_ID"))

@@ -21,7 +21,7 @@ test("an alert Telegram didn't take is sent again next time; a delivered one isn
   }) as typeof fetch
   const layer = Alerts.layer.pipe(
     Layer.provide(DbMemory),
-    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, ALERT_TELEGRAM_CHAT_ID: "42", NEAR_NETWORK: "testnet" } }))),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, ALERT_TELEGRAM_CHAT_ID: "42", SOLANA_CLUSTER: "localnet" } }))),
     Layer.provideMerge(Logger.layer([Logger.make((o) => void logs.push(JSON.stringify(o.message)))]))
   )
   try {
@@ -56,7 +56,7 @@ test("a customer notice reaches their linked chat (Postgres hands a BIGINT chat 
       yield* alerts.customer("nobody.near", "not linked: nothing is sent")
     }).pipe(Effect.provide(Alerts.layer.pipe(
       Layer.provideMerge(DbMemory),
-      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, NEAR_NETWORK: "testnet" } }))),
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, SOLANA_CLUSTER: "localnet" } }))),
       Layer.provideMerge(Logger.layer([Logger.make((o) => void logs.push(JSON.stringify(o.message)))]))
     ))))
   } finally {
@@ -86,7 +86,7 @@ test("a customer notice is worth sending again only when Telegram didn't answer,
       return out
     }).pipe(Effect.provide(Alerts.layer.pipe(
       Layer.provideMerge(DbMemory),
-      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, NEAR_NETWORK: "testnet" } }))),
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { TELEGRAM_BOT_TOKEN: TOKEN, SOLANA_CLUSTER: "localnet" } }))),
       Layer.provideMerge(Logger.layer([]))
     ))))
     // down, 500, 429: again later. 403 (blocked the bot): give up. 200: sent. Not linked: nothing to send.
