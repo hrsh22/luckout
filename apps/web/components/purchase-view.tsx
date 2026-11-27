@@ -115,7 +115,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
 
       {p.status === "delivered" && <UsedToggle p={p} />}
 
-      {p.draw && p.settleTx && <ProofLinks p={p} />}
+      {p.draw?.proof && <ProofLinks p={p} proof={p.draw.proof} />}
 
       <div className="flex flex-wrap gap-2">
         <Button variant="light" onClick={onAgain}>Buy another</Button>
@@ -322,9 +322,9 @@ function Secret({ label, value }: { label: string; value: string }) {
   )
 }
 
-function ProofLinks({ p }: { p: Purchase }) {
-  // One settlement can hold a whole cart's Draws (ADR-0013): the link names this card's.
-  const proof = `/draw/${p.settleTx}${p.contractPurchaseId === undefined ? "" : `?purchase=${p.contractPurchaseId}`}`
+function ProofLinks({ p, proof: { tx, card } }: { p: Purchase; proof: { tx: string; card: number } }) {
+  // One transaction can finish a whole Checkout's Draws (ADR-0013): the link names this card's.
+  const proof = `/draw/${tx}?card=${card}`
   const share = () => {
     const url = `${window.location.origin}${proof}`
     navigator.clipboard.writeText(url).then(() => toast.success("Draw Proof link copied", { description: "Anyone can open it and check the Draw." }))
@@ -441,7 +441,7 @@ export function PurchaseRow({ p, open, onToggle, onUsed }: { p: Purchase; open: 
               )}
               {redemptionShown(p.redemption).any ? <CodeBlock p={p} /> : null}
               {p.status === "delivered" && <UsedToggle p={p} onChange={onUsed} />}
-              {p.draw && p.settleTx ? <ProofLinks p={p} /> : p.settleTx && (
+              {p.draw?.proof ? <ProofLinks p={p} proof={p.draw.proof} /> : p.settleTx && (
                 <a href={explorer(p.settleTx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start`}>
                   Delivery transaction<ExternalLink />
                 </a>

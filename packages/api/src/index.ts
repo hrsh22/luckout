@@ -130,7 +130,9 @@ export class Draw extends Schema.Class<Draw>("Draw")({
   roll: Schema.Int,
   finalBps: Schema.Int,
   finalPrice: MicroUsdc,
-  cashback: MicroUsdc
+  cashback: MicroUsdc,
+  /** Its Draw Proof: the transaction that finished it and the card's place in its Checkout (`/draw/{tx}?card={card}`). */
+  proof: Schema.optional(Schema.Struct({ tx: Schema.String, card: Schema.Int }))
 }) {}
 
 /** "waiting": we're topping up our Bitrefill credit for this card; the customer isn't charged until it's ordered. */

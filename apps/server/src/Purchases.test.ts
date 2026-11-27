@@ -673,6 +673,7 @@ test("a Draw someone else finished first is recorded from their transaction, wit
   assert.equal(r.p.status, "delivered")
   assert.equal(r.row.step, "settled")
   assert.equal(r.row.draw.finish, r.finish, "the proof names their transaction")
+  assert.deepEqual(r.p.draw?.proof, { tx: r.finish, card: 0 }, "the customer's link to its Draw Proof")
   assert.equal(r.p.draw?.cashback, Number(theirs.cashback))
   assert.equal(r.p.draw?.finalPrice, Number(theirs.final_price))
   assert.equal(r.p.draw?.seed, hex(theirs.seed))
