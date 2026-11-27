@@ -147,5 +147,8 @@ test("a withdrawal goes to any Solana address, its USDC account opened for it; S
   assert.equal(world.tokens(usdcOf(world, friend)), 2n * USDC)
   assert.equal(customer?.balance, 3n * USDC)
   assert.equal(customer?.per_purchase_limit, 50_000_000n)
+  // To their own Deposit Address it would only come straight back: refused.
+  const self = await run(Effect.flip(Effect.flatMap(Deposits, (d) => d.withdrawal(wallet.publicKey.toBase58(), 1_000_000, wallet.publicKey.toBase58()))))
+  assert.match(self.message, /your own Deposit Address/)
   await done()
 })

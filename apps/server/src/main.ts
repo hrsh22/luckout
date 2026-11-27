@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, HeldToken, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { OneClick } from "./OneClick.ts"
 import { Config, Effect, Exit, Layer } from "effect"
@@ -20,7 +20,7 @@ import { maxCashback } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
 import { Sales } from "./Sales.ts"
-import { Swap } from "./Swap.ts"
+import { Swap, swapAssetId } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
 import { TopUp } from "./TopUp.ts"
 
@@ -136,12 +136,22 @@ const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
   Effect.gen(function*() {
     const deposits = yield* Deposits
     const solana = yield* Solana
+    const swap = yield* Swap
     const invalid = (e: { readonly message: string }) => new PurchaseInvalid({ message: e.message })
     const prepared = <E extends { readonly message: string }>(f: (accountId: string) => Effect.Effect<{ transaction: string; token: string }, E>) =>
       CurrentAccount.use((a) => f(a.accountId)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid))
     return handlers.handleAll({
       account: () => CurrentAccount.use((a) => deposits.account(a.accountId)).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
-      address: () => CurrentAccount.use((a) => deposits.status(a.accountId)).pipe(Effect.map((d) => new DepositAddress(d)), Effect.mapError(invalid)),
+      address: () =>
+        CurrentAccount.use((a) => Effect.all([deposits.status(a.accountId), swap.held(a.accountId)])).pipe(
+          Effect.map(([d, held]) =>
+            new DepositAddress({
+              ...d,
+              held: held.map((h) => new HeldToken({ assetId: swapAssetId(h.token), symbol: h.token.symbol, amount: String(h.amount), decimals: h.token.decimals }))
+            })
+          ),
+          Effect.mapError(invalid)
+        ),
       approval: ({ payload }) =>
         CurrentAccount.use((a) => deposits.approval(a.accountId, payload.mode)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid)),
       submit: ({ payload }) =>

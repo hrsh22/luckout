@@ -172,6 +172,8 @@ export class Deposits extends Context.Service<Deposits, {
         Effect.gen(function*() {
           const wallet = new PublicKey(walletText)
           const to = yield* Effect.try({ try: () => new PublicKey(toText), catch: () => new SolanaUnavailable({ message: "That isn't a Solana address" }) })
+          // USDC sent there moves straight back into the Balance (deposit_for): a withdrawal that only costs fees.
+          if (to.equals(wallet)) return yield* new SolanaUnavailable({ message: "That's your own Deposit Address: what lands there moves back into your balance. Send it to another address." })
           if (!solana.feePayer) return yield* new SolanaUnavailable({ message: "the fee payer isn't set" })
           const { mint } = yield* usdcOf(wallet)
           const toUsdc = getAssociatedTokenAddressSync(mint, to, true)

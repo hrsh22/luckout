@@ -802,11 +802,25 @@ export class PreparedTransaction extends Schema.Class<PreparedTransaction>("Prep
   token: Schema.String.check(Schema.isMaxLength(128))
 }) {}
 
-/** The customer's Deposit Address (their Privy wallet), whether its one-time approval stands, and USDC waiting there. */
+/** A swap-paid token (USDT, ORE) sitting at the Deposit Address: one tap swaps it into the Balance (TopUpApi.swap). */
+export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
+  /** As in TopUpAsset and TopUpApi.swap. */
+  assetId: Schema.String,
+  symbol: Schema.String,
+  /** Base units. */
+  amount: Schema.String,
+  decimals: Schema.Number
+}) {}
+
+/**
+ * The customer's Deposit Address (their Privy wallet), whether its one-time approval stands, USDC waiting there, and
+ * any swap-paid token there (none when swaps are off).
+ */
 export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress")({
   address: Schema.String,
   approved: Schema.Boolean,
-  waiting: Schema.Number
+  waiting: Schema.Number,
+  held: Schema.Array(HeldToken)
 }) {}
 
 export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}

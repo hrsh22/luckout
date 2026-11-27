@@ -254,6 +254,11 @@ export class Swap extends Context.Service<Swap, {
    * account, then moves that account's USDC into their Balance. It is simulated and checked first.
    */
   transaction(o: { token: SwapToken; wallet: string; spend?: bigint | undefined }): Effect.Effect<SwapTransaction, SwapUnavailable>
+  /**
+   * The swap-paid tokens `wallet` holds (base units), for the app to offer the tap. None when swaps are off, or when
+   * Solana doesn't answer: it's only a hint, and the swap itself reads the chain again.
+   */
+  held(wallet: string): Effect.Effect<ReadonlyArray<{ readonly token: SwapToken; readonly amount: bigint }>>
 }>()("luckout/Swap") {
   static readonly layer = Layer.effect(
     Swap,
@@ -476,7 +481,15 @@ export class Swap extends Context.Service<Swap, {
         }).pipe(Effect.ensuring(Effect.sync(() => building.delete(o.wallet))))
       })
 
-      return Swap.of({ tokens, transaction })
+      const held = (walletText: string) =>
+        Option.isNone(key) || !isWallet(walletText)
+          ? Effect.succeed([])
+          : solana.accounts(SWAP_TOKENS.map((t) => getAssociatedTokenAddressSync(new PublicKey(t.mint), new PublicKey(walletText)))).pipe(
+            Effect.map((accounts) => SWAP_TOKENS.flatMap((token, i) => (tokenBalance(accounts[i]) > 0n ? [{ token, amount: tokenBalance(accounts[i]) }] : []))),
+            Effect.orElseSucceed(() => [])
+          )
+
+      return Swap.of({ tokens, transaction, held })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

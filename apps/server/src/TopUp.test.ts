@@ -24,7 +24,7 @@ const tokens = [
   { assetId: SOL_USDC_ASSET, blockchain: "sol", symbol: "USDC", contractAddress: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6 },
   { assetId: "nep141:sol-usdt.omft.near", blockchain: "sol", symbol: "USDT", decimals: 6 }
 ]
-const noSwaps = Layer.succeed(Swap, Swap.of({ tokens: Effect.succeed([]), transaction: () => Effect.die("swap.transaction was not expected") }))
+const noSwaps = Layer.succeed(Swap, Swap.of({ tokens: Effect.succeed([]), transaction: () => Effect.die("swap.transaction was not expected"), held: () => Effect.succeed([]) }))
 const said = <A>(e: Effect.Effect<A, { message: string }>) => e.pipe(Effect.match({ onFailure: (err) => err.message, onSuccess: () => "ok" }))
 
 /**
@@ -165,7 +165,7 @@ test("a Top-Up is refused before 1Click is asked: an unknown or Solana USDC toke
 
 test("the tokens offered: 1Click's from other chains (Tron's too, not USDC or USDT on Solana), and those swapped from the wallet", async () => {
   const ORE = SWAP_TOKENS.find((x) => x.symbol === "ORE")!
-  const swaps = Layer.succeed(Swap, Swap.of({ tokens: Effect.succeed([{ ...ORE, price: 71.5 }]), transaction: () => Effect.die("not expected") }))
+  const swaps = Layer.succeed(Swap, Swap.of({ tokens: Effect.succeed([{ ...ORE, price: 71.5 }]), transaction: () => Effect.die("not expected"), held: () => Effect.succeed([]) }))
   const assets = await world({ swaps }).run((t) => t.assets)
   assert.deepEqual(assets.map((a) => `${a.symbol} on ${a.chain}${a.swap ? " (swap)" : ""}`), [
     "USDC on base", "SOL on sol", "ETH on eth", "wNEAR on near", "BTC on btc", "USDT on tron", "ORE on sol (swap)"
@@ -545,7 +545,8 @@ test("a swap from the wallet: the token named and the amount asked for, or all o
       o.spend === 1n
         ? Effect.fail(new SwapUnavailable({ message: "That's less than 1 USDC of USDT. Swap at least 1 USDC's worth." }))
         : Effect.sync(() => (asked.push({ symbol: o.token.symbol, wallet: o.wallet, spend: o.spend }),
-          { transaction: "tx", token: "bound", spend: o.spend ?? 12_340_000n, usdcOut: 12_300_000n, minUsdcOut: 12_238_500n }))
+          { transaction: "tx", token: "bound", spend: o.spend ?? 12_340_000n, usdcOut: 12_300_000n, minUsdcOut: 12_238_500n })),
+    held: () => Effect.succeed([])
   }))
   const r = await world({ swaps }).run((t) =>
     Effect.gen(function*() {

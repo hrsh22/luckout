@@ -270,7 +270,7 @@ const fake = (o: {
   const refusal = (spend?: bigint, wallet = c.wallet.publicKey.toBase58()) =>
     run((s) => Effect.flip(s.transaction({ token: ORE, wallet, spend }))).then((e) => e.message)
   const jupiter = () => calls.filter((x) => ["quote", "swap-instructions"].includes(x.to)).length
-  return { w, c, pool, calls, simulated, build, refusal, jupiter, swapIx, honest, to: (what: string) => calls.filter((x) => x.to === what) }
+  return { w, c, pool, calls, simulated, run, build, refusal, jupiter, swapIx, honest, to: (what: string) => calls.filter((x) => x.to === what) }
 }
 
 const decoded = (base64: string) => {
@@ -309,6 +309,15 @@ test("a swap is one transaction the customer signs and our fee payer pays for: J
   assert.deepEqual([tx.spend, tx.usdcOut, tx.minUsdcOut], [10_000_000_000n, out, (out * 9_950n) / 10_000n])
   // A chosen amount: exactly that.
   assert.equal((await fake().build(7_300_000_000n)).spend, 7_300_000_000n)
+})
+
+test("the swap-paid tokens a wallet holds are listed for the app's tap, read from the chain alone", async () => {
+  const f = fake()
+  assert.deepEqual(await f.run((s) => s.held(f.c.wallet.publicKey.toBase58())), [{ token: ORE, amount: 10_000_000_000n }], "its ORE; no USDT account, so no USDT")
+  const empty = fake({ ore: 0n })
+  assert.deepEqual(await empty.run((s) => s.held(empty.c.wallet.publicKey.toBase58())), [])
+  assert.deepEqual(await f.run((s) => s.held("not-a-key")), [])
+  assert.equal(f.jupiter() + empty.jupiter(), 0, "Jupiter isn't asked")
 })
 
 test("refused before Jupiter is asked: no approval, none of the token or not enough, or not a wallet", async () => {
