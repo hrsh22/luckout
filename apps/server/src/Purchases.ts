@@ -370,6 +370,8 @@ export class Purchases extends Context.Service<Purchases, {
   readonly promoteWaiting: Effect.Effect<void>
   /** One reconciler pass (also runs every 30 seconds by itself). */
   readonly reconcileNow: Effect.Effect<void>
+  /** One pass over stuck cards that closed onchain, reclaimed or failed (also runs every 5 minutes by itself). */
+  readonly settleClosed: Effect.Effect<void>
   /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
   checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
   setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
@@ -1503,7 +1505,11 @@ export class Purchases extends Context.Service<Purchases, {
           const card = (yield* solana.checkout(new PublicKey(row.checkout_address)))?.cards[row.position]
           const status = card?.status.kind ?? "Reclaimed"
           if (status === "Reclaimed" || status === "Failed") {
-            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) yield* tell(row.account_id, [yield* load(row.id)])
+            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) {
+              // We had its code (say, settle kept failing at confirm): the customer has it and their money back.
+              if (row.redemption !== null) yield* alerts.admin(`purchase ${row.id} was delivered but closed onchain as ${status}; its voucher cost is ours`)
+              yield* tell(row.account_id, [yield* load(row.id)])
+            }
           }
           // Delivered after we gave up (say, someone else finished its Draw): their code is ready, so show it.
           if (status === "Delivered" && row.redemption !== null) {
@@ -1534,6 +1540,7 @@ export class Purchases extends Context.Service<Purchases, {
         setUsed,
         promoteWaiting: promote,
         reconcileNow: reconcile,
+        settleClosed,
         checkoutEmail,
         setCheckoutEmail,
         useBy

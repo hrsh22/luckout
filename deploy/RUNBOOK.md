@@ -99,9 +99,7 @@ A stuck card that the customer reclaims, or that is failed onchain, is closed by
 
 ## The customer reclaimed after we delivered
 
-The alert `purchase <id> was delivered but closed onchain as Reclaimed; its voucher cost is ours` means `settle` found the card already reclaimed. The customer has both the code and their money back, and the card's price is our loss. Nothing to fix in the database. It can only happen to a card left unconfirmed for 24 hours.
-
-A stuck card the customer reclaims is closed as `failed` with the error `Reclaimed`, without this alert. To find any that had a code:
+The alert `purchase <id> was delivered but closed onchain as Reclaimed; its voucher cost is ours` means we had the card's code, but the customer reclaimed it first: `settle` found it already reclaimed, or it was stuck (say, at `confirm`) and the server closed it as `failed` with the error `Reclaimed`. The customer has both the code and their money back, and the card's price is our loss. Nothing to fix in the database. It can only happen to a card left unconfirmed for 24 hours. To list them:
 
 ```sh
 psql -h 127.0.0.1 -U <role> <db> -c "SELECT id, account_id, voucher_name, package_value, reference_price FROM purchases WHERE step = 'failed' AND error = 'Reclaimed' AND redemption IS NOT NULL"

@@ -730,6 +730,40 @@ test("a card the customer reclaimed after 24 hours is recorded as reclaimed when
   assert.equal(balanceOf(one), 500 * USDC)
 })
 
+test("a stuck card the customer reclaimed is closed as failed; if we had delivered it, the admin hears its cost is ours", async () => {
+  // Delivered, but settle is refused until it gives up: the card is stuck with its code. A day later the customer reclaims.
+  const w = world({ onOrder: (sw) => setOperator(sw, Keypair.generate().publicKey) })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const card = (id: string) =>
+      sql<{ step: string; error: string | null; coded: boolean }>`SELECT step, error, redemption IS NOT NULL AS coded FROM purchases WHERE id = ${id}`.pipe(
+        Effect.map((rows) => rows[0]!)
+      )
+    const p = yield* w.buy()
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    const stuck = yield* card(p.id)
+    const co = yield* checkoutOf(p.id)
+    const { program } = w.sw
+    w.sw.warp(24 * 3_600 + 60)
+    w.sw.send([
+      program.instruction("reclaim", {
+        wallet: w.alice.wallet.publicKey,
+        config: program.config,
+        customer: program.customer(w.alice.wallet.publicKey),
+        checkout: new PublicKey(co.address!),
+        checkout_payer: w.checkout(co.address!)!.payer
+      }, { card: 0 })
+    ], [w.alice.wallet])
+    yield* Purchases.use((s) => s.settleClosed)
+    return { p, stuck, after: yield* card(p.id) }
+  }))
+  assert.deepEqual([r.stuck.step, r.stuck.coded], ["stuck", true])
+  assert.deepEqual([r.after.step, r.after.error], ["failed", "Reclaimed"])
+  assert.equal(balanceOf(w), 500 * USDC, "the customer has their money back")
+  assert.match(w.alerts.at(-1) ?? "", new RegExp(`purchase ${r.p.id} was delivered but closed onchain as Reclaimed; its voucher cost is ours`))
+})
+
 test("a refused settlement whose cards are still open onchain stays pending, and the next try signs afresh", async () => {
   // The owner moves the operator role away while the card is on its way; then back.
   const stranger = Keypair.generate().publicKey
