@@ -115,7 +115,7 @@ This replaces ADR-0010's testnet.
 - **Tests and development:** a local validator, with ORAO's program and a filled randomness account loaded into it. The program has no test-only path.
 - **Devnet:** only for trying the program against ORAO's devnet. Nothing runs there long-term, and it has no 1Click, Jupiter or Bitrefill.
 - **Staging and production:** mainnet, each with its own program and its own Privy app.
-- **Rent:** a program locks 5.08 SOL per MB (read from mainnet on 2026-11-26), and an upgrade borrows the same again until it finishes. The first build is 444 KB, about 2.26 SOL, so both programs and an upgrade's buffer need about 7 SOL.
+- **Rent:** a program locks 5.08 SOL per MB (read from mainnet on 2026-11-26), and an upgrade borrows the same again until it finishes. The build CI makes for deploys is 477 KB, about 2.43 SOL, so both programs and an upgrade's buffer need about 7.5 SOL.
 
 ## Running it
 

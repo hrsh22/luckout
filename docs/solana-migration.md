@@ -41,7 +41,7 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 | Does a 15-card Checkout fit one transaction? | Yes, measured at the first build: admit is 731 bytes and settle with ORAO's request 735, of 1,232. Finishing 13 Draws takes about 150k compute units of 1.4M. `quote_many`'s answer is 439 of 1,024 bytes. | — |
 | Can a fresh wallet pay Bitrefill, and where do failed cards' refunds go? | Guest invoices take `usdc_solana`. A failed card's refund isn't sent back by itself; we claim it, as today. | The first small card from each Pay Wallet (Phase 4) |
 | Do exchanges open a fresh address's token account? | Solana's exchange guide says they should. Binance and CoinDCX don't say. | Real withdrawals (Phase 4) |
-| How big is the program? | 444 KB at the first build, about 2.26 SOL of rent. | — |
+| How big is the program? | 477 KB as CI builds it for deploys, about 2.43 SOL of rent. | — |
 
 ## Phase 1: the program (needs your go for Rust)
 
@@ -69,12 +69,14 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 **Done when** every test passes and a 15-card Lucky Checkout on devnet settles and draws from ORAO's devnet.
 
-**Status (2026-11-27):**
-- **Built** in `programs/luckout`, with 28 tests passing (PR #214). CI runs them, and builds the program reproducibly with `solana-verify`.
-- **Measured:** see the table above. The build uses `opt-level = "z"`, which saves 77 KB of rent for about 60% more compute.
-- **Left:**
-  - the devnet deploy and a live 15-card Draw (`apps/server/scripts/solana-devnet.ts`), waiting on devnet SOL
-  - the test of an upgrade adding a field into the spare bytes, which needs two builds, so it moves to Phase 4
+**Done 2026-11-27.**
+- **Built** in `programs/luckout`, with 28 tests passing (PR #214). CI runs them and builds the program reproducibly with `solana-verify`. Deploys use that build: 477 KB, with `opt-level = "z"` to save rent at the cost of more compute.
+- **Live on devnet** at `4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3`, deployed from CI's build. `apps/server/scripts/solana-devnet.ts` ran a 15-card Lucky Checkout:
+  - admit: 84k compute units
+  - settle with ORAO's request: 79k; the Pay Wallet was repaid 90 USDC
+  - ORAO's devnet oracles filled the request in 4.2 s
+  - finishing 15 Draws: 165k compute units; 13.68 USDC of Cashback, and the Checkout closed
+- **Moved to Phase 4:** the test of an upgrade adding a field into the spare bytes. It needs two builds.
 
 ## Phase 2: the server
 
@@ -170,11 +172,10 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 | Item | Needed by |
 |---|---|
-| About 5 devnet SOL, from faucet.solana.com, for the deployer key in `~/.luckout` | Phase 1 |
 | Privy development and production app IDs | Phase 2 |
 | RPC provider key, with webhooks | Phase 2 |
 | Telegram login for Privy, set up in BotFather | Phase 3 |
 | Bitrefill's tagging of the Pay Wallet addresses | Phase 4 |
 | The owner key, in a wallet you control | Phase 4 |
-| About 7 SOL: two programs at 2.26 SOL each, an upgrade buffer of the same size, fees, Draws (about 0.002 SOL each) and customer accounts (about $0.12 each) | Phase 4 |
+| About 7.5 SOL: two programs at 2.43 SOL each, an upgrade buffer of the same size, fees, Draws (about 0.002 SOL each) and customer accounts (about $0.12 each) | Phase 4 |
 | USDC for the staging reserve and float, then for production | Phases 4 and 5 |
