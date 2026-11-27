@@ -5,7 +5,7 @@
  * own Balance and nowhere else. The server calls it in a sweep every two minutes and whenever the RPC's webhook says
  * something moved. Less than 1 USDC waits until more arrives.
  */
-import type { Mode } from "@luckout/api"
+import type { CustomerAccount, Mode } from "@luckout/api"
 import { createApproveInstruction, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
 import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
 import { Config, Context, Effect, Layer, Option, Redacted, Schedule } from "effect"
@@ -13,6 +13,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { SqlClient } from "effect/sql"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
+import type { Customer } from "./Program.ts"
 import { type RawAccount, Solana, SolanaUnavailable } from "./Solana.ts"
 
 /** The program's minimum deposit: what a deposit's fee is worth moving for. */
@@ -27,6 +28,23 @@ export const tokenAccount = (a: RawAccount) => ({
 })
 
 export interface Prepared { readonly transaction: string; readonly token: string }
+
+export type Account = CustomerAccount
+
+/** A Customer account as the app and the Agent read it; null when they've never made the one-time approval. */
+export const accountOf = (c: Customer | undefined): Account | null =>
+  c
+    ? {
+      balance: String(c.balance),
+      per_purchase_limit: String(c.per_purchase_limit),
+      daily_limit: String(c.daily_limit),
+      day: Number(c.day),
+      spent_today: String(c.spent_today),
+      default_mode: c.default_mode.kind === "Lucky" ? { lucky: c.default_mode.fields[0] } : "normal",
+      premiums_paid: String(c.premiums_paid),
+      cashback_received: String(c.cashback_received)
+    }
+    : null
 
 const programMode = (m: Mode) => (m === "normal" ? { kind: "Normal" } : { kind: "Lucky", fields: [m.lucky] })
 
@@ -43,6 +61,8 @@ export class Deposits extends Context.Service<Deposits, {
   /** The customer's one-time approval (with their account, opened on `mode`, if they have none yet), for them to sign. */
   approval(wallet: string, mode: Mode): Effect.Effect<{ readonly transaction: string; readonly token: string }, SolanaUnavailable>
   status(wallet: string): Effect.Effect<DepositStatus, SolanaUnavailable>
+  /** The customer's Customer account: their Balance, Spending Limits and Default Mode. */
+  account(wallet: string): Effect.Effect<Account | null, SolanaUnavailable>
   /** One pass over every customer's Deposit Address (it also runs every two minutes by itself). */
   readonly sweep: Effect.Effect<void>
   /** Runs a sweep soon, once, however many webhooks ask for one at once. */
@@ -183,7 +203,13 @@ export class Deposits extends Context.Service<Deposits, {
         })
 
       yield* sweep.pipe(Effect.repeat(Schedule.spaced("2 minutes")), Effect.forkScoped)
-      return Deposits.of({ approval, status, sweep, nudge, withdrawal, limits, defaultMode, reclaim })
+      const account = (walletText: string) =>
+        Effect.try({ try: () => new PublicKey(walletText), catch: () => new SolanaUnavailable({ message: `${walletText} isn't a Solana wallet` }) }).pipe(
+          Effect.flatMap(solana.customer),
+          Effect.map(accountOf)
+        )
+
+      return Deposits.of({ approval, status, account, sweep, nudge, withdrawal, limits, defaultMode, reclaim })
     })
   )
 }

@@ -1,8 +1,8 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, DepositAddress, NotFound, PopularCards, PreparedTransaction, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { OneClick } from "./OneClick.ts"
-import { Config, Effect, Layer } from "effect"
+import { Config, Effect, Exit, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -16,6 +16,7 @@ import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
+import { maxCashback } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
 import { Sales } from "./Sales.ts"
@@ -25,14 +26,47 @@ import { TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
+/** Chain trouble, said without its details (RPC URLs, upstream text), which stay in our logs. */
+const chainUnavailable = (e: { readonly message: string }) =>
+  Effect.logWarning(e.message).pipe(Effect.as(new ChainUnavailable({ message: "Solana isn't answering right now. Try again in a moment." })))
+
+/** The program's public state, from its Config (ADR-0015): what the landing page, the shop and Fairness show. */
+export const readProgram = Effect.gen(function*() {
+  const solana = yield* Solana
+  const c = yield* solana.config
+  return new ProgramInfo({
+    cluster: solana.cluster,
+    programId: solana.program.id.toBase58(),
+    usdcMint: c.usdc_mint.toBase58(),
+    versions: c.versions.map((v) => ({
+      name: v.name,
+      premiumBps: v.premium_bps,
+      outcomes: v.outcomes.map((o) => ({ finalBps: o.final_bps, chanceBps: o.chance_bps }))
+    })),
+    reserve: {
+      free: Number(c.free_reserve),
+      maxCashback: Number(maxCashback(c)),
+      cashbackCap: { fixed: c.cashback_cap.fixed === null ? null : Number(c.cashback_cap.fixed), reserveBps: c.cashback_cap.reserve_bps }
+    },
+    minLuckyCheckout: Number(c.min_lucky_checkout),
+    stats: { luckySettled: Number(c.lucky_settled), luckyAmountTotal: Number(c.lucky_amount_total), luckyPaidTotal: Number(c.lucky_paid_total) }
+  })
+})
+
+export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const sales = yield* Sales
     const telegram = yield* Telegram
+    // Anyone may ask, so every visitor shares one read every 30 seconds; a failed read isn't kept.
+    const program = yield* readProgram.pipe(
+      Effect.provideService(Solana, yield* Solana),
+      Effect.cachedWithTTL((exit) => (Exit.isSuccess(exit) ? "30 seconds" : 0))
+    )
     return handlers.handleAll({
       health: () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid),
       status: () => sales.status,
+      program: () => program.pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
       attestation: () => telegram.attestation
     })
   })
@@ -105,6 +139,7 @@ const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
     const prepared = <E extends { readonly message: string }>(f: (accountId: string) => Effect.Effect<{ transaction: string; token: string }, E>) =>
       CurrentAccount.use((a) => f(a.accountId)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid))
     return handlers.handleAll({
+      account: () => CurrentAccount.use((a) => deposits.account(a.accountId)).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
       address: () => CurrentAccount.use((a) => deposits.status(a.accountId)).pipe(Effect.map((d) => new DepositAddress(d)), Effect.mapError(invalid)),
       approval: ({ payload }) =>
         CurrentAccount.use((a) => deposits.approval(a.accountId, payload.mode)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid)),

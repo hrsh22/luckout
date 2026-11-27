@@ -204,6 +204,12 @@ export interface Config {
   readonly versions: ReadonlyArray<GameVersion>
 }
 
+/** The program's max_cashback_at: the lower of the Cashback Cap's fixed amount and its share of Free Reserve. */
+export const maxCashback = (c: Pick<Config, "free_reserve" | "cashback_cap">) => {
+  const share = c.free_reserve * BigInt(c.cashback_cap.reserve_bps) / 10_000n
+  return c.cashback_cap.fixed !== null && c.cashback_cap.fixed < share ? c.cashback_cap.fixed : share
+}
+
 export interface Customer {
   readonly layout: number
   readonly wallet: PublicKey

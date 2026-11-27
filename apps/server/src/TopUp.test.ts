@@ -78,7 +78,7 @@ const world = (o: {
   }))
   const unused = () => Effect.die("not expected")
   const deposits = Layer.succeed(Deposits, Deposits.of({
-    approval: unused, status: unused, sweep: Effect.void, withdrawal: unused, limits: unused, defaultMode: unused, reclaim: unused,
+    approval: unused, status: unused, account: unused, sweep: Effect.void, withdrawal: unused, limits: unused, defaultMode: unused, reclaim: unused,
     nudge: Effect.sync(() => void s.nudged++)
   }))
   const run = <A, E>(f: (t: TopUp["Service"], sql: SqlClient.SqlClient) => Effect.Effect<A, E>) =>

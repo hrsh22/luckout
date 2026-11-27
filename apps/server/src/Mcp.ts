@@ -3,7 +3,7 @@ import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/http"
 import { MODES, modeName, usd, usdUp, worksIn } from "./Agent.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import type { DrawEvent } from "./Program.ts"
+import { type DrawEvent, maxCashback } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Solana } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
@@ -168,16 +168,13 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
         const config = await run(solana.config)
         const attested = await Effect.runPromise(telegram.attestation.pipe(Effect.orElseSucceed(() => undefined)))
         const total = Number(config.lucky_amount_total)
-        // The program's max_cashback_at: the lower of the fixed cap and the reserve's share.
-        const share = config.free_reserve * BigInt(config.cashback_cap.reserve_bps) / 10_000n
-        const fixed = config.cashback_cap.fixed
         return {
           contract: solana.program.id.toBase58(),
           network: solana.cluster,
           promised_average: "105.6% of the price, in every lucky mode",
           live_average: total > 0 ? `${(Number(config.lucky_paid_total) / total * 100).toFixed(2)}% over ${config.lucky_settled} Draws` : "no Draws yet",
           cashback_reserve_free: usd(Number(config.free_reserve)),
-          max_cashback_per_purchase: usd(Number(fixed !== null && fixed < share ? fixed : share)),
+          max_cashback_per_purchase: usd(Number(maxCashback(config))),
           agent_model_attestation: attested
             ? {
               ok: attested.ok,

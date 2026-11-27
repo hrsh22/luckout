@@ -7,6 +7,7 @@ import { Bitrefill } from "./Bitrefill.ts"
 import { LOW_LINES } from "./Monitor.ts"
 import { GUEST_COUNTED_AT, OPEN_STEPS, PAYING_LIMITS, retryPurchase, retryStep } from "./Purchases.ts"
 import { Sales } from "./Sales.ts"
+import { maxCashback } from "./Program.ts"
 import { Solana } from "./Solana.ts"
 
 // The admin panel's server side. Only accounts in ADMIN_ACCOUNTS get anything; everyone else is
@@ -94,7 +95,6 @@ export class Admin extends Context.Service<Admin, {
         const p = purchases[0] ?? { today: 0, delivered: 0 }
         const held = vault ? Number(vault.data.readBigUInt64LE(64)) : 0
         const free = Number(config.free_reserve)
-        const share = Math.floor(free * config.cashback_cap.reserve_bps / 10_000)
         const fixed = config.cashback_cap.fixed === null ? null : Number(config.cashback_cap.fixed)
         const today = BigInt(Math.floor(Date.now() / 86_400_000))
         return new AdminOverview({
@@ -114,7 +114,7 @@ export class Admin extends Context.Service<Admin, {
             free,
             locked: Number(config.locked_reserve),
             proceeds: Number(config.proceeds),
-            maxCashback: fixed === null ? share : Math.min(fixed, share),
+            maxCashback: Number(maxCashback(config)),
             cashbackCap: { fixed, reserveBps: config.cashback_cap.reserve_bps },
             minLuckyCheckout: Number(config.min_lucky_checkout),
             held,

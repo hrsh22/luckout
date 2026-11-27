@@ -76,7 +76,7 @@ export type Mode = typeof Mode.Type
 
 // ---------- auth ----------
 
-/** The signed-in NEAR account, provided to authenticated endpoints. */
+/** The signed-in account (their Privy Solana wallet), provided to authenticated endpoints. */
 export class CurrentAccount extends Context.Service<CurrentAccount, { readonly accountId: string; readonly wallet: Wallet }>()(
   "luckout/CurrentAccount"
 ) {}
@@ -100,87 +100,6 @@ export class Authorization extends HttpApiMiddleware.Service<Authorization, { pr
   "luckout/Authorization",
   { security: { cookie: sessionCookie }, error: Unauthorized }
 ) {}
-
-/** NEP-413 sign-in: the wallet signs `message` for `recipient` with this single-use `nonce`. */
-export class Challenge extends Schema.Class<Challenge>("Challenge")({
-  message: Schema.String,
-  recipient: Schema.String,
-  /** base64, 32 bytes */
-  nonce: Schema.String
-}) {}
-
-export class SignedChallenge extends Schema.Class<SignedChallenge>("SignedChallenge")({
-  accountId: Schema.String,
-  publicKey: Schema.String,
-  /** base64 */
-  signature: Schema.String,
-  nonce: Schema.String
-}) {}
-
-/**
- * EVM sign-in (ADR-0011): the text the wallet signs with `personal_sign`, in the Sign-In with Ethereum format
- * (EIP-4361). It names the site it was made on (`uri`), which a wallet compares with the page asking for the
- * signature and the server checks against its own sites, so a signature made on another site signs nobody in.
- * `address` must be in checksum case, and `issuedAt` an ISO time.
- */
-export const evmSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; chainId: number; issuedAt: string }) =>
-  `${new URL(o.uri).host} wants you to sign in with your Ethereum account:\n${o.address}\n\n` +
-  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
-  // The format wants a nonce of letters and digits only; ours is base64.
-  `URI: ${o.uri}\nVersion: 1\nChain ID: ${o.chainId}\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
-
-export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("SignedEvmChallenge")({
-  /** 0x address, any case */
-  address: Schema.String,
-  /** 0x hex of the 65-byte personal_sign signature */
-  signature: Schema.String,
-  nonce: Schema.String,
-  /** The origin of the page that asked for the signature (`window.location.origin`), as written into the message. */
-  uri: Schema.String,
-  /** The chain the wallet was on, and when it was asked, as written into the message. */
-  chainId: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
-  // An ISO time, nothing more: it is written into the text the server rebuilds, so it can't carry a line of its own.
-  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
-}) {}
-
-/**
- * Solana sign-in (ADR-0011): the text the wallet signs, in the Sign In With Solana format, which Solana wallets read
- * like EIP-4361 and compare with the page asking. `address` is base58, `issuedAt` an ISO time.
- */
-export const solanaSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; issuedAt: string }) =>
-  `${new URL(o.uri).host} wants you to sign in with your Solana account:\n${o.address}\n\n` +
-  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
-  `URI: ${o.uri}\nVersion: 1\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
-
-export class SignedSolanaChallenge extends Schema.Class<SignedSolanaChallenge>("SignedSolanaChallenge")({
-  /** base58 public key */
-  address: Schema.String.check(Schema.isMaxLength(64)),
-  /** base64 of the 64-byte ed25519 signature */
-  signature: Schema.String.check(Schema.isMaxLength(200)),
-  nonce: Schema.String,
-  uri: Schema.String,
-  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
-}) {}
-
-/** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), or a Solana wallet as raw bytes, as `intents.near` takes it. */
-export const SignedIntent = Schema.Union([
-  Schema.Struct({
-    standard: Schema.Literal("erc191"),
-    /** The signed JSON text: signer_id, verifying_contract, deadline, nonce, intents. */
-    payload: Schema.String.check(Schema.isMaxLength(4096)),
-    /** secp256k1:<base58 of r, s and a recovery bit> */
-    signature: Schema.String.check(Schema.isMaxLength(200))
-  }),
-  Schema.Struct({
-    standard: Schema.Literal("raw_ed25519"),
-    payload: Schema.String.check(Schema.isMaxLength(4096)),
-    /** ed25519:<base58 of the Solana address's 32 bytes> */
-    public_key: Schema.String.check(Schema.isMaxLength(100)),
-    /** ed25519:<base58 of the 64-byte signature> */
-    signature: Schema.String.check(Schema.isMaxLength(200))
-  })
-])
-export type SignedIntent = typeof SignedIntent.Type
 
 /** How the customer signed in. A Solana account is named like a NEAR implicit one, so only this tells them apart. */
 export const Wallet = Schema.Literals(["near", "evm", "solana"])
@@ -316,9 +235,40 @@ export class AgentAttestation extends Schema.Class<AgentAttestation>("AgentAttes
   replies: Schema.Struct({ verified: Schema.Number, refused: Schema.Number })
 }) {}
 
+/** The program's public state, for pages anyone can open (ADR-0015). Read on the server and kept about 30 seconds. */
+export class ProgramInfo extends Schema.Class<ProgramInfo>("ProgramInfo")({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  programId: Schema.String,
+  usdcMint: Schema.String,
+  /** The Game Versions, by number: each one's premium, and every Final Price on the Lucky Amount with its chance (basis points). */
+  versions: Schema.Array(Schema.Struct({
+    name: Schema.String,
+    premiumBps: Schema.Int,
+    outcomes: Schema.Array(Schema.Struct({ finalBps: Schema.Int, chanceBps: Schema.Int }))
+  })),
+  reserve: Schema.Struct({
+    free: MicroUsdc,
+    /** The most Cashback one card can pay now: the lower of the Cashback Cap's limits. */
+    maxCashback: MicroUsdc,
+    /** The owner's Cashback Cap: a fixed amount (null is off) and a share of Free Reserve (basis points). */
+    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.Int })
+  }),
+  /** A Checkout with Lucky cards plays at least this much Lucky Amount. */
+  minLuckyCheckout: MicroUsdc,
+  /** For the Live Average: settled Lucky Buys, their Lucky Amounts, and what was paid for them. */
+  stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc })
+}) {}
+
+export class ChainUnavailable extends Schema.TaggedError<ChainUnavailable>()(
+  "ChainUnavailable",
+  { message: Schema.String },
+  { httpApiStatus: 503 }
+) {}
+
 export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).add(
   HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent }),
   HttpApiEndpoint.get("status", "/status", { success: ShopStatus }),
+  HttpApiEndpoint.get("program", "/program", { success: ProgramInfo, error: ChainUnavailable }),
   /** NotFound while the Agent is off (no bot or NEAR AI key) or before its first check. */
   HttpApiEndpoint.get("attestation", "/attestation", { success: AgentAttestation, error: NotFound })
 ) {}
@@ -604,38 +554,6 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable })
 ).middleware(Authorization) {}
 
-// ---------- relayer (NEP-366, ADR-0008) ----------
-
-/** We won't pay for this one, or it ran and failed: nothing to retry with the wallet as is. */
-export class RelayFailed extends Schema.TaggedError<RelayFailed>()(
-  "RelayFailed",
-  { message: Schema.String },
-  { httpApiStatus: 400 }
-) {}
-
-/** Not paying fees right now (switched off, or today's free relays are used): send it from the wallet instead. */
-export class RelayUnavailable extends Schema.TaggedError<RelayUnavailable>()(
-  "RelayUnavailable",
-  { message: Schema.String },
-  { httpApiStatus: 503 }
-) {}
-
-export class RelayApi extends HttpApiGroup.make("relay").add(
-  HttpApiEndpoint.get("status", "/relay", { success: Schema.Struct({ available: Schema.Boolean }) }),
-  HttpApiEndpoint.post("send", "/relay", {
-    /** base64 of a borsh SignedDelegate, as the wallet's signDelegateActions returns it. */
-    payload: Schema.Struct({ signedDelegate: Schema.String.check(Schema.isMaxLength(8192)) }),
-    success: Schema.Struct({ hash: Schema.String }),
-    error: [RelayFailed, RelayUnavailable]
-  }),
-  /** EVM wallets (ADR-0011): one signed NEAR Intents payload, sent by our relayer to `intents.near`. */
-  HttpApiEndpoint.post("intent", "/relay/intent", {
-    payload: Schema.Struct({ signed: SignedIntent }),
-    success: Schema.Struct({ hash: Schema.String }),
-    error: [RelayFailed, RelayUnavailable]
-  })
-).middleware(Authorization) {}
-
 // ---------- admin (whitelisted accounts only; everyone else gets NotFound) ----------
 
 /** The relayer's switch and free-relay caps, changed from the admin panel. */
@@ -891,7 +809,25 @@ export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress
 
 export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
 
+/**
+ * The customer's Customer account in the program, amounts in micro-USDC as strings ("No limit" is u64's maximum).
+ * `day` is days since 1970 (UTC): `spent_today` counts only on that day.
+ */
+export const CustomerAccount = Schema.Struct({
+  balance: Schema.String,
+  per_purchase_limit: Schema.String,
+  daily_limit: Schema.String,
+  day: Schema.Number,
+  spent_today: Schema.String,
+  default_mode: Mode,
+  premiums_paid: Schema.String,
+  cashback_received: Schema.String
+})
+export type CustomerAccount = typeof CustomerAccount.Type
+
 export class DepositsApi extends HttpApiGroup.make("deposits").add(
+  /** null until the one-time approval opens it. */
+  HttpApiEndpoint.get("account", "/account", { success: Schema.NullOr(CustomerAccount), error: ChainUnavailable }),
   HttpApiEndpoint.get("address", "/deposits/address", { success: DepositAddress, error: PurchaseInvalid }),
   HttpApiEndpoint.post("approval", "/deposits/approval", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
   HttpApiEndpoint.post("submit", "/transactions/submit", { payload: PreparedTransaction, success: Submitted, error: PurchaseInvalid }),

@@ -1,6 +1,8 @@
 import { NodeHttpServer } from "@effect/platform-node"
-import { BitrefillUnavailable, CatalogApi } from "@luckout/api"
-import { Cause, Effect, Layer } from "effect"
+import { BitrefillUnavailable, CatalogApi, ProgramInfo, SystemApi } from "@luckout/api"
+import { Cause, Effect, Layer, Schema } from "effect"
+import { SqlClient } from "effect/sql"
+import { MODES } from "../../web/lib/modes.ts"
 import { HttpRouter } from "effect/http"
 import { HttpApi, HttpApiBuilder } from "effect/http-api"
 import assert from "node:assert/strict"
@@ -9,10 +11,12 @@ import { test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { Keypair } from "@solana/web3.js"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
-import { CatalogHandlers } from "./main.ts"
+import { CatalogHandlers, readProgram, SystemHandlers } from "./main.ts"
 import { base58 } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
-import { checkKeys } from "./Solana.ts"
+import { Sales } from "./Sales.ts"
+import { Chain, checkKeys } from "./Solana.ts"
+import { Telegram } from "./Telegram.ts"
 import { fakeBitrefill, solanaLayer, solanaWorld } from "./testing.ts"
 
 // A mainnet server refuses to start half-configured. It dies before building anything, so this
@@ -106,6 +110,54 @@ test("a card's page answers 404 for a card Bitrefill doesn't sell, and 503 when 
     assert.equal(busy.status, 503)
     assert.match((await busy.json() as { message: string }).message, /busy/)
     assert.deepEqual(asked, [{ page: true }, { page: true }], "the page asks for a price it may keep 10 minutes")
+  } finally {
+    await dispose()
+  }
+})
+
+test("the program's public state: its Game Versions are the web app's mode tables, and the Cashback Cap as the program applies it", async () => {
+  const world = solanaWorld()
+  const p = await Effect.runPromise(readProgram.pipe(Effect.provide(solanaLayer(world))))
+  assert.equal(p.cluster, "localnet")
+  assert.equal(p.programId, world.program.id.toBase58())
+  assert.equal(p.usdcMint, world.mint.toBase58())
+  // The shop prices each mode at once from lib/modes.ts; the program decides the real price. They must agree.
+  assert.deepEqual(
+    p.versions.map((v, n) => ({ mode: { lucky: n }, name: v.name, premiumBps: v.premiumBps, outcomes: [...v.outcomes].sort((a, b) => a.finalBps - b.finalBps) })),
+    MODES.slice(1).map((m) => ({ ...m, outcomes: [...m.outcomes].sort((a, b) => a.finalBps - b.finalBps) }))
+  )
+  assert.equal(p.reserve.free, 1_000_000_000, "the world's $1,000 reserve")
+  const { fixed, reserveBps } = p.reserve.cashbackCap
+  assert.equal(p.reserve.maxCashback, Math.min(fixed ?? Infinity, Math.floor(p.reserve.free * reserveBps / 10_000)))
+  assert.equal(p.minLuckyCheckout, 2_500_000)
+  assert.deepEqual(p.stats, { luckySettled: 0, luckyAmountTotal: 0, luckyPaidTotal: 0 })
+})
+
+test("/program needs no sign-in, and every visitor shares one read for 30 seconds", async () => {
+  const world = solanaWorld()
+  let reads = 0
+  const chain = Chain.of({ ...world.chain, accounts: (keys) => Effect.suspend(() => (reads++, world.chain.accounts(keys))) })
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    HttpApiBuilder.layer(HttpApi.make("luckout").add(SystemApi)).pipe(
+      Layer.provide(SystemHandlers),
+      Layer.provide([
+        solanaLayer({ ...world, chain }),
+        Layer.succeed(SqlClient.SqlClient, {} as SqlClient.SqlClient),
+        Layer.succeed(Sales, {} as Sales["Service"]),
+        Layer.succeed(Telegram, {} as Telegram["Service"]),
+        NodeHttpServer.layerHttpServices
+      ])
+    ),
+    { disableLogger: true }
+  )
+  try {
+    const first = await handler(new Request("http://luckout.test/program"))
+    assert.equal(first.status, 200)
+    const body = Schema.decodeUnknownSync(ProgramInfo)(await first.json())
+    assert.equal(body.versions.length, 3)
+    const before = reads
+    assert.equal((await handler(new Request("http://luckout.test/program"))).status, 200)
+    assert.equal(reads, before, "the second visitor got the cached read")
   } finally {
     await dispose()
   }

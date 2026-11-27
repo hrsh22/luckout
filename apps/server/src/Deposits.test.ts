@@ -52,6 +52,21 @@ test("the one-time approval opens the customer's account and makes the Vault's a
   }))
   assert.deepEqual(customer?.default_mode, { kind: "Lucky", fields: [1] }, "opened on the Default Mode they chose")
   assert.deepEqual(status, { address: wallet.publicKey.toBase58(), approved: true, waiting: 0 })
+  const [account, stranger] = await run(Effect.gen(function*() {
+    const deposits = yield* Deposits
+    return [yield* deposits.account(wallet.publicKey.toBase58()), yield* deposits.account(Keypair.generate().publicKey.toBase58())]
+  }))
+  assert.deepEqual(account && { ...account, day: 0 }, {
+    balance: "0",
+    per_purchase_limit: "200000000",
+    daily_limit: "1000000000",
+    day: 0,
+    spent_today: "0",
+    default_mode: { lucky: 1 },
+    premiums_paid: "0",
+    cashback_received: "0"
+  }, "what the app reads: the new account, on its mode and the default limits")
+  assert.equal(stranger, null, "no approval yet, no account")
   assert.equal(world.svm.getBalance(wallet.publicKey.toBase58() as never) ?? 0n, 0n, "the customer spent no SOL")
   await done()
 })

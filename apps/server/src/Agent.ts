@@ -2,8 +2,7 @@ import { BITREFILL_ACCOUNT_LIMITS, DEFAULT_LIMITS, GUEST_LIMITS, MAX_CART, type 
 import { Effect } from "effect"
 import type { ChatCompletion, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions"
 import type { Bitrefill } from "./Bitrefill.ts"
-import { type Deposits, MIN_DEPOSIT as MIN_DEPOSIT_UNITS } from "./Deposits.ts"
-import type { Customer } from "./Program.ts"
+import { type Account, type Deposits, MIN_DEPOSIT as MIN_DEPOSIT_UNITS } from "./Deposits.ts"
 import { guestLimitRefusal, type Purchases } from "./Purchases.ts"
 
 // The Agent (ADR-0001, ADR-0006): a plain tool-calling loop on NEAR AI Cloud's
@@ -173,32 +172,6 @@ export const trimHistory = (h: Array<ChatCompletionMessageParam>, max = 60, keep
   const start = h.findIndex((m, i) => i >= h.length - keep && m.role === "user")
   return start === -1 ? [] : h.slice(start)
 }
-
-export interface Account {
-  balance: string
-  per_purchase_limit: string
-  daily_limit: string
-  day: number
-  spent_today: string
-  default_mode: Mode
-  premiums_paid: string
-  cashback_received: string
-}
-
-/** A Customer account as the Agent reads it; null when they've never made the one-time approval. */
-export const accountOf = (c: Customer | undefined): Account | null =>
-  c
-    ? {
-      balance: String(c.balance),
-      per_purchase_limit: String(c.per_purchase_limit),
-      daily_limit: String(c.daily_limit),
-      day: Number(c.day),
-      spent_today: String(c.spent_today),
-      default_mode: c.default_mode.kind === "Lucky" ? { lucky: c.default_mode.fields[0] } : "normal",
-      premiums_paid: String(c.premiums_paid),
-      cashback_received: String(c.cashback_received)
-    }
-    : null
 
 /** A Spending Limit for the model: dollars, or "No limit" when they turned it off (u128::MAX). */
 const limit = (micro: string) => (noLimit(micro) ? "No limit" : usd(Number(micro)))
