@@ -37,4 +37,4 @@ export const docHref = (d: Doc) => (d.slug ? `/docs/${d.slug}` : "/docs")
 export const docFile = (d: Doc) => d.slug || "index"
 
 /** Said word for word on every page that names Bitrefill: Bitrefill's condition (2026-11-27). */
-export const BITREFILL_NOTE = "Luckout sources its gift cards from Bitrefill, which is not affiliated with Luckout."
+export const BITREFILL_NOTE = "Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout."

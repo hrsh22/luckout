@@ -92,7 +92,7 @@ Flat URLs, one level under `/docs`, with no chain names in the slugs, so the URL
 - **`llms.txt`.**
 - **Your step:** add `https://www.luckout.wtf/sitemap.xml` in Google Search Console, and verify the domain there first if it isn't verified yet.
 
-**At the Solana cutover:** rewrite the six pages marked "Yes" above as part of `docs/solana-migration.md` Phase 3 (the web app). Add that line to the migration plan when the `solana-plan` branch merges. The URLs stay the same.
+**At the Solana cutover:** rewrite the six pages marked "Yes" above, as listed in `docs/solana-migration.md` Phase 3 (the web app). The URLs stay the same.
 
 ## Left out until needed
 
@@ -113,12 +113,12 @@ The voucher pages (`/shop/[id]`, such as "Swiggy gift card with USDC") are what 
 ## Decisions (2026-11-27)
 
 1. **Build now,** not after Solana. The six chain-specific pages get a short rewrite at cutover.
-2. **The Bitrefill sentence** is "Luckout sources its gift cards from Bitrefill, which is not affiliated with Luckout." (`BITREFILL_NOTE` in `lib/docs.ts`), until Dovah's wording summary says otherwise.
+2. **The Bitrefill sentence** is "Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout." (`BITREFILL_NOTE` in `lib/docs.ts`), until Dovah's wording summary says otherwise.
 3. **The nav label is "Docs",** matching the URL.
 
 ## Progress
 
-**Phase 1 done** (2026-11-27, uncommitted on `docs`):
+**Phase 1 done** (2026-11-27, branch `docs`):
 - **Pages:** `/docs`, `/docs/modes` and `/docs/fairness`.
 - **Dependencies:** `@next/mdx`, `@mdx-js/loader`, `remark-gfm` and `rehype-slug`, plus `@types/mdx` as a dev dependency. `@mdx-js/react` isn't needed: it is only `@next/mdx`'s fallback when `mdx-components.tsx` is missing.
 - **The route:** it is two files, `docs/page.tsx` and `docs/[slug]/page.tsx`, sharing `docs/doc-view.tsx`, not one optional catch-all.
