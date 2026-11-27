@@ -1,0 +1,41 @@
+import { Note, Tile, Tiles } from "@/components/docs"
+
+The bot prepares purchases, but it can't spend your money on its own. Three things keep it in check.
+
+<Tiles>
+  <Tile title="Your tap" href="#it-cant-buy-without-your-tap" tint="lilac">Nothing is bought until you tap the Buy button yourself.</Tile>
+  <Tile title="Your limits" href="#it-cant-pass-your-limits" tint="sky">The contract caps every purchase, whoever sends it.</Tile>
+  <Tile title="A checked enclave" href="#its-ai-runs-in-a-verified-enclave" tint="gold">Every reply is signed inside hardware that's checked every hour.</Tile>
+</Tiles>
+
+## It can't buy without your tap
+
+- **The AI can only search, price and prepare.** None of its tools can move money. A purchase starts only from the Buy button.
+- **Only your tap counts:** from the Telegram account linked to your wallet, within 10 minutes, once. Asking again replaces the old button.
+- **What you see is what's bought.** The lines above the button are written by Luckout's code, not the AI, and the contract never charges more than the button shows.
+- **Your email for cards** is saved only from a message you typed yourself, not a forwarded one or text in a photo. Changing one you already gave needs a tap.
+
+## It can't pass your limits
+
+Your [spending limits](/docs/limits) are kept in the Luckout contract, which checks them on every purchase, from the site, the bot or anywhere else. Only a signature from your wallet can change them. Luckout's server can only call the contract's purchase methods: it can't withdraw your balance or change your settings.
+
+## Its AI runs in a verified enclave
+
+The bot's AI runs on NEAR AI Cloud, inside a secure enclave: hardware that can prove what it's running and sign what it says.
+
+- **Every hour,** with a fresh challenge, Luckout checks NVIDIA's attestation for the GPU, Intel's TDX report for the machine, that the enclave's signing key and the challenge are in that report, and the container it runs.
+- **Every reply** must carry a signature from that key. One that doesn't is held back: "I couldn't prove that answer came from the secure enclave, so I didn't send it."
+- **If no check has passed for 2 hours,** the bot goes offline and points you to the [shop](/shop) instead.
+
+[Is it fair?](/fair) shows the latest check, how many replies were verified and how many were held back, with a link to NEAR AI's guide for checking it yourself. The enclave proves where the replies came from. Your tap and your limits are what protect your money.
+
+## What it keeps
+
+- **Chats live in memory only.** They're dropped after an hour of quiet, or when the server restarts, and never written to a database.
+- **Codes never pass through the AI.** Luckout's code puts them in your chat directly.
+- **One thing is saved:** the email you typed for your cards.
+- **Only private chats.** The bot ignores groups and channels.
+
+<Note title="Keep your wallet's recovery phrase to yourself">
+  Luckout never needs it: you sign in by signing a message. Anyone who asks for it, in Telegram or anywhere else, isn't Luckout.
+</Note>

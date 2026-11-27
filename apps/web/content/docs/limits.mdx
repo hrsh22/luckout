@@ -1,0 +1,61 @@
+import { money, Note, Step, Steps } from "@/components/docs"
+import { BITREFILL_ACCOUNT_LIMITS, DEFAULT_LIMITS, GUEST_LIMITS } from "@luckout/api/limits"
+
+Two kinds of limits apply when you buy: your own spending limits, which you set and the Luckout contract enforces, and Bitrefill's limits for each email.
+
+## Your spending limits
+
+Spending limits cap what can leave your balance for cards, so even a mistake, or a purchase you didn't mean, has a ceiling.
+
+| Limit | New accounts start at | How it counts |
+|---|---|---|
+| **Per purchase** | {money(DEFAULT_LIMITS.perPurchase)} | Each card, including each card in a Cart |
+| **Per day** | {money(DEFAULT_LIMITS.daily)} | Everything you buy in a day. The day starts at midnight UTC. |
+
+**The contract checks them on every purchase, whoever sends it:** the site, the Telegram bot, or anything else. Only a signature from your wallet can change them, so the bot never can.
+
+### Change them
+
+<Steps>
+  <Step title="Open Spending limits" tint="sky">On your [wallet page](/wallet).</Step>
+  <Step title="Set each limit">Type a new amount for **Per purchase** and **Per day**, or switch either to **No limit**.</Step>
+  <Step title="Save" tint="gold">Tap **Save limits** and approve in your wallet. The new limits apply right away, higher or lower.</Step>
+</Steps>
+
+With **No limit**, the contract checks only your balance, and the page warns you before you save. When a card would go over a limit, its page says so, such as **Above your {money(DEFAULT_LIMITS.perPurchase)} per-purchase limit**, with a button to raise it.
+
+## Bitrefill's limits
+
+Each card is a guest order on Bitrefill that carries your [Checkout Email](/docs/sign-in#your-email-for-cards), and Bitrefill limits what each email can buy:
+
+| Cards | Spent | Spent |
+|---|---|---|
+| **{GUEST_LIMITS.orders}** in the last 24 hours | **{money(GUEST_LIMITS.daily)}** in the last 24 hours | **{money(GUEST_LIMITS.monthly)}** in the last 30 days |
+
+- **They count by email,** across every Luckout account that uses it, on each card's price.
+- **They roll:** a card counts for 24 hours, and for 30 days, from when you bought it, not by calendar day.
+- **Your wallet page shows them** under **Bitrefill's limits for your email**, with how much you've used.
+- **A card that would go over is stopped before you pay.** Cards you buy on Bitrefill's own site with the same email count toward its limits too.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## Connect Bitrefill
+
+For higher limits, connect your own Bitrefill account. Your cards are then bought on it, under its limits instead of a guest's. Luckout still pays for every card: nothing is charged to your Bitrefill account.
+
+| Your Bitrefill account | Cards a day | Per card | Per day | Per month |
+|---|---|---|---|---|
+| **Basic**, until you verify your identity | {BITREFILL_ACCOUNT_LIMITS.basic.orders} | {money(BITREFILL_ACCOUNT_LIMITS.basic.perCard)} | {money(BITREFILL_ACCOUNT_LIMITS.basic.daily)} | {money(BITREFILL_ACCOUNT_LIMITS.basic.monthly)} |
+| **Verified**, after Bitrefill checks your ID | {BITREFILL_ACCOUNT_LIMITS.verified.orders} | {money(BITREFILL_ACCOUNT_LIMITS.verified.perCard)} | {money(BITREFILL_ACCOUNT_LIMITS.verified.daily)} | {money(BITREFILL_ACCOUNT_LIMITS.verified.monthly)} |
+
+<Steps>
+  <Step title="Start on your wallet page" tint="sky">Under **Connect Bitrefill to raise your limits**, tap **Connect Bitrefill**.</Step>
+  <Step title="Log in to Bitrefill">Log in to your Bitrefill account and allow Luckout. Finish within 10 minutes, in the same Luckout account you started from.</Step>
+  <Step title="Back on Luckout" tint="gold">You land on your wallet page, which says **Bitrefill connected** and shows your account's limits.</Step>
+</Steps>
+
+While you're connected, buying needs no Checkout Email. Bitrefill doesn't tell Luckout your account's level, so the wallet page shows both. To move up to Verified, verify your account on Bitrefill.
+
+<Note title="Disconnecting">
+  Tap **Disconnect** on your wallet page. Luckout gives up its access to your Bitrefill account, and your cards go back to guest orders, with the limits above and your Checkout Email.
+</Note>

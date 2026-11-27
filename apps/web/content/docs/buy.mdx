@@ -1,0 +1,57 @@
+import { Note, Step, Steps } from "@/components/docs"
+import { CardPageMock } from "@/components/docs-art"
+
+Every card in the shop is a gift card for one brand. You pay from your balance, and the code usually arrives within a minute, on the page and by email.
+
+## Find a card
+
+Open the [shop](/shop) and search for a brand, or browse **Shopping**, **Food**, **Games**, **Entertainment** and **Travel**.
+
+**Pick your country first.** A card works only in its own country, in that country's currency: a card for Germany works in German stores, in euros. Cards marked **Works worldwide** work anywhere. The shop starts with the country you're browsing from, plus regional and worldwide cards. Change it with the country picker, or choose **All countries**.
+
+## Buy it
+
+<CardPageMock />
+
+<Steps>
+  <Step title="Choose the amount" tint="sky">Cards come in the amounts the brand sells, in the card's currency, with the price in dollars beside each. Purchases start at $0.50, so smaller amounts are shown dashed.</Step>
+  <Step title="Choose the mode">The page opens on your [default mode](/docs/sign-in#your-default-mode). Each tile shows what you pay now and how often that mode pays cashback. [The four modes](/docs/modes) explains them.</Step>
+  <Step title="Tap Buy" tint="gold">The button shows the exact amount, such as **Buy for $24.00**. It comes out of your balance, and the page follows your card from there.</Step>
+</Steps>
+
+On a phone, the amount and button sit in a bar at the bottom of the screen: tap **Review and buy**.
+
+To buy several cards at once, add them to the [Cart](/docs/buy/cart) and pay once.
+
+## Before you buy
+
+Each card's page has two folded sections, **How to redeem** and **Terms and validity**, with the brand's own steps and rules. Read them before you buy: once a code is delivered, it's yours to use as the brand allows.
+
+**Recent ones expire** gives the expiry date of the latest card of that kind bought in the last 60 days. Cards come in batches, so it's a guide, not a promise for yours. Your own card shows its own date once it's delivered.
+
+## The price
+
+A card's price is what it costs Luckout to buy it right now, in US dollars: its current price on Bitrefill. In Normal you pay exactly that. A lucky mode adds its extra up front, and the page says how much: "The $20.00 price, plus $4.00 for a chance at up to $24.00 back."
+
+- **Prices refresh** every 20 seconds while you look.
+- **If the price rises** before your purchase goes through, you're asked to confirm the new one. You're never charged more than the button showed.
+- **If it falls,** you pay the lower price.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## If you can't buy yet
+
+The button tells you what's missing:
+
+| The button or page says | What to do |
+|---|---|
+| **Sign in to buy** | [Sign in](/docs/sign-in) with your wallet. |
+| **Add $5.00 to buy** | Your balance is short by that much. Tap it to [add funds](/docs/add-funds). |
+| **Above your $200 per-purchase limit** | Pick a smaller card, or raise your [spending limit](/docs/limits) with the button beside it. |
+| An email form instead of the button | Give the [email for your cards](/docs/sign-in#your-email-for-cards). It's needed once. |
+| **Purchases are paused for a few minutes** | Wait and try again. Your balance is safe, and withdrawals still work. |
+| **Daily order limit reached. Back at 14:30** | Luckout has reached its supplier's order limit for the day. The countdown shows when buying opens again. |
+
+<Note title="When cashback is capped">
+  Each purchase can get only so much cashback, the [Cashback Cap](/docs/modes#big-cards). On a big card, only part of the price plays, and the page says how much before you buy. If the Cashback Reserve is used up, the lucky modes are greyed out for a while, and you can still buy at the price.
+</Note>

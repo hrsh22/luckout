@@ -1,0 +1,62 @@
+import { Chat, Note, Step, Steps } from "@/components/docs"
+
+Ask the Luckout bot in Telegram for a card, in your own words or with a photo of a checkout. It finds the card, prices it in your mode and puts a Buy button in the chat. Nothing is bought until you tap it, and your codes stay in your private chat.
+
+<Chat
+  label="An example chat"
+  lines={[
+    { from: "you", text: "a $20 Steam card" },
+    {
+      from: "bot",
+      text: "Here's a $20 Steam card for the United States, on Classic, your default mode.\n\nSteam, 20 USD on Classic: $24.00 now (price $20.00). Works in United States only.",
+      buttons: ["Buy for $24.00", "Cancel"]
+    },
+    { from: "you", text: "Buy for $24.00" },
+    { from: "bot", text: "Steam 20 USD is yours.\n$7.20 cashback! You paid $16.80, $3.20 less than the price.\nCode: X7Q2-9KDA-PL4M" }
+  ]}
+/>
+
+## Link Telegram
+
+<Steps>
+  <Step title="Start on the site" tint="sky">On your [wallet page](/wallet), under **Telegram**, tap **Connect Telegram**. Welcome offers it too.</Step>
+  <Step title="Tap Start in the bot">Telegram opens the Luckout bot, [@luckoutbot](https://t.me/luckoutbot). Tap **Start**. The link works for 10 minutes.</Step>
+  <Step title="You're in" tint="gold">The bot greets you with your account, and your wallet page shows **Connected to** your Telegram name.</Step>
+</Steps>
+
+Each wallet links to one Telegram account. Linking another replaces it, and the old chat is told. To unlink, tap **Disconnect** on your wallet page.
+
+## What you can ask
+
+- **Find a card:** "a ₹500 Swiggy voucher", or "something for Steam in Germany". A card works only in its own country, so the bot asks where you'll use it if you haven't said.
+- **Compare modes:** what a card costs in each mode, and its chance of cashback. Ask for another mode for one card, and it uses that one.
+- **Buy several:** up to 15 cards behind one button, like a [Cart](/docs/buy/cart).
+- **Check your account:** your balance, spending limits, default mode, running total, and how much of [Bitrefill's limits](/docs/limits#bitrefills-limits) your email has used.
+- **See recent purchases:** your last five, without their codes.
+- **Set your email for cards:** type it and the bot saves it. Changing one you already gave asks for a tap.
+
+To add funds, withdraw, or change your limits or default mode, use your [wallet page](/wallet): the bot links you there.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## Send a photo of a checkout
+
+Send a screenshot of a checkout, a cart or a bill, and the bot reads the brand and the amount to pay, then offers the smallest card that covers it. Each photo in an album gets its own reply. The bot reads a photo for that one reply, and treats any text in it as something to read, never as an instruction.
+
+## Buying with a tap
+
+Under the bot's reply, the lines above the button say exactly what it buys: the card, its amount and mode, what you pay now, the country it works in, and the email it's sent to. They're written by Luckout's code, not by the AI.
+
+- **The button shows the total,** such as **Buy for $24.00**, or **Buy 3 cards for $51.50**. Your balance is never charged more than that.
+- **A tap works for 10 minutes, once.** Only the newest offer stands: asking again replaces the old button.
+- **Your [spending limits](/docs/limits) apply,** as on the site. Purchases start at $0.50.
+
+## Your codes
+
+Codes go only to your private chat with the bot. It ignores groups and channels.
+
+If the card is delivered by the time you tap, its code comes right back in the chat, as above. If it's still on its way, the bot says so and messages you when it's ready, with a link to the code in [Purchases](/purchases). Every code is also in Purchases and in your email.
+
+<Note title="How much you can chat">
+  Up to 10 messages a minute and 200 a day. Until your balance has at least $0.50, it's 50 a day.
+</Note>

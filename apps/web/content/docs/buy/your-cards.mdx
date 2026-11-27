@@ -1,0 +1,47 @@
+import { Note } from "@/components/docs"
+import { CodeMock, Pill } from "@/components/docs-art"
+
+Once a card is delivered, its code is yours to use. Here's where to find it, what each status means, and how to keep track of the cards you've used.
+
+## Where your code shows
+
+<CodeMock />
+
+- **On the page you bought from,** as soon as it's delivered, usually within a minute.
+- **In [Purchases](/purchases),** any time, with every card you've bought.
+- **In your private Telegram chat,** if you bought it there. See [The Telegram bot](/docs/telegram#your-codes).
+- **In your email.** Bitrefill emails each card's code and receipt to your [Checkout Email](/docs/sign-in#your-email-for-cards).
+
+A code can be a number, a PIN, a link or a set of steps. Each part has a **Copy** button, a link opens with **Open the voucher**, and the card's own **Use it by** date shows when it has one. Codes are only ever shown to you: a Draw Proof or a shared link never includes one.
+
+Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
+
+## What each status means
+
+| Status | What's happening |
+|---|---|
+| <Pill tint="sky">In progress</Pill> | Luckout is buying your card. The page says **Getting your code**, and the code usually arrives within a minute. |
+| <Pill tint="lilac">Getting it ready</Pill> | Your card is taking longer to prepare. If you haven't been charged yet, the page says so and you can **Cancel**. |
+| <Pill tint="good">Delivered</Pill> | Your code is ready. In a lucky mode, the Draw's result shows too: **30% back**, **100% off!** or **No cashback this time**. |
+| <Pill tint="warn">Refunded</Pill> | The card couldn't be delivered, so the full amount went back to your balance, with no Draw. |
+| <Pill tint="pink">Not bought</Pill> | The purchase was refused before anything was charged, and the page says why. |
+
+A card that's **Getting it ready** for too long is cancelled without a charge, or refunded in full if you were charged. [Refunds and Reclaim](/docs/refunds) covers what happens if a card is stuck.
+
+## Your purchases
+
+[Purchases](/purchases) lists every card you've bought, newest first, with its code and its Draw. Open a row to see the card's price, what you paid up front, the cashback, and what it cost you in the end.
+
+- **Unused** and **Used** sort your delivered cards. **All** also shows refunded and refused purchases.
+- The totals at the top count your delivered cards, the cashback you've had, and the cards that ended up 100% off.
+- After a Cart, the page follows all its cards together: "3 of 5 ready."
+
+If Telegram is linked and you leave before your cards arrive, the bot messages you once they've all finished.
+
+## Marking a card as used
+
+When you've used a card, tap **Mark as used** to move it to the **Used** tab, apart from the ones you still have to spend. It's only a note for you: the code stays shown, nothing changes about your money or the Draw, and **Mark as unused** puts it back.
+
+<Note title="Expiry dates">
+  The **Use it by** date on a delivered card is that card's own date. The **Recent ones expire** date on a card's page in the shop is only a guide from recent cards of that kind.
+</Note>

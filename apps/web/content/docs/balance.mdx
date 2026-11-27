@@ -1,0 +1,47 @@
+import { Note, Step, Steps, Tile, Tiles } from "@/components/docs"
+import { MoneyMap } from "@/components/docs-art"
+
+Your balance is the USDC you keep in Luckout to buy cards with. It's held by the Luckout contract on NEAR and credited to your account, not kept in a company wallet, and you can withdraw anything that isn't in a purchase at any time.
+
+<MoneyMap />
+
+## What moves it
+
+- **In:** your deposits and Top-Ups, cashback from Draws, and refunds of cards that couldn't be delivered.
+- **Out:** the cards you buy, and your withdrawals.
+- **Held:** the price of a card that's still being bought stays held until the purchase finishes, then it's either spent or comes back.
+
+## On your wallet page
+
+The top of your [wallet page](/wallet) shows:
+
+- **Balance in Luckout:** what you can spend or withdraw now. If more USDC sits in your NEAR wallet or NEAR Intents account, it says so underneath.
+- **Running total:** across your lucky purchases, how far below the price your cashback took you, minus the extra you paid up front. It shows whether lucky modes have put you ahead or behind overall.
+- **Spent today:** against your [daily limit](/docs/limits), which resets at midnight UTC. The page shows that time in yours.
+
+## Withdraw
+
+<Steps>
+  <Step title="Tap Withdraw" tint="sky">On your [wallet page](/wallet), next to your balance.</Step>
+  <Step title="Choose the amount and where it goes">The choices depend on your wallet, below.</Step>
+  <Step title="Approve in your wallet" tint="gold">One signature. Luckout pays the network fee.</Step>
+</Steps>
+
+<Tiles>
+  <Tile title="NEAR wallet" tint="sky">Back to your NEAR account as USDC, any amount. It arrives with the transaction, in seconds.</Tile>
+  <Tile title="EVM wallet" tint="lilac">USDC or USDT to your own address on Ethereum, Arbitrum, Base, Polygon or BNB Chain. USDC on Base is the default.</Tile>
+  <Tile title="Solana wallet" tint="lime">USDC or USDT to your own address on Solana.</Tile>
+</Tiles>
+
+With an EVM or Solana wallet, withdrawals go from $1 to $2,000 at a time and usually arrive in a few minutes. They're converted on 1Click, so its spread comes out of what arrives. There's no Luckout fee, and no gas for you to pay. You can also choose **Keep it in NEAR Intents**, which moves it to your own NEAR Intents account.
+
+<Note title="If a withdrawal can't be sent on">
+  If the last step to your chain doesn't go through, the money waits in your NEAR Intents account, and the page says so. Move it back into Luckout, or send it on from there.
+</Note>
+
+## Network fees
+
+Every action on NEAR has a small network fee. Luckout pays it for you, for your deposits, withdrawals, settings, Reclaims and send-backs, within a daily number of free actions.
+
+- **With an EVM or Solana wallet,** you never need NEAR. Once today's free actions are used up, the page says **Try again later**. Moving a Top-Up into your balance always goes through.
+- **With a NEAR wallet,** your wallet pays its own small fee once the free actions are used up, and some NEAR wallets always pay their own.

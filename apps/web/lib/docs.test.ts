@@ -4,7 +4,8 @@ import { test } from "node:test"
 import { BITREFILL_NOTE, docFile, DOCS } from "./docs.ts"
 
 const dir = new URL("../content/docs/", import.meta.url)
-const files = readdirSync(dir).filter((f) => f.endsWith(".mdx"))
+// Subpages sit in folders: "add-funds/ore.mdx".
+const files = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".mdx"))
 const read = (f: string) => readFileSync(new URL(f, dir), "utf8")
 
 // The words CONTEXT.md avoids for a purchase, a Draw or our margin.
@@ -15,10 +16,14 @@ test("every page in the list has its file, and every file is in the list (else i
   assert.equal(new Set(DOCS.map((d) => d.slug)).size, DOCS.length)
 })
 
-test("titles and descriptions are unique, and descriptions fit a search result", () => {
+test("titles and descriptions are unique, fit a search result, and leave Bitrefill to the pages", () => {
   assert.equal(new Set(DOCS.map((d) => d.title)).size, DOCS.length)
   assert.equal(new Set(DOCS.map((d) => d.description)).size, DOCS.length)
-  for (const d of DOCS) assert.ok(d.description.length >= 70 && d.description.length <= 160, `${d.title}: ${d.description.length} characters`)
+  for (const d of DOCS) {
+    assert.ok(d.description.length >= 70 && d.description.length <= 160, `${d.title}: ${d.description.length} characters`)
+    // A search result or llms.txt shows these alone, with no room for the note.
+    assert.doesNotMatch(`${d.title} ${d.description}`, /bitrefill/i, d.title)
+  }
 })
 
 test("pages use the glossary's words, name Bitrefill only with the note, and leave the h1 to the layout", () => {
