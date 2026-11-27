@@ -52,7 +52,7 @@ Once per environment. Needs the Solana CLI (Agave 4.4.1) and `solana-verify` on 
    solana-verify get-executable-hash ~/luckout-so/staging-<commit>/luckout.so   # = the hash in the run's summary
    ```
 2. **SOL for the owner.** The program locks about 2.42 SOL of rent (477 KB; refundable if it's ever closed), and the deploy needs as much again for a buffer while it uploads, returned when it finishes: send the owner about 5 SOL. Check with `solana rent <bytes of luckout.so>`.
-3. **Deploy**, as the owner, through a paid RPC (the public one drops many of the deploy's transactions):
+3. **Deploy**, as the owner, through a paid RPC: through Alchemy it takes minutes, while the public RPC's rate limits stretch it past half an hour:
    ```sh
    solana program deploy ~/luckout-so/staging-<commit>/luckout.so \
      --program-id ~/.luckout/solana-staging-program.json \

@@ -172,6 +172,32 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   - an upgrade, and a rollback
   - an upgrade that changes a layout, with the older build refusing the new accounts
 
+**Ready 2026-11-28, waiting for money** (draft PR #217, `solana-server` → `staging`):
+- **One build per environment:** `--features staging` / `--features production` pick each program's own id (staging `FM2mRU3R…`, production `GCeZ67an…`); no feature is devnet. CI builds all three reproducibly. A mainnet build can be initialized only with Circle's USDC.
+- **Staging keys:**
+  - the owner and upgrade authority (`CXob1pBz…`) and the program keypair are on the operator's Mac until the owner backs them up
+  - the operator, fee payer and Pay Wallet were made on the VM
+  - the VM's `.env` points at the staging program and a fresh database, `luckout_staging_solana`; NEAR's `.env` is kept as `.env.near-2026-11-28`
+- **Rehearsed on devnet** with the staging build at its own address:
+  - deploying through Alchemy took minutes; the public RPC took over 30
+  - `scripts/solana-init.ts` found the upgrade authority, and the build refused a token other than USDC (`NotUsdc`)
+  - an upgrade in place, after dumping the running build, went through
+  - then the program was closed and the devnet SOL returned
+- **Hardened:**
+  - the server checks a database belongs to its deployment before migrating it, and refuses NEAR's
+  - it refuses to start holding the owner's key
+  - our paying address's limit counts every card
+  - deposit trouble and a card reclaimed after delivery alert the admin
+  - a checkout that gave up says why, and Retry resumes one stopped at `admit` or `pay`
+- **Docs:** `deploy/README.md` and `deploy/RUNBOOK.md` describe Solana.
+- **Left for deploy day:**
+  1. money to the owner (about 5 SOL for the deploy, of which 2.42 stays as the program's rent, plus USDC for the reserve and the Pay Wallet's float)
+  2. deploy and set up the program from CI's build
+  3. fund the fee payer, the Pay Wallet and the reserve
+  4. the staging Vercel variables
+  5. `DEPLOY_STAGING=on`, then merge #217
+- **Later:** registering each Deposit Address with Alchemy's webhook (until then, the two-minute sweep).
+
 ## Phase 5: cutover
 
 1. **Production program:** deploy it with the owner key, then fund the Cashback Reserve and the float. The production Pay Wallet's first card is a small one.
