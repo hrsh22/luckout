@@ -151,19 +151,28 @@ test("Retry now moves the checkout the reconciler runs, with its cards, and only
     yield* admin.retry(id(25), "boss")
     assert.deepEqual((yield* steps(slow)).map((x) => (Array.isArray(x) ? x : x.step)), ["delivery", ["delivery"]])
 
-    // Where going again could pay or order twice, or nobody knows what happened: a human looks.
+    // Gave up at admit or pay: back there, where the saved transaction is looked up before anything is signed again.
     const pay = yield* checkout("stuck", [[id(26), "stuck", "Gave up after 12 attempts at pay: send: fetch failed"]])
+    const admit = yield* checkout("stuck", [[id(28), "stuck", "Gave up after 12 attempts at admit: send: fetch failed"]])
+    yield* admin.retry(id(26), "boss")
+    yield* admin.retry(id(28), "boss")
+    assert.deepEqual((yield* steps(pay)).map((x) => (Array.isArray(x) ? x : x.step)), ["pay", ["pay"]])
+    assert.deepEqual((yield* steps(admit)).map((x) => (Array.isArray(x) ? x : x.step)), ["admit", ["admit"]])
+
+    // Where nobody knows what happened (an order on our own account), or a dump was restored: a human looks.
     const unknown = yield* checkout("stuck", [[id(27), "stuck", "Bitrefill order outcome unknown; check the Bitrefill account"]])
-    for (const n of [26, 27]) {
+    const restored = yield* checkout("stuck", [[id(29), "stuck", "Restored from a dump at pay: check by hand"]])
+    for (const n of [27, 29]) {
       const refused = yield* admin.retry(id(n), "boss").pipe(Effect.flip)
       assert.match(refused.message, /needs a manual check/)
     }
-    assert.deepEqual((yield* steps(pay))[1], ["stuck"])
     assert.deepEqual((yield* steps(unknown))[1], ["stuck"])
+    assert.deepEqual((yield* steps(restored))[1], ["stuck"])
 
     // The panel offers Retry now exactly where it works, and labels a payment as the checkout's.
+    yield* checkout("stuck", [[id(30), "stuck", "Gave up after 12 attempts at pay: send: fetch failed"]])
     const attention = (yield* admin.overview).purchases.attention
-    assert.deepEqual(attention.filter((a) => [id(26), id(27)].includes(a.id)).map((a) => a.retryable), [false, false])
+    assert.deepEqual(attention.filter((a) => [id(27), id(29), id(30)].includes(a.id)).map((a) => [a.id, a.retryable]), [[id(27), false], [id(29), false], [id(30), true]])
     const [listed] = yield* admin.purchases(undefined, id(22))
     assert.equal(listed!.checkoutId, gaveUp)
   })))

@@ -220,11 +220,16 @@ export const payingUse = (sql: SqlClient.SqlClient) =>
     Effect.map(([r]) => ({ daily: Number(r?.daily ?? 0), monthly: Number(r?.monthly ?? 0) }))
   )
 /**
- * A card that gave up where going again is safe: settling (confirm, fail) closes a purchase onchain only once, and
- * delivery only asks Bitrefill again about the invoice already paid. Anywhere else (admit, ordering, pay) going again
- * could charge, order or pay twice, so a human looks first (deploy/RUNBOOK.md).
+ * A card that gave up where going again is safe:
+ * - confirm, fail: settling closes a purchase onchain only once;
+ * - delivery: it only asks Bitrefill again about the invoice already paid;
+ * - admit, pay: the admission or payment was saved signed before it was sent, and going again looks that one up first
+ *   (the RPC keeps every landed transaction). A new one is signed only once the saved one's blockhash has expired
+ *   unlanded, so it never can land; an admission under the customer's next Checkout number, a payment only while its
+ *   invoice is under 50 minutes old (savePayment), and past that the invoice is asked for again or the cards refunded.
+ * Not ordering: on our own Bitrefill account an order's outcome there is unknown, so a human looks (deploy/RUNBOOK.md).
  */
-export const GAVE_UP_AT = /^Gave up after \d+ attempts at (confirm|fail|delivery):/
+export const GAVE_UP_AT = /^Gave up after \d+ attempts at (admit|pay|confirm|fail|delivery):/
 /**
  * Where Retry now (Admin) sends a card: on from its own step while its checkout still runs, back to the step it gave
  * up at if that's safe to repeat; undefined when it needs a human.
@@ -239,7 +244,8 @@ export const retryStep = (card: { readonly step: string; readonly error: string 
 /**
  * Retry now: a purchase's checkout runs its next step on the reconciler's next pass instead of after its backoff. One
  * that gave up goes back with every card of it that gave up somewhere safe, each to its own step: the checkout to
- * settle if a card is to be confirmed or failed, else to delivery. Never charges, orders or pays again.
+ * admit or pay with its cards (until delivery they share its step), to settle if a card is to be confirmed or failed,
+ * else to delivery. Never charges, orders or pays twice (GAVE_UP_AT).
  */
 export const retryPurchase = Effect.fn("Purchases.retry")(function*(id: string) {
   const sql = yield* SqlClient.SqlClient
@@ -261,7 +267,8 @@ export const retryPurchase = Effect.fn("Purchases.retry")(function*(id: string) 
       const s = GAVE_UP_AT.exec(c.error ?? "")?.[1]
       return s ? [{ id: c.id, step: s }] : []
     })
-    const next = back.some((c) => c.step !== "delivery") ? "settle" : "delivery"
+    const next = back.find((c) => c.step === "admit" || c.step === "pay")?.step ??
+      (back.some((c) => c.step !== "delivery") ? "settle" : "delivery")
     const moved = yield* sql`UPDATE checkouts SET step = ${next}, error = NULL, attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute'
                              WHERE id = ${row.checkout_id} AND step = 'stuck' RETURNING id`
     if (moved.length === 0) return

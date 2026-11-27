@@ -1845,7 +1845,7 @@ test("a checkout that gave up at settle goes back on Retry now, each card to whe
   assert.equal(w.calls.filter((c) => c === "pay").length, 1, "never paid again")
 })
 
-test("a checkout that gave up at delivery goes back to asking Bitrefill; one that gave up at pay needs a human", async () => {
+test("a checkout that gave up at delivery goes back to asking Bitrefill; at admit or pay, to what it saved, so nothing is charged or paid twice", async () => {
   const slow = world({ real: true, guest: true, bitrefillDown: "delivery" })
   const d = await slow.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", slow.alice.id)
@@ -1863,18 +1863,37 @@ test("a checkout that gave up at delivery goes back to asking Bitrefill; one tha
   assert.deepEqual(d.checkout, { step: "delivery", error: null })
   assert.equal(slow.usdcOf(slow.payees[0]!), 10_000_000n)
 
-  const unpaid = world({ real: true, guest: true })
-  unpaid.faults.set("pay", "down")
-  const p = await unpaid.run(Effect.gen(function*() {
-    yield* withEmail("alice@example.com", unpaid.alice.id)
-    const p = yield* unpaid.buy()
-    const sql = yield* SqlClient.SqlClient
-    yield* sql`UPDATE checkouts SET attempts = 12`
-    yield* reconcilePass
-    return { step: (yield* rowOf(p.id)).step, refused: yield* retryPurchase(p.id).pipe(Effect.flip) }
-  }))
-  assert.equal(p.step, "stuck")
-  assert.match(p.refused.message, /needs a manual check/)
+  // Its admission or payment was saved and landed, but the server lost track of it (say, the RPC) and gave up. Retry
+  // now looks the saved transaction up first, finds it landed, and goes on from it.
+  const gaveUp = (step: "admit" | "pay") =>
+    Effect.gen(function*() {
+      const w = world({ real: true, guest: true })
+      const r = yield* Effect.promise(() =>
+        w.run(Effect.gen(function*() {
+          yield* withEmail("alice@example.com", w.alice.id)
+          w.faults.set(step, "crash")
+          const p = yield* w.buy()
+          const column = step === "admit" ? "admit_tx" : "pay_tx"
+          const saved = (yield* checkoutOf(p.id))[column]!
+          yield* w.sw.chain.submit(Buffer.from(saved.bytes, "base64"))
+          const sql = yield* SqlClient.SqlClient
+          yield* sql`UPDATE checkouts SET attempts = 12`
+          yield* reconcilePass
+          const stuck = (yield* rowOf(p.id)).step
+          const at = yield* retryPurchase(p.id)
+          yield* reconcilePass
+          return { stuck, at, after: yield* settled(p.id), resumed: (yield* checkoutOf(p.id))[column]!.signature === saved.signature }
+        }))
+      )
+      return { ...r, w }
+    })
+  for (const step of ["admit", "pay"] as const) {
+    const { stuck, at, after, resumed, w } = await Effect.runPromise(gaveUp(step))
+    assert.deepEqual([stuck, at, after, resumed], ["stuck", step, "settled", true], step)
+    assert.equal(w.customer().checkouts, 1n, `${step}: admitted once`)
+    assert.equal(balanceOf(w), 490 * USDC, `${step}: charged once`)
+    assert.deepEqual(w.payees.map((x) => w.usdcOf(x)), [10_000_000n], `${step}: one invoice, paid once`)
+  }
 })
 
 test("the same cart sent twice at once is one checkout, returned to both", async () => {
