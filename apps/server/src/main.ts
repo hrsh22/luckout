@@ -45,6 +45,7 @@ export const readProgram = Effect.gen(function*() {
     })),
     reserve: {
       free: Number(c.free_reserve),
+      locked: Number(c.locked_reserve),
       maxCashback: Number(maxCashback(c)),
       cashbackCap: { fixed: c.cashback_cap.fixed === null ? null : Number(c.cashback_cap.fixed), reserveBps: c.cashback_cap.reserve_bps }
     },

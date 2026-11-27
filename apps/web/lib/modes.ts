@@ -1,7 +1,7 @@
 import type { Mode } from "@luckout/api"
 
-// The live Game Versions, mirrored from default_game_versions() in contract/src/lib.rs.
-// They are immutable onchain; the Draw Proof reads the real table from the chain.
+// The live Game Versions, mirrored from the program's (programs/luckout). They are immutable onchain, and a server test
+// checks these against GET /program; the Draw Proof reads the real table from the chain.
 export interface Outcome {
   /** Final Price on the Lucky Amount, in basis points: 5_000 pays half. */
   finalBps: number
@@ -33,7 +33,7 @@ export const MODES: ReadonlyArray<ModeInfo> = [
 /** The longest outcome table: lists reserve this many rows so switching modes doesn't move the page. */
 export const MOST_OUTCOMES = Math.max(...MODES.map((m) => m.outcomes.length))
 
-/** What the quote needs from the contract's get_reserve, in micro-USDC: Free Reserve and the most Cashback one Lucky Buy can pay now. */
+/** What the quote needs from the program's reserve (GET /program), in micro-USDC: Free Reserve and the most Cashback one Lucky Buy can pay now. */
 export interface ReserveView {
   free: number | string
   max_cashback: number | string
@@ -47,7 +47,7 @@ export const modeName = (m: Mode | undefined) => modeInfo(m)?.name ?? "Default"
 /** "classic": how a mode appears in URLs. */
 export const modeSlug = (m: Mode | undefined) => (modeInfo(m) ?? MODES[0]!).name.toLowerCase()
 export const modeFromSlug = (s: string | null | undefined) => MODES.find((m) => m.name.toLowerCase() === s)?.mode
-/** The mode we suggest to new customers. Normal stays the contract's default until they choose. */
+/** The mode we suggest to new customers. Normal stays the program's default until they choose. */
 export const RECOMMENDED = "Classic"
 
 /** Chance, in basis points, of any Cashback; every Cashback leaves the price below normal. */
@@ -56,7 +56,7 @@ export const cashbackChanceBps = (m: ModeInfo) => m.outcomes.filter((x) => x.fin
 /** Cashback as a whole % of what was paid, from a table row: 9_600 on Classic (+20%) is 20. */
 export const cashbackPct = (premiumBps: number, finalBps: number) => Math.round(100 - (finalBps * 100) / (10_000 + premiumBps))
 
-/** What one Draw outcome costs, exactly as the contract computes it (rounded up, capped). */
+/** What one Draw outcome costs, exactly as the program computes it (rounded up, capped). */
 export const finalPrice = (reference: number, lucky: number, max: number, finalBps: number) =>
   Math.min(reference - lucky + Math.ceil((lucky * finalBps) / 10_000), max)
 
@@ -79,22 +79,36 @@ export const pricedOutcomes = (m: ModeInfo, q: { referencePrice: number; luckyAm
 
 /**
  * The quote to buy on: a Lucky one whose best Cashback is under a cent can't give back anything a customer would see,
- * so like one the reserve can't cover at all (Lucky Amount 0: the contract quotes it Normal in a cart and refuses it
+ * so like one the reserve can't cover at all (Lucky Amount 0: the program quotes it Normal in a cart and refuses it
  * alone) it's bought at Normal, at the Reference Price. One rule for the card page, the Cart and the mode tiles.
  */
-export const playable = <Q extends { mode: Mode; referencePrice: number; luckyAmount: number; maxPrice: number }>(q: Q): Q => {
+type Priced = { mode: Mode; referencePrice: number; luckyAmount: number; maxPrice: number }
+const atNormal = <Q extends Priced>(q: Q): Q => ({ ...q, mode: "normal", luckyAmount: 0, maxPrice: q.referencePrice })
+
+export const playable = <Q extends Priced>(q: Q): Q => {
   const m = modeInfo(q.mode)
   if (!m || m.premiumBps === 0) return q
   const best = finalPrice(q.referencePrice, q.luckyAmount, q.maxPrice, Number(minFinalBps(m)))
-  return q.luckyAmount > 0 && q.maxPrice - best >= 10_000 ? q : ({ ...q, mode: "normal", luckyAmount: 0, maxPrice: q.referencePrice } as Q)
+  return q.luckyAmount > 0 && q.maxPrice - best >= 10_000 ? q : atNormal(q)
+}
+
+/**
+ * The program refuses a Checkout whose Lucky cards play less than the smallest Lucky Checkout in all (`min`): a Draw's
+ * cost must be covered (ADR-0015). Such a checkout's Lucky cards are bought at Normal instead, as `playable` does for
+ * one the reserve can't cover, marked `belowMin` so the page can say why. `min` not read yet changes nothing.
+ */
+export const luckyCheckout = <Q extends Priced>(quotes: ReadonlyArray<Q>, min: number | undefined): Array<Q & { belowMin?: true }> => {
+  const plays = quotes.reduce((s, q) => s + (q.mode === "normal" ? 0 : q.luckyAmount), 0)
+  if (min === undefined || plays === 0 || plays >= min) return [...quotes]
+  return quotes.map((q) => (q.mode === "normal" ? q : { ...atNormal(q), belowMin: true as const }))
 }
 
 const minFinalBps = (m: ModeInfo) => BigInt(Math.min(...m.outcomes.map((o) => o.finalBps)))
 
 /**
- * quote_internal in contract/src/lib.rs, in exact integers: the whole price plays, up to what keeps the
+ * The program's quote, in exact integers: the whole price plays, up to what keeps the
  * best result within the Cashback Cap and its lock within Free Reserve. A lucky mode with luckyAmount 0
- * can't be bought right now (the contract refuses it: "Reserve too small"). Normal needs no reserve.
+ * can't be bought right now (the program refuses it: "Reserve too small"). Normal needs no reserve.
  */
 export const simpleQuote = (m: ModeInfo, referencePrice: number, reserve: ReserveView | undefined) => {
   if (m.premiumBps === 0) return { referencePrice, luckyAmount: 0, maxPrice: referencePrice }

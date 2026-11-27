@@ -248,6 +248,8 @@ export class ProgramInfo extends Schema.Class<ProgramInfo>("ProgramInfo")({
   })),
   reserve: Schema.Struct({
     free: MicroUsdc,
+    /** Held for Lucky Buys in progress, until their Draws run. */
+    locked: MicroUsdc,
     /** The most Cashback one card can pay now: the lower of the Cashback Cap's limits. */
     maxCashback: MicroUsdc,
     /** The owner's Cashback Cap: a fixed amount (null is off) and a share of Free Reserve (basis points). */

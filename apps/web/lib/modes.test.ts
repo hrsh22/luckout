@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { ModeInfo } from "./modes.ts"
-import { cashbackChanceBps, finalPrice, MODES, playable, pricedOutcomes, simpleQuote } from "./modes.ts"
+import { cashbackChanceBps, finalPrice, luckyCheckout, MODES, playable, pricedOutcomes, simpleQuote } from "./modes.ts"
 
 const USDC = 1_000_000
 const [normal, lite, classic, jackpot] = MODES as [ModeInfo, ModeInfo, ModeInfo, ModeInfo]
@@ -92,4 +92,14 @@ test("a Lucky quote whose best Cashback is under a cent is bought at Normal, lik
   assert.equal(playable(cent), cent)
   const n = normalAt(5 * USDC)
   assert.equal(playable(n), n)
+})
+
+test("a checkout whose Lucky cards play under the smallest Lucky Checkout is bought at Normal, as the program would refuse it", () => {
+  const lucky = (luckyAmount: number) => ({ mode: { lucky: 1 } as const, referencePrice: luckyAmount, luckyAmount, maxPrice: luckyAmount * 1.2 })
+  const plain = { mode: "normal" as const, referencePrice: 9 * USDC, luckyAmount: 0, maxPrice: 9 * USDC }
+  const min = 2_500_000
+  assert.deepEqual(luckyCheckout([lucky(1 * USDC), plain], min), [{ mode: "normal", referencePrice: 1 * USDC, luckyAmount: 0, maxPrice: 1 * USDC, belowMin: true }, plain])
+  assert.deepEqual(luckyCheckout([lucky(1 * USDC), lucky(1.5 * USDC)], min), [lucky(1 * USDC), lucky(1.5 * USDC)], "two together reach it")
+  assert.deepEqual(luckyCheckout([plain], min), [plain], "no Lucky cards, no minimum")
+  assert.deepEqual(luckyCheckout([lucky(1 * USDC)], undefined), [lucky(1 * USDC)], "not read yet: left to the program")
 })

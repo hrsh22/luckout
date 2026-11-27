@@ -3,7 +3,7 @@
 import { type Category, type Mode, type Purchase, type PurchasePage, type Transfer, type TransferPhase, VoucherSummary } from "@luckout/api"
 import { type InfiniteData, keepPreviousData, type QueryClient, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { api } from "./api"
-import { contractId, view } from "./chain"
+import { programInfo } from "./chain"
 import { modeSlug, type ReserveView } from "./modes"
 import { withNewest } from "./purchase-poll"
 import { markedSince } from "@/lib/used"
@@ -92,7 +92,7 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     enabled: !!value && active,
     // The reserve and Bitrefill's price move: while the page is in sight the quote is renewed as it goes stale, and
     // at once on coming back to the tab, so Buy sends the terms on screen, not ones from minutes ago.
-    // ponytail: a visible tab nobody looks at keeps asking, one NEAR view per 20 s and one Bitrefill price lookup a
+    // ponytail: a visible tab nobody looks at keeps asking, one quote simulation per 20 s and one Bitrefill price lookup a
     // minute (the server reuses a quote's price for up to a minute, or its last one, up to an hour old, while lookups
     // are busy); refetch on the Buy click instead if RPC load ever matters.
     staleTime: 20_000,
@@ -100,12 +100,24 @@ export const useQuote = (voucherId: string, value: string | undefined, mode: Mod
     refetchOnWindowFocus: true
   })
 
-/** The Free Reserve and the Cashback Cap, straight from the chain: they shape every Lucky Amount. Undefined until read. */
+/**
+ * The program's public state (GET /program): Game Versions, reserve, Cashback Cap, smallest Lucky Checkout and the
+ * Live Average figures. The server reads it at most every 30 seconds.
+ */
+export const useProgram = () =>
+  useQuery({
+    queryKey: ["program"],
+    queryFn: () => programInfo(),
+    staleTime: 30_000
+  })
+
+/** The Free Reserve and the most Cashback one card can pay now: they shape every Lucky Amount. Undefined until read. */
 export const useReserve = () =>
   useQuery({
-    queryKey: ["reserve"],
-    queryFn: () => view<ReserveView>(contractId, "get_reserve"),
-    staleTime: 60_000
+    queryKey: ["program"],
+    queryFn: () => programInfo(),
+    staleTime: 30_000,
+    select: (p): ReserveView => ({ free: p.reserve.free, max_cashback: p.reserve.maxCashback })
   }).data
 
 const pending = (p: Purchase) => p.status === "pending" || p.status === "waiting"
@@ -164,26 +176,25 @@ export const useSaveCheckoutEmail = (token: string | undefined) => {
   })
 }
 
-/** While `waiting` (the customer is off in Telegram tapping Start), check every 2 s until linked. */
-export const useTelegram = (token: string | undefined, waiting = false) =>
+/** Whether Telegram is linked (in Privy; the server reads it at sign-in) and the bot to open. */
+export const useTelegram = (token: string | undefined) =>
   useQuery({
     queryKey: ["telegram", token],
     queryFn: () => api((c) => c.telegram.status(), token),
     enabled: !!token,
-    refetchOnWindowFocus: true,
-    refetchInterval: (q) => (waiting && !q.state.data?.linked ? 2000 : false)
+    refetchOnWindowFocus: true
   })
 
 /** Phases where the customer's money is still moving, or waiting on them: polled often. */
-export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "incomplete", "swapping", "moving"])
+export const ACTIVE_PHASES: ReadonlySet<TransferPhase> = new Set(["awaiting-transfer", "incomplete", "swapping"])
 
 /** Top-Ups 1Click has (or that we know were paid) and is delivering: not a quote still waiting for its transfer, nor one paid short. */
 export const arriving = (list: ReadonlyArray<Transfer>) =>
-  list.filter((t) => t.direction === "in" && (t.phase === "swapping" || t.phase === "moving" || (t.phase === "awaiting-transfer" && !!t.depositTx)))
+  list.filter((t) => t.phase === "swapping" || (t.phase === "awaiting-transfer" && !!t.depositTx))
 
 /**
- * The customer's Top-Ups and withdrawals through NEAR Intents (still moving, or ended in the last day),
- * from the server so they survive a closed tab. Checked often while one is moving.
+ * The customer's 1Click Top-Ups (still moving, or ended in the last day), from the server so they survive a closed
+ * tab. Checked often while one is moving.
  */
 export const useTransfers = (token: string | undefined) =>
   useQuery({
@@ -192,15 +203,6 @@ export const useTransfers = (token: string | undefined) =>
     enabled: !!token,
     refetchOnWindowFocus: true,
     refetchInterval: (q) => (q.state.data?.some((t) => ACTIVE_PHASES.has(t.phase)) ? 8000 : 60_000)
-  })
-
-/** What else is in the customer's NEAR Intents account: 1Click's change and refunds, in the token paid with. */
-export const useHeld = (token: string | undefined) =>
-  useQuery({
-    queryKey: ["held", token],
-    queryFn: () => api((c) => c.topup.held(), token),
-    enabled: !!token,
-    refetchOnWindowFocus: true
   })
 
 /** Whether the signed-in account may open the admin panel; decides the menu link. */
@@ -212,7 +214,7 @@ export const useIsAdmin = (token: string | undefined) =>
     staleTime: Infinity
   }).data === true
 
-/** Whether purchases can start: an admin may have stopped sales, the owner paused the contract, or Bitrefill's order limit is reached. */
+/** Whether purchases can start: an admin may have stopped sales, the owner paused the program, or Bitrefill's order limit is reached. */
 export const useShopStatus = () =>
   useQuery({
     queryKey: ["shop-status"],

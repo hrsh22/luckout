@@ -127,6 +127,7 @@ test("the program's public state: its Game Versions are the web app's mode table
     MODES.slice(1).map((m) => ({ ...m, outcomes: [...m.outcomes].sort((a, b) => a.finalBps - b.finalBps) }))
   )
   assert.equal(p.reserve.free, 1_000_000_000, "the world's $1,000 reserve")
+  assert.equal(p.reserve.locked, 0)
   const { fixed, reserveBps } = p.reserve.cashbackCap
   assert.equal(p.reserve.maxCashback, Math.min(fixed ?? Infinity, Math.floor(p.reserve.free * reserveBps / 10_000)))
   assert.equal(p.minLuckyCheckout, 2_500_000)

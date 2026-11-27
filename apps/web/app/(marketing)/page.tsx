@@ -1,7 +1,7 @@
 import { HeroArt } from "@/components/hero-art"
 import { OddsGrid } from "@/components/odds-grid"
 import { buttonVariants } from "@/components/ui/button"
-import { contractId, liveAverage, network, type Stats, view } from "@/lib/chain"
+import { cluster, liveAverage, programInfo } from "@/lib/chain"
 import { usdUp } from "@/lib/format"
 import { AMPLE_RESERVE, cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
@@ -27,6 +27,7 @@ const FAQ = [
     q: "Where is my money while it's in Luckout?",
     a: "In the Luckout contract on NEAR, credited to your account, not in a company wallet. You can withdraw anything not locked in a purchase at any time. If we ever neither deliver nor cancel a purchase, you can take the full amount back yourself after 24 hours."
   },
+  // TODO(phase3-proof): these answers still describe NEAR (the Draw's randomness, wallets, fees); rewrite for Solana and Privy.
   {
     q: "How random is the Draw?",
     a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why each Draw's cashback is capped: at most the lower of a fixed amount and a share of the reserve.`
@@ -37,7 +38,7 @@ const FAQ = [
 
 export default async function Home() {
   // Read again at most every 60 s (revalidate above).
-  const stats = await view<Stats>(contractId, "get_stats").catch(() => undefined)
+  const stats = await programInfo("10 seconds").then((p) => p.stats, () => undefined)
   const avg = stats && liveAverage(stats)
 
   return (
@@ -58,8 +59,8 @@ export default async function Home() {
             <Link href="/welcome" className={buttonVariants({ size: "lg", variant: "light" })}>Create your account</Link>
           </div>
           <p className="mt-6 flex items-center gap-2 text-sm text-muted">
-            <span className={`size-2 rounded-full ${network === "testnet" ? "bg-warn" : "bg-good"}`} />
-            {network === "testnet" ? "Live on NEAR testnet with free test USDC" : "Live on NEAR"}
+            <span className={`size-2 rounded-full ${cluster === "mainnet" ? "bg-good" : "bg-warn"}`} />
+            {cluster === "mainnet" ? "Live on Solana" : `On Solana ${cluster}, test cards only`}
           </p>
         </div>
         <HeroArt />
@@ -131,7 +132,7 @@ export default async function Home() {
               </p>
               <p className="font-display mt-8 text-7xl font-extrabold text-gold">{avg === undefined ? "105.6%" : `${avg.toFixed(1)}%`}</p>
               <p className="text-white/70">
-                {avg === undefined ? "promised average, for every mode" : `of the price, on average, over ${stats!.lucky_settled} Draws. Promised: 105.6%.`}
+                {avg === undefined ? "promised average, for every mode" : `of the price, on average, over ${stats!.luckySettled} Draws. Promised: 105.6%.`}
               </p>
               <Link href="/fair" className={`${buttonVariants({ variant: "light" })} mt-6`}>See the live numbers</Link>
             </div>

@@ -19,7 +19,7 @@ export function useLeft(at: number) {
   return minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`
 }
 
-/** Shown across the app while purchases are paused (by an admin, in the contract by the owner, or at Bitrefill's order limit). */
+/** Shown across the app while purchases are paused (by an admin, in the program by the owner, or at Bitrefill's order limit). */
 export function ShopBanner() {
   const shop = useShopStatus().data
   const limit = shop?.reason === "limit" && shop.reopensAt !== undefined ? shop.reopensAt : undefined

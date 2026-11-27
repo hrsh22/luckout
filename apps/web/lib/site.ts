@@ -1,4 +1,4 @@
-import { network } from "./chain"
+import { cluster } from "./chain.ts"
 
 /**
  * Our public URL: shared Draw Proof links and Win Cards point here, not at *.vercel.app. Each Vercel
@@ -12,8 +12,10 @@ export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL
   ? `https://${process.env.VERCEL_URL}`
   : "http://localhost:3000"
 
-export const testnet = network === "testnet"
+/** Off mainnet only Bitrefill's test cards are sold. */
+export const testnet = cluster !== "mainnet"
 
+// TODO(phase3-proof): NEAR Draws; link a Solana Draw Proof once the page reads them.
 /**
  * A Draw Proof to show, linked from the landing page, Fairness and the footer. Mainnet: a Jackpot Draw on
  * app.luckout.near, $8.28 for an $11.03 card, on www.luckout.wtf (staging's contract doesn't have it).

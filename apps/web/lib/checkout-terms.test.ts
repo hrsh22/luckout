@@ -25,11 +25,11 @@ test("each line gets its own copies' quotes, and says when the reserve put a Luc
   assert.equal(lucky!.each, undefined, "the copies cost different amounts")
   assert.equal(lucky!.normal, true, "one Lucky copy is bought at Normal")
   assert.equal(lucky!.plays, 4_000_000, "the smallest part that still plays")
-  assert.deepEqual(normal, { line: lines[1], total: 5_000_000, each: 5_000_000, normal: false, plays: undefined })
+  assert.deepEqual(normal, { line: lines[1], total: 5_000_000, each: 5_000_000, normal: false, belowMin: false, plays: undefined })
   // Copies a few micro-USDC apart cost the same to the cent: shown as "each".
   assert.equal(pricedLines([{ mode: classic, keys: ["a", "b"] }], [q(1, 12_000_001, 1), q(1, 12_000_004, 1)])[0]!.each, 12_000_001)
   // Before the quote is in: nothing is claimed.
-  assert.deepEqual(pricedLines(lines, undefined)[0], { line: lines[0], total: undefined, each: undefined, normal: false, plays: undefined })
+  assert.deepEqual(pricedLines(lines, undefined)[0], { line: lines[0], total: undefined, each: undefined, normal: false, belowMin: false, plays: undefined })
 })
 
 test("one card's odds stand for each copy only while no later copy plays less than one card alone", () => {
