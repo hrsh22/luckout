@@ -1011,4 +1011,27 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   })
 ).middleware(Authorization).annotate(OpenApi.Exclude, true) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi) {}
+// ---------- deposits and customer-signed transactions (ADR-0015) ----------
+
+/** A transaction the customer signs and we pay for: unsigned, with the token that binds its bytes. */
+export class PreparedTransaction extends Schema.Class<PreparedTransaction>("PreparedTransaction")({
+  transaction: Schema.String.check(Schema.isMaxLength(4096)),
+  token: Schema.String.check(Schema.isMaxLength(128))
+}) {}
+
+/** The customer's Deposit Address (their Privy wallet), whether its one-time approval stands, and USDC waiting there. */
+export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress")({
+  address: Schema.String,
+  approved: Schema.Boolean,
+  waiting: Schema.Number
+}) {}
+
+export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
+
+export class DepositsApi extends HttpApiGroup.make("deposits").add(
+  HttpApiEndpoint.get("address", "/deposits/address", { success: DepositAddress, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("approval", "/deposits/approval", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("submit", "/transactions/submit", { payload: PreparedTransaction, success: Submitted, error: PurchaseInvalid })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi).add(DepositsApi) {}

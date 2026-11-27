@@ -390,6 +390,11 @@ export const migrationSteps = {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE checkouts ADD COLUMN number BIGINT, ADD COLUMN address TEXT`
     yield* sql`ALTER TABLE purchases ADD COLUMN round SMALLINT`
+  }),
+  // When a customer's Deposit Address lost its approval (another app's replaced ours), so they're told once.
+  "0031_deposit_approval": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE known_accounts ADD COLUMN approval_lost_at TIMESTAMPTZ`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)

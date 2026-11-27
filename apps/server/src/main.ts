@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, DepositAddress, NotFound, PopularCards, PreparedTransaction, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
@@ -15,6 +15,7 @@ import { Base } from "./Base.ts"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
+import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
@@ -95,6 +96,27 @@ const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
           s.linked.email
             ? Effect.flatMap(purchases.checkoutEmail(s.accountId), (c) => (c.email ? Effect.void : purchases.setCheckoutEmail(s.accountId, s.linked.email!).pipe(Effect.ignore)))
             : Effect.void))
+    })
+  })
+)
+
+// Deposits (ADR-0015): the customer's Deposit Address, their one-time approval, and any transaction they sign that we
+// pay for, co-signed only if it's the one we prepared.
+const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
+  Effect.gen(function*() {
+    const deposits = yield* Deposits
+    const solana = yield* Solana
+    const invalid = (e: { readonly message: string }) => new PurchaseInvalid({ message: e.message })
+    return handlers.handleAll({
+      address: () => CurrentAccount.use((a) => deposits.status(a.accountId)).pipe(Effect.map((d) => new DepositAddress(d)), Effect.mapError(invalid)),
+      approval: ({ payload }) =>
+        CurrentAccount.use((a) => deposits.approval(a.accountId, payload.mode)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid)),
+      submit: ({ payload }) =>
+        solana.cosign(payload.transaction, payload.token).pipe(
+          Effect.tap(() => deposits.nudge),
+          Effect.map((o) => new Submitted({ signature: o.signature })),
+          Effect.mapError(invalid)
+        )
     })
   })
 )
@@ -212,7 +234,7 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
 )
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
-  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
+  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer, Deposits.layer)),
   Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
   // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
   Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer)),
@@ -253,7 +275,7 @@ const mainnetProblems = (env: Record<string, string | undefined>) => [
 
 const Routes = Layer.mergeAll(
   HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
+    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers, DepositsHandlers]),
     Layer.provide(AuthorizationLive)
   ),
   // Read-only tools for other AI agents (Mcp.ts).
@@ -266,7 +288,8 @@ const Routes = Layer.mergeAll(
       Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
   })),
   // Solana Pay transaction requests (ADR-0014): no session (TopUp.ts).
-  SolanaPayRoute
+  SolanaPayRoute,
+  DepositsWebhook
 ).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(
