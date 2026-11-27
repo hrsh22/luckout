@@ -1,5 +1,5 @@
 import { address, getTransactionDecoder, lamports as kitLamports } from "@solana/kit"
-import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js"
+import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction, VersionedTransaction } from "@solana/web3.js"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { FailedTransactionMetadata, LiteSVM, type TransactionMetadata } from "litesvm"
 import { readFileSync } from "node:fs"
@@ -113,8 +113,8 @@ export interface SolanaWorld {
   readonly payWalletUsdc: PublicKey
   /** Config for the Solana layer: these keys, this program, localnet. */
   readonly env: Record<string, string>
-  /** Sends a transaction the fee payer pays, signed by anyone else too (customers, the owner). */
-  readonly send: (ixs: ReadonlyArray<TransactionInstruction>, signers: ReadonlyArray<Keypair>) => void
+  /** Sends a transaction the fee payer pays, signed by anyone else too (customers, the owner); returns its signature. */
+  readonly send: (ixs: ReadonlyArray<TransactionInstruction>, signers: ReadonlyArray<Keypair>) => string
   readonly tokenAccount: (owner: PublicKey, amount: bigint) => PublicKey
   readonly tokens: (account: PublicKey) => bigint
   readonly give: (account: PublicKey, amount: bigint) => void
@@ -207,6 +207,14 @@ export const solanaWorld = (): SolanaWorld => {
 
   let height = 1_000
   const landed = new Map<string, Ran>()
+  /** Each account's landed transactions, newest first, as getSignaturesForAddress lists them. */
+  const byAccount = new Map<string, Array<string>>()
+  const record = (signature: string, bytes: Uint8Array, ran: Ran) => {
+    landed.set(signature, ran)
+    for (const k of VersionedTransaction.deserialize(bytes).message.staticAccountKeys) {
+      byAccount.set(k.toBase58(), [signature, ...(byAccount.get(k.toBase58()) ?? [])])
+    }
+  }
   const chain = Chain.of({
     accounts: (keys) =>
       Effect.succeed(keys.map((k) => {
@@ -223,7 +231,7 @@ export const solanaWorld = (): SolanaWorld => {
         if (res instanceof FailedTransactionMetadata) {
           return Effect.fail(new Refused({ error: txError(res.err()), logs: res.meta().logs() }))
         }
-        landed.set(signature, ranFrom(res, undefined))
+        record(signature, bytes, ranFrom(res, undefined))
         return Effect.void
       }),
     landed: (signature) => Effect.sync(() => landed.get(signature)),
@@ -233,7 +241,7 @@ export const solanaWorld = (): SolanaWorld => {
         return res instanceof FailedTransactionMetadata ? ranFrom(res.meta(), txError(res.err())) : ranFrom(res.meta(), undefined)
       }),
     balance: (k) => Effect.sync(() => BigInt(svm.getBalance(address(k.toBase58())) ?? 0n)),
-    signatures: () => Effect.succeed([])
+    signatures: (key, limit) => Effect.sync(() => (byAccount.get(key.toBase58()) ?? []).slice(0, limit))
   })
 
   const send = (ixs: ReadonlyArray<TransactionInstruction>, signers: ReadonlyArray<Keypair>) => {
@@ -242,9 +250,13 @@ export const solanaWorld = (): SolanaWorld => {
       ...ixs
     )
     tx.sign(feePayer, ...signers.filter((s) => !s.publicKey.equals(feePayer.publicKey)))
-    const res = svm.sendTransaction(kitTx.decode(tx.serialize()))
+    const bytes = tx.serialize()
+    const res = svm.sendTransaction(kitTx.decode(bytes))
     if (res instanceof FailedTransactionMetadata) throw new Error(`${res.err()}\n${res.meta().logs().join("\n")}`)
+    const signature = base58.encode(tx.signature!)
+    record(signature, bytes, ranFrom(res, undefined))
     svm.expireBlockhash()
+    return signature
   }
 
   const payWalletUsdc = tokenAccount(payWallet.publicKey, 0n)

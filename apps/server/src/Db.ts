@@ -390,6 +390,11 @@ export const migrationSteps = {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE checkouts ADD COLUMN number BIGINT, ADD COLUMN address TEXT`
     yield* sql`ALTER TABLE purchases ADD COLUMN round SMALLINT`
+    // The reconciler's indexes take the new open steps: a card waiting on its Draw, and its checkout.
+    yield* sql`DROP INDEX purchases_open`
+    yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'confirm', 'fail', 'drawing')`
+    yield* sql`DROP INDEX checkouts_open`
+    yield* sql`CREATE INDEX checkouts_open ON checkouts (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'settle', 'draw')`
   }),
   // When a customer's Deposit Address lost its approval (another app's replaced ours), so they're told once.
   "0031_deposit_approval": Effect.gen(function*() {
