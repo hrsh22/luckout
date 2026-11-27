@@ -1,4 +1,5 @@
 import { loadEnvConfig } from "@next/env"
+import createMDX from "@next/mdx"
 import type { NextConfig } from "next"
 
 // One `.env` at the repo root for every app.
@@ -28,7 +29,10 @@ if (mixed.length > 0) throw new Error(`NEXT_PUBLIC_NEAR_NETWORK=${network}, but 
 // origin, in iframes that inherit this policy; lock scripts down once wallets can live with it.
 const csp = ["frame-ancestors 'none'", "base-uri 'self'", "object-src 'none'", "form-action 'self'"].join("; ")
 
-export default {
+// The docs (content/docs) are MDX. Turbopack takes plugins by name only.
+const withMDX = createMDX({ options: { remarkPlugins: ["remark-gfm"], rehypePlugins: ["rehype-slug"] } })
+
+export default withMDX({
   transpilePackages: ["@luckout/api"],
   // No "X-Powered-By: Next.js": it tells a stranger which framework advisories to try.
   poweredByHeader: false,
@@ -45,4 +49,4 @@ export default {
       ]
     }]
   }
-} satisfies NextConfig
+} satisfies NextConfig)

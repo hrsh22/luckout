@@ -1,0 +1,48 @@
+import { ExampleDraw } from "@/components/docs"
+
+Luckout is built so you can check it, not just trust it. Your balance, your limits and every Draw live in the Luckout contract on NEAR, where anyone can read them. [Is it fair?](/fair) shows the live figures.
+
+## How Luckout earns
+
+Normal purchases cost exactly the price. Each lucky mode's table is built so that, across many purchases, buyers pay 105.6% of the price on average, the same for every mode and every card size. That 5.6% is Luckout's only revenue. There are no top-up fees and no service fees.
+
+## The tables can't change
+
+Each mode is a Game Version: a table of cashback and chances stored in the contract. Once added, a Game Version can't be edited. The contract also refuses any table that doesn't average exactly 105.6% of the price, or whose cashback could leave you above the price.
+
+## The Live Average
+
+[Is it fair?](/fair) shows the Live Average: what lucky buyers have actually paid so far, as a share of the price, read from the contract within the last minute. Over a few dozen Draws it swings a lot. Over thousands it settles near 105.6%.
+
+## Nobody can retry a Draw
+
+1. Luckout confirms the card was delivered. That confirmation is final.
+2. A block later, in a separate step, the contract runs the Draw. Once it's scheduled, nothing can undo the confirmation, not even us.
+3. Any cashback lands in your balance.
+
+So nobody can cancel a purchase after seeing its result, or run its Draw again for a better one.
+
+The Draw's random value comes from NEAR's block randomness, mixed with the purchase number, so two Draws in the same block come out different. A block producer could nudge that randomness slightly, which is one reason each purchase's cashback is capped.
+
+## Every cashback is covered first
+
+The Cashback Reserve is money Luckout keeps in the contract to pay cashback. Before a lucky purchase starts, the contract locks what its biggest possible cashback would cost, so the money is there whatever the Draw shows.
+
+One purchase can get at most the Cashback Cap: the lower of a fixed amount and a share of the free reserve, never more than half of it. So the reserve always outlasts a run of luck. [Is it fair?](/fair) shows the reserve and today's cap.
+
+## Check any Draw yourself
+
+Every Draw has a public Draw Proof: its transaction, random seed, purchase number and Game Version. The Draw Proof page recomputes the cashback in your browser, straight from the chain. <ExampleDraw>See one</ExampleDraw>.
+
+## What the contract guarantees
+
+- Your balance is held by the contract and credited to you. Anything not locked in a purchase can be withdrawn at any time.
+- Your per-purchase and daily spending limits apply to every purchase, whoever submits it, the Telegram bot included.
+- A card that can't be delivered is refunded in full to your balance, with no Draw.
+- A purchase we neither deliver nor cancel within 24 hours can be reclaimed in full, by you.
+
+## What you trust us for
+
+- **Delivery.** The chain can't see a gift card code, so Luckout confirms each delivery. A purchase we never confirm or cancel can be reclaimed after 24 hours. Luckout sources its gift cards from Bitrefill, which is not affiliated with Luckout.
+- **The mode and the amount.** Luckout submits each purchase for you. The contract caps it at what you confirmed and at your spending limits.
+- **Upgrades.** Luckout can upgrade the contract. Every upgrade is a public transaction and changes the contract's code hash, which [Is it fair?](/fair) shows. Build the contract from [its source](https://github.com/hrsh22/luckout) and you get the same hash.

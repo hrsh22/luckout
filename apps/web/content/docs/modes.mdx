@@ -1,0 +1,39 @@
+import { ModeTable } from "@/components/docs"
+import { OddsGrid } from "@/components/odds-grid"
+
+Every card can be bought four ways. Normal is the card at its price. Lite, Classic and Jackpot cost more up front, and a Draw after delivery decides how much of that comes back to you as cashback. In every mode, you get the card.
+
+## The modes at a glance
+
+For a $20 card:
+
+<ModeTable />
+
+The lucky modes differ only in how much extra you pay up front, and in how often and how much cashback comes back. All three average the same over many purchases: 105.6% of the price.
+
+## How cashback works
+
+- **It's a share of what you paid,** in steps of 10%, up to 100%, which makes the card free.
+- **Any cashback puts you below the price.** In every mode, even the smallest cashback is more than that mode's extra charge.
+- **No cashback is the single most likely result** in every lucky mode.
+- **It lands in your balance** right after the Draw. Spend it on your next card, or withdraw it.
+
+## See the odds
+
+Each dot below is one of 100 people buying a $20 card. Pick a mode to see what each of them paid.
+
+<div className="mt-6"><OddsGrid /></div>
+
+## Your default mode
+
+You choose a mode once, when you create your account, and every purchase uses it, on the site and in Telegram. You can change it on your [wallet page](/wallet), or pick another mode for one card on that card's page or by telling the Telegram bot. Until you choose, purchases use Normal.
+
+## Big cards
+
+One purchase can get at most a set amount of cashback, the Cashback Cap. It's the lower of a fixed amount and a share of the free Cashback Reserve, and [Is it fair?](/fair) shows today's figure.
+
+A card too big for that still sells. Only part of its price plays, and the extra up-front charge applies only to that part. The rest is bought at the price. The card's page tells you how much of the price plays before you buy.
+
+## Why the odds can't change
+
+Each mode is a Game Version: a fixed table of cashback and chances, stored in the Luckout contract. A Game Version can't be edited, and the contract refuses any table that doesn't average exactly 105.6% of the price, or whose cashback could leave you above it. [How Luckout stays fair](/docs/fairness) covers the rest.

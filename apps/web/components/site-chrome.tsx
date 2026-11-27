@@ -8,7 +8,8 @@ import Link from "next/link"
 const LINKS = [
   { href: "/#how", label: "How it works" },
   { href: "/#modes", label: "Modes" },
-  { href: "/fair", label: "Fairness" }
+  { href: "/fair", label: "Fairness" },
+  { href: "/docs", label: "Docs" }
 ]
 
 export function SiteHeader() {
@@ -30,6 +31,7 @@ export function SiteFooter({ compact = false }: { compact?: boolean }) {
         NEAR {network}{network === "testnet" ? ", test USDC only" : ""}
       </span>
       <Link className={link} href="/fair">Fairness</Link>
+      <Link className={link} href="/docs">Docs</Link>
       <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>
       <a className={link} href={explorerAccount(contractId)} target="_blank" rel="noreferrer">The contract</a>
       <span className="sm:ml-auto">Gift cards sourced from Bitrefill, which isn't affiliated with Luckout. You always get the card.</span>
