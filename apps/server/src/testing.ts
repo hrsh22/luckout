@@ -4,35 +4,12 @@ import { ConfigProvider, Effect, Layer } from "effect"
 import { FailedTransactionMetadata, LiteSVM, type TransactionMetadata } from "litesvm"
 import { readFileSync } from "node:fs"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Near } from "./Near.ts"
 import { base58, IDL_PROGRAM_ID, type Mode, ORAO_NETWORK_STATE, ORAO_VRF, oraoRequest, oraoTreasury, type Program, programAt } from "./Program.ts"
 import { Chain, type Ran, Refused, Solana, type TxError } from "./Solana.ts"
 
 // Fakes for tests: everything a test doesn't override dies loudly if it's called.
 
 const unused = (what: string) => () => Effect.die(`${what} was not expected in this test`)
-
-export const fakeNear = (overrides: Partial<Near["Service"]> = {}) =>
-  Near.of({
-    contractId: "app.test",
-    usdcId: "usdc.test",
-    operatorId: "server.test",
-    operatorPublicKey: undefined,
-    relayerId: undefined,
-    treasuryId: undefined,
-    intentsId: "intents.test",
-    view: unused("near.view"),
-    call: unused("near.call"),
-    relay: unused("near.relay"),
-    relayerCall: unused("near.relayerCall"),
-    treasurySend: unused("near.treasurySend"),
-    resume: unused("near.resume"),
-    accessKey: unused("near.accessKey"),
-    height: Effect.die("near.height was not expected in this test"),
-    account: unused("near.account"),
-    verifySignIn: () => Effect.succeed(false),
-    ...overrides
-  })
 
 export const fakeBitrefill = (overrides: Partial<Bitrefill["Service"]> = {}) =>
   Bitrefill.of({

@@ -437,6 +437,9 @@ export const DeploymentLock = Layer.effectDiscard(
     const sql = yield* SqlClient.SqlClient
     const cluster = yield* Cluster
     const program = (yield* ProgramId).toBase58()
+    // The NEAR build marked its database with its contract: the Solana deployment starts on a fresh one (ADR-0015).
+    const [near] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'contract'`
+    if (near) return yield* Effect.die(`This database belongs to the NEAR deployment (${String(near.value)}). The Solana deployment needs a fresh database.`)
     for (const [key, value, setting] of [["cluster", cluster, "SOLANA_CLUSTER"], ["program", program, "SOLANA_PROGRAM_ID"]]) {
       yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')
                  ON CONFLICT (key) DO NOTHING`

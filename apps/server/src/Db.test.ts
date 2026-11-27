@@ -23,6 +23,16 @@ test("a database stays with the deployment that first used it: staging and produ
   assert.deepEqual(exits.map(Exit.isSuccess), [true, true, false, false])
 })
 
+test("the NEAR deployment's database is refused: the Solana one starts on a fresh database", async () => {
+  const { SqlClient } = await import("effect/sql")
+  const exit = await Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`INSERT INTO settings (key, value, updated_by) VALUES ('contract', '"app.luckout.near"'::jsonb, 'server')`
+    return yield* Effect.exit(start({ SOLANA_CLUSTER: "mainnet", SOLANA_PROGRAM_ID: PRODUCTION }))
+  })).pipe(Effect.provide(DbMemory)))
+  assert.equal(Exit.isSuccess(exit), false)
+})
+
 test("every purchase made before carts becomes a checkout of its own, under its own id, with its invoice and payment", async () => {
   const { PGlite } = await import("@electric-sql/pglite")
   const { PgliteClient } = await import("@effect/sql-pglite")

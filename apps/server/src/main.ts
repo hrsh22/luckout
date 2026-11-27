@@ -16,10 +16,8 @@ import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { Near } from "./Near.ts"
 import { Purchases } from "./Purchases.ts"
 import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
-import { Relay } from "./Relay.ts"
 import { Sales } from "./Sales.ts"
 import { Swap } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
@@ -190,17 +188,6 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
   })
 )
 
-const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
-  Effect.gen(function*() {
-    const relay = yield* Relay
-    return handlers.handleAll({
-      status: () => CurrentAccount.use((a) => relay.available(a.accountId).pipe(Effect.map((available) => ({ available })))),
-      send: ({ payload }) => CurrentAccount.use((a) => relay.send(a.accountId, payload.signedDelegate)),
-      intent: ({ payload }) => CurrentAccount.use((a) => relay.sendIntent(a.accountId, payload.signed))
-    })
-  })
-)
-
 // Admins only; to anyone else the endpoints answer NotFound, and /openapi.json leaves them out.
 const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
   Effect.gen(function*() {
@@ -227,9 +214,9 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
 
 const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
   // Swap builds on Solana (prepare, simulate), as Deposits does.
-  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer, Deposits.layer, Swap.layer)),
+  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Deposits.layer, Swap.layer)),
   Layer.provideMerge(Layer.mergeAll(Sales.layer, Connect.layer)),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Alerts.layer)),
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
 
@@ -268,7 +255,7 @@ const mainnetProblems = (env: Record<string, string | undefined>) => [
 
 const Routes = Layer.mergeAll(
   HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers, DepositsHandlers]),
+    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, AdminHandlers, DepositsHandlers]),
     Layer.provide(AuthorizationLive)
   ),
   // Read-only tools for other AI agents (Mcp.ts).

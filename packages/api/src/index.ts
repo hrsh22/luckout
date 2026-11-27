@@ -909,4 +909,4 @@ export class DepositsApi extends HttpApiGroup.make("deposits").add(
   HttpApiEndpoint.post("reclaim", "/transactions/reclaim", { payload: Schema.Struct({ purchaseId: Schema.String.check(Schema.isMaxLength(64)) }), success: PreparedTransaction, error: PurchaseInvalid })
 ).middleware(Authorization) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi).add(DepositsApi) {}
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(AdminApi).add(DepositsApi) {}
