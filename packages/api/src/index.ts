@@ -457,23 +457,13 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.post("disconnectBitrefill", "/bitrefill/disconnect", { success: CheckoutEmail })
 ).middleware(Authorization) {}
 
-export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
-  "LinkInvalid",
-  { message: Schema.String },
-  { httpApiStatus: 400 }
-) {}
-
 /**
- * Telegram linking (ADR-0001, ADR-0007): the signed-in web session issues a one-time code and
- * opens the bot with it, so only the wallet owner decides which Telegram account gets access.
+ * The customer's Telegram link (ADR-0015): made by signing in with Telegram in Privy, which the server reads at sign-in.
+ * Unlinking here stops the bot buying for them at once; unlinking in Privy too keeps the next sign-in from linking it again.
  */
 export class TelegramApi extends HttpApiGroup.make("telegram").add(
   HttpApiEndpoint.get("status", "/telegram", {
     success: Schema.Struct({ linked: Schema.Boolean, telegramName: Schema.optional(Schema.String), botUrl: Schema.optional(Schema.String) })
-  }),
-  HttpApiEndpoint.post("linkCode", "/telegram/link-code", {
-    success: Schema.Struct({ url: Schema.String, expiresAt: Schema.Number }),
-    error: LinkInvalid
   }),
   HttpApiEndpoint.post("unlink", "/telegram/unlink", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}

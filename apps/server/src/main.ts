@@ -169,7 +169,6 @@ const TelegramHandlers = HttpApiBuilder.group(Api, "telegram", (handlers) =>
     const telegram = yield* Telegram
     return handlers.handleAll({
       status: () => CurrentAccount.use((a) => telegram.status(a.accountId)),
-      linkCode: () => CurrentAccount.use((a) => telegram.linkCode(a.accountId)),
       unlink: () => CurrentAccount.use((a) => telegram.unlink(a.accountId))
     })
   })
