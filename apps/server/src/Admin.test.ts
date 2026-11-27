@@ -1,5 +1,6 @@
-import { Api } from "@luckout/api"
-import { Keypair } from "@solana/web3.js"
+import { Api, type OwnerAction } from "@luckout/api"
+import { getAssociatedTokenAddressSync } from "@solana/spl-token"
+import { Keypair, Transaction } from "@solana/web3.js"
 import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -10,7 +11,7 @@ import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 import { Sales } from "./Sales.ts"
-import { Chain, SolanaUnavailable } from "./Solana.ts"
+import { Chain, Solana, SolanaUnavailable } from "./Solana.ts"
 import { fakeBitrefill, solanaLayer, solanaWorld, type SolanaWorld } from "./testing.ts"
 
 // The admin panel's server side on an in-memory database and the real program on LiteSVM, with Bitrefill faked.
@@ -34,7 +35,7 @@ const alerts: Array<string> = []
 const layerFor = (world: SolanaWorld, chain: Chain["Service"] = world.chain) =>
   Admin.layer.pipe(
     Layer.provideMerge(Sales.layer),
-    Layer.provide(Layer.mergeAll(
+    Layer.provideMerge(Layer.mergeAll(
       solanaLayer({ ...world, chain }),
       Layer.succeed(Bitrefill, fakeBitrefill()),
       Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
@@ -44,7 +45,7 @@ const layerFor = (world: SolanaWorld, chain: Chain["Service"] = world.chain) =>
 
 const { world, alice } = funded()
 const layer = layerFor(world)
-const run = <A, E>(e: Effect.Effect<A, E, Admin | Sales | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
+const run = <A, E>(e: Effect.Effect<A, E, Admin | Sales | Solana | SqlClient.SqlClient>) => Effect.runPromise(Effect.scoped(e).pipe(Effect.provide(layer)))
 
 const purchase = (id: string, step: string, error: string | null, minutesAgo = 30, account = alice) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
@@ -281,3 +282,87 @@ test("a purchase is found by its id however old, past the latest 300 an account'
     assert.deepEqual((yield* admin.purchases(undefined, old)).map((p) => p.id), [old])
     assert.deepEqual(yield* admin.purchases(undefined, "00000000-0000-4000-8000-000000000999"), [], "no such purchase")
   })))
+
+// ---------- owner transactions (ADR-0015): prepared here, signed in the owner's own wallet, sent by cosign ----------
+
+/** What a wallet does with a prepared transaction: signs it, and hands it back. */
+const signAs = (wallet: Keypair, transaction: string) => {
+  const tx = Transaction.from(Buffer.from(transaction, "base64"))
+  tx.partialSign(wallet)
+  return tx.serialize({ requireAllSignatures: false }).toString("base64")
+}
+
+/** Runs `f` on a fresh world, with `sign`: admin "boss" prepares the action and `key` (the owner by default) signs it. */
+const asOwner = <A, E>(f: (w: SolanaWorld, sign: (action: OwnerAction, key?: Keypair) => Effect.Effect<unknown, unknown>) => Effect.Effect<A, E, Admin | Solana>) => {
+  const w = solanaWorld()
+  return Effect.runPromise(Effect.scoped(Effect.gen(function*() {
+    const admin = yield* Admin
+    const solana = yield* Solana
+    const sign = (action: OwnerAction, key = w.owner) =>
+      admin.ownerTransaction("boss", action).pipe(Effect.flatMap((t) => solana.cosign(signAs(key, t.transaction), t.token)))
+    return yield* f(w, sign)
+  })).pipe(Effect.provide(layerFor(w))))
+}
+
+test("the owner pauses and sets the caps from their own wallet; a non-admin can't prepare anything", () =>
+  asOwner((_, sign) =>
+    Effect.gen(function*() {
+      const admin = yield* Admin
+      const solana = yield* Solana
+      const refused = yield* Effect.flip(admin.ownerTransaction(alice, { _tag: "set_paused", paused: true }))
+      assert.equal(refused._tag, "NotFound", "to anyone else the endpoint doesn't exist")
+
+      yield* sign({ _tag: "set_paused", paused: true })
+      yield* sign({ _tag: "set_cashback_cap", fixed: null, reserveBps: 3_000 })
+      yield* sign({ _tag: "set_repay_cap", daily: 900 * USDC })
+      yield* sign({ _tag: "set_min_lucky_checkout", amount: 4 * USDC })
+      const c = yield* solana.config
+      assert.equal(c.paused, true)
+      assert.deepEqual(c.cashback_cap, { fixed: null, reserve_bps: 3_000 })
+      assert.deepEqual([c.repay_daily_cap, c.min_lucky_checkout], [900n * BigInt(USDC), 4n * BigInt(USDC)])
+      const o = yield* admin.overview
+      assert.deepEqual([o.program.paused, o.reserve.maxCashback, o.repay.dailyCap], [true, 300 * USDC, 900 * USDC])
+
+      const resume = yield* admin.ownerTransaction("boss", { _tag: "set_paused", paused: false })
+      assert.throws(() => signAs(Keypair.generate(), resume.transaction), /unknown signer/, "only the owner's key can sign it")
+    })))
+
+test("the reserve leaves only for the owner's USDC account, opened at our cost, and comes back from it", () =>
+  asOwner((w, sign) =>
+    Effect.gen(function*() {
+      const solana = yield* Solana
+      const ownerUsdc = getAssociatedTokenAddressSync(w.mint, w.owner.publicKey)
+      assert.equal(yield* solana.account(ownerUsdc), undefined, "no USDC account yet")
+      yield* sign({ _tag: "withdraw_reserve", amount: 100 * USDC })
+      assert.equal(w.tokens(ownerUsdc), 100n * BigInt(USDC))
+      yield* sign({ _tag: "fund_reserve", amount: 40 * USDC })
+      assert.equal(w.tokens(ownerUsdc), 60n * BigInt(USDC))
+      assert.equal((yield* solana.config).free_reserve, 940n * BigInt(USDC))
+      const tooMuch = yield* Effect.flip(sign({ _tag: "withdraw_reserve", amount: 10_000 * USDC }))
+      assert.match(String((tooMuch as { message?: string }).message), /free reserve/i, "the program refuses more than is free")
+    })))
+
+test("the owner names a new operator and Pay Wallet, and hands over to a proposed owner who accepts in their own wallet", () =>
+  asOwner((w, sign) =>
+    Effect.gen(function*() {
+      const admin = yield* Admin
+      const solana = yield* Solana
+      const [operator, payWallet, next] = [Keypair.generate(), Keypair.generate(), Keypair.generate()]
+      const nothing = yield* Effect.flip(admin.ownerTransaction("boss", { _tag: "accept_owner" }))
+      assert.match(nothing.message, /No new owner is proposed/)
+      const bad = yield* Effect.flip(admin.ownerTransaction("boss", { _tag: "set_operator", operator: "not-a-key" }))
+      assert.match(bad.message, /isn't a Solana address/)
+
+      yield* sign({ _tag: "set_operator", operator: operator.publicKey.toBase58() })
+      yield* sign({ _tag: "set_pay_wallet", payWallet: payWallet.publicKey.toBase58() })
+      yield* sign({ _tag: "propose_owner", newOwner: next.publicKey.toBase58() })
+      const proposed = yield* solana.config
+      assert.ok(proposed.operator.equals(operator.publicKey))
+      assert.ok(proposed.pay_wallet.equals(getAssociatedTokenAddressSync(w.mint, payWallet.publicKey)), "its USDC account, opened at our cost")
+      assert.ok(proposed.pending_owner?.equals(next.publicKey))
+
+      yield* sign({ _tag: "accept_owner" }, next)
+      const after = yield* solana.config
+      assert.ok(after.owner.equals(next.publicKey))
+      assert.equal(after.pending_owner, null)
+    })))

@@ -253,7 +253,10 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       sales: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.setSales(payload.open, by)),
       retry: ({ params }) =>
         Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
-          UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
+          UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound())),
+      // Admin.ownerTransaction refuses non-admins itself.
+      owner: ({ payload }) =>
+        CurrentAccount.use((a) => admin.ownerTransaction(a.accountId, payload)).pipe(Effect.map((p) => new PreparedTransaction(p)))
     })
   })
 )

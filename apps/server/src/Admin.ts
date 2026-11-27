@@ -1,5 +1,18 @@
-import { ADMIN_LIST_LIMIT, AdminOverview, AdminPurchase, AdminUser, AttentionPurchase, GUEST_LIMITS, type PurchaseInvalid, type ShopStatus } from "@luckout/api"
-import { PublicKey } from "@solana/web3.js"
+import {
+  ADMIN_LIST_LIMIT,
+  AdminInvalid,
+  AdminOverview,
+  AdminPurchase,
+  AdminUser,
+  AttentionPurchase,
+  GUEST_LIMITS,
+  NotFound,
+  type OwnerAction,
+  type PurchaseInvalid,
+  type ShopStatus
+} from "@luckout/api"
+import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
+import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
 import { Config, Context, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
@@ -12,7 +25,8 @@ import { Solana } from "./Solana.ts"
 
 // The admin panel's server side. Only accounts in ADMIN_ACCOUNTS get anything; everyone else is
 // told the page doesn't exist. Nothing here moves money: the reserve, Proceeds, pausing and caps are
-// transactions the owner signs in their own wallet, and the program checks the owner itself.
+// transactions prepared here for the owner to sign in their own wallet (ADR-0015), and the program checks
+// the owner itself.
 
 /** Customers on the users list: each costs one account read per load. */
 const USERS_SHOWN = ADMIN_LIST_LIMIT
@@ -40,6 +54,11 @@ export class Admin extends Context.Service<Admin, {
   setSales(open: boolean, by: string): Effect.Effect<ShopStatus>
   /** Runs a purchase's next step now instead of after its backoff. Never re-buys or re-charges. */
   retry(id: string, by: string): Effect.Effect<void, PurchaseInvalid>
+  /**
+   * An owner transaction for admin `by`, unsigned: our fee payer pays, and the owner signs (the proposed owner, for
+   * `accept_owner`). It goes through /transactions/submit like any other prepared transaction.
+   */
+  ownerTransaction(by: string, action: OwnerAction): Effect.Effect<{ readonly transaction: string; readonly token: string }, NotFound | AdminInvalid>
 }>()("luckout/Admin") {
   static readonly layer = Layer.effect(
     Admin,
@@ -279,13 +298,75 @@ export class Admin extends Context.Service<Admin, {
           Effect.provideService(SqlClient.SqlClient, sql)
         )
 
+      const ownerTransaction = (by: string, action: OwnerAction) =>
+        Effect.gen(function*() {
+          if (!admins.has(by)) return yield* new NotFound()
+          const feePayer = solana.feePayer
+          if (!feePayer) return yield* new AdminInvalid({ message: "The server's fee payer isn't set" })
+          const config = yield* solana.config
+          const p = solana.program
+          const owner = config.owner
+          const key = (text: string) =>
+            Effect.try({ try: () => new PublicKey(text), catch: () => new AdminInvalid({ message: `${text} isn't a Solana address` }) })
+          const usdc = (wallet: PublicKey) => getAssociatedTokenAddressSync(config.usdc_mint, wallet)
+          // Opened, if it has none, at our fee payer's cost.
+          const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(feePayer, usdc(wallet), wallet, config.usdc_mint)
+          const ix = (accounts: Readonly<Record<string, PublicKey>>, args: Readonly<Record<string, unknown>> = {}) =>
+            p.instruction(action._tag, { owner, config: p.config, ...accounts }, args)
+          const payout = (to: PublicKey, amount: number) => ix({ vault: p.vault, vault_authority: p.vaultAuthority, to }, { amount: BigInt(amount) })
+
+          let signer = owner
+          let ixs: Array<TransactionInstruction>
+          switch (action._tag) {
+            case "set_paused":
+              ixs = [ix({}, { paused: action.paused })]
+              break
+            case "set_cashback_cap":
+              ixs = [ix({}, { fixed: action.fixed === null ? null : BigInt(action.fixed), reserve_bps: action.reserveBps })]
+              break
+            case "set_repay_cap":
+              ixs = [ix({}, { daily: BigInt(action.daily) })]
+              break
+            case "set_min_lucky_checkout":
+              ixs = [ix({}, { amount: BigInt(action.amount) })]
+              break
+            case "fund_reserve":
+              ixs = [ix({ from: usdc(owner), vault: p.vault }, { amount: BigInt(action.amount) })]
+              break
+            case "withdraw_reserve":
+              ixs = [open(owner), payout(usdc(owner), action.amount)]
+              break
+            case "withdraw_proceeds":
+              ixs = action.to === "payWallet" ? [payout(config.pay_wallet, action.amount)] : [open(owner), payout(usdc(owner), action.amount)]
+              break
+            case "set_operator":
+              ixs = [ix({}, { operator: yield* key(action.operator) })]
+              break
+            case "set_pay_wallet": {
+              const wallet = yield* key(action.payWallet)
+              ixs = [open(wallet), ix({ pay_wallet: usdc(wallet) })]
+              break
+            }
+            case "propose_owner":
+              ixs = [ix({}, { new_owner: action.newOwner === null ? null : yield* key(action.newOwner) })]
+              break
+            case "accept_owner":
+              if (!config.pending_owner) return yield* new AdminInvalid({ message: "No new owner is proposed" })
+              signer = config.pending_owner
+              ixs = [p.instruction("accept_owner", { new_owner: signer, config: p.config })]
+              break
+          }
+          return yield* solana.prepare(ixs, signer)
+        }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.fail(new AdminInvalid({ message: e.message }))))
+
       return Admin.of({
         isAdmin: (a) => admins.has(a),
         overview,
         purchases: purchaseList,
         users,
         setSales: sales.setOpen,
-        retry
+        retry,
+        ownerTransaction
       })
     })
   )
