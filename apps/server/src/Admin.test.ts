@@ -77,14 +77,26 @@ test("the overview reads the program's Config and Vault, the fee payer's SOL, th
     assert.equal(o.reserve.maxCashback, 50 * USDC, "the lower of the fixed $50 and 20% of the reserve")
     assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0 })
     assert.deepEqual(
-      o.keys.map((k) => [k.role, k.address, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
-      [["feePayer", world.feePayer.publicKey.toBase58(), "ok"], ["payWallet", world.payWalletUsdc.toBase58(), "low"]],
-      "the fee payer has its SOL; the Pay Wallet has no float yet"
+      o.keys.map((k) => [k.role, k.address, k.usdcAccount, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
+      [["feePayer", world.feePayer.publicKey.toBase58(), undefined, "ok"], ["payWallet", world.payWallet.publicKey.toBase58(), world.payWalletUsdc.toBase58(), "low"]],
+      "the fee payer has its SOL; the Pay Wallet has no float yet. Each shows the wallet to send to; the Pay Wallet's USDC account is only a detail"
     )
-    assert.deepEqual(o.paying, { daily: 0, monthly: 0, limits: { daily: 10_000 * USDC, monthly: 50_000 * USDC } })
+    assert.deepEqual(o.paying, { daily: 0, monthly: 0, limits: { daily: 10_000 * USDC, monthly: 50_000 * USDC } }, "test cards are free")
     assert.equal(o.purchases.today, 2)
     assert.equal(o.purchases.deliveredToday, 1)
     assert.deepEqual(o.purchases.attention.map((a) => [a.step, a.retryable]), [["stuck", false]])
+  })))
+
+test("our paying address counts every card the Pay Wallet paid: a guest's and one on a customer's own Bitrefill account", () =>
+  run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    for (const [key, price, buyer, emailKey] of [["g", 10, "guest", "ek"], ["a", 20, "account", null]] as const) {
+      yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id)
+                 INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, buyer, email_key, invoice_id, ordered_at)
+                 VALUES ((SELECT id FROM co), ${alice}, ${key}, 'amazon-us', 'Card', '10', ${price * USDC}, 'settled', ${buyer}, ${emailKey}, 'inv', now())`
+    }
+    const o = yield* (yield* Admin).overview
+    assert.deepEqual([o.paying.daily, o.paying.monthly], [30 * USDC, 30 * USDC])
   })))
 
 /** A checkout at `step` with its cards, each `[id, step, error]`, as the reconciler and giveUp leave them. */
@@ -139,19 +151,28 @@ test("Retry now moves the checkout the reconciler runs, with its cards, and only
     yield* admin.retry(id(25), "boss")
     assert.deepEqual((yield* steps(slow)).map((x) => (Array.isArray(x) ? x : x.step)), ["delivery", ["delivery"]])
 
-    // Where going again could pay or order twice, or nobody knows what happened: a human looks.
+    // Gave up at admit or pay: back there, where the saved transaction is looked up before anything is signed again.
     const pay = yield* checkout("stuck", [[id(26), "stuck", "Gave up after 12 attempts at pay: send: fetch failed"]])
+    const admit = yield* checkout("stuck", [[id(28), "stuck", "Gave up after 12 attempts at admit: send: fetch failed"]])
+    yield* admin.retry(id(26), "boss")
+    yield* admin.retry(id(28), "boss")
+    assert.deepEqual((yield* steps(pay)).map((x) => (Array.isArray(x) ? x : x.step)), ["pay", ["pay"]])
+    assert.deepEqual((yield* steps(admit)).map((x) => (Array.isArray(x) ? x : x.step)), ["admit", ["admit"]])
+
+    // Where nobody knows what happened (an order on our own account), or a dump was restored: a human looks.
     const unknown = yield* checkout("stuck", [[id(27), "stuck", "Bitrefill order outcome unknown; check the Bitrefill account"]])
-    for (const n of [26, 27]) {
+    const restored = yield* checkout("stuck", [[id(29), "stuck", "Restored from a dump at pay: check by hand"]])
+    for (const n of [27, 29]) {
       const refused = yield* admin.retry(id(n), "boss").pipe(Effect.flip)
       assert.match(refused.message, /needs a manual check/)
     }
-    assert.deepEqual((yield* steps(pay))[1], ["stuck"])
     assert.deepEqual((yield* steps(unknown))[1], ["stuck"])
+    assert.deepEqual((yield* steps(restored))[1], ["stuck"])
 
     // The panel offers Retry now exactly where it works, and labels a payment as the checkout's.
+    yield* checkout("stuck", [[id(30), "stuck", "Gave up after 12 attempts at pay: send: fetch failed"]])
     const attention = (yield* admin.overview).purchases.attention
-    assert.deepEqual(attention.filter((a) => [id(26), id(27)].includes(a.id)).map((a) => a.retryable), [false, false])
+    assert.deepEqual(attention.filter((a) => [id(27), id(29), id(30)].includes(a.id)).map((a) => [a.id, a.retryable]), [[id(27), false], [id(29), false], [id(30), true]])
     const [listed] = yield* admin.purchases(undefined, id(22))
     assert.equal(listed!.checkoutId, gaveUp)
   })))

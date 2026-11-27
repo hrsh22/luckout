@@ -57,14 +57,14 @@ psql -h 127.0.0.1 -U <role> <db> -c "SELECT p.id, p.checkout_id, p.position, p.s
   `closed` means every card ended and the account closed. Its transactions (`https://explorer.solana.com/address/<address>`) show how.
 - **Bitrefill:** guest orders aren't in our Bitrefill account. Bitrefill support can look one up from the invoice id and the payment's signature. Bitrefill also emails each guest card's code to its Checkout Email.
 
-A `Gave up after 12 attempts at <step>: …` error carries only what the checkout last saved. The cause of each failed try is in the logs, as `checkout <id> paused: …`.
+A `Gave up after 12 attempts at <step>: …` error, and the alert `checkout <id> stuck after 12 attempts at <step>: …`, end with why the last try failed. Every try's cause is in the logs, as `checkout <id> paused: …`.
 
 | Error or step | Means | Do |
 |---|---|---|
 | `Gave up after 12 attempts at delivery: …` | We paid the invoice, and Bitrefill hasn't delivered in about six hours. | **Retry now**. It asks Bitrefill only about that invoice, and refunds the customer itself if Bitrefill says a card failed. Still nothing: ask Bitrefill support, with the invoice id and the payment's signature. Never set `fail`: the invoice is paid. |
 | `Gave up … at confirm: …` or `at fail: …` | `settle` kept failing: the RPC, or the fee payer out of SOL. | Fix the cause, then **Retry now**. The program closes a card only once. |
-| `Gave up … at admit: …` | The admission kept failing: the RPC, or the fee payer. | Look up its `admit` transaction, then restart at `admit` (below). The server resends that same transaction, and signs a new one only after the old one's blockhash has expired, so it can't charge twice. |
-| `Gave up … at pay: …` | Paying the invoice kept failing. | Look up its `payment`, then restart at `pay`. The server checks the saved payment first: if it landed, the checkout goes on to `delivery`. If it never landed, the server pays again only within 50 minutes of the invoice, and otherwise asks Bitrefill for a fresh one. |
+| `Gave up … at admit: …` | The admission kept failing: the RPC, or the fee payer. | Fix the cause, then **Retry now**. The server looks up the saved `admit` transaction first and goes on from it if it landed; it signs a new one only after the old one's blockhash has expired unlanded, so it can't charge twice. One admitted over an hour after it was placed is refunded in full at the next step. |
+| `Gave up … at pay: …` | Paying the invoice kept failing. | Fix the cause, then **Retry now**. The server checks the saved payment first: if it landed, the checkout goes on to `delivery`. If it never landed, the server pays again only within 50 minutes of the invoice; past that it asks Bitrefill for a fresh invoice, or refunds the customer in full once the checkout is over an hour old. It never pays one invoice twice. |
 | `failing it was refused, delivered onchain: …`, with the alert `purchase … is delivered onchain but we tried to fail it` | Bitrefill said the card failed, but the program has it Delivered: the customer paid and has no code. | Ask Bitrefill support about the card. Delivered after all: get the code to the customer, and set the card `settled`. Not delivered: send its price in USDC to the customer's Deposit Address (`account_id`), which the sweep moves into their Balance, and set the card `failed`. |
 | Card `drawing`, checkout `draw`, with the alert `… have a Draw still unfinished after 10 minutes` or `… a Draw is still unfinished after 12 tries` | ORAO hasn't filled the request (it takes 4 to 20 s), or finishing it keeps failing (the RPC, the fee payer). The card is delivered and its code shown; only its Cashback waits. | Check the fee payer and the RPC. The server keeps finishing it and never gives up. An hour after the request it asks ORAO again (`ORAO hadn't filled round N after an hour; asked again`). Anyone may finish a Draw. |
 | `waiting`; or `restock`, `The payment failed, so nothing was paid: …` | The float can't cover the checkout yet (uncharged), or its payment was refused, usually because the float ran short (charged). | See [A short Pay Wallet float](#a-short-pay-wallet-float). |
@@ -77,7 +77,7 @@ A `Gave up after 12 attempts at <step>: …` error carries only what the checkou
 | `We couldn't order and pay for this card in time`, with the alert `… couldn't be ordered and paid for in time; refunding it in full` | Charged over an hour ago and still unpaid. Refunded in full, well before the customer could Reclaim. | Same. |
 | `Bitrefill order outcome unknown; check the Bitrefill account` (devnet only) | The server restarted while ordering a test card on our account. | Find the order in our Bitrefill account. Delivered: set `invoice_id` on the checkout and its cards, then restart at `delivery`. No order: set the cards to `fail` and the checkout to `settle`. |
 
-**Restart a purchase** only at the step it gave up at (its error says which). Move its checkout and cards together, with the backoff cleared, in one transaction. **Retry now** does this for `delivery`, `confirm` and `fail`. By hand, for `delivery`:
+**Restart a purchase** only at the step it gave up at (its error says which). Move its checkout and cards together, with the backoff cleared, in one transaction. **Retry now** does this for `admit`, `pay`, `delivery`, `confirm` and `fail`. By hand, for `delivery`:
 
 ```sql
 -- The server runs checkouts, not cards: move the checkout and its cards together, in one transaction, or nothing resumes.
@@ -99,9 +99,7 @@ A stuck card that the customer reclaims, or that is failed onchain, is closed by
 
 ## The customer reclaimed after we delivered
 
-The alert `purchase <id> was delivered but closed onchain as Reclaimed; its voucher cost is ours` means `settle` found the card already reclaimed. The customer has both the code and their money back, and the card's price is our loss. Nothing to fix in the database. It can only happen to a card left unconfirmed for 24 hours.
-
-A stuck card the customer reclaims is closed as `failed` with the error `Reclaimed`, without this alert. To find any that had a code:
+The alert `purchase <id> was delivered but closed onchain as Reclaimed; its voucher cost is ours` means we had the card's code, but the customer reclaimed it first: `settle` found it already reclaimed, or it was stuck (say, at `confirm`) and the server closed it as `failed` with the error `Reclaimed`. The customer has both the code and their money back, and the card's price is our loss. Nothing to fix in the database. It can only happen to a card left unconfirmed for 24 hours. To list them:
 
 ```sh
 psql -h 127.0.0.1 -U <role> <db> -c "SELECT id, account_id, voucher_name, package_value, reference_price FROM purchases WHERE step = 'failed' AND error = 'Reclaimed' AND redemption IS NOT NULL"
@@ -136,7 +134,7 @@ The Pay Wallet pays each checkout's invoice, and `settle` repays it. A new check
 **Top it up**, in any of these ways. Waiting checkouts then go ahead on their own.
 - **From Proceeds (owner):** Admin → Proceeds → Withdraw, to "the Pay Wallet, as float".
 - **Raise the daily repay cap (owner),** if the repay alert fired.
-- **Send USDC on Solana** to the Pay Wallet's own address, from any wallet or exchange. The address is in `deploy/README.md`, Environments. Don't send to the address the panel shows: that's the Pay Wallet's USDC account, not the wallet.
+- **Send USDC on Solana** to the Pay Wallet's own address, from any wallet or exchange: Admin → Paying Bitrefill → Pay Wallet float shows it under "Send USDC on Solana to" (and `deploy/README.md`, Environments, lists it). Never to its USDC account, which the panel shows below it only as a detail.
 
 While sales are stopped or the program is paused, waiting checkouts keep their place, but their 60 minutes keep running.
 
@@ -149,8 +147,8 @@ The server moves USDC from each Deposit Address into its customer's Balance (`de
 Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (everyone who has signed in) are swept.
 
 - **No approval yet:** the customer hasn't made the one-time approval. The Wallet page asks for it.
-- **Another app's approval replaced ours:** what arrives stays at the address. The customer is told once in Telegram, if linked, to approve again in Wallet. To find them: `SELECT account_id, approval_lost_at FROM known_accounts WHERE approval_lost_at IS NOT NULL`.
-- **The sweep fails:** the log says `deposit for <wallet> failed: …` or `deposit sweep failed`. Usually the fee payer or the RPC.
+- **Another app's approval replaced ours** (alert `another app's approval replaced ours at <wallet>'s Deposit Address: …`): what arrives stays at the address. The customer is told once in Telegram, if linked, to approve again in Wallet. To find them: `SELECT account_id, approval_lost_at FROM known_accounts WHERE approval_lost_at IS NOT NULL`.
+- **The sweep fails:** the log says `deposit for <wallet> failed: …` or `deposit sweep failed`. Usually the fee payer or the RPC. After three failures in a row for one wallet, the alert `deposits for <wallet> keep failing, …` comes, then hourly while it lasts.
 - **USDT** isn't swept. The customer taps to swap it in, in Wallet.
 
 ## Stopping purchases
@@ -178,9 +176,9 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
 
 ## Bitrefill's limits and client secret
 
-- **`Luckout's paying address reached Bitrefill's limit ($10000.00 a day, $50000.00 a month); new guest checkouts are refused until it frees up`.**
-  - Bitrefill tagged our paying address with these limits. Every guest card counts against them, whatever its Checkout Email.
-  - New guest checkouts are refused until the 24-hour and 30-day windows move on. Admin → Our paying address shows where it stands.
+- **`Luckout's paying address reached Bitrefill's limit ($10000.00 a day, $50000.00 a month); new checkouts are refused until it frees up`.**
+  - Bitrefill tagged our paying address with these limits. Every card the Pay Wallet pays counts against them: a guest's, whatever its Checkout Email, and one on a customer's own Bitrefill account.
+  - New checkouts are refused until the 24-hour and 30-day windows move on. Admin → Our paying address shows where it stands.
   - Only Bitrefill can raise the limits.
 - **`the Bitrefill client secret expires on <date>, in N day(s): …`**, said daily from two weeks before.
   - Register a new client and replace the `BITREFILL_CLIENT_*` values (`deploy/README.md`, "A Bitrefill client for guest checkout"), then `pm2 restart luckout-api`.
@@ -200,7 +198,7 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
 - **`SOLANA_OPERATOR_SECRET_KEY is …, but the program's operator is …`:** put the operator's key in `.env`. If the owner changed the operator, put the new key in.
 - **`SOLANA_PAY_WALLET_SECRET_KEY doesn't own the program's Pay Wallet account …`:** the same, for the Pay Wallet.
 - **`Another Luckout server is already running against this database`:** `pm2 list`, and stop the extra process. Exactly one may run.
-- **`This database belongs to …, but SOLANA_PROGRAM_ID is …`** (or `SOLANA_CLUSTER`), or **`This database belongs to the NEAR deployment …`:** `DATABASE_URL` points at another deployment's database (`DeploymentLock`). Point it at this site's own.
+- **`This database belongs to …, but SOLANA_PROGRAM_ID is …`** (or `SOLANA_CLUSTER`), or **`This database belongs to the NEAR deployment …`:** `DATABASE_URL` points at another deployment's database (`DeploymentLock`), which was left as it was: the check comes before any migration. Point it at this site's own.
 - `SOLANA_CLUSTER` must be `localnet`, `devnet` or `mainnet`. Anything else stops the start.
 
 ## Rolling back a release
@@ -213,7 +211,7 @@ A release goes in this order: the program (upgraded by hand, staging's first), t
   - Put back the server that goes with that program too.
 - **The server:**
   - A failed deploy prints the command to go back: `bash deploy/remote-deploy.sh <branch> <earlier commit>`.
-  - If the server was refused at its key check, nothing was migrated, and going back is safe.
+  - If the server was refused at its key check or its database check (`This database belongs to …`), nothing was migrated, and going back is safe.
   - Otherwise its migrations stay. Check `git diff <earlier> <failed> -- apps/server/src/Db.ts` first. A new table, or a new nullable or defaulted column, doesn't bother the old code. Anything else means fixing forward: revert or fix on `staging` by PR, then release.
 - **The web:**
   - Vercel's Instant Rollback brings back the previous production deployment. On the Hobby plan it only goes back one.

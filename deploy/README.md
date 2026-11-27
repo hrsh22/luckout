@@ -90,7 +90,7 @@ The `.env` in the repo root on the site user (mode 600). On mainnet the server r
 - `TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID` (alerts reach a human), `NEAR_AI_API_KEY` (the bot's model)
 - `ADMIN_ACCOUNTS`: the Privy wallet addresses (comma-separated) that may open `/admin`
 
-The database records its cluster and program on first start and refuses another (`DeploymentLock`), so a NEAR database or another program's can't be reused by mistake.
+The database records its cluster and program on first start and refuses another (`DeploymentLock`), so a NEAR database or another program's can't be reused by mistake. It checks before running any migration, so a database it refuses is left as it was.
 
 **Web (Vercel)**, per environment: `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_SOLANA_CLUSTER=mainnet`, `NEXT_PUBLIC_SOLANA_PROGRAM_ID` (the Admin panel signs owner transactions only for this program) and `NEXT_PUBLIC_PRIVY_APP_ID`.
 

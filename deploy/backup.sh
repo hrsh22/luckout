@@ -16,7 +16,10 @@ fail() {
   rm -f "$part"
   local last where text token chat
   last=$(ls -1 "$dir"/luckout-*.sql.gz 2>/dev/null | tail -n 1); last=${last##*/}
-  where=$(setting LUCKOUT_CONTRACT_ID); where=${where#app.}; where=${where:-$(setting NEAR_NETWORK)}
+  # Tagged as the server tags its alerts (Alerts.ts): the cluster and the start of the program's address.
+  local cluster program
+  cluster=$(setting SOLANA_CLUSTER); program=$(setting SOLANA_PROGRAM_ID)
+  where="${cluster:-devnet}${program:+ ${program:0:4}}"
   text="⚠️ Luckout [$where]: the nightly database dump failed ($1). The newest one kept is ${last:-missing}. See deploy/RUNBOOK.md, \"Restoring from a dump\"."
   echo "$(date -u +%FT%TZ) $text" >&2
   token=$(setting TELEGRAM_BOT_TOKEN); chat=$(setting ALERT_TELEGRAM_CHAT_ID)

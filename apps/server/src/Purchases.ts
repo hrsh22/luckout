@@ -15,7 +15,7 @@ import {
 } from "@luckout/api"
 import { createAssociatedTokenAccountIdempotentInstruction, createTransferCheckedInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
 import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
-import { Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule, Semaphore } from "effect"
+import { Cause, Config, Context, Effect, Fiber, FiberSet, Layer, Option, Schedule, Semaphore } from "effect"
 import { SqlClient } from "effect/sql"
 import { createHmac, randomUUID } from "node:crypto"
 import { Alerts } from "./Alerts.ts"
@@ -195,8 +195,9 @@ export const guestLimitRefusal = (used: { readonly orders: number; readonly day:
     : undefined
 }
 /**
- * What Bitrefill lets our one paying address buy as a guest (ADR-0015): every guest card counts, whatever its email.
- * Past it, new checkouts are refused until the window moves on; KYB is the way past it.
+ * What Bitrefill lets our one paying address buy (ADR-0015): every card the Pay Wallet pays counts, a guest's whatever
+ * its email, and one on a customer's own Bitrefill account too. Past it, new checkouts are refused until the window
+ * moves on; KYB is the way past it.
  */
 export const PAYING_LIMITS = { daily: 10_000_000_000, monthly: 50_000_000_000 }
 /** A checkout's steps where every card is still at the checkout's own step. */
@@ -207,12 +208,28 @@ const SHARED_STEPS = ["waiting", "admit", "ordering", "restock", "pay", "deliver
  * order time counts from when it was placed.
  */
 export const GUEST_COUNTED_AT = "COALESCE(ordered_at, CASE WHEN step IN ('waiting', 'admit', 'ordering', 'restock', 'pay') THEN now() ELSE created_at END)"
+/** What our paying address has used of PAYING_LIMITS: every real card (test cards are free), counted as GUEST_COUNTED_AT. */
+export const payingUse = (sql: SqlClient.SqlClient) =>
+  sql<{ daily: string; monthly: string }>`
+    SELECT COALESCE(sum(reference_price) FILTER (WHERE ${sql.literal(GUEST_COUNTED_AT)} > now() - interval '1 day'), 0)::text AS daily,
+           COALESCE(sum(reference_price) FILTER (WHERE ${sql.literal(GUEST_COUNTED_AT)} > now() - interval '30 days'), 0)::text AS monthly
+    FROM purchases
+    WHERE voucher_id NOT LIKE 'test-%' AND created_at > now() - interval '32 days'
+      AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`.pipe(
+    Effect.orDie,
+    Effect.map(([r]) => ({ daily: Number(r?.daily ?? 0), monthly: Number(r?.monthly ?? 0) }))
+  )
 /**
- * A card that gave up where going again is safe: settling (confirm, fail) closes a purchase onchain only once, and
- * delivery only asks Bitrefill again about the invoice already paid. Anywhere else (admit, ordering, pay) going again
- * could charge, order or pay twice, so a human looks first (deploy/RUNBOOK.md).
+ * A card that gave up where going again is safe:
+ * - confirm, fail: settling closes a purchase onchain only once;
+ * - delivery: it only asks Bitrefill again about the invoice already paid;
+ * - admit, pay: the admission or payment was saved signed before it was sent, and going again looks that one up first
+ *   (the RPC keeps every landed transaction). A new one is signed only once the saved one's blockhash has expired
+ *   unlanded, so it never can land; an admission under the customer's next Checkout number, a payment only while its
+ *   invoice is under 50 minutes old (savePayment), and past that the invoice is asked for again or the cards refunded.
+ * Not ordering: on our own Bitrefill account an order's outcome there is unknown, so a human looks (deploy/RUNBOOK.md).
  */
-export const GAVE_UP_AT = /^Gave up after \d+ attempts at (confirm|fail|delivery):/
+export const GAVE_UP_AT = /^Gave up after \d+ attempts at (admit|pay|confirm|fail|delivery):/
 /**
  * Where Retry now (Admin) sends a card: on from its own step while its checkout still runs, back to the step it gave
  * up at if that's safe to repeat; undefined when it needs a human.
@@ -227,7 +244,8 @@ export const retryStep = (card: { readonly step: string; readonly error: string 
 /**
  * Retry now: a purchase's checkout runs its next step on the reconciler's next pass instead of after its backoff. One
  * that gave up goes back with every card of it that gave up somewhere safe, each to its own step: the checkout to
- * settle if a card is to be confirmed or failed, else to delivery. Never charges, orders or pays again.
+ * admit or pay with its cards (until delivery they share its step), to settle if a card is to be confirmed or failed,
+ * else to delivery. Never charges, orders or pays twice (GAVE_UP_AT).
  */
 export const retryPurchase = Effect.fn("Purchases.retry")(function*(id: string) {
   const sql = yield* SqlClient.SqlClient
@@ -249,7 +267,8 @@ export const retryPurchase = Effect.fn("Purchases.retry")(function*(id: string) 
       const s = GAVE_UP_AT.exec(c.error ?? "")?.[1]
       return s ? [{ id: c.id, step: s }] : []
     })
-    const next = back.some((c) => c.step !== "delivery") ? "settle" : "delivery"
+    const next = back.find((c) => c.step === "admit" || c.step === "pay")?.step ??
+      (back.some((c) => c.step !== "delivery") ? "settle" : "delivery")
     const moved = yield* sql`UPDATE checkouts SET step = ${next}, error = NULL, attempts = 0, next_attempt_at = now(), updated_at = now() - interval '1 minute'
                              WHERE id = ${row.checkout_id} AND step = 'stuck' RETURNING id`
     if (moved.length === 0) return
@@ -358,6 +377,8 @@ export class Purchases extends Context.Service<Purchases, {
   readonly promoteWaiting: Effect.Effect<void>
   /** One reconciler pass (also runs every 30 seconds by itself). */
   readonly reconcileNow: Effect.Effect<void>
+  /** One pass over stuck cards that closed onchain, reclaimed or failed (also runs every 5 minutes by itself). */
+  readonly settleClosed: Effect.Effect<void>
   /** The customer's Checkout Email, and whether buying needs one (ADR-0012). */
   checkoutEmail(accountId: string): Effect.Effect<CheckoutEmail>
   setCheckoutEmail(accountId: string, email: string): Effect.Effect<CheckoutEmail, PurchaseInvalid>
@@ -643,7 +664,7 @@ export class Purchases extends Context.Service<Purchases, {
             }
             case "ordering": {
               if (bitrefill.guest) {
-                // Charged long ago and still not paid for (Base or Bitrefill kept failing): nothing was signed, so
+                // Charged long ago and still not paid for (Solana or Bitrefill kept failing): nothing was signed, so
                 // refund it now rather than order again, and a late card never races a Reclaim.
                 if (!co.pay_tx && overdue(co, all, WAIT_MINUTES)) {
                   yield* alerts.admin(`checkout ${co.id} couldn't be ordered and paid for in time; refunding it in full`)
@@ -948,6 +969,9 @@ export class Purchases extends Context.Service<Purchases, {
       }
       const notify = (checkoutId: string) => Effect.flatMap(loadCheckout(checkoutId), (co) => Effect.flatMap(cardsIn(co.id), (rows) => tell(co.account_id, rows)))
 
+      /** Keeps why a try failed on the checkout, so giving up can say it (giveUp). Not a step: updated_at stays. */
+      const lastFailure = (id: string, message: string) =>
+        sql`UPDATE checkouts SET error = ${message} WHERE id = ${id}`.pipe(Effect.asVoid, Effect.catchCause(() => Effect.void))
       const advance = (id: string, resumed: boolean, notifyAfter = resumed) =>
         Effect.suspend(() => {
           // Another run has this checkout: leave it, and leave its guard alone. Only the run that set the
@@ -959,9 +983,12 @@ export class Purchases extends Context.Service<Purchases, {
             while (yield* Effect.flatMap(loadCheckout(id), (co) => step(co, resumed && first))) first = false
             if (notifyAfter) yield* notify(id)
           }).pipe(
-            Effect.catch((e: Unknown) => Effect.logWarning(`checkout ${id} paused: ${e.message}`)),
+            Effect.catch((e: Unknown) => Effect.andThen(Effect.logWarning(`checkout ${id} paused: ${e.message}`), lastFailure(id, e.message))),
             // Anything unexpected (database, decryption) pauses this checkout only; the reconciler retries it.
-            Effect.catchCause((cause) => Effect.logError(`checkout ${id} paused`, cause)),
+            Effect.catchCause((cause) => {
+              const e = Cause.squash(cause)
+              return Effect.andThen(Effect.logError(`checkout ${id} paused`, cause), lastFailure(id, e instanceof Error ? e.message : String(e)))
+            }),
             Effect.ensuring(Effect.sync(() => running.delete(id)))
           )
         }).pipe(
@@ -1202,14 +1229,12 @@ export class Purchases extends Context.Service<Purchases, {
           if (!email) return yield* invalid("Add the email for your cards first: Bitrefill needs one for each card (a throwaway one is fine).")
           const over = yield* overGuestLimit(email.key, sum, real.length)
           if (over) return yield* invalid(over)
-          const [paid] = yield* sql<{ day: string; month: string }>`
-            SELECT COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '1 day'), 0)::text AS day,
-                   COALESCE(sum(reference_price) FILTER (WHERE ${counted} > now() - interval '30 days'), 0)::text AS month
-            FROM purchases
-            WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
-              AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)`.pipe(Effect.orDie)
-          if (Number(paid?.day ?? 0) + sum > PAYING_LIMITS.daily || Number(paid?.month ?? 0) + sum > PAYING_LIMITS.monthly) {
-            yield* alerts.admin(`Luckout's paying address reached Bitrefill's limit (${usd(PAYING_LIMITS.daily)} a day, ${usd(PAYING_LIMITS.monthly)} a month); new guest checkouts are refused until it frees up`)
+        }
+        // The Pay Wallet pays every real card, a guest's or one on the customer's own Bitrefill account.
+        if (real.length > 0 && bitrefill.guest) {
+          const paid = yield* payingUse(sql)
+          if (paid.daily + sum > PAYING_LIMITS.daily || paid.monthly + sum > PAYING_LIMITS.monthly) {
+            yield* alerts.admin(`Luckout's paying address reached Bitrefill's limit (${usd(PAYING_LIMITS.daily)} a day, ${usd(PAYING_LIMITS.monthly)} a month); new checkouts are refused until it frees up`)
             return yield* invalid("Luckout has bought as many cards as Bitrefill allows us for now. Please try again later.")
           }
         }
@@ -1321,7 +1346,7 @@ export class Purchases extends Context.Service<Purchases, {
       })
 
       /**
-       * Starts a checkout's run. A guest checkout can take over a minute (Base payment, then Bitrefill), and Cloudflare
+       * Starts a checkout's run. A guest checkout can take over a minute (the payment, then Bitrefill), and Cloudflare
        * drops a request at 100 s: stop waiting at requestWait and answer "pending". The run carries on; the web follows
        * it, and Telegram hears when it ends.
        */
@@ -1415,7 +1440,7 @@ export class Purchases extends Context.Service<Purchases, {
           // Each card says the step it was at, so Retry now can send it back there where that's safe (GAVE_UP_AT).
           const each = open.map((c) => [c, { step: "stuck" as const, error: gaveUp(c.step) }] as const)
           if (!(yield* move(co, { step: "stuck", error: gaveUp(co.step) }, undefined, each))) return
-          yield* alerts.admin(`checkout ${id} stuck after ${MAX_ATTEMPTS} attempts at ${co.step}`)
+          yield* alerts.admin(`checkout ${id} stuck after ${MAX_ATTEMPTS} attempts at ${co.step}: ${co.error ?? "no failure was recorded"}`)
           yield* notify(id)
         })
 
@@ -1493,7 +1518,11 @@ export class Purchases extends Context.Service<Purchases, {
           const card = (yield* solana.checkout(new PublicKey(row.checkout_address)))?.cards[row.position]
           const status = card?.status.kind ?? "Reclaimed"
           if (status === "Reclaimed" || status === "Failed") {
-            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) yield* tell(row.account_id, [yield* load(row.id)])
+            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) {
+              // We had its code (say, settle kept failing at confirm): the customer has it and their money back.
+              if (row.redemption !== null) yield* alerts.admin(`purchase ${row.id} was delivered but closed onchain as ${status}; its voucher cost is ours`)
+              yield* tell(row.account_id, [yield* load(row.id)])
+            }
           }
           // Delivered after we gave up (say, someone else finished its Draw): their code is ready, so show it.
           if (status === "Delivered" && row.redemption !== null) {
@@ -1524,6 +1553,7 @@ export class Purchases extends Context.Service<Purchases, {
         setUsed,
         promoteWaiting: promote,
         reconcileNow: reconcile,
+        settleClosed,
         checkoutEmail,
         setCheckoutEmail,
         useBy

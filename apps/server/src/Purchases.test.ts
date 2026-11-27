@@ -730,6 +730,40 @@ test("a card the customer reclaimed after 24 hours is recorded as reclaimed when
   assert.equal(balanceOf(one), 500 * USDC)
 })
 
+test("a stuck card the customer reclaimed is closed as failed; if we had delivered it, the admin hears its cost is ours", async () => {
+  // Delivered, but settle is refused until it gives up: the card is stuck with its code. A day later the customer reclaims.
+  const w = world({ onOrder: (sw) => setOperator(sw, Keypair.generate().publicKey) })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const card = (id: string) =>
+      sql<{ step: string; error: string | null; coded: boolean }>`SELECT step, error, redemption IS NOT NULL AS coded FROM purchases WHERE id = ${id}`.pipe(
+        Effect.map((rows) => rows[0]!)
+      )
+    const p = yield* w.buy()
+    yield* sql`UPDATE checkouts SET attempts = 12`
+    yield* reconcilePass
+    const stuck = yield* card(p.id)
+    const co = yield* checkoutOf(p.id)
+    const { program } = w.sw
+    w.sw.warp(24 * 3_600 + 60)
+    w.sw.send([
+      program.instruction("reclaim", {
+        wallet: w.alice.wallet.publicKey,
+        config: program.config,
+        customer: program.customer(w.alice.wallet.publicKey),
+        checkout: new PublicKey(co.address!),
+        checkout_payer: w.checkout(co.address!)!.payer
+      }, { card: 0 })
+    ], [w.alice.wallet])
+    yield* Purchases.use((s) => s.settleClosed)
+    return { p, stuck, after: yield* card(p.id) }
+  }))
+  assert.deepEqual([r.stuck.step, r.stuck.coded], ["stuck", true])
+  assert.deepEqual([r.after.step, r.after.error], ["failed", "Reclaimed"])
+  assert.equal(balanceOf(w), 500 * USDC, "the customer has their money back")
+  assert.match(w.alerts.at(-1) ?? "", new RegExp(`purchase ${r.p.id} was delivered but closed onchain as Reclaimed; its voucher cost is ours`))
+})
+
 test("a refused settlement whose cards are still open onchain stays pending, and the next try signs afresh", async () => {
   // The owner moves the operator role away while the card is on its way; then back.
   const stranger = Keypair.generate().publicKey
@@ -1203,6 +1237,26 @@ test("a connected customer's card is ordered on their own Bitrefill account, wit
   assert.equal(w.usdcOf(w.payees[0]!), 10_000_000n, "paid once from the Pay Wallet, as any card")
 })
 
+test("our paying address's limits count every card the Pay Wallet paid, on customers' own Bitrefill accounts too", async () => {
+  const w = world({ real: true, guest: true })
+  const r = await w.run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    // $9,995 of cards bought today on someone's own Bitrefill account: no Checkout Email, but paid from the Pay Wallet.
+    yield* sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id)
+               INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, buyer, invoice_id, ordered_at)
+               VALUES ((SELECT id FROM co), ${w.bob.id}, 'big', 'amazon-us', 'Card', '10000', 9995000000, 'settled', 'account', 'inv-big', now())`
+    yield* connectAs(w.alice.id)
+    const connected = yield* w.buy().pipe(Effect.flip)
+    yield* withEmail("bob@example.com", w.bob.id)
+    const guest = yield* w.buy(undefined, w.bob.id).pipe(Effect.flip)
+    return { connected, guest }
+  }))
+  assert.match(r.connected.message, /as many cards as Bitrefill allows us/)
+  assert.match(r.guest.message, /as many cards as Bitrefill allows us/)
+  assert.deepEqual(w.calls, [], "nothing signed or ordered")
+  assert.match(w.alerts.at(-1) ?? "", /paying address reached Bitrefill's limit/)
+})
+
 test("a lapsed Bitrefill login falls back to a guest order with the Checkout Email, or with none fails and refunds in full", async () => {
   // The login from connecting ends within a minute, so the order renews it first, and Bitrefill refuses.
   const oauth = fakeBitrefillOAuth(60)
@@ -1441,12 +1495,15 @@ test("a guest order Bitrefill never took is refunded in full once the retries ru
     const p = yield* paid.buy()
     yield* sql`UPDATE checkouts SET attempts = 12`
     yield* reconcilePass
-    return yield* settled(p.id)
+    const [card] = yield* sql<{ error: string }>`SELECT error FROM purchases WHERE id = ${p.id}`
+    return { step: yield* settled(p.id), error: card!.error }
   }))
-  assert.equal(after, "stuck")
+  assert.equal(after.step, "stuck")
   assert.equal(paid.usdcOf(paid.payees[0]!), 10_000_000n)
   assert.ok(!paid.calls.includes("settle"), "never refunded while Bitrefill may still deliver")
-  assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery/)
+  // Both say why: the last try's failure.
+  assert.match(after.error, /^Gave up after 12 attempts at delivery: invoice \S+ is still pending$/)
+  assert.match(paid.alerts.join(" "), /stuck after 12 attempts at delivery: invoice \S+ is still pending/)
 })
 
 test("a busy minute at Bitrefill isn't counted against the account as cards it couldn't find", async () => {
@@ -1788,7 +1845,7 @@ test("a checkout that gave up at settle goes back on Retry now, each card to whe
   assert.equal(w.calls.filter((c) => c === "pay").length, 1, "never paid again")
 })
 
-test("a checkout that gave up at delivery goes back to asking Bitrefill; one that gave up at pay needs a human", async () => {
+test("a checkout that gave up at delivery goes back to asking Bitrefill; at admit or pay, to what it saved, so nothing is charged or paid twice", async () => {
   const slow = world({ real: true, guest: true, bitrefillDown: "delivery" })
   const d = await slow.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", slow.alice.id)
@@ -1806,18 +1863,37 @@ test("a checkout that gave up at delivery goes back to asking Bitrefill; one tha
   assert.deepEqual(d.checkout, { step: "delivery", error: null })
   assert.equal(slow.usdcOf(slow.payees[0]!), 10_000_000n)
 
-  const unpaid = world({ real: true, guest: true })
-  unpaid.faults.set("pay", "down")
-  const p = await unpaid.run(Effect.gen(function*() {
-    yield* withEmail("alice@example.com", unpaid.alice.id)
-    const p = yield* unpaid.buy()
-    const sql = yield* SqlClient.SqlClient
-    yield* sql`UPDATE checkouts SET attempts = 12`
-    yield* reconcilePass
-    return { step: (yield* rowOf(p.id)).step, refused: yield* retryPurchase(p.id).pipe(Effect.flip) }
-  }))
-  assert.equal(p.step, "stuck")
-  assert.match(p.refused.message, /needs a manual check/)
+  // Its admission or payment was saved and landed, but the server lost track of it (say, the RPC) and gave up. Retry
+  // now looks the saved transaction up first, finds it landed, and goes on from it.
+  const gaveUp = (step: "admit" | "pay") =>
+    Effect.gen(function*() {
+      const w = world({ real: true, guest: true })
+      const r = yield* Effect.promise(() =>
+        w.run(Effect.gen(function*() {
+          yield* withEmail("alice@example.com", w.alice.id)
+          w.faults.set(step, "crash")
+          const p = yield* w.buy()
+          const column = step === "admit" ? "admit_tx" : "pay_tx"
+          const saved = (yield* checkoutOf(p.id))[column]!
+          yield* w.sw.chain.submit(Buffer.from(saved.bytes, "base64"))
+          const sql = yield* SqlClient.SqlClient
+          yield* sql`UPDATE checkouts SET attempts = 12`
+          yield* reconcilePass
+          const stuck = (yield* rowOf(p.id)).step
+          const at = yield* retryPurchase(p.id)
+          yield* reconcilePass
+          return { stuck, at, after: yield* settled(p.id), resumed: (yield* checkoutOf(p.id))[column]!.signature === saved.signature }
+        }))
+      )
+      return { ...r, w }
+    })
+  for (const step of ["admit", "pay"] as const) {
+    const { stuck, at, after, resumed, w } = await Effect.runPromise(gaveUp(step))
+    assert.deepEqual([stuck, at, after, resumed], ["stuck", step, "settled", true], step)
+    assert.equal(w.customer().checkouts, 1n, `${step}: admitted once`)
+    assert.equal(balanceOf(w), 490 * USDC, `${step}: charged once`)
+    assert.deepEqual(w.payees.map((x) => w.usdcOf(x)), [10_000_000n], `${step}: one invoice, paid once`)
+  }
 })
 
 test("the same cart sent twice at once is one checkout, returned to both", async () => {

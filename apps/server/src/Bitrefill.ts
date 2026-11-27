@@ -8,10 +8,9 @@ import { Cluster } from "./Solana.ts"
 
 // On mainnet, cards are bought as a guest through Bitrefill's MCP endpoint with the customer's Checkout
 // Email, or on their own Bitrefill account once they've connected it (Connect.ts), and each invoice is paid
-// in USDC on Base from our Base Wallet (ADR-0012). The API key only reads:
-// the catalog, logos and prices. Testnet buys Bitrefill's free test cards on REST with its own account,
-// since a guest can't buy those. Without a guest client (BITREFILL_CLIENT_ID), real cards are bought from the
-// account's USD store credit (ADR-0009), but a mainnet server no longer starts without one (main.ts).
+// in USDC on Solana (`usdc_solana`) from our Pay Wallet (ADR-0015). The API key only reads:
+// the catalog, logos and prices. Devnet and a local validator buy Bitrefill's free test cards on REST with its
+// own account, since a guest can't buy those; a mainnet server doesn't start without a guest client (main.ts).
 
 const Product = Schema.Struct({
   id: Schema.String,
@@ -29,27 +28,6 @@ const Product = Schema.Struct({
   logo_background: Schema.optional(Schema.String),
   packages: Schema.optional(Schema.Array(Schema.Struct({ value: Schema.String, amount: Schema.optional(Schema.Number) })))
 })
-const Balances = Schema.Struct({
-  balances: Schema.Array(Schema.Struct({ payment_method: Schema.String, balance_currency: Schema.String, amount: Schema.String })),
-  /** How much more each sub-account may take before Bitrefill holds a deposit for review. */
-  top_up: Schema.optional(Schema.Array(Schema.Struct({
-    currency: Schema.String,
-    max_amount: Schema.optional(Schema.Struct({ amount: Schema.String, currency: Schema.String }))
-  })))
-})
-const Deposit = Schema.Struct({
-  id: Schema.String,
-  status: Schema.String,
-  payment: Schema.Struct({
-    method: Schema.String,
-    address: Schema.String,
-    currency: Schema.String,
-    /** Base units of `currency`. */
-    price: Schema.Number,
-    commission: Schema.optional(Schema.Number)
-  })
-})
-const InvoiceState = Schema.Struct({ id: Schema.String, status: Schema.String })
 
 const McpProduct = Schema.Struct({
   id: Schema.String,
@@ -238,7 +216,7 @@ export const matchOrders = <
 
 export type Order =
   | { readonly _tag: "Ordered"; readonly invoiceId: string }
-  /** A guest invoice, unpaid: pay exactly `amount` (USDC base units) to `payTo` on Base; read it back with `accessToken`. */
+  /** A guest invoice, unpaid: pay exactly `amount` (USDC base units) to `payTo` on Solana; read it back with `accessToken`. */
   | { readonly _tag: "Invoiced"; readonly invoiceId: string; readonly accessToken: string; readonly payTo: string; readonly amount: number }
   /** Our USD credit can't cover it; nothing was created or paid, so it can be ordered again later. */
   | { readonly _tag: "NoCredit"; readonly reason: string }
@@ -248,23 +226,13 @@ export type Order =
 /** Who an order is placed for: a guest with their Checkout Email, or the customer's own Bitrefill login (Connect.ts). */
 export type Buyer = { readonly email: string } | { readonly token: string }
 
-/** A USD credit deposit: sending exactly `price` (USDC base units) to `address` on Base buys `amount` of credit. */
-export interface CreditDeposit {
-  readonly invoiceId: string
-  readonly address: string
-  readonly price: number
-}
-/** Where a credit deposit is. "failed" means Bitrefill gave up on it after we may have paid: a human must look. */
-export type DepositState = "pending" | "credited" | "failed"
-
-const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/
 /** Bitrefill's words for a balance that can't cover an order. */
 const NO_CREDIT = /balance|insufficient|not enough|top ?up/i
 /** Bitrefill's words for an order past its limit (`purchase_limit_reached`): nothing was created or paid. */
 export const ORDER_LIMIT = /purchase[_ ]?limit/i
 
 const DAY_MS = 24 * 60 * 60 * 1000
-/** Bitrefill takes this many invoices from our account (orders and credit top-ups) in any 24 hours. */
+/** Bitrefill takes this many invoices from our account in any 24 hours. */
 export const ORDERS_PER_DAY = 15
 /**
  * How many orders the last 24 hours used, counting `inFlight` ones about to be placed, and when they're
@@ -457,7 +425,7 @@ export const forSale = <P extends { priceMicroUsdc: number }>(packages: Readonly
 export const tooSmall = <P extends { priceMicroUsdc: number }>(packages: ReadonlyArray<P>) => packages.filter((p) => p.priceMicroUsdc < MIN_PRICE)
 
 export class Bitrefill extends Context.Service<Bitrefill, {
-  /** Orders are guest invoices paid from the Base Wallet (ADR-0012), not store credit. */
+  /** Orders are guest invoices paid from the Pay Wallet (ADR-0015), not store credit. */
   readonly guest: boolean
   search(q: string): Effect.Effect<ReadonlyArray<VoucherSummary>, BitrefillUnavailable>
   /** The catalog a page at a time, filtered only by what the customer chose. */
@@ -473,7 +441,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
    */
   voucher(id: string, options?: { readonly purchase?: boolean; readonly page?: boolean }): Effect.Effect<Voucher, BitrefillUnavailable>
   /**
-   * Orders a card. With guest checkout it's an unpaid invoice to pay from the Base Wallet, placed as a guest
+   * Orders a card. With guest checkout it's an unpaid invoice to pay from the Pay Wallet, placed as a guest
    * with the customer's Checkout Email or on their own Bitrefill account; otherwise it's paid at once from the
    * USD balance. Save the invoice before going on.
    */
@@ -483,11 +451,6 @@ export class Bitrefill extends Context.Service<Bitrefill, {
    * Nothing settled yet is an error (unknown, not failed). A guest invoice needs its access token.
    */
   delivery(invoiceId: string, accessToken: string | undefined, cards: ReadonlyArray<Card>): Effect.Effect<ReadonlyArray<CardDelivery>, BitrefillUnavailable>
-  /** Our USD store credit, and how much more Bitrefill lets us hold (micro-USDC). */
-  readonly credit: Effect.Effect<{ readonly balance: number; readonly room: number }, BitrefillUnavailable>
-  /** Asks for `amount` (micro-USDC, whole cents) of USD credit, paid 1:1 in USDC on Base. */
-  deposit(amount: number): Effect.Effect<CreditDeposit, BitrefillUnavailable>
-  depositState(invoiceId: string): Effect.Effect<{ readonly state: DepositState; readonly status: string }, BitrefillUnavailable>
   /** Bitrefill's order limit with `inFlight` orders about to be placed (see orderRoom); undefined if its invoices can't be read. */
   orderLimit(inFlight: number): Effect.Effect<OrderRoom | undefined>
 }>()("luckout/Bitrefill") {
@@ -937,7 +900,7 @@ export class Bitrefill extends Context.Service<Bitrefill, {
       const settled = (cards: ReadonlyArray<Card>, orders: ReadonlyArray<{ readonly product?: { readonly id: string; readonly value?: unknown } | undefined; readonly redemption_info?: Redemption | null | undefined; readonly status?: string }>, invoiceFailed: boolean) =>
         invoiceFailed || matchOrders(cards, orders).every((o) => !!o && (!!o.redemption_info || GUEST_FAILED.test(o.status ?? "")))
 
-      // A guest invoice is delivered once Bitrefill sees our Base payment, usually within a minute.
+      // A guest invoice is delivered once Bitrefill sees the Pay Wallet's payment, usually within a minute.
       const guestDelivery = (invoiceId: string, accessToken: string, cards: ReadonlyArray<Card>) =>
         Effect.andThen(pollSlot, asGuest("get-invoice-by-id", { invoice_id: invoiceId, invoice_access_token: accessToken }, GuestInvoice)).pipe(
           Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
@@ -982,64 +945,8 @@ export class Bitrefill extends Context.Service<Bitrefill, {
         )
       })
 
-      // Only MCP sees the USD sub-account; REST reports the primary (BTC) one.
-      const credit = mcp("get-balances", {}, Balances).pipe(
-        Effect.mapError((e) => (e instanceof BitrefillUnavailable ? e : unavailable(e.reason))),
-        Effect.flatMap((r) =>
-          Effect.try({
-            try: () => {
-              const usd = r.balances.find((b) => b.payment_method === "balance" && b.balance_currency === "USD")
-              const room = r.top_up?.find((t) => t.currency === "USD")?.max_amount
-              return {
-                balance: usdToMicro(usd?.amount ?? "0"),
-                // Without a reported room, assume Bitrefill's usual $2,000 limit on what the account holds.
-                room: room?.currency === "USD" ? usdToMicro(room.amount) : Math.max(0, 2_000_000_000 - usdToMicro(usd?.amount ?? "0"))
-              }
-            },
-            catch: (e) => unavailable(`unreadable balances: ${e}`)
-          })
-        )
-      )
-
-      // Never retried: each call creates an invoice. An unpaid one simply expires.
-      const deposit = Effect.fn("Bitrefill.deposit")(function*(amount: number) {
-        if (!Number.isInteger(amount) || amount <= 0 || amount % 10_000 !== 0) {
-          return yield* unavailable(`a credit deposit must be whole cents, not ${amount}`)
-        }
-        const d = yield* HttpClientRequest.post("/accounts/deposit").pipe(
-          HttpClientRequest.bodyJsonUnsafe({ currency: "USD", payment_method: "usdc_base", amount: amount / 1_000_000 }),
-          rest.execute,
-          // The response echoes the account's email; it's decoded here and never logged.
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(data(Deposit))),
-          Effect.map((r) => r.data),
-          Effect.mapError(unavailable),
-          Effect.ensuring(invoiced)
-        )
-        // Pay only what buys exactly this much credit, in USDC on Base, to a well-formed address.
-        if (d.payment.method !== "usdc_base" || d.payment.currency !== "USDC") {
-          return yield* unavailable(`deposit ${d.id} wants ${d.payment.method}/${d.payment.currency}, not USDC on Base`)
-        }
-        if (d.payment.price !== amount || (d.payment.commission ?? 0) !== 0) {
-          return yield* unavailable(`deposit ${d.id} costs ${d.payment.price} for ${amount} of credit; refusing to pay more than 1:1`)
-        }
-        if (!EVM_ADDRESS.test(d.payment.address)) return yield* unavailable(`deposit ${d.id} has a malformed address`)
-        return { invoiceId: d.id, address: d.payment.address, price: d.payment.price }
-      })
-
-      const depositState = (invoiceId: string) =>
-        get(`/invoices/${encodeURIComponent(invoiceId)}`, InvoiceState).pipe(
-          Effect.map((i) => ({
-            status: i.status,
-            state: (["all_delivered", "complete", "delivered"].includes(i.status)
-              ? "credited"
-              : ["all_error", "payment_error", "refunded"].includes(i.status)
-              ? "failed"
-              : "pending") as DepositState
-          }))
-        )
-
       const logo = (id: string) => logos.get(id) ?? {}
-      return Bitrefill.of({ guest, search, browse, popular, logo, voucher, order, delivery, credit, deposit, depositState, orderLimit })
+      return Bitrefill.of({ guest, search, browse, popular, logo, voucher, order, delivery, orderLimit })
     })
   ).pipe(Layer.provide(FetchHttpClient.layer))
 }

@@ -714,7 +714,10 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   /** Our keys' balances and where the Monitor alerts: the fee payer's SOL (lamports), the Pay Wallet's USDC. */
   keys: Schema.Array(Schema.Struct({
     role: Schema.Literals(["feePayer", "payWallet"]),
+    /** The wallet: where to send it SOL or USDC. */
     address: Schema.String,
+    /** The Pay Wallet's USDC account, which the program pays and repays: a detail, never where to send (an exchange can strand USDC sent to it). */
+    usdcAccount: Schema.optional(Schema.String),
     balance: Schema.String,
     alertBelow: Schema.String
   })),
@@ -738,7 +741,7 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
     busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
   }),
-  /** What every guest card has used of our paying address's own limits at Bitrefill (ADR-0015). */
+  /** What every card the Pay Wallet paid, a guest's or on a customer's own Bitrefill account, has used of our paying address's own limits at Bitrefill (ADR-0015). */
   paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
 }) {}
 

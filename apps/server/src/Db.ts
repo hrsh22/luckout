@@ -425,33 +425,40 @@ export const migrationSteps = {
 }
 const migrations = Migrator.fromRecord(migrationSteps)
 
-const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
-
 /**
  * A database belongs to one deployment for good: the first server to start records its cluster and program, and a
  * server for another refuses to start against it. So devnet and mainnet data never mix, and neither do staging and
- * production, which are both on mainnet with programs of their own (ADR-0015).
+ * production, which are both on mainnet with programs of their own (ADR-0015). The check comes before any migration,
+ * so a database it refuses is left as it was; the record comes after, once the `settings` table exists.
  */
 export const DeploymentLock = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const cluster = yield* Cluster
-    const program = (yield* ProgramId).toBase58()
-    // The NEAR build marked its database with its contract: the Solana deployment starts on a fresh one (ADR-0015).
-    const [near] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = 'contract'`
-    if (near) return yield* Effect.die(`This database belongs to the NEAR deployment (${String(near.value)}). The Solana deployment needs a fresh database.`)
-    for (const [key, value, setting] of [["cluster", cluster, "SOLANA_CLUSTER"], ["program", program, "SOLANA_PROGRAM_ID"]]) {
-      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')
-                 ON CONFLICT (key) DO NOTHING`
-      const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = ${key}`
-      if (row?.value !== value) {
-        return yield* Effect.die(`This database belongs to ${String(row?.value)}, but ${setting} is ${value}. Point DATABASE_URL at that deployment's own database.`)
+    const ours = { cluster: yield* Cluster, program: (yield* ProgramId).toBase58() }
+    const setting = { cluster: "SOLANA_CLUSTER", program: "SOLANA_PROGRAM_ID" }
+    // A fresh database has no settings table yet. The NEAR build recorded its network (and later its contract) there,
+    // and its database ends at migration 0029, which the Solana migrations after it would change.
+    const [table] = yield* sql<{ t: string | null }>`SELECT to_regclass('settings')::text AS t`
+    const recorded = table?.t
+      ? new Map((yield* sql<{ key: string; value: unknown }>`SELECT key, value FROM settings WHERE key IN ('network', 'contract', 'cluster', 'program')`)
+        .map((r) => [r.key, r.value]))
+      : new Map<string, unknown>()
+    const near = recorded.get("contract") ?? recorded.get("network")
+    if (near !== undefined) return yield* Effect.die(`This database belongs to the NEAR deployment (${String(near)}). The Solana deployment needs a fresh database.`)
+    for (const key of ["cluster", "program"] as const) {
+      const value = recorded.get(key)
+      if (value !== undefined && value !== ours[key]) {
+        return yield* Effect.die(`This database belongs to ${String(value)}, but ${setting[key]} is ${ours[key]}. Point DATABASE_URL at that deployment's own database.`)
       }
+    }
+    yield* Migrator.make({})({ loader: migrations })
+    for (const key of ["cluster", "program"] as const) {
+      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(ours[key])}::jsonb, 'server') ON CONFLICT (key) DO NOTHING`
     }
   }).pipe(Effect.orDie)
 )
 
-export const DbLive = DeploymentLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
+export const DbLive = DeploymentLock.pipe(Layer.provideMerge(Client))
 
 // Tests migrate one database per process and start each fresh one from its dump: ~70ms instead of
 // ~1s to boot and migrate. (The template is closed once dumped; left open, the process lingers 10s.)
