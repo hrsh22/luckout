@@ -100,13 +100,24 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 **Done when** the server's tests pass against a local validator with Bitrefill faked.
 
-**Status (2026-11-28), on branch `solana-server`:**
+**Done 2026-11-28, on branch `solana-server`.** The server's 250 tests pass on LiteSVM, running the real program and ORAO's, with Bitrefill faked.
 - **Built:**
   - `Program.ts`, which codes the program's instructions, accounts, events and errors from its IDL, committed in `programs/idl`
   - `Solana.ts`, which separates the transport (RPC, or LiteSVM in tests) from our keys. It saves every transaction before sending it and resumes it after a crash.
-  - Purchases on the program, Privy sign-in, Bitrefill in `usdc_solana`, `Deposits.ts`, and Admin and Monitor on the program
-  - the server tests, which run the real program and ORAO's on LiteSVM
-- **Left:** Top-Ups and Swap, the Agent's deposit tool, Telegram, MCP and the remaining NEAR modules (in progress), then one migration for the fresh database.
+  - Purchases on the program, with the Draw step
+  - Privy sign-in
+  - Bitrefill in `usdc_solana`, with our paying address's limits
+  - `Deposits.ts` and the transactions a customer signs
+  - 1Click Top-Ups to the Deposit Address (`FLEX_INPUT`, with a refund address on the source chain)
+  - USDT and ORE as one swap-and-deposit transaction
+  - the Agent's deposit tool, and buying once the money lands
+  - Admin, Monitor and MCP on the program
+- **Removed:** `Near`, `Relay`, `Intents`, `Base`, `Credit` and `Refill`, their scripts, and `near-api-js`.
+- **Carried into Phase 3:**
+  - the web app still calls the old endpoints and fails its type check
+  - in the bot, 1Click addresses for other chains wait for a refund-address question; until then it gives the Deposit Address
+  - `deploy/README.md` still describes NEAR
+- **Carried into Phase 4:** Jupiter's `payer` (the fee payer funding the customer's token accounts) must be proved with real money.
 - **Decisions made while building:**
   - **Accounts and sessions:** a customer's account id is their Privy wallet's address. Privy's tokens are checked once, at sign-in. After that our own session cookie carries it, bound to the cluster and the program.
   - **Transactions a customer signs:** we build each one with our fee payer and hand it out unsigned with a token that binds its bytes (`/transactions/*`). The fee payer signs only those bytes, and only once the customer has signed them.
