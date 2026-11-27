@@ -1,7 +1,7 @@
 "use client"
 
 import { BitrefillAccount, BitrefillLimits, CheckoutEmailForm } from "@/components/checkout-email"
-import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
+import { AddFundsSheet, DepositPanel, WithdrawSheet } from "@/components/funds"
 import { InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
 import { ModePicker } from "@/components/mode-picker"
@@ -14,7 +14,7 @@ import { useWalletActions } from "@/lib/actions"
 import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
-import { useCheckoutEmail } from "@/lib/queries"
+import { useCheckoutEmail, useDepositAddress } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode, NO_LIMIT, noLimit } from "@luckout/api"
 import { Plus } from "lucide-react"
@@ -25,7 +25,10 @@ export default function WalletPage() {
   const { accountId, account, ready, token } = useSession()
   const checkout = useCheckoutEmail(token).data
   const actions = useWalletActions()
+  const approved = useDepositAddress(token).data?.approved
   const [adding, setAdding] = useState(false)
+  const [addTab, setAddTab] = useState<"solana" | "chain">("solana")
+  const add = (tab: "solana" | "chain") => (setAddTab(tab), setAdding(true))
   const [withdrawing, setWithdrawing] = useState(false)
   const [saving, setSaving] = useState<Mode>()
   // The pre-deposit pick lives in localStorage, which doesn't re-render: nudge it.
@@ -77,7 +80,7 @@ export default function WalletPage() {
               {account === undefined ? <span className="skeleton inline-block h-14 w-48 rounded-full opacity-30" /> : <Money micro={balance} down />}
             </p>
             <div className="mt-8 flex flex-wrap gap-2">
-              <Button variant="gold" onClick={() => setAdding(true)}><Plus />Add funds</Button>
+              <Button variant="gold" onClick={() => add("solana")}><Plus />Add funds</Button>
               <Button variant="light" disabled={!balance} onClick={() => setWithdrawing(true)}>Withdraw</Button>
             </div>
           </div>
@@ -105,7 +108,17 @@ export default function WalletPage() {
         </div>
       </section>
 
-      {/* TODO(phase3-wallet): the Deposit Address, its approval, USDT waiting there, 1Click Top-Ups. */}
+      <section id="deposit" className="flex scroll-mt-28 flex-col gap-4">
+        <div>
+          <h2 className="font-display text-3xl font-extrabold">{approved === false && !account ? "Set up deposits" : "Deposit Address"}</h2>
+          <p className="mt-1 max-w-[60ch] text-ink-soft">Your own address on Solana. What you send there lands in your balance, from any exchange or wallet.</p>
+        </div>
+        <div className="card p-6"><DepositPanel /></div>
+        {approved && (
+          <Button variant="light" className="self-start" onClick={() => add("chain")}>Top up from another chain</Button>
+        )}
+      </section>
+
       <InTransit />
 
       <section className="flex flex-col gap-4">
@@ -149,7 +162,7 @@ export default function WalletPage() {
 
       <RecentTransfers />
 
-      <AddFundsSheet open={adding} onOpenChange={setAdding} />
+      <AddFundsSheet open={adding} onOpenChange={setAdding} tab={addTab} />
       <WithdrawSheet open={withdrawing} onOpenChange={setWithdrawing} />
     </div>
   )
