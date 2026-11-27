@@ -42,7 +42,8 @@ const refundsBegin = () => new Date(Date.now() + 30 * 60 * 1000)
 const CHAIN_NAMES: Record<string, string> = {
   eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana", btc: "Bitcoin", near: "NEAR", tron: "Tron"
 }
-const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
+/** A chain as people name it: "Base" for base. */
+export const chainName = (c: string | null) => (c ? CHAIN_NAMES[c] ?? c : "another chain")
 const usd = (micro: number) => `$${(micro / 1e6).toFixed(2)}`
 const isSolanaAddress = (address: string) => {
   try {
