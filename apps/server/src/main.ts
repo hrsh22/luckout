@@ -74,9 +74,8 @@ export const readDrawProof = (signature: string) =>
     const program = `Program ${solana.program.id.toBase58()} invoke [1]`
     const orao = `Program ${ORAO_VRF.toBase58()} invoke`
     // One request per settle, so a Checkout's Draws share one: each is read once.
-    const requests = yield* Effect.forEach(new Set(draws.map((d) => d.request.toBase58())), (address) =>
+    const requests = yield* Effect.forEach(new Map(draws.map((d) => [d.request.toBase58(), d.request])), ([address, key]) =>
       Effect.gen(function*() {
-        const key = draws.find((d) => d.request.toBase58() === address)!.request
         const account = yield* solana.account(key)
         const value = account?.owner.equals(ORAO_VRF) ? filledRandomness(account.data) : undefined
         const others = (yield* solana.signatures(key, 20)).filter((s) => s !== signature).reverse()
@@ -129,11 +128,11 @@ export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
     const sales = yield* Sales
     const telegram = yield* Telegram
     // Anyone may ask, so every visitor shares one read every 30 seconds; a failed read isn't kept.
+    const solana = yield* Solana
     const program = yield* readProgram.pipe(
-      Effect.provideService(Solana, yield* Solana),
+      Effect.provideService(Solana, solana),
       Effect.cachedWithTTL((exit) => (Exit.isSuccess(exit) ? "30 seconds" : 0))
     )
-    const solana = yield* Solana
     const proofs = new Map<string, DrawProof>()
     const proof = (signature: string) =>
       Effect.gen(function*() {
