@@ -1,5 +1,6 @@
 import { NodeHttpServer } from "@effect/platform-node"
-import { BitrefillUnavailable, CatalogApi, ProgramInfo, SystemApi } from "@luckout/api"
+import { BitrefillUnavailable, CatalogApi, DrawProof, ProgramInfo, SystemApi } from "@luckout/api"
+import { verifyCard } from "@luckout/api/draw"
 import { Cause, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/sql"
 import { MODES } from "../../web/lib/modes.ts"
@@ -9,13 +10,13 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
-import { Keypair } from "@solana/web3.js"
+import { Keypair, PublicKey } from "@solana/web3.js"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { CatalogHandlers, readProgram, SystemHandlers } from "./main.ts"
-import { base58 } from "./Program.ts"
+import { base58, lucky, ORAO_NETWORK_STATE, ORAO_VRF, oraoRequest, oraoTreasury } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Sales } from "./Sales.ts"
-import { Chain, checkKeys } from "./Solana.ts"
+import { Chain, checkKeys, SolanaUnavailable } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
 import { fakeBitrefill, solanaLayer, solanaWorld } from "./testing.ts"
 
@@ -159,6 +160,153 @@ test("/program needs no sign-in, and every visitor shares one read for 30 second
     const before = reads
     assert.equal((await handler(new Request("http://luckout.test/program"))).status, 200)
     assert.equal(reads, before, "the second visitor got the cached read")
+  } finally {
+    await dispose()
+  }
+})
+
+// A Draw Proof from the real program on LiteSVM: two Classic cards admitted, delivered, settled, filled and finished.
+const USDC = 1_000_000n
+const RANDOMNESS = Buffer.from(Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256))
+
+const finishedDraw = () => {
+  const world = solanaWorld()
+  const p = world.program
+  const alice = world.shopper(lucky(1))
+  world.give(alice.usdc, 100n * USDC)
+  const customer = p.customer(alice.wallet.publicKey)
+  world.send([p.instruction("deposit_for", { config: p.config, customer, source: alice.usdc, vault: p.vault, vault_authority: p.vaultAuthority })], [])
+  const checkout = p.checkout(alice.wallet.publicKey, 0n)
+  const card = { reference_price: 10n * USDC, mode: lucky(1), max_debit: 12n * USDC, lucky_amount: null }
+  world.send([
+    p.instruction("admit", { operator: world.operator.publicKey, payer: world.feePayer.publicKey, config: p.config, customer, checkout }, { number: 0n, cards: [card, card] })
+  ], [world.operator])
+  const state = Effect.runSync(world.chain.accounts([ORAO_NETWORK_STATE]))[0]!
+  const request = oraoRequest(checkout, 0)
+  const settle = world.send([
+    p.instruction("settle", {
+      operator: world.operator.publicKey,
+      payer: world.feePayer.publicKey,
+      config: p.config,
+      customer,
+      checkout,
+      vault: p.vault,
+      vault_authority: p.vaultAuthority,
+      pay_wallet: world.payWalletUsdc,
+      checkout_payer: world.feePayer.publicKey,
+      vrf: ORAO_VRF,
+      network_state: ORAO_NETWORK_STATE,
+      treasury: oraoTreasury(state.data),
+      request
+    }, { delivered: Buffer.from([0, 1]), failed: Buffer.alloc(0) })
+  ], [world.operator])
+  world.fill(checkout, 0, RANDOMNESS)
+  const finish = world.send([
+    p.instruction("finish_draw", {
+      config: p.config,
+      customer,
+      checkout,
+      randomness: request,
+      checkout_payer: world.feePayer.publicKey,
+      event_authority: p.eventAuthority,
+      program: p.id
+    }, { round: 0 })
+  ], [])
+  return { world, checkout, request, settle, finish, customer: alice.wallet.publicKey }
+}
+
+test("/draws/:signature gives a finished Draw's proof, ORAO's request with the transactions that asked for and filled it, and keeps it", async () => {
+  const { world, checkout, request, settle, finish, customer } = finishedDraw()
+  // LiteSVM's oracles write the filled request in place: the transaction ORAO's would have sent is added here, with a
+  // failed one and another program's, which aren't ORAO's fill.
+  const sig = (n: number) => base58.encode(Buffer.alloc(64, n))
+  const [fill, failed, other] = [sig(1), sig(2), sig(3)]
+  const orao = `Program ${ORAO_VRF.toBase58()} invoke [1]`
+  const ran = { inner: [], returnData: undefined, units: 0 }
+  const fakes = new Map([
+    [fill, { ...ran, error: undefined, logs: [orao, "Program log: Instruction: FulfillV2", `Program ${ORAO_VRF.toBase58()} success`] }],
+    [failed, { ...ran, error: { text: "failed" }, logs: [orao] }],
+    [other, { ...ran, error: undefined, logs: [`Program ${PublicKey.default.toBase58()} invoke [1]`] }]
+  ])
+  let reads = 0
+  let down = false
+  const chain = Chain.of({
+    ...world.chain,
+    landed: (s) =>
+      Effect.suspend(() => {
+        reads++
+        if (down) return Effect.fail(new SolanaUnavailable({ message: "transaction: https://rpc.example/?api-key=secret timed out" }))
+        return fakes.has(s) ? Effect.succeed(fakes.get(s)) : world.chain.landed(s)
+      }),
+    signatures: (key, limit) =>
+      Effect.map(world.chain.signatures(key, limit), (all) => (key.equals(request) ? [all[0]!, other, fill, failed, ...all.slice(1)] : all))
+  })
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    HttpApiBuilder.layer(HttpApi.make("luckout").add(SystemApi)).pipe(
+      Layer.provide(SystemHandlers),
+      Layer.provide([
+        solanaLayer({ ...world, chain }),
+        Layer.succeed(SqlClient.SqlClient, {} as SqlClient.SqlClient),
+        Layer.succeed(Sales, {} as Sales["Service"]),
+        Layer.succeed(Telegram, {} as Telegram["Service"]),
+        NodeHttpServer.layerHttpServices
+      ])
+    ),
+    { disableLogger: true }
+  )
+  const get = (path: string) => handler(new Request(`http://luckout.test/draws/${path}`))
+  try {
+    const res = await get(finish)
+    assert.equal(res.status, 200)
+    const proof = Schema.decodeUnknownSync(DrawProof)(await res.json())
+    assert.equal(proof.cluster, "localnet")
+    assert.equal(proof.programId, world.program.id.toBase58())
+    assert.equal(proof.signature, finish)
+    assert.equal(typeof proof.time, "number")
+    assert.deepEqual(proof.draws.map((d) => d.card), [0, 1])
+    for (const d of proof.draws) {
+      assert.equal(d.checkout, checkout.toBase58())
+      assert.equal(d.customer, customer.toBase58())
+      assert.equal(d.round, 0)
+      assert.equal(d.randomness, RANDOMNESS.toString("hex"))
+      assert.deepEqual(d.request, { address: request.toBase58(), value: RANDOMNESS.toString("hex"), requestedBy: settle, filledBy: [fill] })
+      assert.equal(d.version.name, "Classic")
+      assert.equal(d.maxPrice - d.cashback, d.finalPrice)
+      // What the page recomputes in the browser, from exactly this answer.
+      const checks = await verifyCard({
+        card: d.card,
+        game_version: d.gameVersion,
+        reference_price: String(d.referencePrice),
+        lucky_amount: String(d.luckyAmount),
+        max_price: String(d.maxPrice),
+        randomness: d.randomness,
+        random: d.random,
+        roll: d.roll,
+        final_bps: d.finalBps,
+        final_price: String(d.finalPrice),
+        cashback: String(d.cashback)
+      }, { name: d.version.name, premium_bps: d.version.premiumBps, outcomes: d.version.outcomes.map((o) => ({ final_bps: o.finalBps, chance_bps: o.chanceBps })) })
+      assert.ok(checks.every((c) => c.ok), JSON.stringify(checks))
+    }
+    assert.notEqual(proof.draws[0]!.random, proof.draws[1]!.random, "cards drawn together are independent")
+
+    const before = reads
+    const one = await get(`${finish}?card=1`)
+    assert.equal(one.status, 200)
+    assert.deepEqual(Schema.decodeUnknownSync(DrawProof)(await one.json()).draws.map((d) => d.card), [1])
+    assert.equal(reads, before, "a landed proof is read from Solana once")
+
+    assert.equal((await get(`${finish}?card=7`)).status, 404, "no such card in it")
+    assert.equal((await get("not-a-signature")).status, 404)
+    assert.equal((await get(settle)).status, 404, "a transaction with no Draw")
+    assert.equal((await get(sig(9))).status, 404, "one Solana doesn't have")
+
+    down = true
+    const outage = await get(sig(8))
+    assert.equal(outage.status, 503)
+    const body = await outage.text()
+    assert.match(body, /Solana isn't answering right now/)
+    assert.doesNotMatch(body, /rpc\.example|api-key/, "never the RPC's URL or key")
   } finally {
     await dispose()
   }

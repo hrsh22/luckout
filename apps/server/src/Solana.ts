@@ -61,6 +61,8 @@ export interface Ran {
   readonly inner: ReadonlyArray<Uint8Array>
   readonly returnData: Buffer | undefined
   readonly units: number | undefined
+  /** When it landed (Unix seconds), if the chain dates it. */
+  readonly time?: number | undefined
 }
 
 /** A signed transaction, saved before it is sent. */
@@ -142,7 +144,8 @@ export class Chain extends Context.Service<Chain, {
                   logs: tx.meta?.logMessages ?? [],
                   inner: (tx.meta?.innerInstructions ?? []).flatMap((g) => g.instructions.filter(ours).map((ix) => base58.decode(ix.data))),
                   returnData: undefined,
-                  units: tx.meta?.computeUnitsConsumed
+                  units: tx.meta?.computeUnitsConsumed,
+                  time: tx.blockTime ?? undefined
                 }
                 : undefined
             )
@@ -249,6 +252,8 @@ export class Solana extends Context.Service<Solana, {
   resume(signed: Signed): Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | TxExpired>
   balance(key: PublicKey): Effect.Effect<bigint, SolanaUnavailable>
   signatures(key: PublicKey, limit: number): Effect.Effect<Array<string>, SolanaUnavailable>
+  /** What any landed transaction did, ours or not; undefined while the chain hasn't got it. */
+  landed(signature: string): Effect.Effect<Ran | undefined, SolanaUnavailable>
   /** A landed transaction's events, if it succeeded. */
   transaction(signature: string): Effect.Effect<Outcome | undefined, SolanaUnavailable>
   /**
@@ -414,6 +419,7 @@ export class Solana extends Context.Service<Solana, {
         resume: deliver,
         balance: chain.balance,
         signatures: chain.signatures,
+        landed: chain.landed,
         transaction: (signature) =>
           chain.landed(signature).pipe(
             Effect.map((ran) =>

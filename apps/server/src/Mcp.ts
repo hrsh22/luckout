@@ -3,7 +3,7 @@ import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/http"
 import { MODES, modeName, usd, usdUp, worksIn } from "./Agent.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { type DrawEvent, maxCashback } from "./Program.ts"
+import { type DrawEvent, isSignature, maxCashback } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Solana } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
@@ -70,8 +70,6 @@ export const respond = async (message: unknown, tools: ReadonlyArray<Tool>) => {
   }
 }
 
-/** A Solana transaction signature: 64 bytes in base58. */
-const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{86,88}$/
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
 
 const text = (args: Record<string, unknown>, key: string, max = 100) => {
@@ -201,7 +199,7 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
       },
       run: async (args) => {
         const tx = text(args, "tx_hash", 88)
-        if (!SIGNATURE.test(tx)) throw new ToolError("tx_hash must be a Solana transaction signature")
+        if (!isSignature(tx)) throw new ToolError("tx_hash must be a Solana transaction signature")
         // Only our program's own records count: a failed transaction has none, and a Draw only another program logged
         // isn't one (Program.decodeEvents).
         const out = await run(solana.transaction(tx))

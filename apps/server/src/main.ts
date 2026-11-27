@@ -1,5 +1,5 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, HeldToken, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, DrawProof, HeldToken, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
 import { OneClick } from "./OneClick.ts"
 import { Config, Effect, Exit, Layer } from "effect"
@@ -16,7 +16,7 @@ import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { maxCashback } from "./Program.ts"
+import { decodeEvents, type DrawEvent, filledRandomness, isSignature, maxCashback, ORAO_VRF } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
 import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
 import { Sales } from "./Sales.ts"
@@ -54,20 +54,108 @@ export const readProgram = Effect.gen(function*() {
   })
 })
 
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
+const succeeded = (logs: ReadonlyArray<string> | undefined, line: string) => logs?.includes(line) === true
+
+/**
+ * A Draw Proof (ADR-0005, ADR-0015): the Draws a `finish_draw` transaction recorded, each with ORAO's request as Solana
+ * has it now (its value, the transaction that asked for it, and ORAO's oracles' transactions that filled it in) and its
+ * Game Version's table. Undefined for a transaction Solana hasn't got, a failed one, or one with no Draw.
+ * ponytail: looks at a request's newest 20 transactions; a request someone floods with others loses its links, not its value.
+ */
+export const readDrawProof = (signature: string) =>
+  Effect.gen(function*() {
+    const solana = yield* Solana
+    const ran = yield* solana.landed(signature)
+    // Only our program's own records count (Program.decodeEvents).
+    const draws = ran && !ran.error ? decodeEvents(ran.logs, ran.inner).filter((e) => e.name === "Draw").map((e) => e.data as unknown as DrawEvent) : []
+    if (draws.length === 0) return undefined
+    const { versions } = yield* solana.config
+    const program = `Program ${solana.program.id.toBase58()} invoke [1]`
+    const orao = `Program ${ORAO_VRF.toBase58()} invoke`
+    // One request per settle, so a Checkout's Draws share one: each is read once.
+    const requests = yield* Effect.forEach(new Map(draws.map((d) => [d.request.toBase58(), d.request])), ([address, key]) =>
+      Effect.gen(function*() {
+        const account = yield* solana.account(key)
+        const value = account?.owner.equals(ORAO_VRF) ? filledRandomness(account.data) : undefined
+        const others = (yield* solana.signatures(key, 20)).filter((s) => s !== signature).reverse()
+        const txs = yield* Effect.forEach(others, (s) => Effect.map(solana.landed(s), (r) => ({ s, logs: r && !r.error ? r.logs : undefined })), { concurrency: 4 })
+        // Our settle or request_again calls ORAO; ORAO's oracles call it directly.
+        const asked = txs.find((t) => succeeded(t.logs, program) && succeeded(t.logs, `${orao} [2]`))
+        return [address, {
+          address,
+          value: value ? hex(value) : null,
+          ...(asked ? { requestedBy: asked.s } : {}),
+          filledBy: txs.filter((t) => succeeded(t.logs, `${orao} [1]`)).map((t) => t.s)
+        }] as const
+      }), { concurrency: 2 }).pipe(Effect.map((entries) => new Map(entries)))
+    return new DrawProof({
+      cluster: solana.cluster,
+      programId: solana.program.id.toBase58(),
+      signature,
+      ...(ran?.time === undefined ? {} : { time: ran.time }),
+      draws: draws.map((d) => {
+        const v = versions[d.game_version]!
+        return {
+          checkout: d.checkout.toBase58(),
+          customer: d.customer.toBase58(),
+          card: d.card,
+          round: d.round,
+          seed: hex(d.seed),
+          randomness: hex(d.randomness),
+          random: hex(d.random),
+          roll: d.roll,
+          gameVersion: d.game_version,
+          referencePrice: Number(d.reference_price),
+          luckyAmount: Number(d.lucky_amount),
+          maxPrice: Number(d.max_price),
+          finalBps: d.final_bps,
+          finalPrice: Number(d.final_price),
+          cashback: Number(d.cashback),
+          request: requests.get(d.request.toBase58())!,
+          version: { name: v.name, premiumBps: v.premium_bps, outcomes: v.outcomes.map((o) => ({ finalBps: o.final_bps, chanceBps: o.chance_bps })) }
+        }
+      })
+    })
+  })
+
+/** Landed proofs never change, so the newest are kept. ponytail: per process, in memory. */
+const KEPT_PROOFS = 1_000
+
 export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const sales = yield* Sales
     const telegram = yield* Telegram
     // Anyone may ask, so every visitor shares one read every 30 seconds; a failed read isn't kept.
+    const solana = yield* Solana
     const program = yield* readProgram.pipe(
-      Effect.provideService(Solana, yield* Solana),
+      Effect.provideService(Solana, solana),
       Effect.cachedWithTTL((exit) => (Exit.isSuccess(exit) ? "30 seconds" : 0))
     )
+    const proofs = new Map<string, DrawProof>()
+    const proof = (signature: string) =>
+      Effect.gen(function*() {
+        const kept = proofs.get(signature)
+        if (kept) return kept
+        const read = yield* readDrawProof(signature).pipe(Effect.provideService(Solana, solana))
+        if (!read) return yield* new NotFound()
+        proofs.set(signature, read)
+        if (proofs.size > KEPT_PROOFS) proofs.delete(proofs.keys().next().value!)
+        return read
+      })
     return handlers.handleAll({
       health: () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid),
       status: () => sales.status,
       program: () => program.pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
+      drawProof: ({ params, query }) =>
+        Effect.gen(function*() {
+          if (!isSignature(params.signature)) return yield* new NotFound()
+          const all = yield* proof(params.signature)
+          if (query.card === undefined) return all
+          const draws = all.draws.filter((d) => d.card === query.card)
+          return draws.length > 0 ? new DrawProof({ ...all, draws }) : yield* new NotFound()
+        }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
       attestation: () => telegram.attestation
     })
   })

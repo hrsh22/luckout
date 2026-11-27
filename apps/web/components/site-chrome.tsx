@@ -1,9 +1,10 @@
 import { Wordmark } from "@/components/brand"
 import { NavShell } from "@/components/nav-shell"
 import { buttonVariants } from "@/components/ui/button"
-import { cluster } from "@/lib/chain"
+import { cluster, explorerAccount, programInfo } from "@/lib/chain"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import Link from "next/link"
+import { Suspense } from "react"
 
 const LINKS = [
   { href: "/#how", label: "How it works" },
@@ -30,10 +31,21 @@ export function SiteFooter({ compact = false }: { compact?: boolean }) {
         Solana {cluster}{cluster === "mainnet" ? "" : ", test cards only"}
       </span>
       <Link className={link} href="/fair">Fairness</Link>
-      <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>
+      {EXAMPLE_DRAW_HREF && <Link className={link} href={EXAMPLE_DRAW_HREF}>A Draw Proof</Link>}
+      <Suspense fallback={null}>
+        <ProgramLink className={link} />
+      </Suspense>
       <span className="sm:ml-auto">Gift cards sourced from Bitrefill, which isn't affiliated with Luckout. You always get the card.</span>
     </footer>
   )
+}
+
+/** The program on Solana Explorer, once the server has said which it is; nothing while it can't. */
+async function ProgramLink({ className }: { className: string }) {
+  const program = await programInfo("10 seconds").catch(() => undefined)
+  return program
+    ? <a className={className} href={explorerAccount(program.programId)} target="_blank" rel="noreferrer">The program</a>
+    : null
 }
 
 /**

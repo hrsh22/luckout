@@ -10,11 +10,9 @@ import Link from "next/link"
 export const revalidate = 60
 export const metadata: Metadata = {
   title: "Is it fair?",
-  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the contract."
+  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the program on Solana."
 }
 
-// TODO(phase3-proof): the text below still describes the NEAR contract (its Draw, its upgrades); rewrite for the program,
-// with its verified build in place of the code hash.
 export default async function Fair() {
   const [program, tee] = await Promise.all([
     programInfo("10 seconds").catch(() => undefined),
@@ -52,7 +50,10 @@ export default async function Fair() {
       </section>
       <p className="max-w-[64ch] text-ink-soft">
         Over a few dozen Draws the average swings a lot; over thousands it settles near 105.6%. Every Draw links to a Draw Proof you can
-        recompute in your browser, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.
+        recompute in your browser
+        {EXAMPLE_DRAW_HREF
+          ? <>, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.</>
+          : "."}
       </p>
 
       {reserve && (
@@ -71,19 +72,19 @@ export default async function Fair() {
       )}
 
       <section className="flex flex-col gap-4">
-        <h2 className="font-display text-3xl font-extrabold">What the contract guarantees</h2>
+        <h2 className="font-display text-3xl font-extrabold">What the program guarantees</h2>
         <ul className="grid gap-3 sm:grid-cols-2">
           {[
-            "Every Game Version is immutable, and the contract refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.",
-            "The Draw runs a block after delivery is confirmed, so nobody, including us, can retry it or cancel a purchase after seeing the result.",
+            "Every Game Version is immutable, and the program refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.",
+            "Delivery is confirmed before the Draw asks ORAO's oracles for randomness. Once they fill it in, the result is fixed: nobody, including us, can retry it or cancel a purchase after seeing it.",
             <>Your per-purchase and daily limits apply to every purchase, whoever submits it. The daily limit resets every day at <DailyReset />.</>,
             "A purchase we neither deliver nor cancel can be reclaimed in full after 24 hours."
           ].map((t, i) => <li key={i} className="card p-6 text-ink-soft">{t}</li>)}
         </ul>
         <p className="max-w-[64ch] text-ink-soft">
-          What it can't prove: that a code was delivered (Bitrefill isn't on chain), and that we buy in the mode you chose. Both are bounded
-          by the most you confirmed and by your limits. And Luckout can upgrade the contract: every upgrade is a public transaction, and it
-          changes the code hash below.
+          What it can't prove: that a code was delivered (Bitrefill isn't on Solana), and that we buy in the mode you chose. Both are
+          bounded by the most you confirmed and by your limits. And Luckout can still upgrade the program, with a key kept off our servers.
+          Every upgrade is a public transaction on Solana.
         </p>
       </section>
 

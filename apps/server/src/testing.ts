@@ -173,7 +173,7 @@ export const solanaWorld = (): SolanaWorld => {
   /** Each account's landed transactions, newest first, as getSignaturesForAddress lists them. */
   const byAccount = new Map<string, Array<string>>()
   const record = (signature: string, bytes: Uint8Array, ran: Ran) => {
-    landed.set(signature, ran)
+    landed.set(signature, { ...ran, time: Number(svm.getClock().unixTimestamp) })
     for (const k of VersionedTransaction.deserialize(bytes).message.staticAccountKeys) {
       byAccount.set(k.toBase58(), [signature, ...(byAccount.get(k.toBase58()) ?? [])])
     }

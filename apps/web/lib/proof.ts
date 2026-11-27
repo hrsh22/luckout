@@ -1,19 +1,22 @@
-import type { DrawEvent, GameVersion } from "./draw"
+import type { DrawProof } from "@luckout/api"
+import { api, isNotFound } from "./api.ts"
 
-// TODO(phase3-proof): Draws are on Solana now (ADR-0015): load the Draw event, ORAO's filled randomness and the Game
-// Version from the program. Until then every Draw Proof page is a 404. The NEAR version is at
-// `git show 9313693:apps/web/lib/proof.ts`.
-
-/** A NEAR transaction hash: base58, 32 bytes. */
-export const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/
+/** A Solana transaction signature: base58, 64 bytes. */
+export const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{86,88}$/
 
 /** No such transaction, or one that ran no Draw: a page about it is a 404, not an outage. */
 export class NotOnChain extends Error {}
 
-/** One Draw from its transaction plus the Game Version it was played on (ADR-0005). */
-export async function loadDraw(_tx: string, _purchaseId?: number): Promise<{ draw: DrawEvent; version: GameVersion; blockHash: string }> {
-  throw new NotOnChain("Draw Proofs are being rebuilt for Solana")
-}
+/**
+ * The Draws a `finish_draw` transaction recorded, with ORAO's request and each Game Version's table (ADR-0005,
+ * ADR-0015). Our server reads them from Solana, so no RPC key reaches the browser, and keeps them, since a landed
+ * transaction never changes. The browser recomputes every step itself (proofChecks in lib/draw.ts).
+ */
+export const loadProof = (signature: string): Promise<DrawProof> =>
+  api((c) => c.drawProof({ params: { signature }, query: {} }), undefined, "20 seconds").catch((e: unknown) => {
+    throw isNotFound(e) ? new NotOnChain("No Draw in this transaction") : e
+  })
 
-/** The Draw and when it was settled, for the page; the browser's own check doesn't need the time. */
-export const loadDrawAt = async (tx: string, purchaseId?: number) => ({ ...(await loadDraw(tx, purchaseId)), time: new Date(0) })
+/** The card a Draw Proof link names (`?card=`), or the transaction's first Draw. */
+export const pickDraw = (proof: DrawProof, card: number | undefined) =>
+  proof.draws.find((d) => d.card === card) ?? (card === undefined ? proof.draws[0] : undefined)

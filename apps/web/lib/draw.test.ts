@@ -1,30 +1,49 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { plainly, verify } from "./draw.ts"
+import { plainly, proofChecks } from "./draw.ts"
 
-// The first testnet Draw: tx 77EAmNVpwoqL62byNaPmES54vJmRMChfzL5LrMb8NxFQ on app.luckout.testnet.
-const jackpot = {
-  name: "Jackpot",
-  premium_bps: 5000,
-  outcomes: [{ final_bps: 0, chance_bps: 1000 }, { final_bps: 5000, chance_bps: 1500 }, { final_bps: 10000, chance_bps: 2800 }, { final_bps: 15000, chance_bps: 4700 }]
-}
-const event = {
-  purchase_id: 0,
-  customer: "alice.luckout.testnet",
-  game_version: 2,
-  reference_price: "6000000",
-  lucky_amount: "6000000",
-  max_price: "9000000",
-  seed: "508e58c111c794905b24e9b3286a71a3c675e14ae8f412c6a98e1bc706ab510c",
-  random: "01de7648033d12c60e9648769b729dce840c57bb72fe195f043034491bd04f8d",
-  roll: 8993,
-  final_bps: 15000,
-  final_price: "9000000",
-  cashback: "0"
+// A real Draw: card 9 of the 15-card Classic Checkout finished on devnet on 2026-11-27 (program
+// 4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3, transaction 2dgQpYiNzc8m7fVa…), as GET /draws/:signature answers it.
+const card9 = {
+  checkout: "rDd4jKBhjfBDLcR83boXaFHaWUjwVCAe6A93y57tLUn",
+  customer: "5ZNr8ZE8NpwiCyGqHLUYMRVoCRw9RwC5fu2XZp9Kat6D",
+  card: 9,
+  round: 0,
+  seed: "71cb3c0cc72f6b6784bcd6803c173190e6d341fa149e362f36a9b01353c692b1",
+  randomness: "fbcf3f27b76af47a27e9dec26291cfc3405b6f0136ac26ecf95c87c0e24978d67036920084bc8d2a6554c45f5c93eac939a31876fffd2572c935b1645ae82f03",
+  random: "1cb9ae2a48abdd4a9ae7980f3a0d5897c0b26b8ed8fd1739e63c8f7662099327",
+  roll: 972,
+  gameVersion: 1,
+  referencePrice: 6_000_000,
+  luckyAmount: 6_000_000,
+  maxPrice: 7_200_000,
+  finalBps: 8_400,
+  finalPrice: 5_040_000,
+  cashback: 2_160_000,
+  request: {
+    address: "HXS4HypiKKp1VUsX8SB5atpD7kXw9UG6YFQ1zb3qqGyK",
+    value: "fbcf3f27b76af47a27e9dec26291cfc3405b6f0136ac26ecf95c87c0e24978d67036920084bc8d2a6554c45f5c93eac939a31876fffd2572c935b1645ae82f03",
+    filledBy: []
+  },
+  version: {
+    name: "Classic",
+    premiumBps: 2_000,
+    outcomes: [
+      { finalBps: 0, chanceBps: 200 },
+      { finalBps: 6_000, chanceBps: 300 },
+      { finalBps: 7_200, chanceBps: 400 },
+      { finalBps: 8_400, chanceBps: 700 },
+      { finalBps: 9_600, chanceBps: 2_400 },
+      { finalBps: 12_000, chanceBps: 6_000 }
+    ]
+  }
 }
 
-test("a real testnet Draw recomputes exactly", async () => {
-  const checks = await verify(event, jackpot)
+const failing = async (d: typeof card9) => (await proofChecks(d)).filter((c) => !c.ok).map((c) => c.label)
+
+test("a real devnet Draw recomputes exactly, from its Checkout to its Cashback", async () => {
+  const checks = await proofChecks(card9)
+  assert.deepEqual(checks.map((c) => c.label), ["Seed", "ORAO request", "ORAO's randomness", "Random value", "Roll", "Final Price share", "Final Price", "Cashback"])
   assert.ok(checks.every((c) => c.ok), JSON.stringify(checks))
 })
 
@@ -35,7 +54,15 @@ test("the raw numbers also read plainly", () => {
   assert.equal(plainly("9000000", "usdc"), "$9.00")
 })
 
-test("a tampered Draw is caught", async () => {
-  const checks = await verify({ ...event, roll: 12, final_price: "0", cashback: "9000000" }, jackpot)
-  assert.deepEqual(checks.filter((c) => !c.ok).map((c) => c.label), ["Roll", "Final Price", "Cashback"])
+test("a tampered outcome is caught", async () => {
+  assert.deepEqual(await failing({ ...card9, roll: 12, finalPrice: 0, cashback: 7_200_000 }), ["Roll", "Final Price", "Cashback"])
+  assert.deepEqual(await failing({ ...card9, card: 6 }), ["Random value", "Roll", "Final Price share", "Final Price", "Cashback"], "another card's draw")
+})
+
+test("a Draw tied to another Checkout or round, or to randomness ORAO's request doesn't hold, is caught", async () => {
+  assert.deepEqual(await failing({ ...card9, round: 1 }), ["Seed", "ORAO request"])
+  assert.deepEqual(await failing({ ...card9, checkout: card9.customer }), ["Seed", "ORAO request"])
+  assert.deepEqual(await failing({ ...card9, request: { ...card9.request, address: card9.checkout } }), ["ORAO request"])
+  assert.deepEqual(await failing({ ...card9, request: { ...card9.request, value: "00".repeat(64) } }), ["ORAO's randomness"])
+  assert.deepEqual(await failing({ ...card9, request: { ...card9.request, value: null } as never }), ["ORAO's randomness"], "never filled in")
 })
