@@ -1,0 +1,172 @@
+# Solana migration plan
+
+This plan carries out ADR-0015. Each phase starts on an explicit go (`AGENTS.md`). Phase 1 is Rust contract work, so it needs that go most of all. Every phase ends with a check, and its result is noted here.
+
+## Phase 0: alongside, no code
+
+**Yours:**
+
+- **Lawyer:** the 2025 online gaming law, FIU-IND registration, and custody (the customers' Privy wallets and the one-time deposit approval).
+- **Bitrefill** (go-ahead received 2026-11-27):
+  - the KYC and questionnaire they asked for
+  - tell them the payer moves to USDC on Solana
+  - ask whether a failed card's refund can go back to the paying address by itself
+- **UPI onramps:** apply to Onmeta and Onramp.money, the two that take INR by UPI.
+- **Grants:** apply for the Solana Foundation × CoinDCX India grant (up to $15k), and join Superteam India.
+- **Privacy policy:** cover Privy and India's DPDP Act.
+- **NEAR:** freeze releases and mainnet upgrades, except security fixes.
+- **Accounts and keys:**
+  - Privy, with a development app and a production app
+  - an RPC provider with webhooks (Helius or similar)
+  - Telegram login for Privy: in BotFather's Login Widget, allow `https://auth.privy.io/api/v1/oauth/callback`, and give Privy the client ID and secret shown there
+  - the owner key: a wallet you control (a hardware wallet if possible), never on the VM
+
+**Mine, each on your go:**
+
+- **Pay Wallets:** a key made on each VM, staging and production. Only the addresses leave the VM. They go to Bitrefill for tagging before either pays anything.
+- **Wording fixes** on the site, docs and bot: Bitrefill is only where the cards come from, and isn't affiliated with Luckout. Then the summary Bitrefill asked for.
+
+## Checked before building (2026-11-27)
+
+The pre-build checks were answered from primary docs and mainnet reads. What's left needs a build or real money, so it moves into Phases 1 and 4.
+
+| Question | Answer | Left to prove |
+|---|---|---|
+| Does a Privy wallet sign the approval with no prompt, with our fee payer paying? | Yes. `signTransaction` takes `showWalletUIs: false`, and Privy documents the fee-payer flow. | In the web app (Phase 3) |
+| Does a Phantom sign-in get a Privy wallet, and can customers export their key? | Yes, with `createOnLogin: 'all-users'`, in Privy's own window only. Export is on by default. | — |
+| What does Privy cost? | Free up to 499 monthly users and 50,000 signatures a month. Then $299 a month up to 2,499 users, and $499 up to 9,999. | — |
+| Can the server make a Privy user from a Telegram account? | Yes, but we won't. The approval still needs the customer's wallet to sign in the app, so the bot sends new customers there to sign in once. | — |
+| What does ORAO cost, and is it on devnet? | It's the same program on devnet and mainnet. The fee is 0.0005 SOL, and each request account keeps 0.0013 SOL of rent for good (read from mainnet). About $0.13 a Draw, filled in 4–20 s. | A Draw on devnet (Phase 1) |
+| Where does 1Click refund when the sender is an exchange? | To the `refundTo` address we give it, not the sender. `FLEX_INPUT` swaps whatever arrives above the quote's minimum. | Tron and Base Top-Ups (Phase 4) |
+| Does a 15-card Checkout fit one transaction? | The limits are 1,232 bytes, 1.4M compute and 1,024 bytes of return data. v1 transactions (4,096 bytes) are live on mainnet, and only our keys sign admit and settle, so those can use them. | Measured at the first build (Phase 1) |
+| Can a fresh wallet pay Bitrefill, and where do failed cards' refunds go? | Guest invoices take `usdc_solana`. A failed card's refund isn't sent back by itself; we claim it, as today. | The first small card from each Pay Wallet (Phase 4) |
+| Do exchanges open a fresh address's token account? | Solana's exchange guide says they should. Binance and CoinDCX don't say. | Real withdrawals (Phase 4) |
+| How big is the program? | It needs a build. | The first build (Phase 1) |
+
+## Phase 1: the program (needs your go for Rust)
+
+- **Build it** in `programs/luckout` with Anchor 1.x and `orao-solana-vrf` 0.8, using the accounts and instructions in ADR-0015.
+- **Port the game maths and test vectors** from `contract/src`: `draw_random`, `roll_from_random`, `final_bps_for_roll`, `final_price`, `quote_at`, `lucky_allowed` and `max_cashback_at`.
+- **Measure the first build:**
+  - its size, which sets the SOL budget (up to 10 SOL until then)
+  - whether a 15-card admit and a 15-card settle with ORAO's request each fit one transaction: 1,232 bytes, or a v1 transaction's 4,096
+  - whether `quote_many`'s answer fits 1,024 bytes; if not, quotes come in pages
+- **Test on a local validator,** with ORAO's program and a filled randomness account loaded in (no test-only path in the program):
+  - every refusal, including a wrong Vault, Customer account or token account
+  - a randomness account that isn't ORAO's, isn't at our seed's address, or isn't filled
+  - a cart admitted card by card, in order
+  - a Checkout number reused, before and after its account closed
+  - Lucky Amount, the smallest Lucky Checkout, and the Cashback Cap
+  - a settle with both delivered and failed cards
+  - a Draw finished twice, and a request replaced after an hour unfilled
+  - `deposit_for` moving money only into the approving customer's Balance
+  - Reclaim at 24 hours
+  - the repay cap, pause and unpause by the owner only, and an owner change by propose and accept
+  - Checkout accounts closing
+  - an account with a newer version byte refused
+  - an upgrade that adds a field into the spare bytes
+- **Deploy to devnet,** with a verified build made in CI.
+
+**Done when** every test passes and a 15-card Lucky Checkout on devnet settles and draws from ORAO's devnet.
+
+## Phase 2: the server
+
+| Today | Becomes |
+|---|---|
+| `Near.ts` | A Solana client that sends, simulates (for quotes) and reads accounts |
+| `Relay.ts`, `Intents.ts` | A fee payer that only pays for transactions the server built. `Intents.ts` goes. |
+| `Base.ts`, `Refill.ts`, `Credit.ts` | Pay Wallet payments in `Bitrefill.ts`. Repaying happens in `settle`. These files go. |
+| `Purchases.ts` | The same workflow, admitting and settling one numbered Checkout account. It stores each Draw Proof with ORAO's filling transaction. |
+| `TopUp.ts`, `OneClick.ts` | 1Click `FLEX_INPUT` quotes to the Deposit Address, refunding to an address on the source chain. Intents Accounts and Send-Backs go. |
+| `Swap.ts` | The Jupiter swap and the deposit in one transaction, for ORE and USDT |
+| new `Deposits.ts` | `deposit_for` on each webhook, plus a sweep every few minutes. It watches for a lost approval. |
+| `Agent.ts`, `Telegram.ts` | A deposit tool (the Deposit Address, or a 1Click address); buying once the money lands, until the quote expires; new customers sent to sign in once with Telegram |
+| `Auth.ts` | Privy's tokens instead of wallet signatures |
+| `Bitrefill.ts` | Also counts all orders against our paying address's cap ($10k a day, $50k a month) and pauses sales when it's reached, as it does at the daily order limit today. Per-email guest limits stay. A failed card's refund is claimed to the Pay Wallet, with an alert as today. |
+| `Admin.ts` | Owner actions as Solana transactions the owner's wallet signs, as today |
+| `Monitor.ts`, `Alerts.ts`, `Mcp.ts` | The new alerts, and reads from Solana |
+
+- **Kept as they are:** `Connect.ts` (Bitrefill confirmed on 2026-11-27 that per-email guest limits still apply, so Connect Bitrefill stays as the way past them), `Attestation.ts`, `Seal.ts`, `Sales.ts`, `Settings.ts`, `RateLimit.ts`, `Edge.ts` and `Db.ts`.
+- **A fresh database** for the Solana deployment. NEAR's history stays in the old one.
+
+**Done when** the server's tests pass against a local validator with Bitrefill faked.
+
+## Phase 3: the web app
+
+- **Privy login,** in Privy's own window, replaces NEAR Connect, Reown and the Solana wallet adapter. `lib/near.ts` and `lib/evm.ts` go, and `lib/solana.ts` shrinks.
+- **Wallet page:**
+  - the Deposit Address with its QR code, after the one-time approval (signed with no prompt)
+  - a tap for USDT that has arrived
+  - 1Click Top-Ups from other chains
+  - withdrawal to any Solana address
+- **Draw Proof page:** checks ORAO's value and recomputes the Cashback (`lib/draw.ts`, `lib/proof.ts`).
+- **Admin panel:** owner actions signed in the owner's wallet, as today.
+
+**Done when** a customer on a local validator signs in with email, deposits, buys a Lucky Cart, sees its Draw Proofs and withdraws.
+
+## Phase 4: staging on mainnet
+
+- **Deploy** the staging program, with a small Cashback Reserve and float. The staging Pay Wallet's first card is a small one.
+- **Prove each deposit route with real money:**
+  - USDC and USDT on Solana, withdrawn from Binance and from an Indian exchange to a fresh Deposit Address. If USDT can't arrive, the approval also opens the USDT account.
+  - 1Click from Tron and from Base
+  - the bot's Deposit Address, and a 1Click address from the bot
+- **Prove the rest with real money:**
+  - a 15-card Lucky Checkout
+  - a failed card, with its refund claimed back to the Pay Wallet
+  - a Reclaim
+  - a withdrawal
+  - a pause
+  - an upgrade, and a rollback
+  - an upgrade that changes a layout, with the older build refusing the new accounts
+
+## Phase 5: cutover
+
+1. **Production program:** deploy it with the owner key, then fund the Cashback Reserve and the float. The production Pay Wallet's first card is a small one.
+2. **Switch the site:** point luckout.wtf at the Solana build, and pause new purchases on NEAR.
+3. **Move the team's money over.** Only our team has bought on NEAR.
+   - A one-off script withdraws each NEAR Balance whose key we hold and sends it to that person's Deposit Address, where it lands in their new Balance.
+   - Anyone whose key we don't hold withdraws for themselves.
+   - Old purchases stay in the old database, and every card's code is also in its Checkout Email.
+4. **Wind down NEAR:**
+   - let pending purchases finish
+   - withdraw the reserve and Proceeds to `luckout.near`
+   - empty the Base Float, Treasury and Relayer
+   - move everything to Solana
+5. **Update the docs:**
+   - mark the superseded ADRs
+   - update `CONTEXT.md` as below
+   - update `README.md` and `deploy/README.md`
+
+### `CONTEXT.md` at cutover
+
+- **Terms that go:** Intents Account, Send-Back, Relayer, Refill, Treasury, Base Wallet, Base Float, Bitrefill Credit.
+- **New terms:** Pay Wallet, Deposit Address.
+- **Terms that change:** Top-Up, Balance (held by the program), Draw (randomness from a provider), Checkout (one numbered account), Web App (Privy login), Agent (takes deposits), Swap Token.
+
+## After cutover
+
+- USDT swapped by the program itself, with no tap
+- Moving the owner and upgrade authority to a Squads multisig with a time lock, plus a small upgrade adding a pause-only guardian key
+- An outside security review, before real customer volume
+
+## Decisions (2026-11-27)
+
+1. **Owner:** one key in our own wallet, with no multisig and no time lock for now. The program is ready to move to a multisig later.
+2. **Daily repay cap:** starts at $500. The monitor warns at 80%, and the owner raises it as sales grow, keeping it at about twice the busiest day.
+3. **Key export:** customers can always export their Privy key.
+4. **Outside review:** not now.
+5. **NEAR funds:** moved by script at cutover, since only our team used it.
+6. **Smallest Lucky Checkout:** 2.5 USDC to start, the point where the margin covers one Draw. It's an owner setting, moved as SOL's price moves.
+
+## What only you can provide
+
+| Item | Needed by |
+|---|---|
+| Privy development and production app IDs | Phase 2 |
+| RPC provider key, with webhooks | Phase 2 |
+| Telegram login for Privy, set up in BotFather | Phase 3 |
+| Bitrefill's tagging of the Pay Wallet addresses | Phase 4 |
+| The owner key, in a wallet you control | Phase 4 |
+| Up to 10 SOL until the program is measured: two programs, the upgrade buffer, fees, Draws (about 0.002 SOL each) and customer accounts (about $0.12 each) | Phase 4 |
+| USDC for the staging reserve and float, then for production | Phases 4 and 5 |
