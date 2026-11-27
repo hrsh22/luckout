@@ -27,7 +27,9 @@
     "viem": "2.57.12"
   },
   "devDependencies": {
+    "@solana/kit": "8.6.0",
     "@types/node": "24",
+    "litesvm": "1.6.2",
     "typescript": "6.0.3"
   }
 }
