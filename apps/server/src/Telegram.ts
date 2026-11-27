@@ -161,9 +161,12 @@ export const depositLines = (d: DepositTo, now = Date.now()) => {
 const cardLine = (p: Pending) =>
   (p.maxPrice === p.referencePrice
     ? `${p.voucherName}, ${p.value} ${p.currency}: ${usdUp(p.maxPrice)}` +
-      // A Lucky card the Cashback Reserve can't cover now is bought at Normal: said here by code, not left to the model.
+      // A Lucky card bought at Normal (the checkout plays under the smallest Lucky Checkout, or the Cashback Reserve can't
+      // cover it now): said here by code, not left to the model.
       (p.mode === "normal" && p.requestedMode !== "normal"
-        ? ` on Normal: the Cashback Reserve can't cover ${modeName(p.requestedMode)} right now, so there's no Draw.`
+        ? p.luckyFrom !== undefined
+          ? ` on Normal: Lucky cards play together from ${usd(p.luckyFrom)} a checkout, so there's no Draw.`
+          : ` on Normal: the Cashback Reserve can't cover ${modeName(p.requestedMode)} right now, so there's no Draw.`
         : ".")
     : `${p.voucherName}, ${p.value} ${p.currency} on ${modeName(p.mode)}: ${usdUp(p.maxPrice)} now (price ${usd(p.referencePrice)}).`) +
   // A card only works in its own country: said on the button's line, every time.
@@ -530,6 +533,7 @@ export class Telegram extends Context.Service<Telegram, {
           deposits,
           topUp: yield* TopUp,
           shopClosed: Effect.map((yield* Sales).status, (st) => (st.open ? undefined : closedMessage(st))),
+          minLuckyCheckout: Effect.map(solana.config, (c) => Number(c.min_lucky_checkout)),
           testnet,
           web: webOrigin,
           ...ai,

@@ -142,17 +142,24 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
         const asked = args.mode === undefined ? undefined : text(args, "mode", 10).toLowerCase()
         if (asked !== undefined && !MODES[asked]) throw new ToolError("mode must be normal, lite, classic or jackpot")
         const modes = asked === undefined ? Object.values(MODES) : [MODES[asked]!]
-        const { versions } = await run(solana.config)
+        const { versions, min_lucky_checkout } = await run(solana.config)
         const quotes = await Promise.all(modes.map(async (m) => {
           const q = await run(purchases.quote(id, value, m === "normal" ? undefined : m.lucky))
-          const version = m === "normal" ? undefined : versions[m.lucky]
+          // Under the smallest Lucky Checkout, one card alone is bought at Normal: no odds to give.
+          const version = q.mode === "normal" ? undefined : versions[q.mode.lucky]
           const outcomes = version
             ? version.outcomes.map((o) => {
               const price = Number(finalPrice(BigInt(q.referencePrice), BigInt(q.luckyAmount), BigInt(q.maxPrice), o.final_bps))
               return { chance: `${o.chance_bps / 100}%`, final_price: usd(price), cashback: usd(q.maxPrice - price) }
             })
             : [{ chance: "100%", final_price: usd(q.referencePrice), cashback: usd(0) }]
-          return { price: usd(q.referencePrice), mode: modeName(m), pay_up_front: usdUp(q.maxPrice), outcomes }
+          return {
+            price: usd(q.referencePrice),
+            mode: modeName(m),
+            pay_up_front: usdUp(q.maxPrice),
+            outcomes,
+            ...(q.belowMin ? { note: `Lucky cards play together from ${usd(Number(min_lucky_checkout))} a checkout, so this one alone is bought at the normal price.` } : {})
+          }
         }))
         return { card_price: quotes[0]?.price, quotes: quotes.map(({ price: _, ...q }) => q), buy_url: buyUrl(id) }
       }

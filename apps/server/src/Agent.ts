@@ -38,6 +38,8 @@ export interface Pending {
   readonly referencePrice: number
   /** The quote's Lucky Amount (0 for Normal): the purchase plays exactly that, or is refused. */
   readonly luckyAmount: number
+  /** At Normal because the checkout's Lucky cards play less than this together: the smallest Lucky Checkout. */
+  readonly luckyFrom?: number
   /** The Checkout Email this card and its receipt are also emailed to, when the order needs one: shown on the Buy line. */
   readonly receiptTo?: string
   /** ISO: the use-by date on the last of these delivered recently (Purchases.useBy); shown on the Buy line. */
@@ -250,6 +252,8 @@ export const makeAgent = (deps: {
   topUp: Pick<TopUp["Service"], "assets" | "quote">
   /** Why new purchases can't start right now (sales stopped, program paused, Bitrefill's order limit), or undefined. */
   shopClosed: Effect.Effect<string | undefined>
+  /** The smallest Lucky Checkout, from the program's Config: what a quote marked belowMin fell short of. */
+  minLuckyCheckout: Effect.Effect<number, { message: string }>
   testnet: boolean
   web: string
   apiKey: string
@@ -346,10 +350,15 @@ export const makeAgent = (deps: {
         const q = yield* deps.purchases.quote(voucher_id, value, game(m))
         const why = blocker(a, q.maxPrice, deps.web)
         return {
-          mode: modeName(m),
+          mode: modeName(q.belowMin ? q.mode : m),
           price: usd(q.referencePrice),
           pay_now: usdUp(q.maxPrice),
           ...(q.luckyAmount > 0 && q.luckyAmount < q.referencePrice ? { lucky_part: usd(q.luckyAmount) } : {}),
+          ...(q.belowMin
+            ? {
+              lucky_from: `Lucky plays from ${usd(yield* deps.minLuckyCheckout)} a checkout, so this card alone is at the normal price, with no Draw. Say that in one short line and offer it on Normal, or with more Lucky cards bought together.`
+            }
+            : {}),
           ...(why ? { cannot_buy_yet: why } : {})
         }
       })),
@@ -390,6 +399,7 @@ export const makeAgent = (deps: {
         const real = quotes.filter((_, i) => !vouchers[i]!.id.startsWith("test-"))
         const overLimit = real.length > 0 && email.used && guestLimitRefusal(email.used, real.reduce((s, q) => s + q.referencePrice, 0), real.length)
         if (overLimit) return { error: `${overLimit} Or they can connect their own Bitrefill account at ${deps.web}/wallet for higher limits.` }
+        const luckyFrom = quotes.some((q) => q.belowMin) ? yield* deps.minLuckyCheckout : undefined
         turn.offer = { ...(short > 0 ? { short } : {}), cards: cards.map((c, i) => {
           const v = vouchers[i]!
           const q = quotes[i]!
@@ -405,6 +415,7 @@ export const makeAgent = (deps: {
             maxPrice: q.maxPrice,
             referencePrice: q.referencePrice,
             luckyAmount: q.luckyAmount,
+            ...(q.belowMin && luckyFrom !== undefined ? { luckyFrom } : {}),
             ...(email.needed && email.email ? { receiptTo: email.email } : {}),
             ...(useBy ? { useBy } : {})
           }
@@ -414,7 +425,11 @@ export const makeAgent = (deps: {
           shown: `Under your reply the customer sees ${cards.length === 1 ? "the exact card" : "every card"}, mode, price and use-by date, and one Buy button. So reply with one short line and no prices, like: Here ${cards.length === 1 ? "it is" : "they are"}, tap Buy when you're ready.`,
           // The Buy line says it too; the model's words keep the reply from promising a Draw.
           ...(normal.length > 0
-            ? { normal_price: `Nothing is bought yet. The cashback reserve can't cover these right now, so the button buys them at the normal price, with no Draw: ${normal.join(", ")}. Say that in a few words, without prices.` }
+            ? {
+              normal_price: luckyFrom !== undefined
+                ? `Nothing is bought yet. Lucky plays from ${usd(luckyFrom)} a checkout, so the button buys these at the normal price, with no Draw: ${normal.join(", ")}. Say that in one short line, without other prices, and offer more Lucky cards bought together to play.`
+                : `Nothing is bought yet. The cashback reserve can't cover these right now, so the button buys them at the normal price, with no Draw: ${normal.join(", ")}. Say that in a few words, without prices.`
+            }
             : {}),
           ...(short > 0
             ? {

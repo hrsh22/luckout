@@ -151,9 +151,10 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Admin panel:** the control room reads the program live. Every owner action was signed from it and landed, in a Wallet Standard wallet holding the devnet owner key (as Phantom would) and in a Privy wallet: pause and resume, the repay cap, the smallest Lucky Checkout, the Cashback Cap, funding and withdrawing the reserve, withdrawing Proceeds, changing the operator and the Pay Wallet, and handing ownership over and back. The server now refuses to start if any of its keys is the owner's.
 - **Carried into Phase 4:**
   - Google, Telegram and Phantom sign-in need a person to click through them
-  - quotes on the server, and so the Agent, don't apply the smallest Lucky Checkout yet. The web app does.
-  - `deploy/README.md`, carried from Phase 2
-- **Since:** the bot gives a 1Click address for another chain's token once the customer has typed their refund address there; USDC and USDT on Solana still go to the Deposit Address.
+- **Since, on the same branch:**
+  - the server's quotes and purchases put a checkout's Lucky cards under the smallest Lucky Checkout at Normal (`belowMin` on the quote), as the web does, and the Agent and its Buy line say Lucky plays from that much a checkout
+  - the bot gives a 1Click address for another chain's token once the customer has typed their refund address there; USDC and USDT on Solana still go to the Deposit Address
+  - `deploy/README.md` describes Solana
 
 ## Phase 4: staging on mainnet
 

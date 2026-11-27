@@ -75,6 +75,7 @@ const deps = {
   account: () => Effect.succeed(rich),
   deposits: { status: (wallet: string) => Effect.succeed({ address: wallet, approved: true, waiting: 0 }) },
   web: "https://luckout.test",
+  minLuckyCheckout: Effect.succeed(2_500_000),
   shopClosed: Effect.succeed(undefined),
   verify: async () => true
 } as never
@@ -426,6 +427,22 @@ test("a Lucky card the Cashback Reserve can't cover is offered at Normal, and th
   const turn = await agent("alice.testnet", [], "a 10 dollar test card on classic")
   model.close()
   assert.deepEqual(cards(turn)?.map((c) => [c.mode, c.requestedMode]), [["normal", { lucky: 1 }]], "bought at Normal; the Buy line can say Classic wasn't possible")
+})
+
+test("a Lucky card under the smallest Lucky Checkout is quoted and offered at Normal, saying Lucky plays from that much a checkout", async () => {
+  const atNormal = new Quote({ mode: "normal", referencePrice: 1_000_000, luckyAmount: 0, maxPrice: 1_000_000, belowMin: true })
+  const classic = { voucher_id: "test-gift-card-code", value: "10", mode: "classic" }
+  const model = await fakeModel([call("quote", classic), call("prepare_purchase", { cards: [classic] }), { role: "assistant", content: "Tap Buy." }])
+  const purchases = { ...(deps as unknown as { purchases: object }).purchases, quote: () => Effect.succeed(atNormal), quoteCart: () => Effect.succeed([atNormal]) }
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.testnet", [], "a 1 dollar test card on classic")
+  model.close()
+  const result = (i: number) => JSON.parse(String(model.seen[i]!.messages.at(-1)!.content))
+  assert.equal(result(1).mode, "Normal")
+  assert.equal(result(1).pay_now, "$1.00")
+  assert.match(result(1).lucky_from, /^Lucky plays from \$2\.50 a checkout/)
+  assert.match(result(2).normal_price, /Lucky plays from \$2\.50 a checkout/)
+  assert.deepEqual(cards(turn)?.map((c) => [c.mode, c.requestedMode, c.luckyFrom]), [["normal", { lucky: 1 }, 2_500_000]], "the Buy line can say why")
 })
 
 /** Mainnet with a Checkout Email that has used `used` of Bitrefill's guest limits, selling a real (non-test) card. */

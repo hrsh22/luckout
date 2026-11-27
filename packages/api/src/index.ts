@@ -119,7 +119,12 @@ export class Quote extends Schema.Class<Quote>("Quote")({
   referencePrice: MicroUsdc,
   /** The part of the price the Game Version applies to (0 for Normal). */
   luckyAmount: MicroUsdc,
-  maxPrice: MicroUsdc
+  maxPrice: MicroUsdc,
+  /**
+   * A Lucky card quoted at Normal because its checkout's Lucky cards play less than the smallest Lucky Checkout
+   * together (ADR-0015): bought like this, it's bought at the normal price.
+   */
+  belowMin: Schema.optional(Schema.Literal(true))
 }) {}
 
 /** One Draw, enough to recompute it in the browser (ADR-0005). */
