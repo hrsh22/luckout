@@ -1218,7 +1218,10 @@ fn accounts_written_by_layout_1_load_and_work_and_an_advance_marks_its_checkout_
     e.deposit(&alice, 10 * USDC);
     ok(e.admit(&alice, 1, vec![card(5 * USDC, Mode::Normal)]));
     ok(e.advance(&alice, 0, 20 * USDC));
-    assert_eq!((e.checkout(&alice, 0).layout, e.checkout(&alice, 1).layout, e.config().layout), (2, 2, 1));
+    // A Checkout that never advances, and a Customer opened now, stay as layout 1 wrote them.
+    assert_eq!((e.checkout(&alice, 0).layout, e.checkout(&alice, 1).layout, e.config().layout), (2, 1, 1));
+    let bob = e.shopper(Mode::Normal);
+    assert_eq!(e.customer(&bob).layout, 1);
     ok(e.settle(&alice, 0, vec![0], vec![1]));
     ok(e.pay_refund(&alice, 0, 10 * USDC));
     ok(e.settle(&alice, 1, vec![0], vec![]));

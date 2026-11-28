@@ -204,7 +204,7 @@ pub mod luckout {
         fresh(ctx.accounts.config.layout)?;
         known_mode(&ctx.accounts.config, default_mode)?;
         ctx.accounts.customer.set_inner(Customer {
-            layout: LAYOUT,
+            layout: PLAIN_LAYOUT,
             bump: ctx.bumps.customer,
             wallet: ctx.accounts.wallet.key(),
             balance: 0,
@@ -439,7 +439,7 @@ pub mod luckout {
         customer.checkouts += 1;
         emit!(Admitted { customer: customer.wallet, checkout: a.checkout.key(), number, cards: admitted.clone() });
         a.checkout.set_inner(Checkout {
-            layout: LAYOUT,
+            layout: PLAIN_LAYOUT,
             bump: ctx.bumps.checkout,
             customer: customer.wallet,
             number,

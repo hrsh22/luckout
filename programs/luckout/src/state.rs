@@ -3,8 +3,8 @@
 //! layout is newer than it knows (`fresh`).
 //!
 //! Layout 2 (ADR-0016) put a Checkout's advance and pending refund, and their totals on Config, in what were spare
-//! bytes, so an account layout 1 wrote reads them as 0 and needs no migration. Every account this build creates, and a
-//! Checkout it advances, is written as layout 2: a rolled-back build refuses those, and keeps working on the rest.
+//! bytes, so an account layout 1 wrote reads them as 0 and needs no migration. Only a Checkout that advances is written
+//! as layout 2: a rolled-back build refuses those, and keeps working on every other account (`PLAIN_LAYOUT`).
 
 use anchor_lang::prelude::*;
 
@@ -12,6 +12,9 @@ use crate::error::LuckoutError;
 
 /// The account layout this build writes, and the newest it reads.
 pub const LAYOUT: u8 = 2;
+/// What a new Customer or Checkout is written as: until a Checkout advances, both are byte for byte what layout 1
+/// wrote, so a rolled-back build goes on working on them.
+pub const PLAIN_LAYOUT: u8 = 1;
 /// The most cards one Checkout holds: Bitrefill's own cart size.
 pub const MAX_CART: usize = 15;
 pub const MAX_NAME: usize = 16;

@@ -37,7 +37,7 @@ ADR-0015 rejected "the program paying invoices straight from the Vault", because
 
 - **Layout 2** puts the Checkout's `advanced` and `refund_pending`, and Config's `advanced` and `refunds_pending`, in what were spare bytes.
   - An account layout 1 wrote reads them as 0, so live accounts need no migration and no resize. The Checkout's spare bytes are now used up, so its next field needs a bigger account. Checkouts live a day at most, so new ones can simply be made bigger.
-  - Every account this build creates, and a Checkout it advances, is written as layout 2, so a rolled-back build refuses it rather than misread it. Config keeps its layout byte: an older build never acts on the totals and carries them through untouched.
+  - Only a Checkout that advances is written as layout 2, so a rolled-back build refuses it rather than misread it. New Customers and Checkouts are still byte for byte what layout 1 wrote and keep its byte, so a rolled-back build goes on working on them. Config keeps its layout byte: an older build never acts on the totals and carries them through untouched.
 
 ## Rejected
 

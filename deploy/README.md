@@ -166,7 +166,7 @@ It adds `advance` and `pay_refund`, and changes the Config and Checkout layouts 
 3. **Merge** the release into `staging`, so CI deploys the server. Until then the old server keeps working on the new program: it never advances, so it never needs to repay one.
 4. **Resume**, and prove it with small money: a checkout bigger than the Pay Wallet's float (it shows one `advance` in the payment), and the Admin panel's advance and refund figures.
 
-A rollback after this release is a fix forward: an older build refuses the Customers opened and the Checkouts admitted or advanced after the upgrade.
+Going back after this release works while no Checkout has an advance or a pending refund (the Admin panel shows both as $0): an older build refuses only the Checkouts that advanced. With either outstanding, fix forward.
 
 ## Pausing in an emergency
 

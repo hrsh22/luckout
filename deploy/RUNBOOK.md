@@ -225,7 +225,7 @@ A release goes in this order: the program (upgraded by hand, staging's first), t
 
 - **The program upgrade went wrong:**
   - Stop sales, and redeploy the build dumped before the upgrade (`deploy/README.md`, Upgrading a program, steps 1 and 6).
-  - This only works if the release didn't change an account layout. An older build refuses any account a newer one wrote (`This account was written by a newer build`), so after a layout change, fix forward. The advances release (ADR-0016) changed layouts: an older build would refuse every Customer opened and Checkout admitted or advanced after the upgrade, while older accounts kept working.
+  - This only works if the release didn't change an account layout. An older build refuses any account a newer one wrote (`This account was written by a newer build`), so after a layout change, fix forward. The advances release (ADR-0016) changed only the layout of a Checkout that advanced: an older build refuses those, open or owed a refund, and works on every other account. So go back only when no Checkout has an advance or a pending refund (the Admin panel shows both as $0); otherwise fix forward.
   - Put back the server that goes with that program too.
 - **The server:**
   - A failed deploy prints the command to go back: `bash deploy/remote-deploy.sh <branch> <earlier commit>`.
