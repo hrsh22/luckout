@@ -1,6 +1,7 @@
 "use client"
 
 import { AmountField } from "@/components/amount-field"
+import { HelpLink } from "@/components/help-link"
 import { AddressBox, TopUp } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
@@ -88,6 +89,9 @@ export function AddFundsPanel({ need, onDone, onContinue, tab: first = "solana" 
         </div>
       )}
       {approved && tab === "chain" ? <TopUp need={need} onContinue={onContinue} /> : <DepositPanel need={need} onContinue={onContinue} />}
+      <p className="text-sm text-muted">
+        <HelpLink href="/docs/add-funds">Every way to add funds</HelpLink>, with what each costs.
+      </p>
     </div>
   )
 }

@@ -1,6 +1,7 @@
 "use client"
 
 import { GiftCard } from "@/components/gift-card"
+import { HelpLink } from "@/components/help-link"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
@@ -208,13 +209,16 @@ function SafetyNet({ p }: { p: Purchase }) {
     return (
       <p className="flex items-start gap-2 text-sm text-muted">
         <LifeBuoy size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-        Taking longer than usual. If it isn't delivered by {new Date(opens).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}, you can take back the full amount right here.
+        <span>
+          Taking longer than usual. If it isn't delivered by {new Date(opens).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}, you can take back the full amount right here.{" "}
+          <HelpLink href="/docs/refunds#reclaim">How Reclaim works</HelpLink>
+        </span>
       </p>
     )
   }
   return (
     <div className="flex flex-col gap-3 rounded-[1.25rem] bg-warn-soft p-4 text-warn sm:flex-row sm:items-center">
-      <p className="flex-1 text-[15px] font-medium">This wasn't delivered within 24 hours, so the full amount you paid is yours to take back.</p>
+      <p className="flex-1 text-[15px] font-medium">This wasn't delivered within 24 hours, so the full amount you paid is yours to take back. <HelpLink href="/docs/refunds#reclaim">How Reclaim works</HelpLink></p>
       <Button size="sm" loading={busy} onClick={async () => {
         setBusy(true)
         if (await actions.reclaim(p.id)) await qc.invalidateQueries({ queryKey: ["purchases"] })

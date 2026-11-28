@@ -2,6 +2,7 @@
 
 import { BitrefillAccount, BitrefillLimits, CheckoutEmailForm } from "@/components/checkout-email"
 import { AddFundsSheet, DepositPanel, WithdrawSheet } from "@/components/funds"
+import { HelpLink } from "@/components/help-link"
 import { InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
 import { ModePicker } from "@/components/mode-picker"
@@ -125,7 +126,8 @@ export default function WalletPage() {
         <div>
           <h2 className="font-display text-3xl font-extrabold">Default mode</h2>
           <p className="mt-1 max-w-[60ch] text-ink-soft">
-            Used here and in Telegram unless you pick another for a card.
+            Used here and in Telegram unless you pick another for a card.{" "}
+            <HelpLink href="/docs/modes">Compare the modes</HelpLink>
           </p>
         </div>
         <ModePicker value={saving ?? chosen} onChange={pickMode} saving={saving} savedDefault={account?.default_mode} label="Default mode" />
@@ -194,7 +196,8 @@ function Limits({ per, daily }: { per: string; daily: string }) {
       <div>
         <h2 className="font-display text-3xl font-extrabold">Spending limits</h2>
         <p className="mt-1 max-w-[60ch] text-ink-soft">
-          The program enforces these on every purchase, from here or Telegram. Only you can change them.
+          The program enforces these on every purchase, from here or Telegram. Only you can change them.{" "}
+          <HelpLink href="/docs/limits#your-spending-limits">How limits work</HelpLink>
         </p>
       </div>
       <div className="card flex flex-col gap-5 p-6">

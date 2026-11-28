@@ -127,6 +127,9 @@ export default async function DrawProofPage({ params, searchParams }: Props) {
           </li>
         </ol>
         <BrowserCheck draw={draw} />
+        <p className="text-ink-soft">
+          Why nobody can retry a Draw, and how to read this page: <Link href="/docs/draw" className="font-semibold text-ink underline underline-offset-4">The Draw</Link>.
+        </p>
       </section>
 
       <section className="flex flex-col gap-3">
