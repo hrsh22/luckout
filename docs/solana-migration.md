@@ -175,7 +175,8 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 **Ready 2026-11-28, waiting for money** (draft PR #217, `solana-server` → `staging`):
 - **One build per environment:** `--features staging` / `--features production` pick each program's own id (staging `FM2mRU3R…`, production `GCeZ67an…`); no feature is devnet. CI builds all three reproducibly. A mainnet build can be initialized only with Circle's USDC.
 - **Staging keys:**
-  - the owner and upgrade authority (`59i8NfY9…`) is the owner's own wallet, with a copy of its key on the operator's Mac for deploys; the program keypair stays there until the owner backs it up
+  - the owner and upgrade authority (`59i8NfY9…`) is the owner's own wallet, with a copy of its key on the operator's Mac for the deploy and setup only; the program keypair stays there until the first deploy
+  - the guardian (`BcyJnVFp…`), which can only pause, is on the operator's Mac
   - the operator, fee payer and Pay Wallet were made on the VM
   - the VM's `.env` points at the staging program and a fresh database, `luckout_staging_solana`; NEAR's `.env` is kept as `.env.near-2026-11-28`
 - **Rehearsed on devnet** with the staging build at its own address:
@@ -189,13 +190,18 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   - our paying address's limit counts every card
   - deposit trouble and a card reclaimed after delivery alert the admin
   - a checkout that gave up says why, and Retry resumes one stopped at `admit` or `pay`
+- **The owner's key can leave the operator's Mac** (ADR-0015):
+  - a guardian named by the owner can only pause (`set_guardian`, `pause`, in Config's spare bytes, so the devnet program upgraded in place); `scripts/solana-pause.ts` pauses with its key
+  - upgrades: the operator uploads the build to a buffer and hands it to the upgrade authority, and the Admin panel shows the build's hash (solana-verify's, matched against a CI build) before the owner's wallet signs one upgrade
+  - proved on devnet through the panel: an upgrade from a buffer, naming and removing the guardian, its pause, the owner's resume
 - **Docs:** `deploy/README.md` and `deploy/RUNBOOK.md` describe Solana.
 - **Left for deploy day:**
   1. money to the owner (about 5 SOL for the deploy, of which 2.42 stays as the program's rent, plus USDC for the reserve and the Pay Wallet's float)
-  2. deploy and set up the program from CI's build
-  3. fund the fee payer, the Pay Wallet and the reserve
-  4. the staging Vercel variables
-  5. `DEPLOY_STAGING=on`, then merge #217
+  2. deploy and set up the program from CI's build, naming the guardian
+  3. fund the fee payer, the Pay Wallet, the reserve and the guardian
+  4. delete the owner's key and the program keypair from the operator's Mac
+  5. the staging Vercel variables
+  6. `DEPLOY_STAGING=on`, then merge #217
 - **Later:** registering each Deposit Address with Alchemy's webhook (until then, the two-minute sweep).
 
 ## Phase 5: cutover

@@ -9,6 +9,7 @@ Luckout runs on Solana (ADR-0015): one program per environment, a server on our 
 | Branch | `staging` (PRs from feature branches, with CI passing) | `main` (only by PR from `staging`, with CI passing) |
 | Program | `FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F` (build `--features staging`) | `GCeZ67ann5G1hzNijYtqFiHyAJ4dJy2mwFA6g2eQfssr` (build `--features production`) |
 | Owner and upgrade authority | `59i8NfY9b2qkeQUzJSSg3c54PLbfYf4XmKEv2YLZxrJW`, the owner's own wallet; a copy of its key on the operator's Mac for deploys | a key in the owner's own wallet |
+| Guardian (pause only) | `BcyJnVFpEX3ufMdqWEAuuNJte4TJM7p5q3Ao4Kd5SwVE`, on the operator's Mac | on the operator's Mac |
 | Operator, fee payer | `B6iF2cR8KUeQNS3Gqd6CskP48UZaqbtFa5eHe6KxfuEc`, `Ex44UESieWATsL8JngBeSi8uEKMTBWeMuAH1bPChVQcH`, made on the VM | made on the VM |
 | Pay Wallet | `9vQpDTkUwS8C4o3jpfS1FjdMoyvpbcyfx4UXgNRYq1RP`, made on the VM; Bitrefill tags it | made on the VM; Bitrefill tags it |
 | Web (Vercel) | Preview env vars for branch `staging`, domain `staging.luckout.wtf` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it) |
@@ -35,10 +36,12 @@ SSH (22) and CloudPanel (8443) are open only to our Tailscale tailnet; only 80 a
 | Key | Holds | Lives |
 |---|---|---|
 | Owner (also the upgrade authority) | the pause, the reserve, Proceeds, the caps, the operator, the Pay Wallet, ownership, upgrades | the owner's wallet, never on the VM. The server refuses to start if any of its keys is the owner's. |
+| Guardian | only the pause: it can't resume, move money or change anything else | the operator's Mac (`~/.luckout/solana-<environment>-guardian.json`), never on the VM; about 0.01 SOL for its fees. The owner names or removes it in the Admin panel. |
+| Upload key | writes an upgrade's build to a buffer and hands the buffer to the upgrade authority | the operator's Mac (`~/.luckout/solana-<environment>-upload.json`); holds SOL only during an upgrade |
 | Program keypair | only the program's address, used once by the first deploy | the operator's Mac; worthless after the first deploy |
 | Operator | admits and settles Checkouts | the VM's `.env` (`SOLANA_OPERATOR_SECRET_KEY`) |
 | Fee payer | pays every transaction's fee and the rent of customers' accounts | the VM's `.env` (`SOLANA_FEE_PAYER_SECRET_KEY`); holds SOL |
-| Pay Wallet | pays Bitrefill's invoices in USDC; `settle` repays it | the VM's `.env` (`SOLANA_PAY_WALLET_SECRET_KEY`); holds USDC and a little SOL |
+| Pay Wallet | pays Bitrefill's invoices in USDC; `settle` repays it | the VM's `.env` (`SOLANA_PAY_WALLET_SECRET_KEY`); holds USDC (the fee payer pays its fees) |
 
 The VM's keys are made on the VM, so their secrets never travel: an ed25519 key in Solana's 64-byte form, base58, in `.env` (mode 600). Print only public keys when checking them.
 
@@ -62,17 +65,18 @@ Once per environment. Needs the Solana CLI (Agave 4.4.1) and `solana-verify` on 
    ```
    If it stops midway, `solana program show --buffers --url "$RPC"` lists the buffer; resume with `--buffer <its keypair>` or close it to get the SOL back (`solana program close <buffer>`).
 4. **Anyone can check it** against the source: `solana-verify verify-from-repo -u "$RPC" --program-id <program> https://github.com/hrsh22/luckout --commit-hash <commit> --library-name luckout --mount-path programs -- --features staging`.
-5. **Set it up** with `apps/server/scripts/solana-init.ts`, which opens the Pay Wallet's USDC account and calls `initialize` as the upgrade authority. It simulates first, including an initialize with USDT, which a mainnet build must refuse:
+5. **Set it up** with `apps/server/scripts/solana-init.ts`, which opens the Pay Wallet's USDC account, calls `initialize` as the upgrade authority and names the guardian. It simulates first, including an initialize with USDT, which a mainnet build must refuse:
    ```sh
    RPC_URL="$RPC" PROGRAM_ID=FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F OWNER_KEY=~/.luckout/solana-staging-owner.json \
      OPERATOR=B6iF2cR8KUeQNS3Gqd6CskP48UZaqbtFa5eHe6KxfuEc PAY_WALLET=9vQpDTkUwS8C4o3jpfS1FjdMoyvpbcyfx4UXgNRYq1RP \
-     node apps/server/scripts/solana-init.ts          # then again with --send
+     GUARDIAN=BcyJnVFpEX3ufMdqWEAuuNJte4TJM7p5q3Ao4Kd5SwVE node apps/server/scripts/solana-init.ts          # then again with --send
    ```
    The program starts unpaused, with a $500 daily repay cap, a 2.5 USDC smallest Lucky Checkout, a Cashback Cap of the lower of $50 and 20% of the free reserve, and an empty reserve.
 6. **Money in place:**
    - the fee payer: about 0.1 SOL for staging (each new customer's account costs about 0.0017 SOL of rent, and each Draw 0.0018 SOL for ORAO's request);
    - the Pay Wallet: USDC for about a day of sales (its float); the fee payer pays its fees;
-   - the reserve, from the owner's USDC, in the Admin panel (Fund).
+   - the reserve, from the owner's USDC, in the Admin panel (Fund);
+   - the guardian: about 0.01 SOL.
 7. **The server** ([Server settings](#server-settings)), then merge the release into the branch and turn its `DEPLOY_*` variable `on`.
 8. **Prove it** with small money: a deposit from an exchange and from a wallet, a Normal card, a Lucky card and a Cart of two, a card through the bot, a Top-Up from another chain, a withdrawal, and the owner actions in the Admin panel.
 
@@ -136,14 +140,31 @@ The server runs database migrations on start. Keep it at one instance (a second 
 
 ## Upgrading a program
 
-In place: same address, same accounts, new code, so balances never move. The program reserves spare bytes in its accounts and records a layout number, so an upgrade may add a field in the spare bytes; one that changes a layout must also make the older build refuse the new accounts. A release goes to staging's program first, and to production's only after staging has sold with it.
+In place: same address, same accounts, new code, so balances never move. The program reserves spare bytes in its accounts and records a layout number, so an upgrade may add a field in the spare bytes; one that changes a layout must also make the older build refuse the new accounts. A release goes to staging's program first, and to production's only after staging has sold with it. The operator uploads the build; the upgrade authority's wallet signs only the upgrade, in the Admin panel, so its key never needs to be on the operator's Mac.
 
 1. **Keep the build running now:** `solana program dump <program> ~/luckout-so/<environment>-before-<date>.so --url "$RPC"`.
 2. **The new build** from CI, its hash checked (step 1 of [A new program](#a-new-program-staging-then-production)).
-3. **Stop sales** (Admin → Stop sales), and wait until nothing is at `admit`. The owner's pause also works and refuses every new Checkout on chain.
-4. **Deploy** as the upgrade authority: the same `solana program deploy` command with `--program-id <program address>` (no keypair needed now). It writes a buffer, then swaps it in; the program's rent grows only if the build is bigger.
-5. **Check:** `solana program show <program>`; the Admin panel reads the reserve, the caps and a customer as before; a small purchase settles and draws.
-6. **Restart sales.** If anything is wrong: deploy the dumped build from step 1 the same way.
+3. **Pause** (Admin → Pause the program, or the guardian: [Pausing in an emergency](#pausing-in-an-emergency)), and wait until nothing is at `admit` and pending Draws have finished.
+4. **Upload it** from the operator's Mac. The upload key pays the buffer's rent (`solana rent <bytes of luckout.so>`), which the upgrade hands back to the upgrade authority:
+   ```sh
+   U=~/.luckout/solana-<environment>-upload.json
+   solana program write-buffer ~/luckout-so/<environment>-<commit>/luckout.so -k $U \
+     --url "$RPC" --with-compute-unit-price 20000 --max-sign-attempts 50 --use-rpc     # prints the buffer's address
+   solana program set-buffer-authority <buffer> --new-buffer-authority <upgrade authority> -k $U --url "$RPC"
+   ```
+   If the build is bigger than the program's room (the panel says so in step 5), grow the program first; on mainnet anyone may pay for that: `solana program extend <program> <bytes> -k $U --url "$RPC"`.
+5. **Upgrade** in the Admin panel: Program → Upgrade the program → paste the buffer → Check the build. The new build's hash must equal the one in CI's summary for the commit. Then the upgrade authority's wallet signs; the panel refuses a transaction that does anything but upgrade this program from that buffer.
+6. **Check:** `solana program show <program>`; `solana-verify verify-from-repo` (step 4 of [A new program](#a-new-program-staging-then-production)); the Admin panel reads the reserve, the caps and a customer as before; a small purchase settles and draws.
+7. **Resume** in the Admin panel (the owner). If anything is wrong: upload the dumped build from step 1 the same way and upgrade to it.
+
+## Pausing in an emergency
+
+- **Stop sales** (Admin panel, any admin): the server stops taking purchases at once. No wallet.
+- **The guardian**, from the operator's Mac: the program refuses every new Checkout, whoever sends it, without waiting on the owner. Settling, Draws, Reclaims, deposits and withdrawals go on.
+  ```sh
+  RPC_URL="$RPC" PROGRAM_ID=<program> GUARDIAN_KEY=~/.luckout/solana-<environment>-guardian.json node apps/server/scripts/solana-pause.ts
+  ```
+- **The owner** pauses in the Admin panel too, and only the owner resumes.
 
 ## Logs
 

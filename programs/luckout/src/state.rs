@@ -87,7 +87,9 @@ pub struct Config {
     pub lucky_settled: u64,
     pub lucky_amount_total: u64,
     pub lucky_paid_total: u64,
-    pub spare: [u8; 64],
+    /// May only pause (`pause`), so a time lock on the owner never delays one. All zeros: none.
+    pub guardian: Pubkey,
+    pub spare: [u8; 32],
     /// Append-only. Grows by one entry with each `add_game_version`.
     #[max_len(0)]
     pub versions: Vec<GameVersion>,

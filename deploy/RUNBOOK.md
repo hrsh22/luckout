@@ -159,11 +159,11 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
   - Checkouts already on their way finish. Waiting ones keep their place.
   - Deposits, withdrawals and Reclaims keep working.
   - **Restart sales** undoes it.
-- **The hard stop: Admin → Pause the program**, signed in the owner's wallet.
+- **The hard stop: Admin → Pause the program**, signed in the owner's wallet, or the guardian's pause from the operator's Mac when the owner can't be reached: `RPC_URL="$RPC" PROGRAM_ID=<program> GUARDIAN_KEY=~/.luckout/solana-<environment>-guardian.json node apps/server/scripts/solana-pause.ts`.
   - The program refuses every new Checkout, whoever sends it. One the server hadn't admitted yet ends `rejected` (`New purchases are paused`), uncharged.
   - Checkouts already admitted still settle and draw, and deposits, withdrawals and Reclaims keep working.
   - The server sees the pause within 15 seconds and closes the shop too.
-  - **Resume the program** undoes it.
+  - **Resume the program** undoes it, and only the owner can.
 - **The Vault holds less than the program owes.** The Monitor alerts `the Vault holds X USDC, less than the program owes: …`. Pause the program now, then investigate.
 - **The server's keys may be stolen.** The operator and the Pay Wallet are both on the VM. Together they can admit Checkouts against customers' Balances and settle them as delivered, and `settle` repays the Pay Wallet up to the daily cap.
   1. Pause the program.

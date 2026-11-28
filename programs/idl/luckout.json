@@ -687,6 +687,48 @@
       ]
     },
     {
+      "name": "pause",
+      "docs": [
+        "The guardian's only power, which the owner has too: stop new Checkouts at once. Only the owner restarts them."
+      ],
+      "discriminator": [
+        211,
+        22,
+        221,
+        251,
+        74,
+        121,
+        193,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "guardian",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "propose_owner",
       "docs": [
         "Proposes a new owner, or withdraws the proposal with `None`. Nothing changes until it accepts, so the",
@@ -1110,6 +1152,58 @@
             "defined": {
               "name": "Mode"
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_guardian",
+      "docs": [
+        "`None` removes the guardian."
+      ],
+      "discriminator": [
+        147,
+        243,
+        50,
+        121,
+        154,
+        164,
+        50,
+        30
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "guardian",
+          "type": {
+            "option": "pubkey"
           }
         }
       ]
@@ -2192,6 +2286,11 @@
       "code": 6038,
       "name": "NotUsdc",
       "msg": "A mainnet build takes only Circle's USDC"
+    },
+    {
+      "code": 6039,
+      "name": "NotGuardian",
+      "msg": "Only the guardian or the owner can pause"
     }
   ],
   "types": [
@@ -2526,11 +2625,18 @@
             "type": "u64"
           },
           {
+            "name": "guardian",
+            "docs": [
+              "May only pause (`pause`), so a time lock on the owner never delays one. All zeros: none."
+            ],
+            "type": "pubkey"
+          },
+          {
             "name": "spare",
             "type": {
               "array": [
                 "u8",
-                64
+                32
               ]
             }
           },

@@ -201,6 +201,8 @@ export interface Config {
   readonly lucky_settled: bigint
   readonly lucky_amount_total: bigint
   readonly lucky_paid_total: bigint
+  /** May only pause; PublicKey.default when there is none. */
+  readonly guardian: PublicKey
   readonly versions: ReadonlyArray<GameVersion>
 }
 

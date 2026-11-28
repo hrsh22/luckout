@@ -2,16 +2,18 @@
 // payer co-sign), so a server that was broken into could otherwise slip its own key in as the new owner, operator or
 // Pay Wallet, or add an instruction of its own that the owner's signature would carry. Each one must be exactly the
 // instruction the admin asked for, to the program this site was built for, with nothing else but compute settings and
-// the opening of a USDC account at our fee payer's cost. No `@/` imports, so `node --test` can load it.
+// the opening of a USDC account at our fee payer's cost; an upgrade, exactly one upgrade of this program from the
+// buffer the admin checked. No `@/` imports, so `node --test` can load it.
 
 import type { OwnerAction } from "@luckout/api"
 import { ASSOCIATED_TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token"
-import { address, getAddressEncoder, getBase64Encoder, getCompiledTransactionMessageDecoder, getTransactionDecoder } from "@solana/kit"
+import { address, getAddressEncoder, getBase64Encoder, getCompiledTransactionMessageDecoder, getProgramDerivedAddress, getTransactionDecoder } from "@solana/kit"
 
 /** The program this site was built for: NEXT_PUBLIC_SOLANA_PROGRAM_ID, or the devnet program the IDL names. */
 export const PROGRAM_ID = process.env.NEXT_PUBLIC_SOLANA_PROGRAM_ID || "4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3"
 
 const COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111"
+const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111"
 
 const u64 = (n: number) => {
   const b = new Uint8Array(8)
@@ -37,7 +39,9 @@ export async function instructionData(action: OwnerAction): Promise<Uint8Array> 
     ? key(action.operator)
     : action._tag === "propose_owner"
     ? option(action.newOwner === null ? undefined : key(action.newOwner))
-    : [] // set_pay_wallet and accept_owner take none
+    : action._tag === "set_guardian"
+    ? option(action.guardian === null ? undefined : key(action.guardian))
+    : [] // set_pay_wallet and accept_owner take none; an upgrade isn't the program's
   return Uint8Array.from([...hash.subarray(0, 8), ...args])
 }
 
@@ -53,6 +57,19 @@ export async function ownerTxProblem(transaction: string, action: OwnerAction, s
   if (message.version !== "legacy") return "it isn't a plain transaction"
   const keys = message.staticAccounts
   if (keys[0] === signer) return "it would make your wallet pay its fee"
+  if (action._tag === "upgrade") {
+    const ixs = message.instructions.filter((ix) => keys[ix.programAddressIndex] !== COMPUTE_BUDGET)
+    const ix = ixs[0]
+    if (ixs.length !== 1 || !ix || keys[ix.programAddressIndex] !== LOADER || !same(ix.data, [3, 0, 0, 0])) return "it isn't one upgrade"
+    // Program data, program, buffer, where the buffer's rent goes, the rent and clock sysvars, the upgrade authority.
+    const a = (ix.accountIndices ?? []).map((i) => keys[i])
+    const [programData] = await getProgramDerivedAddress({ programAddress: address(LOADER), seeds: [getAddressEncoder().encode(address(PROGRAM_ID))] })
+    if (a[0] !== programData || a[1] !== PROGRAM_ID) return "it upgrades another program"
+    if (a[2] !== action.buffer) return "it takes another buffer"
+    if (a[6] !== signer) return "it's for another signer"
+    if (a[3] !== signer) return "it sends the buffer's rent elsewhere"
+    return undefined
+  }
   const ours = message.instructions.filter((ix) => keys[ix.programAddressIndex] === PROGRAM_ID)
   for (const ix of message.instructions) {
     const program = keys[ix.programAddressIndex]

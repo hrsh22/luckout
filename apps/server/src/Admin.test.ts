@@ -1,10 +1,13 @@
 import { Api, type OwnerAction } from "@luckout/api"
+import { address, lamports } from "@solana/kit"
 import { getAssociatedTokenAddressSync } from "@solana/spl-token"
-import { Keypair, Transaction } from "@solana/web3.js"
+import { Keypair, type PublicKey, Transaction } from "@solana/web3.js"
 import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { test } from "node:test"
 import { Admin } from "./Admin.ts"
 import { Alerts } from "./Alerts.ts"
@@ -386,4 +389,58 @@ test("the owner names a new operator and Pay Wallet, and hands over to a propose
       const after = yield* solana.config
       assert.ok(after.owner.equals(next.publicKey))
       assert.equal(after.pending_owner, null)
+    })))
+
+test("the owner names a guardian, who shows in the overview, and removes it", () =>
+  asOwner((_, sign) =>
+    Effect.gen(function*() {
+      const admin = yield* Admin
+      const guardian = Keypair.generate().publicKey.toBase58()
+      assert.equal((yield* admin.overview).program.guardian, undefined)
+      yield* sign({ _tag: "set_guardian", guardian })
+      assert.equal((yield* admin.overview).program.guardian, guardian)
+      yield* sign({ _tag: "set_guardian", guardian: null })
+      assert.equal((yield* admin.overview).program.guardian, undefined)
+    })))
+
+test("an upgrade shows the buffer's hash first, takes only one the upgrade authority holds, and returns its rent to it", () =>
+  asOwner((w, sign) =>
+    Effect.gen(function*() {
+      const admin = yield* Admin
+      const so = readFileSync(new URL("../../../programs/target/deploy/luckout.so", import.meta.url))
+      const buffer = (authority: PublicKey, build = so) => {
+        const at = Keypair.generate().publicKey.toBase58()
+        const data = Buffer.concat([Buffer.from([1, 0, 0, 0, 1]), authority.toBuffer(), build])
+        w.svm.setAccount({
+          address: address(at),
+          data,
+          executable: false,
+          lamports: lamports(5_000_000_000n),
+          programAddress: address("BPFLoaderUpgradeab1e11111111111111111111111"),
+          space: BigInt(data.length)
+        })
+        return at
+      }
+      const owner = address(w.owner.publicKey.toBase58())
+      const ours = buffer(w.owner.publicKey)
+      const checked = yield* admin.buffer("boss", ours)
+      // As solana-verify hashes a build: without its trailing zeros (checked against a CI build's printed hash).
+      const hash = createHash("sha256").update(so.subarray(0, so.findLastIndex((b) => b !== 0) + 1)).digest("hex")
+      assert.deepEqual([checked.hash, checked.size, checked.authority], [hash, so.length, w.owner.publicKey.toBase58()], "the hash CI prints for this build")
+      assert.deepEqual(checked.program, { hash, upgradeAuthority: w.owner.publicKey.toBase58(), room: checked.program.room })
+      assert.ok(checked.program.room >= so.length)
+
+      assert.equal((yield* Effect.flip(admin.buffer(alice, ours)))._tag, "NotFound")
+      assert.match((yield* Effect.flip(admin.buffer("boss", w.mint.toBase58()))).message, /isn't a program buffer/)
+      const theirs = buffer(Keypair.generate().publicKey)
+      assert.match((yield* Effect.flip(admin.ownerTransaction("boss", { _tag: "upgrade", buffer: theirs }))).message, /not the upgrade authority/)
+      const big = buffer(w.owner.publicKey, Buffer.concat([so, Buffer.alloc(checked.program.room, 1)]))
+      assert.match((yield* Effect.flip(admin.ownerTransaction("boss", { _tag: "upgrade", buffer: big }))).message, /extend it first/)
+
+      // The loader refuses an upgrade in the slot the program was deployed in, and LiteSVM deployed it in slot 0.
+      w.svm.warpToSlot(w.svm.getClock().slot + 1n)
+      const before = w.svm.getBalance(owner) ?? 0n
+      yield* sign({ _tag: "upgrade", buffer: ours })
+      assert.equal(w.svm.getAccount(address(ours)).exists, false, "the buffer is spent")
+      assert.equal((w.svm.getBalance(owner) ?? 0n) - before, 5_000_000_000n, "its rent went back to the owner, who paid no fee")
     })))

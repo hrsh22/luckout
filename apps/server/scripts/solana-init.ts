@@ -3,15 +3,16 @@
 // program is already set up. The owner's key is read from a file on this machine and never goes to the server.
 //
 //   RPC_URL=… PROGRAM_ID=… OWNER_KEY=~/.luckout/solana-staging-owner.json OPERATOR=<address> PAY_WALLET=<address> \
-//     node apps/server/scripts/solana-init.ts [--send]
+//     [GUARDIAN=<address>] node apps/server/scripts/solana-init.ts [--send]
 //
 // Without --send it only simulates, including an initialize with a token that isn't USDC, which a mainnet build
-// must refuse.
+// must refuse. GUARDIAN names the key that can only pause (`solana-pause.ts`), here or on a program already set up.
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
-import { ComputeBudgetProgram, Connection, Keypair, PublicKey, Transaction, type TransactionInstruction, sendAndConfirmTransaction } from "@solana/web3.js"
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js"
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { decodeAccount, programAt, type Config } from "../src/Program.ts"
+import { sendAndWait } from "./send.ts"
 
 const need = (k: string) => process.env[k] || (() => { throw new Error(`set ${k}`) })()
 const USDC = new PublicKey(process.env.USDC_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
@@ -20,6 +21,7 @@ const program = programAt(new PublicKey(need("PROGRAM_ID")))
 const owner = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(need("OWNER_KEY").replace(/^~/, homedir()), "utf8"))))
 const operator = new PublicKey(need("OPERATOR"))
 const payWallet = new PublicKey(need("PAY_WALLET"))
+const guardian = process.env.GUARDIAN ? new PublicKey(process.env.GUARDIAN) : undefined
 const send = process.argv.includes("--send")
 // Mainnet drops transactions without a priority fee when it's busy.
 const price = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: Number(process.env.MICROLAMPORTS ?? 20_000) })
@@ -63,10 +65,18 @@ if (!existing) {
   }
   console.log(`initialize with USDC: ${await simulate([openPayWallet(USDC), initialize(USDC)])}`)
   if (!send) process.exit(0)
-  const sig = await sendAndConfirmTransaction(conn, new Transaction().add(price, openPayWallet(USDC), initialize(USDC)), [owner], { commitment: "confirmed" })
+  const sig = await sendAndWait(conn, [price, openPayWallet(USDC), initialize(USDC)], [owner])
   console.log(`initialized: ${sig}`)
 }
-const config = decodeAccount<Config>("Config", (await conn.getAccountInfo(program.config))!.data)
+let config = decodeAccount<Config>("Config", (await conn.getAccountInfo(program.config))!.data)
+if (guardian && !config.guardian.equals(guardian)) {
+  const name = program.instruction("set_guardian", { owner: owner.publicKey, config: program.config }, { guardian })
+  console.log(`name the guardian ${guardian.toBase58()}: ${await simulate([name])}`)
+  if (send) {
+    console.log(`guardian named: ${await sendAndWait(conn, [price, name], [owner])}`)
+    config = decodeAccount<Config>("Config", (await conn.getAccountInfo(program.config))!.data)
+  }
+}
 console.log({
   owner: config.owner.toBase58(),
   operator: config.operator.toBase58(),
@@ -74,6 +84,7 @@ console.log({
   vault: config.vault.toBase58(),
   payWalletUsdc: config.pay_wallet.toBase58(),
   paused: config.paused,
+  guardian: config.guardian.equals(PublicKey.default) ? null : config.guardian.toBase58(),
   minLuckyCheckout: Number(config.min_lucky_checkout) / 1e6,
   repayDailyCap: Number(config.repay_daily_cap) / 1e6
 })

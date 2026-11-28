@@ -656,7 +656,11 @@ export const OwnerAction = Schema.Union([
   Schema.TaggedStruct("set_pay_wallet", { payWallet: Address }),
   /** null withdraws a proposal. */
   Schema.TaggedStruct("propose_owner", { newOwner: Schema.NullOr(Address) }),
-  Schema.TaggedStruct("accept_owner", {})
+  Schema.TaggedStruct("accept_owner", {}),
+  /** The guardian can only pause; null removes it. */
+  Schema.TaggedStruct("set_guardian", { guardian: Schema.NullOr(Address) }),
+  /** Replaces the program with the build in `buffer`, signed by the upgrade authority, which must hold the buffer (deploy/README.md). */
+  Schema.TaggedStruct("upgrade", { buffer: Address })
 ])
 export type OwnerAction = typeof OwnerAction.Type
 
@@ -689,7 +693,9 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     vault: Schema.String,
     /** The Pay Wallet's USDC account, which `settle` repays. */
     payWallet: Schema.String,
-    paused: Schema.Boolean
+    paused: Schema.Boolean,
+    /** A key that can only pause, so a pause never waits on the owner. */
+    guardian: Schema.optional(Schema.String)
   }),
   /** An admin stopped new purchases on the server (any admin can, unlike the program's pause). */
   salesStopped: Schema.Boolean,
@@ -743,6 +749,19 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   }),
   /** What every card the Pay Wallet paid, a guest's or on a customer's own Bitrefill account, has used of our paying address's own limits at Bitrefill (ADR-0015). */
   paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
+}) {}
+
+/** A build uploaded for an upgrade (deploy/README.md), as the owner checks it before signing. */
+export class AdminBuffer extends Schema.Class<AdminBuffer>("AdminBuffer")({
+  address: Schema.String,
+  /** solana-verify's executable hash: the release's must match the one in CI's program-build summary. */
+  hash: Schema.String,
+  /** Bytes the build needs. */
+  size: Schema.Int,
+  /** Who may use it: an upgrade needs the program's upgrade authority. */
+  authority: Schema.NullOr(Schema.String),
+  /** The program as it runs now: its hash, its upgrade authority (null: it can never change), and its room for a build in bytes. */
+  program: Schema.Struct({ hash: Schema.String, upgradeAuthority: Schema.NullOr(Schema.String), room: Schema.Int })
 }) {}
 
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
@@ -813,6 +832,8 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     success: HttpApiSchema.NoContent,
     error: [NotFound, PurchaseInvalid]
   }),
+  /** A buffer holding a build for an upgrade, checked against the program. */
+  HttpApiEndpoint.get("buffer", "/admin/buffers/:address", { params: { address: Address }, success: AdminBuffer, error: [NotFound, AdminInvalid] }),
   /** An owner transaction, unsigned, for the owner's wallet to sign and `/transactions/submit` to send. */
   HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] })
 ).middleware(Authorization).annotate(OpenApi.Exclude, true) {}

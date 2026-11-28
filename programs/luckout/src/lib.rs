@@ -166,7 +166,8 @@ pub mod luckout {
             lucky_settled: 0,
             lucky_amount_total: 0,
             lucky_paid_total: 0,
-            spare: [0; 64],
+            guardian: Pubkey::default(),
+            spare: [0; 32],
             versions: default_game_versions(),
         });
         Ok(())
@@ -512,6 +513,18 @@ pub mod luckout {
     /// Stops only new Checkouts.
     pub fn set_paused(ctx: Context<OwnerOnly>, paused: bool) -> Result<()> {
         ctx.accounts.config.paused = paused;
+        Ok(())
+    }
+
+    /// `None` removes the guardian.
+    pub fn set_guardian(ctx: Context<OwnerOnly>, guardian: Option<Pubkey>) -> Result<()> {
+        ctx.accounts.config.guardian = guardian.unwrap_or_default();
+        Ok(())
+    }
+
+    /// The guardian's only power, which the owner has too: stop new Checkouts at once. Only the owner restarts them.
+    pub fn pause(ctx: Context<Pause>) -> Result<()> {
+        ctx.accounts.config.paused = true;
         Ok(())
     }
 
@@ -954,6 +967,18 @@ pub struct Settle<'info> {
 pub struct OwnerOnly<'info> {
     pub owner: Signer<'info>,
     #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = owner @ LuckoutError::NotOwner)]
+    pub config: Account<'info, Config>,
+}
+
+#[derive(Accounts)]
+pub struct Pause<'info> {
+    pub guardian: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = guardian.key() == config.guardian || guardian.key() == config.owner @ LuckoutError::NotGuardian
+    )]
     pub config: Account<'info, Config>,
 }
 

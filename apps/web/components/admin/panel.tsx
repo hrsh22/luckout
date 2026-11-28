@@ -6,6 +6,7 @@ import { OwnerBanner, useOwner } from "@/components/admin/owner"
 import { PurchasesCard } from "@/components/admin/purchases"
 import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
 import { AddressLink, AdminTabs, Bar, LastFigures, sol } from "@/components/admin/shared"
+import { UpgradeSheet } from "@/components/admin/upgrade"
 import { shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
@@ -102,7 +103,7 @@ function Loading() {
   )
 }
 
-type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "cap" | "repay" | "min-lucky" | "operator" | "pay-wallet" | "owner"
+type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "cap" | "repay" | "min-lucky" | "operator" | "pay-wallet" | "owner" | "guardian" | "upgrade"
 
 function Dashboard({ o }: { o: AdminOverview }) {
   const owner = useOwner(o)
@@ -189,7 +190,15 @@ function Dashboard({ o }: { o: AdminOverview }) {
       </section>
 
       <section className="grid items-start gap-4 lg:grid-cols-[1fr_1.25fr]">
-        <ProgramCard o={o} onOperator={show("operator")} onPayWallet={show("pay-wallet")} onOwner={show("owner")} />
+        <ProgramCard
+          o={o}
+          onOperator={show("operator")}
+          onPayWallet={show("pay-wallet")}
+          onOwner={show("owner")}
+          onGuardian={show("guardian")}
+          onRemoveGuardian={owner.asOwner(() => void owner.sign({ _tag: "set_guardian", guardian: null }, "Removing the guardian", "The guardian can no longer pause"))}
+          onUpgrade={show("upgrade")}
+        />
         <PurchasesCard p={o.purchases} />
       </section>
 
@@ -277,6 +286,18 @@ function Dashboard({ o }: { o: AdminOverview }) {
         save={(v) => `Make ${shortAccount(v)} the Pay Wallet`}
         onSave={(v) => owner.sign({ _tag: "set_pay_wallet", payWallet: v }, "Changing the Pay Wallet", `${shortAccount(v)} is the Pay Wallet now`)}
       />
+      <ValueSheet
+        kind="address"
+        open={open === "guardian"}
+        onClose={close}
+        title={o.program.guardian ? "Change the guardian" : "Name a guardian"}
+        description="A key that can only pause the program, so a pause never waits on the owner's wallet. It can't resume, move money or change anything else: only the owner resumes. Keep its key off the server."
+        label="Guardian's address"
+        problem={(v) => (v === o.program.guardian ? "That's the guardian now" : undefined)}
+        save={(v) => `Make ${shortAccount(v)} the guardian`}
+        onSave={(v) => owner.sign({ _tag: "set_guardian", guardian: v }, "Naming the guardian", `${shortAccount(v)} can pause the program now`)}
+      />
+      <UpgradeSheet open={open === "upgrade"} onClose={close} owner={owner} />
       <ValueSheet
         kind="address"
         open={open === "owner"}
@@ -391,13 +412,22 @@ function LimitsCard({ o }: { o: AdminOverview }) {
 }
 
 /** The program's keys and accounts, each linked to Solana Explorer, and the owner's rarer changes. */
-function ProgramCard({ o, onOperator, onPayWallet, onOwner }: { o: AdminOverview; onOperator: () => void; onPayWallet: () => void; onOwner: () => void }) {
+function ProgramCard({ o, onOperator, onPayWallet, onOwner, onGuardian, onRemoveGuardian, onUpgrade }: {
+  o: AdminOverview
+  onOperator: () => void
+  onPayWallet: () => void
+  onOwner: () => void
+  onGuardian: () => void
+  onRemoveGuardian: () => void
+  onUpgrade: () => void
+}) {
   const p = o.program
   const rows: ReadonlyArray<[string, string | undefined]> = [
     ["Program", p.id],
     ["Owner", p.owner],
     ["Proposed owner", p.pendingOwner],
     ["Operator", p.operator],
+    ["Guardian (pause only)", p.guardian],
     ["Pay Wallet's USDC", p.payWallet],
     ["Vault", p.vault],
     ["USDC", p.usdcMint]
@@ -420,6 +450,9 @@ function ProgramCard({ o, onOperator, onPayWallet, onOwner }: { o: AdminOverview
         <Button size="sm" variant="light" onClick={onOperator}>Change the operator</Button>
         <Button size="sm" variant="light" onClick={onPayWallet}>Change the Pay Wallet</Button>
         <Button size="sm" variant="light" onClick={onOwner}>Transfer ownership</Button>
+        <Button size="sm" variant="light" onClick={onGuardian}>{p.guardian ? "Change the guardian" : "Name a guardian"}</Button>
+        {p.guardian && <Button size="sm" variant="light" onClick={onRemoveGuardian}>Remove the guardian</Button>}
+        <Button size="sm" variant="light" onClick={onUpgrade}>Upgrade the program</Button>
       </div>
     </div>
   )

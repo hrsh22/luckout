@@ -1,5 +1,6 @@
 import {
   ADMIN_LIST_LIMIT,
+  AdminBuffer,
   AdminInvalid,
   AdminOverview,
   AdminPurchase,
@@ -12,8 +13,9 @@ import {
   type ShopStatus
 } from "@luckout/api"
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
-import { PublicKey, type TransactionInstruction } from "@solana/web3.js"
+import { PublicKey, SYSVAR_CLOCK_PUBKEY, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js"
 import { Config, Context, Effect, Layer } from "effect"
+import { createHash } from "node:crypto"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
@@ -21,7 +23,7 @@ import { LOW_LINES } from "./Monitor.ts"
 import { GUEST_COUNTED_AT, OPEN_STEPS, PAYING_LIMITS, payingUse, retryPurchase, retryStep } from "./Purchases.ts"
 import { Sales } from "./Sales.ts"
 import { maxCashback } from "./Program.ts"
-import { Solana } from "./Solana.ts"
+import { type RawAccount, Solana } from "./Solana.ts"
 
 // The admin panel's server side. Only accounts in ADMIN_ACCOUNTS get anything; everyone else is
 // told the page doesn't exist. Nothing here moves money: the reserve, Proceeds, pausing and caps are
@@ -32,6 +34,25 @@ import { Solana } from "./Solana.ts"
 const USERS_SHOWN = ADMIN_LIST_LIMIT
 /** Purchases the overview lists as needing attention; the count of all of them comes with it. */
 const ATTENTION_SHOWN = 20
+
+const LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+
+/** An upgradeable loader account: a buffer (tag 1) or a program's data (tag 3), with its authority and the build it holds. */
+const loaderAccount = (a: RawAccount | undefined, tag: 1 | 3) => {
+  if (!a?.owner.equals(LOADER) || a.data.length < 4 || a.data.readUInt32LE(0) !== tag) return undefined
+  const at = tag === 1 ? 4 : 12
+  return { authority: a.data[at] === 1 ? new PublicKey(a.data.subarray(at + 1, at + 33)) : null, build: a.data.subarray(at + 33) }
+}
+
+/** solana-verify's executable hash: sha256 of the build without its trailing zeros. */
+const buildHash = (build: Buffer) => {
+  let n = build.length
+  while (n > 0 && build[n - 1] === 0) n--
+  return createHash("sha256").update(build.subarray(0, n)).digest("hex")
+}
+
+const keyOf = (text: string) =>
+  Effect.try({ try: () => new PublicKey(text), catch: () => new AdminInvalid({ message: `${text} isn't a Solana address` }) })
 
 interface Row {
   id: string
@@ -59,6 +80,8 @@ export class Admin extends Context.Service<Admin, {
    * `accept_owner`). It goes through /transactions/submit like any other prepared transaction.
    */
   ownerTransaction(by: string, action: OwnerAction): Effect.Effect<{ readonly transaction: string; readonly token: string }, NotFound | AdminInvalid>
+  /** A buffer holding a build for an upgrade: its hash, to check against CI's, and whether the program can take it. */
+  buffer(by: string, address: string): Effect.Effect<AdminBuffer, NotFound | AdminInvalid>
 }>()("luckout/Admin") {
   static readonly layer = Layer.effect(
     Admin,
@@ -120,7 +143,8 @@ export class Admin extends Context.Service<Admin, {
             usdcMint: config.usdc_mint.toBase58(),
             vault: config.vault.toBase58(),
             payWallet: config.pay_wallet.toBase58(),
-            paused: config.paused
+            paused: config.paused,
+            ...(config.guardian.equals(PublicKey.default) ? {} : { guardian: config.guardian.toBase58() })
           },
           salesStopped: shop.reason === "stopped",
           reserve: {
@@ -294,6 +318,23 @@ export class Admin extends Context.Service<Admin, {
           Effect.provideService(SqlClient.SqlClient, sql)
         )
 
+      const upgradable = (address: string) =>
+        Effect.gen(function*() {
+          const at = yield* keyOf(address)
+          const [b, pd] = yield* solana.accounts([at, solana.program.programData])
+          const buffer = loaderAccount(b, 1)
+          if (!buffer) return yield* new AdminInvalid({ message: `${address} isn't a program buffer` })
+          const live = loaderAccount(pd, 3)
+          if (!live) return yield* new AdminInvalid({ message: "The program isn't deployed" })
+          return new AdminBuffer({
+            address: at.toBase58(),
+            hash: buildHash(buffer.build),
+            size: buffer.build.length,
+            authority: buffer.authority?.toBase58() ?? null,
+            program: { hash: buildHash(live.build), upgradeAuthority: live.authority?.toBase58() ?? null, room: live.build.length }
+          })
+        }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.fail(new AdminInvalid({ message: e.message }))))
+
       const ownerTransaction = (by: string, action: OwnerAction) =>
         Effect.gen(function*() {
           if (!admins.has(by)) return yield* new NotFound()
@@ -302,8 +343,7 @@ export class Admin extends Context.Service<Admin, {
           const config = yield* solana.config
           const p = solana.program
           const owner = config.owner
-          const key = (text: string) =>
-            Effect.try({ try: () => new PublicKey(text), catch: () => new AdminInvalid({ message: `${text} isn't a Solana address` }) })
+          const key = keyOf
           const usdc = (wallet: PublicKey) => getAssociatedTokenAddressSync(config.usdc_mint, wallet)
           // Opened, if it has none, at our fee payer's cost.
           const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(feePayer, usdc(wallet), wallet, config.usdc_mint)
@@ -351,6 +391,35 @@ export class Admin extends Context.Service<Admin, {
               signer = config.pending_owner
               ixs = [p.instruction("accept_owner", { new_owner: signer, config: p.config })]
               break
+            case "set_guardian":
+              ixs = [ix({}, { guardian: action.guardian === null ? null : yield* key(action.guardian) })]
+              break
+            case "upgrade": {
+              const b = yield* upgradable(action.buffer)
+              if (!b.program.upgradeAuthority) return yield* new AdminInvalid({ message: "The program can no longer be upgraded" })
+              if (b.authority !== b.program.upgradeAuthority) {
+                return yield* new AdminInvalid({ message: `The buffer's authority is ${b.authority ?? "none"}, not the upgrade authority ${b.program.upgradeAuthority}` })
+              }
+              if (b.size > b.program.room) {
+                return yield* new AdminInvalid({ message: `The build needs ${b.size - b.program.room} more bytes than the program has: extend it first (deploy/README.md)` })
+              }
+              signer = new PublicKey(b.program.upgradeAuthority)
+              ixs = [new TransactionInstruction({
+                programId: LOADER,
+                keys: [
+                  { pubkey: p.programData, isSigner: false, isWritable: true },
+                  { pubkey: p.id, isSigner: false, isWritable: true },
+                  { pubkey: new PublicKey(b.address), isSigner: false, isWritable: true },
+                  // The buffer's rent goes back to the upgrade authority.
+                  { pubkey: signer, isSigner: false, isWritable: true },
+                  { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
+                  { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+                  { pubkey: signer, isSigner: true, isWritable: false }
+                ],
+                data: Buffer.from([3, 0, 0, 0])
+              })]
+              break
+            }
           }
           return yield* solana.prepare(ixs, signer)
         }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.fail(new AdminInvalid({ message: e.message }))))
@@ -362,7 +431,8 @@ export class Admin extends Context.Service<Admin, {
         users,
         setSales: sales.setOpen,
         retry,
-        ownerTransaction
+        ownerTransaction,
+        buffer: (by, address) => (admins.has(by) ? upgradable(address) : Effect.fail(new NotFound()))
       })
     })
   )

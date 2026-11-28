@@ -67,6 +67,19 @@ const k = (a: string) => new Key(a)
 const ownerOnly = { owner: k(owner), config: program.config }
 const payout = (amount: number) => program.instruction("withdraw_reserve", { ...ownerOnly, vault: program.vault, vault_authority: program.vaultAuthority, to: k(attacker) }, { amount: BigInt(amount) })
 
+const LOADER = "BPFLoaderUpgradeab1e11111111111111111111111"
+/** An upgrade as Admin.ts builds it. */
+const upgrade = (o: { buffer?: string; spill?: string; authority?: string; programData?: string; data?: ReadonlyArray<number> } = {}) =>
+  raw(LOADER, [
+    [o.programData ?? program.programData.toBase58(), AccountRole.WRITABLE],
+    [PROGRAM_ID, AccountRole.WRITABLE],
+    [o.buffer ?? attacker, AccountRole.WRITABLE],
+    [o.spill ?? owner, AccountRole.WRITABLE],
+    ["SysvarRent111111111111111111111111111111111", AccountRole.READONLY],
+    ["SysvarC1ock11111111111111111111111111111111", AccountRole.READONLY],
+    [o.authority ?? owner, AccountRole.READONLY_SIGNER]
+  ], o.data ?? [3, 0, 0, 0])
+
 test("every owner action the server builds passes, byte for byte", async () => {
   const [payWalletUsdc] = await findAssociatedTokenPda({ owner: address(attacker), mint: address(mint), tokenProgram: TOKEN_PROGRAM_ADDRESS })
   const cases: ReadonlyArray<[OwnerAction, ReadonlyArray<Instruction>]> = [
@@ -82,7 +95,10 @@ test("every owner action the server builds passes, byte for byte", async () => {
     [{ _tag: "set_pay_wallet", payWallet: attacker }, [openUsdc(feePayer, attacker, payWalletUsdc), kit(program.instruction("set_pay_wallet", { ...ownerOnly, pay_wallet: k(payWalletUsdc) }))]],
     [{ _tag: "propose_owner", newOwner: attacker }, [kit(program.instruction("propose_owner", ownerOnly, { new_owner: k(attacker) }))]],
     [{ _tag: "propose_owner", newOwner: null }, [kit(program.instruction("propose_owner", ownerOnly, { new_owner: null }))]],
-    [{ _tag: "accept_owner" }, [kit(program.instruction("accept_owner", { new_owner: k(owner), config: program.config }))]]
+    [{ _tag: "accept_owner" }, [kit(program.instruction("accept_owner", { new_owner: k(owner), config: program.config }))]],
+    [{ _tag: "set_guardian", guardian: attacker }, [kit(program.instruction("set_guardian", ownerOnly, { guardian: k(attacker) }))]],
+    [{ _tag: "set_guardian", guardian: null }, [kit(program.instruction("set_guardian", ownerOnly, { guardian: null }))]],
+    [{ _tag: "upgrade", buffer: attacker }, [upgrade()]]
   ]
   for (const [action, ixs] of cases) assert.equal(await ownerTxProblem(wire(ixs), action, owner, mint), undefined, action._tag)
   const withdraw = kit(program.instruction("withdraw_proceeds", { ...ownerOnly, vault: program.vault, vault_authority: program.vaultAuthority, to: k(attacker) }, { amount: 5n }))
@@ -106,4 +122,13 @@ test("a transaction that isn't exactly what the admin asked for is refused befor
   await refuse([pause], { _tag: "set_paused", paused: true }, /pay its fee/, owner)
   await refuse([kit(program.instruction("set_pay_wallet", { ...ownerOnly, pay_wallet: k(feePayer) }))], { _tag: "set_pay_wallet", payWallet: attacker }, /another Pay Wallet/)
   await refuse([kit(program.instruction("set_paused", { owner: k(attacker), config: program.config }, { paused: true }))], { _tag: "set_paused", paused: true }, /another signer/)
+  // An upgrade must be exactly one upgrade of this program, from the buffer the admin checked.
+  const up = { _tag: "upgrade", buffer: attacker } as const
+  await refuse([upgrade({ buffer: feePayer })], up, /another buffer/)
+  await refuse([upgrade({ spill: feePayer })], up, /rent elsewhere/)
+  await refuse([upgrade({ authority: feePayer })], up, /another signer/)
+  await refuse([upgrade({ programData: feePayer })], up, /another program/)
+  await refuse([upgrade({ data: [4, 0, 0, 0] })], up, /isn't one upgrade/)
+  await refuse([upgrade(), raw(tokenProgram, [[attacker, AccountRole.WRITABLE], [feePayer, AccountRole.WRITABLE], [owner, AccountRole.READONLY_SIGNER]], [3, 1, 0, 0, 0, 0, 0, 0, 0])], up, /isn't one upgrade/)
+  await refuse([upgrade()], up, /pay its fee/, owner)
 })
