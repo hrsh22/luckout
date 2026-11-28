@@ -1,13 +1,17 @@
 //! Accounts and the types they hold (ADR-0015, "Accounts"). Every account starts with a layout version
 //! byte and keeps spare bytes, so a new field rarely needs a resize, and a build refuses an account whose
 //! layout is newer than it knows (`fresh`).
+//!
+//! Layout 2 (ADR-0016) put a Checkout's advance and pending refund, and their totals on Config, in what were spare
+//! bytes, so an account layout 1 wrote reads them as 0 and needs no migration. Every account this build creates, and a
+//! Checkout it advances, is written as layout 2: a rolled-back build refuses those, and keeps working on the rest.
 
 use anchor_lang::prelude::*;
 
 use crate::error::LuckoutError;
 
-/// The account layout this build reads and writes.
-pub const LAYOUT: u8 = 1;
+/// The account layout this build writes, and the newest it reads.
+pub const LAYOUT: u8 = 2;
 /// The most cards one Checkout holds: Bitrefill's own cart size.
 pub const MAX_CART: usize = 15;
 pub const MAX_NAME: usize = 16;
@@ -89,7 +93,11 @@ pub struct Config {
     pub lucky_paid_total: u64,
     /// May only pause (`pause`), so a time lock on the owner never delays one. All zeros: none.
     pub guardian: Pubkey,
-    pub spare: [u8; 32],
+    /// Checkouts' outstanding advances: sent to the Pay Wallet ahead of delivery (`advance`).
+    pub advanced: u64,
+    /// Refunds owed to customers whose money had been advanced: the Vault doesn't hold them (`pay_refund`).
+    pub refunds_pending: u64,
+    pub spare: [u8; 16],
     /// Append-only. Grows by one entry with each `add_game_version`.
     #[max_len(0)]
     pub versions: Vec<GameVersion>,
@@ -161,7 +169,12 @@ pub struct Checkout {
     /// Randomness requests made so far; the next request's seed uses this number.
     pub rounds: u8,
     pub requested_at: i64,
-    pub spare: [u8; 16],
+    /// Sent to the Pay Wallet ahead of delivery and not yet taken by a delivered card. Never more than the Pending
+    /// cards' Reference Prices: it is their money.
+    pub advanced: u64,
+    /// Owed to the customer for failed or reclaimed cards whose money had been advanced. The Checkout stays open
+    /// until it is paid. These two took the last spare bytes: a new field needs a bigger Checkout.
+    pub refund_pending: u64,
     #[max_len(MAX_CART)]
     pub cards: Vec<Card>,
 }
@@ -171,10 +184,17 @@ impl Checkout {
         8 + Checkout::INIT_SPACE - MAX_CART * Card::INIT_SPACE + cards * Card::INIT_SPACE
     }
 
-    /// Every card is delivered (and drawn), failed or reclaimed.
+    /// Every card is delivered (and drawn), failed or reclaimed, and no refund is owed.
     pub fn done(&self) -> bool {
-        self.cards
-            .iter()
-            .all(|c| !matches!(c.status, Status::Pending | Status::Drawing))
+        self.refund_pending == 0
+            && self
+                .cards
+                .iter()
+                .all(|c| !matches!(c.status, Status::Pending | Status::Drawing))
+    }
+
+    /// The Pending cards' Reference Prices: the most the Checkout may have advanced.
+    pub fn pending_value(&self) -> u64 {
+        self.cards.iter().filter(|c| c.status == Status::Pending).map(|c| c.reference_price).sum()
     }
 }

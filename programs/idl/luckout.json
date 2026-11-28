@@ -228,6 +228,116 @@
       ]
     },
     {
+      "name": "advance",
+      "docs": [
+        "Sends part of a Checkout's own money from the Vault to the Pay Wallet, when the float alone can't pay its",
+        "invoice (ADR-0016). Never more than its Pending cards' Reference Prices, and counted against the daily repay cap",
+        "as `settle`'s repayments are, so stolen keys can move no more a day than before. Unlike `settle`, it fails when",
+        "the cap has no room: nothing waits as Proceeds."
+      ],
+      "discriminator": [
+        7,
+        56,
+        108,
+        201,
+        36,
+        20,
+        57,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pay_wallet",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "deposit_for",
       "docs": [
         "Moves the USDC in a customer's approved account into their own Balance, and nowhere else."
@@ -729,6 +839,133 @@
       "args": []
     },
     {
+      "name": "pay_refund",
+      "docs": [
+        "Pays `amount` of a Checkout's pending refund: `payer` sends it from `from` into the Vault, and it goes to the",
+        "customer's Balance. The Pay Wallet in practice, the owner if ever needed; never more than is pending."
+      ],
+      "discriminator": [
+        222,
+        142,
+        111,
+        215,
+        70,
+        190,
+        60,
+        145
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Owns `from`, or is its delegate."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "from",
+          "docs": [
+            "Never the Vault: Anchor refuses an account passed twice as writable."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "checkout_payer",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "propose_owner",
       "docs": [
         "Proposes a new owner, or withdraws the proposal with `None`. Nothing changes until it accepts, so the",
@@ -841,7 +1078,8 @@
     {
       "name": "reclaim",
       "docs": [
-        "The customer takes back the full amount of a card nobody confirmed or failed within 24 hours."
+        "The customer takes back the full amount of a card nobody confirmed or failed within 24 hours: from the Vault,",
+        "except a part that had been advanced, which is owed as a pending refund (`refund`)."
       ],
       "discriminator": [
         44,
@@ -1522,9 +1760,10 @@
     {
       "name": "settle",
       "docs": [
-        "Confirms delivery of `delivered` and fails `failed`. Delivered cards' Reference Prices repay the Pay",
-        "Wallet up to the daily cap; past it they wait as Proceeds. Delivered Lucky cards share one randomness",
-        "request, made in this same instruction, after delivery is confirmed (ADR-0001, amended)."
+        "Confirms delivery of `delivered` and fails `failed`. Delivered cards' Reference Prices are owed to the Pay",
+        "Wallet: the Checkout's advance covers them first, and the rest is repaid up to the daily cap; past it they wait",
+        "as Proceeds. Failed cards come back in full (`refund`). Delivered Lucky cards share one randomness request,",
+        "made in this same instruction, after delivery is confirmed (ADR-0001, amended)."
       ],
       "discriminator": [
         175,
@@ -2000,6 +2239,19 @@
       ]
     },
     {
+      "name": "Advanced",
+      "discriminator": [
+        196,
+        0,
+        190,
+        135,
+        133,
+        149,
+        73,
+        182
+      ]
+    },
+    {
       "name": "Deposited",
       "discriminator": [
         111,
@@ -2062,6 +2314,19 @@
         167,
         137,
         130
+      ]
+    },
+    {
+      "name": "RefundPaid",
+      "discriminator": [
+        191,
+        158,
+        89,
+        168,
+        130,
+        235,
+        207,
+        139
       ]
     },
     {
@@ -2291,6 +2556,21 @@
       "code": 6039,
       "name": "NotGuardian",
       "msg": "Only the guardian or the owner can pause"
+    },
+    {
+      "code": 6040,
+      "name": "BadAdvance",
+      "msg": "An advance is more than 0 and at most the Pending cards' Reference Prices not yet advanced"
+    },
+    {
+      "code": 6041,
+      "name": "OverRepayCap",
+      "msg": "Today's repay cap has no room for this advance"
+    },
+    {
+      "code": 6042,
+      "name": "BadRefund",
+      "msg": "A refund payment is more than 0 and at most what is pending"
     }
   ],
   "types": [
@@ -2320,6 +2600,22 @@
                 }
               }
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Advanced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }
@@ -2490,13 +2786,20 @@
             "type": "i64"
           },
           {
-            "name": "spare",
-            "type": {
-              "array": [
-                "u8",
-                16
-              ]
-            }
+            "name": "advanced",
+            "docs": [
+              "Sent to the Pay Wallet ahead of delivery and not yet taken by a delivered card. Never more than the Pending",
+              "cards' Reference Prices: it is their money."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "refund_pending",
+            "docs": [
+              "Owed to the customer for failed or reclaimed cards whose money had been advanced. The Checkout stays open",
+              "until it is paid. These two took the last spare bytes: a new field needs a bigger Checkout."
+            ],
+            "type": "u64"
           },
           {
             "name": "cards",
@@ -2632,11 +2935,25 @@
             "type": "pubkey"
           },
           {
+            "name": "advanced",
+            "docs": [
+              "Checkouts' outstanding advances: sent to the Pay Wallet ahead of delivery (`advance`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "refunds_pending",
+            "docs": [
+              "Refunds owed to customers whose money had been advanced: the Vault doesn't hold them (`pay_refund`)."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "spare",
             "type": {
               "array": [
                 "u8",
-                32
+                16
               ]
             }
           },
@@ -3019,6 +3336,36 @@
           },
           {
             "name": "amount",
+            "docs": [
+              "Back in the Balance now."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "refund_pending",
+            "docs": [
+              "The rest of the Maximum Price, which had been advanced: owed until `pay_refund`."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RefundPaid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "customer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
             "type": "u64"
           }
         ]
@@ -3042,11 +3389,25 @@
             "type": "bytes"
           },
           {
+            "name": "from_advance",
+            "docs": [
+              "Delivered cards' Reference Prices the Checkout's advance already paid the Pay Wallet."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "repaid",
             "type": "u64"
           },
           {
             "name": "to_proceeds",
+            "type": "u64"
+          },
+          {
+            "name": "refund_pending",
+            "docs": [
+              "The failed cards' money that had been advanced: owed to the customer until `pay_refund`."
+            ],
             "type": "u64"
           }
         ]
