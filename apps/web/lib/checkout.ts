@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation"
 import { api, TimedOut } from "./api"
 import type { CartCard } from "./cart"
 import { checkoutRequest } from "./checkout-terms.ts"
-import { playable } from "./modes"
+import { luckyCheckout, playable } from "./modes"
+import { useProgram } from "./queries"
 import { useSession } from "./session"
 
 /** One card of a checkout, with the key that makes it one purchase however often the checkout is sent. */
@@ -16,12 +17,14 @@ export interface Unit {
 }
 
 /**
- * Several cards priced together, as the contract would admit them now (ADR-0013): each Lucky card on the reserve the
- * cards before it left, Normal when there's none left for it, or too little for a cent of Cashback (playable). One quote
- * per unit, in order. Renewed as it goes stale while in sight.
+ * Several cards priced together, as the program would admit them now (ADR-0013): each Lucky card on the reserve the
+ * cards before it left, Normal when there's none left for it, or too little for a cent of Cashback (playable), and every
+ * Lucky card Normal when together they play less than the smallest Lucky Checkout (luckyCheckout). One quote per unit,
+ * in order. Renewed as it goes stale while in sight.
  */
-export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) =>
-  useQuery({
+export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) => {
+  const min = useProgram().data?.minLuckyCheckout
+  return useQuery({
     queryKey: ["quote-cart", units.map(({ line }) => `${line.voucherId}|${line.value}|${JSON.stringify(line.mode)}`)],
     queryFn: () =>
       api((c) =>
@@ -31,8 +34,9 @@ export const useCartQuote = (units: ReadonlyArray<Unit>, active = true) =>
     staleTime: 20_000,
     refetchInterval: 20_000,
     refetchOnWindowFocus: true,
-    select: (q) => (q.length === units.length ? q.map(playable) : undefined)
+    select: (q) => (q.length === units.length ? luckyCheckout(q.map(playable), min) : undefined)
   })
+}
 
 /**
  * Buys several cards as one checkout, exactly as each quote showed (its mode too, Normal when the reserve couldn't

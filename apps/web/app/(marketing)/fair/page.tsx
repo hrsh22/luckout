@@ -1,6 +1,6 @@
 import { DailyReset } from "@/components/local-time"
 import { api } from "@/lib/api"
-import { codeHash, contractId, explorerAccount, liveAverage, type Stats, view } from "@/lib/chain"
+import { explorerAccount, liveAverage, programInfo } from "@/lib/chain"
 import { usd, usdDown } from "@/lib/format"
 import { EXAMPLE_DRAW_HREF } from "@/lib/site"
 import { ChevronDown } from "lucide-react"
@@ -10,18 +10,16 @@ import Link from "next/link"
 export const revalidate = 60
 export const metadata: Metadata = {
   title: "Is it fair?",
-  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the contract."
+  description: "What Luckout's lucky buyers have actually paid, and the reserve behind every cashback, read live from the program on Solana."
 }
 
-interface Reserve { free: string; locked: string; max_cashback: string }
-
 export default async function Fair() {
-  const [stats, reserve, code, tee] = await Promise.all([
-    view<Stats>(contractId, "get_stats").catch(() => undefined),
-    view<Reserve>(contractId, "get_reserve").catch(() => undefined),
-    codeHash(contractId).catch(() => undefined),
+  const [program, tee] = await Promise.all([
+    programInfo("10 seconds").catch(() => undefined),
     api((c) => c.attestation(), undefined, "10 seconds").catch(() => undefined)
   ])
+  const stats = program?.stats
+  const reserve = program?.reserve
   const avg = stats && liveAverage(stats)
 
   return (
@@ -31,18 +29,18 @@ export default async function Fair() {
         <h1 className="font-display text-[56px] leading-[0.93] font-extrabold tracking-[-0.03em] sm:text-[80px]">Is it fair?</h1>
         <p className="mt-6 max-w-[56ch] text-lg text-ink-soft">
           Every lucky mode is built to average 105.6% of the price. That 5.6% is Luckout's only revenue. Here is what lucky buyers have
-          actually paid so far, read from the contract within the last minute.
+          actually paid so far, read from the program within the last minute.
         </p>
       </div>
 
-      {!stats && <p role="alert" className="font-medium text-bad">Couldn't reach NEAR just now. Reload in a moment.</p>}
+      {!stats && <p role="alert" className="font-medium text-bad">Couldn't reach Solana just now. Reload in a moment.</p>}
 
       <section className="relative grid gap-4 sm:grid-cols-2">
         <div className="relative overflow-hidden rounded-[2.25rem] bg-ink p-8 text-white">
           <div className="blob -top-20 -right-10 size-64 bg-gold opacity-35" aria-hidden="true" />
           <h2 className="relative text-white/70">Live Average</h2>
           <p className="font-display relative mt-1 text-7xl font-extrabold text-gold">{avg === undefined ? "None yet" : `${avg.toFixed(1)}%`}</p>
-          <p className="relative mt-2 text-white/70">of the price, over {stats?.lucky_settled ?? 0} settled lucky buys</p>
+          <p className="relative mt-2 text-white/70">of the price, over {stats?.luckySettled ?? 0} settled lucky buys</p>
         </div>
         <div className="card p-8">
           <h2 className="text-ink-soft">Promised</h2>
@@ -52,8 +50,11 @@ export default async function Fair() {
       </section>
       <p className="max-w-[64ch] text-ink-soft">
         Over a few dozen Draws the average swings a lot; over thousands it settles near 105.6%. Every Draw links to a Draw Proof you can
-        recompute in your browser, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.
-        How it all works, step by step: <Link href="/docs/fairness" className="font-semibold text-ink underline underline-offset-4">How Luckout stays fair</Link>.
+        recompute in your browser
+        {EXAMPLE_DRAW_HREF
+          ? <>, like <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-ink underline underline-offset-4">this one</Link>.</>
+          : "."}
+        {" "}How it all works, step by step: <Link href="/docs/fairness" className="font-semibold text-ink underline underline-offset-4">How Luckout stays fair</Link>.
       </p>
 
       {reserve && (
@@ -62,7 +63,7 @@ export default async function Fair() {
           <div className="grid gap-4 sm:grid-cols-3">
             <Figure label="Free" value={usd(reserve.free)} />
             <Figure label="Locked for purchases in progress" value={usd(reserve.locked)} />
-            <Figure label="Most cashback one purchase can get now" value={usdDown(reserve.max_cashback)} />
+            <Figure label="Most cashback one purchase can get now" value={usdDown(reserve.maxCashback)} />
           </div>
           <p className="text-ink-soft">
             Each lucky buy locks what its biggest possible cashback would cost before it starts, so every cashback is already covered. One
@@ -72,27 +73,20 @@ export default async function Fair() {
       )}
 
       <section className="flex flex-col gap-4">
-        <h2 className="font-display text-3xl font-extrabold">What the contract guarantees</h2>
+        <h2 className="font-display text-3xl font-extrabold">What the program guarantees</h2>
         <ul className="grid gap-3 sm:grid-cols-2">
           {[
-            "Every Game Version is immutable, and the contract refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.",
-            "The Draw runs a block after delivery is confirmed, so nobody, including us, can retry it or cancel a purchase after seeing the result.",
+            "Every Game Version is immutable, and the program refuses any table that doesn't average exactly 105.6%, or whose cashback could leave you above the price.",
+            "Delivery is confirmed before the Draw asks ORAO's oracles for randomness. Once they fill it in, the result is fixed: nobody, including us, can retry it or cancel a purchase after seeing it.",
             <>Your per-purchase and daily limits apply to every purchase, whoever submits it. The daily limit resets every day at <DailyReset />.</>,
             "A purchase we neither deliver nor cancel can be reclaimed in full after 24 hours."
           ].map((t, i) => <li key={i} className="card p-6 text-ink-soft">{t}</li>)}
         </ul>
         <p className="max-w-[64ch] text-ink-soft">
-          What it can't prove: that a code was delivered (Bitrefill isn't on chain), and that we buy in the mode you chose. Both are bounded
-          by the most you confirmed and by your limits. And Luckout can upgrade the contract: every upgrade is a public transaction, and it
-          changes the code hash below.
+          What it can't prove: that a code was delivered (Bitrefill isn't on Solana), and that we buy in the mode you chose. Both are
+          bounded by the most you confirmed and by your limits. And Luckout can still upgrade the program, with a key kept off our servers.
+          Every upgrade is a public transaction on Solana.
         </p>
-        {code && (
-          <p className="max-w-[64ch] text-ink-soft">
-            Code hash <code className="font-mono text-sm break-all text-ink">{code}</code>. Build the contract from{" "}
-            <a href="https://github.com/hrsh22/luckout" className="font-semibold text-ink underline underline-offset-4" target="_blank" rel="noreferrer">its source</a>{" "}
-            with <code className="font-mono text-sm text-ink">cargo near build reproducible-wasm</code> and you get the same hash.
-          </p>
-        )}
       </section>
 
       {tee && (
@@ -134,9 +128,11 @@ export default async function Fair() {
         </section>
       )}
 
-      <a className="self-start text-sm font-medium text-muted underline underline-offset-4 hover:text-ink" href={explorerAccount(contractId)} target="_blank" rel="noreferrer">
-        Contract {contractId} on NearBlocks
-      </a>
+      {program && (
+        <a className="self-start text-sm font-medium break-all text-muted underline underline-offset-4 hover:text-ink" href={explorerAccount(program.programId)} target="_blank" rel="noreferrer">
+          Program {program.programId} on Solana Explorer
+        </a>
+      )}
     </main>
   )
 }

@@ -166,3 +166,21 @@ export const tokenAmount = (formatted: string, symbol: string, dir: "up" | "down
   const r = round(n / step + (dir === "up" ? -1e-9 : 1e-9)) * step
   return STABLES.has(symbol) ? r.toFixed(2) : r.toLocaleString("en-US", { maximumSignificantDigits: 6, useGrouping: false })
 }
+
+/** Base units → "12.5": exact, trailing zeros trimmed. */
+export const formatUnits = (amount: string, decimals: number) => {
+  const s = amount.replace(/^0+(?=\d)/, "").padStart(decimals + 1, "0")
+  const whole = s.slice(0, s.length - decimals)
+  const frac = s.slice(s.length - decimals).replace(/0+$/, "")
+  return frac ? `${whole}.${frac}` : whole
+}
+
+/**
+ * The least a FLEX_INPUT quote swaps, formatted like `amountInFormatted`; undefined when 1Click gave none. The token's
+ * decimals come from the asset, or else from the quote's own amount and its formatted form.
+ */
+export const minimumOf = (q: { readonly amountIn: string; readonly amountInFormatted: string; readonly minAmountIn?: string | undefined }, decimals?: number) => {
+  if (!q.minAmountIn) return undefined
+  const d = decimals ?? Math.round(Math.log10(Number(q.amountIn) / Number(q.amountInFormatted)))
+  return Number.isInteger(d) && d >= 0 ? formatUnits(q.minAmountIn, d) : undefined
+}

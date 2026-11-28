@@ -3,12 +3,12 @@ import { Context, Effect, Layer, Schema } from "effect"
 import { SqlClient } from "effect/sql"
 import { Alerts } from "./Alerts.ts"
 import { Bitrefill, ORDERS_PER_DAY, type OrderRoom } from "./Bitrefill.ts"
-import { Near } from "./Near.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
+import { Solana } from "./Solana.ts"
 
 // Whether new purchases may start. Three things stop them:
 // - "stopped": any admin, on the server, at once (Admin → Stop sales). For incidents.
-// - "paused": the contract's own pause, which only the owner's wallet can set. The hard stop.
+// - "paused": the program's own pause, which only the owner's wallet can set. The hard stop.
 // - "limit": Bitrefill's orders for the last 24 hours are used up; it reopens on its own.
 // Purchases already in progress finish either way, and customers can always withdraw.
 
@@ -27,7 +27,7 @@ export const closedMessage = (s: ShopStatus) =>
 
 const SalesSetting = Schema.Struct({ open: Schema.Boolean })
 const OPEN = { open: true }
-/** The contract's pause is read at most this often. */
+/** The program's pause is read at most this often. */
 const PAUSE_TTL_MS = 15_000
 /** Admins hear once when only this many of Bitrefill's daily orders are left. */
 const FEW_LEFT = 3
@@ -40,20 +40,20 @@ export class Sales extends Context.Service<Sales, {
     Sales,
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
-      const near = yield* Near
+      const solana = yield* Solana
       const bitrefill = yield* Bitrefill
       const alerts = yield* Alerts
       let paused = { value: false, at: 0 }
 
-      const contractPaused = Effect.suspend(() =>
+      const programPaused = Effect.suspend(() =>
         Date.now() - paused.at < PAUSE_TTL_MS
           ? Effect.succeed(paused.value)
-          : near.view<{ paused: boolean }>("get_config").pipe(
+          : solana.config.pipe(
             Effect.map((c) => {
               paused = { value: c.paused, at: Date.now() }
               return c.paused
             }),
-            // Unreadable: assume not paused; the contract refuses a paused admission anyway.
+            // Unreadable: assume not paused; the program refuses a paused admission anyway.
             Effect.orElseSucceed(() => paused.value)
           )
       )
@@ -82,7 +82,7 @@ export class Sales extends Context.Service<Sales, {
       const status = Effect.gen(function*() {
         const setting = yield* readSetting("sales", SalesSetting, OPEN).pipe(Effect.provideService(SqlClient.SqlClient, sql))
         if (!setting.open) return new ShopStatus({ open: false, reason: "stopped" })
-        if (yield* contractPaused) return new ShopStatus({ open: false, reason: "paused" })
+        if (yield* programPaused) return new ShopStatus({ open: false, reason: "paused" })
         // Unreadable: assume there's room; Bitrefill refuses an order past its limit anyway (and it's refunded).
         const room = yield* bitrefill.orderLimit(yield* inFlight)
         if (room) yield* watch(room)

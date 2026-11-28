@@ -29,7 +29,8 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 - **The operator:** admits a Checkout, and settles it by confirming the delivered cards and failing the rest. A Buy is a Checkout of one card, so the single-card methods ADR-0013 kept for older servers go.
 - **Anyone:** finishes a Draw whose randomness has arrived, and requests it again if it never arrives (below). Anyone can also move USDC a customer has approved into that customer's own Balance (`deposit_for`, below).
 - **The owner:** Game Versions, the Cashback Cap, the smallest Lucky Checkout, the operator, the Pay Wallet, the repay cap, pause, reserve and Proceeds withdrawals, and upgrades. For now it is one key in our own wallet, never on the VM, with no time lock, so it can pause at once. The Admin panel builds these transactions for that wallet to sign, as it does today.
-- **Ready for a multisig later.** The owner changes by propose and accept, as in today's contract, and the upgrade authority moves with one command. So both can move to a Squads multisig with a time lock without changing the program. At that point a small upgrade adds a pause-only guardian key, using the spare bytes, so the time lock never delays a pause.
+- **Ready for a multisig later.** The owner changes by propose and accept, as in today's contract, and the upgrade authority moves with one command. So both can move to a Squads multisig with a time lock without changing the program.
+- **A guardian that can only pause.** The owner names or removes it, and it lives in Config's spare bytes. A pause never waits on the owner's wallet, or later on a multisig's time lock, and only the owner resumes. It came before launch (2026-11-28), not with the multisig, so the owner's key could leave the operator's Mac.
 
 ## The Draw can't be re-rolled
 
@@ -96,7 +97,8 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 - **Operator:** on the VM. It may admit and settle Checkouts, and pays for nothing.
 - **Fee payer:** on the VM. It holds only SOL and has no rights in the program. It pays the fees of transactions the server built itself and never signs one a client built, so a crafted transaction can't borrow anyone's authority or drain its SOL.
 - **Pay Wallet:** on the VM, holding the USDC float.
-- **Owner and upgrade authority:** one key in our own wallet, kept off the VM. A Squads multisig with a time lock, and a guardian key, can take over later (above).
+- **Owner and upgrade authority:** one key in our own wallet, kept off the VM. A Squads multisig with a time lock can take over later (above).
+- **Guardian:** on the operator's Mac, never on the VM. It can only pause.
 
 ## Upgrades in place
 
@@ -105,6 +107,7 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 - **Before an upgrade:** pause, let pending Draws finish, and keep the accounts that finishing a Draw takes unchanged.
 - **New fields** go into spare bytes. Migration code gets written only when a field first outgrows them.
 - **Rollback is either safe or refused.** A build refuses any account whose version byte is newer than it knows, so a rolled-back build can't misread one. Each release says whether it changes a layout, and so whether it can be rolled back.
+- **The upgrade authority signs only the upgrade.** The operator uploads the build to a buffer and hands the buffer to it; the Admin panel shows the build's hash to check against CI's, and the upgrade authority's wallet signs one upgrade.
 - **The upgrade authority stays** until the program is stable.
 - **A new program address** means taking the money out through the old program first.
 

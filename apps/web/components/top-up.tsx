@@ -4,23 +4,26 @@ import { AmountField } from "@/components/amount-field"
 import { Qr } from "@/components/qr"
 import { chainLabel, sortAssets, TokenMark, TokenPicker } from "@/components/token-picker"
 import { Button } from "@/components/ui/button"
-import { depositCall, useWalletActions } from "@/lib/actions"
-import { api, apiUrl, errorMessage } from "@/lib/api"
-import { dollars, tokenAmount, toMicro, usd, usdUp } from "@/lib/format"
-import { usdcId, view } from "@/lib/near"
-import { pendingMode } from "@/lib/onboarding"
-import { useHeld } from "@/lib/queries"
+import { api, errorMessage } from "@/lib/api"
+import { cluster } from "@/lib/chain"
+import { dollars, tokenAmount, toMicro, usd } from "@/lib/format"
+import { refundAddress, setRefundAddress } from "@/lib/onboarding"
+import { useTopUpAssets } from "@/lib/queries"
 import { useSession } from "@/lib/session"
+import { minimumOf, topUpMicro, topUpPicks } from "@/lib/top-up-quote"
 import type { TopUpAsset, TopUpQuote } from "@luckout/api"
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Circle, CircleCheck, Copy, LoaderCircle } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 
-const STORAGE_DEPOSIT = "1250000000000000000000" // 0.00125 NEAR, USDC's registration fee
-const DONE = new Set(["SUCCESS", "REFUNDED", "FAILED"])
+// Top-Ups from other chains (ADR-0015): a 1Click quote that swaps whatever arrives above its minimum (FLEX_INPUT)
+// into USDC at the customer's Deposit Address, where it moves into their Balance by itself. 1Click refunds to the
+// address the customer gives on the source chain, not to the sender, so an exchange can send it.
 
-/** A transfer's network fee on each chain, roughly: it's paid by the sender's own wallet, not Luckout. */
+const FINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"])
+
+/** A transfer's network fee on each chain, roughly: the sender pays it, not Luckout. */
 const FEES: Record<string, string> = {
   base: "under $0.01",
   arb: "under $0.01",
@@ -28,29 +31,60 @@ const FEES: Record<string, string> = {
   sol: "under $0.01",
   near: "under $0.01",
   bsc: "about $0.02",
-  eth: "varies, often $0.50 or more",
-  btc: "set by your wallet"
+  eth: "varies, often $0.50 or more"
 }
 
-/** A live price for a Top-Up while the amount and token are chosen: a dry quote, so nothing is created. */
-export const useTopUpPreview = (token: string | undefined, assetId: string, micro: number) => {
-  const [settled, setSettled] = useState(micro)
+/** What a refund address looks like on each chain, as the field's hint. */
+const PLACEHOLDERS: Record<string, string> = { eth: "0x…", arb: "0x…", base: "0x…", pol: "0x…", bsc: "0x…", tron: "T…", btc: "bc1…", near: "you.near", sol: "Your Solana address" }
+
+export const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+
+export const copy = (text: string, what: string) =>
+  navigator.clipboard.writeText(text).then(() => toast.success(`${what} copied`), () => toast.error("Couldn't copy. Select it and copy it instead."))
+
+/** An address to copy, or to scan from a phone wallet or an exchange app. `qr` is what the code holds, if not the address. */
+export function AddressBox({ address, qr = address, memo, label, size = 136 }: {
+  address: string
+  qr?: string
+  memo?: string | undefined
+  label: string
+  size?: number
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      <Qr value={qr} size={size} label={label} />
+      <div className="flex min-w-0 flex-col gap-2">
+        <p className="font-mono text-sm break-all text-ink select-all">{address}</p>
+        {memo && <p className="text-sm">Memo (required): <span className="font-mono select-all">{memo}</span></p>}
+        <div className="flex flex-wrap gap-2">
+          <Button variant="light" size="sm" onClick={() => copy(address, "Address")}><Copy />Copy address</Button>
+          {memo && <Button variant="light" size="sm" onClick={() => copy(memo, "Memo")}><Copy />Copy memo</Button>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** A live price while the amount, token and refund address are chosen: a dry quote, so nothing is created. */
+const usePreview = (token: string | undefined, assetId: string | undefined, micro: number, refundTo: string) => {
+  const asked = { assetId: assetId ?? "", micro, refundTo: refundTo.trim() }
+  const [settled, setSettled] = useState(asked)
+  const key = JSON.stringify(asked)
   useEffect(() => {
-    const t = setTimeout(() => setSettled(micro), 400)
+    const t = setTimeout(() => setSettled(JSON.parse(key)), 400)
     return () => clearTimeout(t)
-  }, [micro])
+  }, [key])
   return useQuery({
-    queryKey: ["topup-preview", assetId, settled],
-    queryFn: () => api((c) => c.topup.quote({ payload: { originAsset: assetId, usdc: settled, dry: true } }), token),
-    enabled: !!token && !!assetId && settled >= 1_000_000,
+    queryKey: ["topup-preview", settled.assetId, settled.micro, settled.refundTo],
+    queryFn: () => api((c) => c.topup.quote({ payload: { originAsset: settled.assetId, usdc: settled.micro, refundTo: settled.refundTo, dry: true } }), token),
+    enabled: !!token && !!settled.assetId && settled.micro >= 1_000_000 && !!settled.refundTo,
     staleTime: 30_000,
     retry: false,
     placeholderData: keepPreviousData
   })
 }
 
-/** What the customer will send, when it arrives, and the fee their wallet pays. */
-export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | undefined; stale: boolean; error: unknown; warning?: string | undefined }) {
+function Preview({ q, stale, error }: { q: TopUpQuote | undefined; stale: boolean; error: unknown }) {
   if (error) return <p role="alert" className="text-sm font-medium text-bad">{errorMessage(error)}</p>
   if (!q) return <span className="skeleton h-[66px] rounded-2xl" />
   const chain = chainLabel(q.chain)
@@ -58,63 +92,21 @@ export function TopUpPreview({ q, stale, error, warning }: { q: TopUpQuote | und
     <div className={`flex flex-col gap-1 rounded-2xl bg-soft px-4 py-3 transition-opacity ${stale ? "opacity-60" : ""}`} aria-live="polite">
       <p className="flex items-center gap-2">
         <TokenMark symbol={q.symbol} chain={q.chain} size={22} />
-        {q.swap
-          // A swap takes exactly this: Luckout builds it, and the chain holds it to the USDC it must give.
-          ? <span>You swap <b>{tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
-          : <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>}
+        <span>You send <b>≈ {tokenAmount(q.amountInFormatted, q.symbol, "up")} {q.symbol}</b> on {chain}</span>
       </p>
       <p className="text-sm text-muted">
-        Arrives in about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min · {chain} network fee:{" "}
-        {/* A token sent on Solana also opens the deposit address's account for that token, which the sender pays for. */}
-        {q.swap
-          ? "under 0.007 SOL, with the token accounts it opens"
-          : q.chain === "sol" && q.symbol !== "SOL" ? "about 0.002 SOL, with the deposit address's token account" : FEES[q.chain] ?? "set by your wallet"}
+        In your balance about {Math.max(1, Math.ceil(q.timeEstimateSeconds / 60))} min after it arrives · {chain} network fee:{" "}
+        {FEES[q.chain] ?? "set by your wallet or exchange"}, paid by the sender
       </p>
-      {warning && <p className="text-sm font-medium text-warn">{warning}</p>}
     </div>
   )
 }
 
-/** A deposit address to copy, or to scan from a phone wallet or an exchange app. */
-export function DepositAddress({ address, memo }: { address: string; memo?: string | undefined }) {
-  return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-      <Qr value={address} size={136} label="QR code of the deposit address" />
-      <div className="flex min-w-0 flex-col gap-2">
-        <p className="font-mono text-sm break-all text-ink select-all">{address}</p>
-        {memo && <p className="text-sm">Memo (required): <span className="font-mono select-all">{memo}</span></p>}
-        <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(address).then(() => toast.success("Address copied"))}>
-          <Copy />Copy address
-        </Button>
-      </div>
-    </div>
-  )
-}
+/** The step a Top-Up is on, from 1Click's status: 0 the transfer, 1 converting, 3 all done. */
+const stepOf = (status: string) => (status === "PROCESSING" ? 1 : status === "SUCCESS" ? 3 : 0)
 
-/**
- * A swap-paid Top-Up (ADR-0014): a Solana Pay code. A Solana wallet that scans it (or opens the link on a phone) gets
- * the transaction that pays this Top-Up from that wallet, and shows the swap before it's approved.
- */
-export function SolanaPayCode({ depositAddress }: { depositAddress: string }) {
-  const link = `solana:${apiUrl}/solana-pay/${depositAddress}`
-  return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-      <Qr value={link} size={136} label="Solana Pay code that pays this Top-Up" />
-      <div className="flex min-w-0 flex-col gap-2">
-        <p>Scan it with Phantom, Solflare or Backpack. Your wallet shows the swap before you approve it.</p>
-        <a href={link} className="self-start text-sm font-semibold underline underline-offset-4">Open in a wallet on this device</a>
-      </div>
-    </div>
-  )
-}
-
-/** The step a Top-Up is on, from 1Click's status: 0 the transfer, 1 converting, 2 landing (an EVM move-in), 3 all done. */
-export const stepOf = (status: string | undefined, moving: boolean) =>
-  status === "PROCESSING" ? 1 : status === "SUCCESS" ? (moving ? 2 : 3) : 0
-
-/** A Top-Up's three steps, the one under way spinning: the customer sees it move, not 1Click's status codes. */
-export function TopUpSteps({ at, landing, minutes }: { at: number; landing: string; minutes: number }) {
-  const steps = ["Your transfer arrives", `Converted to USDC, usually in about ${minutes} min`, landing]
+function Steps({ at, minutes }: { at: number; minutes: number }) {
+  const steps = ["Your transfer arrives", `Converted to USDC, usually in about ${minutes} min`, "In your balance a minute later"]
   return (
     <ol className="flex flex-col gap-1.5" aria-label="Top-up progress">
       {steps.map((s, i) => (
@@ -132,204 +124,140 @@ export function TopUpSteps({ at, landing, minutes }: { at: number; landing: stri
 }
 
 /**
- * Nothing more needs the customer once it's sent, so they needn't watch it: the header shows it on its way, a message
- * says when it lands, and Wallet keeps every step.
+ * Top up from another chain through 1Click: the customer picks the USDC to receive, the token and chain they pay with,
+ * and an address there for refunds; then they get 1Click's deposit address. `onContinue` lets them go on without
+ * waiting: it lands by itself.
  */
-export function OnItsWay({ sent, lands, onContinue }: { sent: boolean; lands: string; onContinue?: (() => void) | undefined }) {
-  return (
-    <div className="flex flex-col gap-2 rounded-2xl bg-white p-3">
-      <p>
-        {sent ? "No need to wait here:" : "Sent it? No need to wait here:"} it {lands}. You'll see it land wherever you are on Luckout,
-        and Wallet shows where it is.
-      </p>
-      {onContinue && <Button size="sm" className="self-start" onClick={onContinue}>Continue</Button>}
-    </div>
-  )
-}
-
-/**
- * A NEAR wallet can't show us its other chains, but its NEAR Intents account we can see: anything there (1Click's
- * change or a refund) is the cheapest place to start, so it's offered first.
- */
-function HeldFirst() {
-  const { token } = useSession()
-  const actions = useWalletActions()
-  const held = (useHeld(token).data ?? []).filter((h) => h.sendable)
-  const [busy, setBusy] = useState(false)
-  if (held.length === 0) return null
-  return (
-    <div className="flex flex-col gap-2 rounded-2xl bg-gold-soft p-4 text-sm text-gold-ink">
-      <p>
-        You already have {held.map((h) => `${h.amount} ${h.symbol} on ${chainLabel(h.chain)}`).join(", ")} in your NEAR Intents account. Bring it to your
-        NEAR wallet as USDC, then deposit it with the other tab.
-      </p>
-      <Button size="sm" variant="light" className="self-start" loading={busy} disabled={busy} onClick={() => {
-        setBusy(true)
-        // One at a time: each asks the wallet to approve.
-        void held.reduce((p, h) => p.then(() => actions.sendBack(h)), Promise.resolve<unknown>(undefined)).finally(() => setBusy(false))
-      }}>
-        Send it to my NEAR wallet
-      </Button>
-    </div>
-  )
-}
-
-/** What a card still needs (at least the $1 top-up minimum), or $20. */
-const needed = (need: number | undefined) => (need ? Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 : undefined)
-export const topUpAmount = (need?: number) => dollars(needed(need) ?? 20_000_000)
-// One row of chips: "Exactly …" takes $50's place when a card needs a set amount.
-export const topUpPicks = (need?: number) => [
-  ...(needed(need) ? [{ label: `Exactly ${usdUp(needed(need)!)}`, micro: needed(need)! }] : []),
-  { label: "$10", micro: 10_000_000 },
-  { label: "$25", micro: 25_000_000 },
-  ...(needed(need) ? [] : [{ label: "$50", micro: 50_000_000 }])
-]
-
-/**
- * Top up from any chain with NEAR Intents 1Click: USDC lands in the wallet, then one deposit.
- * `onDone` runs once it's in the balance, like a wallet deposit (a mode chosen before it is saved then).
- */
-export function TopUp({ onDone, onContinue, need }: { onDone?: (ok: boolean) => void; onContinue?: (() => void) | undefined; need?: number | undefined } = {}) {
-  const { accountId, token, refresh, send, gasFree } = useSession()
+export function TopUp({ need, onContinue }: { need?: number | undefined; onContinue?: (() => void) | undefined }) {
+  const { accountId, token } = useSession()
   const qc = useQueryClient()
-  // Whether this NEAR account can hold USDC. No deposit address is offered until that's known: a swap's USDC sent
-  // to an account that isn't registered for it can't land there.
-  const usdc = useQuery({
-    queryKey: ["usdc-registered", accountId],
-    queryFn: () => view<unknown>(usdcId, "storage_balance_of", { account_id: accountId }).then((b) => b !== null),
-    enabled: !!accountId
-  })
-  const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>()
-  const [asset, setAsset] = useState("")
-  const swap = !!assets?.find((a) => a.assetId === asset)?.swap
-  const [amount, setAmount] = useState(() => topUpAmount(need))
-  const preview = useTopUpPreview(token, asset, toMicro(amount))
-  const [quote, setQuote] = useState<TopUpQuote>()
-  const [status, setStatus] = useState<string>()
+  const all = useTopUpAssets(token)
+  // USDT and ORE on Solana go to the Deposit Address instead, and are swapped there with a tap.
+  const assets = useMemo(() => sortAssets((all.data ?? []).filter((a) => !a.swap)), [all.data])
+  const [assetId, setAssetId] = useState("")
+  const asset = assets.find((a) => a.assetId === assetId) ?? assets[0]
+  const [amount, setAmount] = useState(() => dollars(topUpMicro(need)))
+  const [refundTo, setRefundTo] = useState("")
+  const micro = toMicro(amount)
+  const preview = usePreview(token, asset?.assetId, micro, refundTo)
+  const [quoted, setQuoted] = useState<{ quote: TopUpQuote; asset: TopUpAsset }>()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
-  const fail = (e: unknown) => setError(errorMessage(e))
+  const chain = asset ? chainLabel(asset.chain) : ""
 
+  // The refund address they last gave on this chain, until they type another.
   useEffect(() => {
-    if (!accountId || !token) return
-    api((c) => c.topup.assets(), token).then((a) => {
-      const sorted = sortAssets(a)
-      setAssets(sorted)
-      setAsset(sorted[0]?.assetId ?? "")
-    }, fail)
-  }, [accountId, token])
+    if (accountId && asset) setRefundTo(refundAddress(accountId, asset.chain))
+  }, [accountId, asset?.chain]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll 1Click until the swap settles.
+  if (!token || !accountId) return null
+  if (quoted) return <Quoted {...quoted} onAgain={() => setQuoted(undefined)} onContinue={onContinue} />
+
+  const getAddress = async () => {
+    if (!asset) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      const quote = await api((c) => c.topup.quote({ payload: { originAsset: asset.assetId, usdc: micro, refundTo: refundTo.trim() } }), token)
+      setRefundAddress(accountId, asset.chain, refundTo.trim())
+      setQuoted({ quote, asset })
+      // Recorded on the server now: it shows under "Money on its way" even if this closes.
+      void qc.invalidateQueries({ queryKey: ["transfers"] })
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {cluster !== "mainnet" && (
+        <p role="note" className="rounded-2xl bg-warn-soft p-3 text-sm text-warn">This is {cluster}: prices work, but deposit addresses are given out on mainnet only.</p>
+      )}
+      <AmountField label="USDC to receive" value={amount} onChange={setAmount} picks={topUpPicks(need)} />
+      <div className="flex flex-col gap-2">
+        <span className="text-sm font-semibold text-muted">Pay with</span>
+        {all.isError
+          ? <p role="alert" className="text-sm font-medium text-bad">{errorMessage(all.error)}</p>
+          : all.data
+          ? <TokenPicker assets={assets} value={asset?.assetId ?? ""} onChange={setAssetId} />
+          : <span className="skeleton h-14 rounded-[1.25rem]" />}
+      </div>
+      {asset && (
+        <div className="flex flex-col gap-2">
+          <label htmlFor="refund-to" className="text-sm font-semibold text-muted">Your address on {chain}, for refunds</label>
+          <input
+            id="refund-to"
+            className="field font-mono text-sm"
+            value={refundTo}
+            onChange={(e) => setRefundTo(e.target.value)}
+            placeholder={PLACEHOLDERS[asset.chain] ?? "Your address"}
+            spellCheck={false}
+            autoComplete="off"
+            autoCapitalize="off"
+          />
+          <p className="text-sm text-muted">
+            If the swap can't finish (too little arrives, or too late), 1Click sends the money back to this address, not to whoever sent it. So
+            you can pay from an exchange, but give an address you control on {chain}.
+          </p>
+        </div>
+      )}
+      {micro >= 1_000_000 && asset && refundTo.trim() && <Preview q={preview.data} stale={preview.isPlaceholderData || preview.isFetching} error={preview.error} />}
+      <Button size="lg" loading={busy} disabled={busy || !asset || !(micro >= 1_000_000) || !refundTo.trim()} onClick={getAddress}>
+        Get the deposit address
+      </Button>
+      {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
+    </div>
+  )
+}
+
+/** The quote to pay: where, exactly how much, the least that's swapped, until when, and where refunds go; then where it is. */
+function Quoted({ quote, asset, onAgain, onContinue }: { quote: TopUpQuote; asset: TopUpAsset; onAgain: () => void; onContinue?: (() => void) | undefined }) {
+  const { token } = useSession()
+  const [status, setStatus] = useState("PENDING_DEPOSIT")
+  const done = FINAL.has(status)
+
+  // 1Click's status until it settles. The Wallet page keeps following it after this closes.
   useEffect(() => {
-    if (!quote || !token || (status && DONE.has(status))) return
+    if (done) return
     const t = setInterval(() => {
       api((c) => c.topup.status({ query: { depositAddress: quote.depositAddress } }), token).then((s) => setStatus(s.status), () => {})
     }, 5000)
     return () => clearInterval(t)
-  }, [quote, token, status])
+  }, [quote.depositAddress, token, done])
 
-  const step = async (f: () => Promise<unknown>) => {
-    setBusy(true)
-    setError(undefined)
-    await f().catch(fail)
-    setBusy(false)
-  }
-
-  if (!token) return null
-  if (usdc.data === undefined) {
-    return usdc.isError
-      ? (
-        <div className="flex flex-col items-start gap-2">
-          <p role="alert" className="text-sm font-medium text-bad">Couldn't check that your NEAR account can receive USDC. {errorMessage(usdc.error)}</p>
-          <Button variant="light" size="sm" loading={usdc.isFetching} onClick={() => void usdc.refetch()}>Try again</Button>
-        </div>
-      )
-      : <span className="skeleton h-14 rounded-[1.25rem]" />
-  }
-  if (usdc.data === false) {
-    return (
-      <Button variant="light" className="self-start" disabled={busy} onClick={() => step(async () => {
-        await send({ receiverId: usdcId, method: "storage_deposit", args: { account_id: accountId, registration_only: true }, deposit: STORAGE_DEPOSIT })
-        qc.setQueryData(["usdc-registered", accountId], true)
-      })}>
-        Enable USDC on your account (once{gasFree ? ", fee on us" : ", 0.00125 NEAR"})
-      </Button>
-    )
-  }
-
+  const chain = chainLabel(quote.chain)
+  const send = tokenAmount(quote.amountInFormatted, quote.symbol, "up")
+  const min = minimumOf(quote, asset.decimals)
+  const by = time(quote.deadline)
   return (
-    <div className="flex flex-col gap-3">
-      {!quote && (
-        <div className="flex flex-col gap-4">
-          <HeldFirst />
-          <AmountField label="USDC to receive" value={amount} onChange={setAmount} picks={topUpPicks(need)} />
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-semibold text-muted">Pay with</span>
-            {assets ? <TokenPicker assets={assets} value={asset} onChange={setAsset} /> : <span className="skeleton h-14 rounded-[1.25rem]" />}
-          </div>
-          {toMicro(amount) >= 1_000_000 && asset && <TopUpPreview q={preview.data} stale={preview.isPlaceholderData || preview.isFetching} error={preview.error} />}
-          <Button size="lg" disabled={busy || !asset || !(toMicro(amount) >= 1_000_000)} onClick={() => step(async () => {
-            setQuote(await api((c) => c.topup.quote({ payload: { originAsset: asset, usdc: toMicro(amount) } }), token))
-            setStatus("PENDING_DEPOSIT")
-            // Recorded on the server now: it shows under "Money on its way" even if this page closes.
-            void qc.invalidateQueries({ queryKey: ["transfers"] })
-          })}>
-            {swap ? "Get the code to scan" : "Get deposit address"}
-          </Button>
+    <div className="flex flex-col gap-4 rounded-[1.5rem] bg-soft p-5 text-sm">
+      <p className="text-base">
+        Send <b>{send} {quote.symbol}</b> on <b>{chain}</b> to this address before <b>{by}</b>, and get about <b>{usd(quote.usdcOut)}</b> in your balance.
+      </p>
+      <AddressBox address={quote.depositAddress} memo={quote.depositMemo} label={`QR code of 1Click's deposit address on ${chain}`} />
+      <Button variant="light" size="sm" className="self-start" onClick={() => copy(send, "Amount")}><Copy />Copy amount</Button>
+      <ul className="flex list-disc flex-col gap-1.5 pl-5 text-ink-soft">
+        <li>Only {quote.symbol} on {chain}. Another token or network can't be swapped.</li>
+        <li>More is fine: everything that arrives is swapped and lands in your balance, so add a little for an exchange's withdrawal fee.</li>
+        {min && <li>At least {tokenAmount(min, quote.symbol, "up")} {quote.symbol} must arrive. Less waits for the rest until {by}, then goes back to your refund address.</li>}
+        <li>Refunds go to <span className="font-mono break-all">{quote.refundTo}</span> on {chain}.</li>
+      </ul>
+      {status === "REFUNDED" || status === "FAILED"
+        ? <p className="font-medium text-warn">It didn't go through: 1Click sent it back to your refund address on {chain}.</p>
+        : status === "INCOMPLETE_DEPOSIT"
+        ? <p className="font-medium text-warn">1Click got part of it. Send the rest to the same address before {by}, or what arrived goes back to your refund address.</p>
+        : <Steps at={stepOf(status)} minutes={Math.max(1, Math.ceil(quote.timeEstimateSeconds / 60))} />}
+      {!done && (
+        <div className="flex flex-col gap-2 rounded-2xl bg-white p-3">
+          <p>No need to wait here: once 1Click has it, it lands in your balance by itself. Wallet shows where it is.</p>
+          {onContinue && <Button size="sm" className="self-start" onClick={onContinue}>Continue</Button>}
         </div>
       )}
-
-      {quote && (
-        <div className="flex flex-col gap-2 rounded-[1.5rem] bg-soft p-5 text-sm">
-          {quote.swap
-            ? (
-              <>
-                <p>
-                  Pay from a Solana wallet: it swaps <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> into the USDC this
-                  Top-Up needs, in one transaction you approve. Any USDC beyond that stays in that wallet.
-                </p>
-                <SolanaPayCode depositAddress={quote.depositAddress} />
-              </>
-            )
-            : (
-              <>
-                <p>
-                  Send <b>{tokenAmount(quote.amountInFormatted, quote.symbol, "up")} {quote.symbol}</b> on <b>{chainLabel(quote.chain)}</b> to this address. A little
-                  more is fine: 1Click sends the extra back.
-                </p>
-                <DepositAddress address={quote.depositAddress} memo={quote.depositMemo} />
-              </>
-            )}
-          <p className="text-muted">
-            {usd(quote.usdcOut)} arrives in your NEAR wallet about {Math.ceil(quote.timeEstimateSeconds / 60)} min after your{" "}
-            {quote.swap ? "swap" : "transfer"} confirms. {quote.swap ? "Pay" : "Send"} before {new Date(quote.deadline).toLocaleTimeString()}. If anything
-            goes wrong, 1Click refunds it to your NEAR Intents account, and the Wallet page sends it on to your wallet.
-          </p>
-          {status === "REFUNDED" || status === "FAILED"
-            ? <p className="font-medium text-warn">It didn't go through: 1Click sent it back to your NEAR Intents account. Wallet sends it on to your wallet.</p>
-            : <TopUpSteps at={stepOf(status, false)} landing="In your NEAR wallet, ready to deposit" minutes={Math.ceil(quote.timeEstimateSeconds / 60)} />}
-          {!(status && DONE.has(status)) && <OnItsWay sent={status !== "PENDING_DEPOSIT"} lands="lands in your NEAR wallet by itself, ready to deposit with one tap" onContinue={onContinue} />}
-          {status === "SUCCESS" && (
-            <Button className="self-start" disabled={busy} onClick={() => step(async () => {
-              // The swap can deliver less than quoted: deposit what actually arrived, never more than the quote.
-              const arrived = Number(await view<string>(usdcId, "ft_balance_of", { account_id: accountId }))
-              const micro = Math.min(arrived, quote.usdcOut)
-              if (!(micro > 0)) throw new Error("No USDC has arrived in your NEAR wallet yet. Try again in a minute.")
-              await send(depositCall(micro, accountId ? pendingMode(accountId) : undefined)).finally(() => refresh().catch(() => {}))
-              setQuote(undefined)
-              setStatus(undefined)
-              toast.success(`${usd(micro)} added to your balance`)
-              onDone?.(true)
-            })}>
-              Deposit {usd(quote.usdcOut)} into Luckout
-            </Button>
-          )}
-          {(status === "REFUNDED" || status === "FAILED") && (
-            <Button variant="light" className="self-start" onClick={() => (setQuote(undefined), setStatus(undefined))}>Start over</Button>
-          )}
-        </div>
-      )}
-      {error && <p role="alert" className="text-sm font-medium text-bad">{error}</p>}
+      <Button variant={done ? "primary" : "ghost"} size="sm" className="self-start" onClick={onAgain}>
+        {done ? "Top up again" : "Start a different Top-Up"}
+      </Button>
     </div>
   )
 }

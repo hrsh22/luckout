@@ -1,4 +1,4 @@
-import { Context, Schema, Struct } from "effect"
+import { Context, Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 
 export * from "./intents.ts"
@@ -76,7 +76,7 @@ export type Mode = typeof Mode.Type
 
 // ---------- auth ----------
 
-/** The signed-in NEAR account, provided to authenticated endpoints. */
+/** The signed-in account (their Privy Solana wallet), provided to authenticated endpoints. */
 export class CurrentAccount extends Context.Service<CurrentAccount, { readonly accountId: string; readonly wallet: Wallet }>()(
   "luckout/CurrentAccount"
 ) {}
@@ -101,87 +101,6 @@ export class Authorization extends HttpApiMiddleware.Service<Authorization, { pr
   { security: { cookie: sessionCookie }, error: Unauthorized }
 ) {}
 
-/** NEP-413 sign-in: the wallet signs `message` for `recipient` with this single-use `nonce`. */
-export class Challenge extends Schema.Class<Challenge>("Challenge")({
-  message: Schema.String,
-  recipient: Schema.String,
-  /** base64, 32 bytes */
-  nonce: Schema.String
-}) {}
-
-export class SignedChallenge extends Schema.Class<SignedChallenge>("SignedChallenge")({
-  accountId: Schema.String,
-  publicKey: Schema.String,
-  /** base64 */
-  signature: Schema.String,
-  nonce: Schema.String
-}) {}
-
-/**
- * EVM sign-in (ADR-0011): the text the wallet signs with `personal_sign`, in the Sign-In with Ethereum format
- * (EIP-4361). It names the site it was made on (`uri`), which a wallet compares with the page asking for the
- * signature and the server checks against its own sites, so a signature made on another site signs nobody in.
- * `address` must be in checksum case, and `issuedAt` an ISO time.
- */
-export const evmSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; chainId: number; issuedAt: string }) =>
-  `${new URL(o.uri).host} wants you to sign in with your Ethereum account:\n${o.address}\n\n` +
-  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
-  // The format wants a nonce of letters and digits only; ours is base64.
-  `URI: ${o.uri}\nVersion: 1\nChain ID: ${o.chainId}\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
-
-export class SignedEvmChallenge extends Schema.Class<SignedEvmChallenge>("SignedEvmChallenge")({
-  /** 0x address, any case */
-  address: Schema.String,
-  /** 0x hex of the 65-byte personal_sign signature */
-  signature: Schema.String,
-  nonce: Schema.String,
-  /** The origin of the page that asked for the signature (`window.location.origin`), as written into the message. */
-  uri: Schema.String,
-  /** The chain the wallet was on, and when it was asked, as written into the message. */
-  chainId: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
-  // An ISO time, nothing more: it is written into the text the server rebuilds, so it can't carry a line of its own.
-  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
-}) {}
-
-/**
- * Solana sign-in (ADR-0011): the text the wallet signs, in the Sign In With Solana format, which Solana wallets read
- * like EIP-4361 and compare with the page asking. `address` is base58, `issuedAt` an ISO time.
- */
-export const solanaSignInMessage = (o: { challenge: { message: string; nonce: string }; address: string; uri: string; issuedAt: string }) =>
-  `${new URL(o.uri).host} wants you to sign in with your Solana account:\n${o.address}\n\n` +
-  `${o.challenge.message}. This signature moves no money. While signed in, you can buy gift cards from your Luckout balance, within your Spending Limits.\n\n` +
-  `URI: ${o.uri}\nVersion: 1\nNonce: ${o.challenge.nonce.replace(/[^A-Za-z0-9]/g, "")}\nIssued At: ${o.issuedAt}`
-
-export class SignedSolanaChallenge extends Schema.Class<SignedSolanaChallenge>("SignedSolanaChallenge")({
-  /** base58 public key */
-  address: Schema.String.check(Schema.isMaxLength(64)),
-  /** base64 of the 64-byte ed25519 signature */
-  signature: Schema.String.check(Schema.isMaxLength(200)),
-  nonce: Schema.String,
-  uri: Schema.String,
-  issuedAt: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/))
-}) {}
-
-/** One NEAR Intents payload an EVM wallet signed with personal_sign (ERC-191), or a Solana wallet as raw bytes, as `intents.near` takes it. */
-export const SignedIntent = Schema.Union([
-  Schema.Struct({
-    standard: Schema.Literal("erc191"),
-    /** The signed JSON text: signer_id, verifying_contract, deadline, nonce, intents. */
-    payload: Schema.String.check(Schema.isMaxLength(4096)),
-    /** secp256k1:<base58 of r, s and a recovery bit> */
-    signature: Schema.String.check(Schema.isMaxLength(200))
-  }),
-  Schema.Struct({
-    standard: Schema.Literal("raw_ed25519"),
-    payload: Schema.String.check(Schema.isMaxLength(4096)),
-    /** ed25519:<base58 of the Solana address's 32 bytes> */
-    public_key: Schema.String.check(Schema.isMaxLength(100)),
-    /** ed25519:<base58 of the 64-byte signature> */
-    signature: Schema.String.check(Schema.isMaxLength(200))
-  })
-])
-export type SignedIntent = typeof SignedIntent.Type
-
 /** How the customer signed in. A Solana account is named like a NEAR implicit one, so only this tells them apart. */
 export const Wallet = Schema.Literals(["near", "evm", "solana"])
 export type Wallet = typeof Wallet.Type
@@ -200,7 +119,12 @@ export class Quote extends Schema.Class<Quote>("Quote")({
   referencePrice: MicroUsdc,
   /** The part of the price the Game Version applies to (0 for Normal). */
   luckyAmount: MicroUsdc,
-  maxPrice: MicroUsdc
+  maxPrice: MicroUsdc,
+  /**
+   * A Lucky card quoted at Normal because its checkout's Lucky cards play less than the smallest Lucky Checkout
+   * together (ADR-0015): bought like this, it's bought at the normal price.
+   */
+  belowMin: Schema.optional(Schema.Literal(true))
 }) {}
 
 /** One Draw, enough to recompute it in the browser (ADR-0005). */
@@ -211,7 +135,9 @@ export class Draw extends Schema.Class<Draw>("Draw")({
   roll: Schema.Int,
   finalBps: Schema.Int,
   finalPrice: MicroUsdc,
-  cashback: MicroUsdc
+  cashback: MicroUsdc,
+  /** Its Draw Proof: the transaction that finished it and the card's place in its Checkout (`/draw/{tx}?card={card}`). */
+  proof: Schema.optional(Schema.Struct({ tx: Schema.String, card: Schema.Int }))
 }) {}
 
 /** "waiting": we're topping up our Bitrefill credit for this card; the customer isn't charged until it's ordered. */
@@ -316,9 +242,97 @@ export class AgentAttestation extends Schema.Class<AgentAttestation>("AgentAttes
   replies: Schema.Struct({ verified: Schema.Number, refused: Schema.Number })
 }) {}
 
+/** A Game Version's table: its premium, and every Final Price on the Lucky Amount with its chance (basis points). */
+const GameVersionTable = Schema.Struct({
+  name: Schema.String,
+  premiumBps: Schema.Int,
+  outcomes: Schema.Array(Schema.Struct({ finalBps: Schema.Int, chanceBps: Schema.Int }))
+})
+
+/** The program's public state, for pages anyone can open (ADR-0015). Read on the server and kept about 30 seconds. */
+export class ProgramInfo extends Schema.Class<ProgramInfo>("ProgramInfo")({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  programId: Schema.String,
+  usdcMint: Schema.String,
+  /** The Game Versions, by number. */
+  versions: Schema.Array(GameVersionTable),
+  reserve: Schema.Struct({
+    free: MicroUsdc,
+    /** Held for Lucky Buys in progress, until their Draws run. */
+    locked: MicroUsdc,
+    /** The most Cashback one card can pay now: the lower of the Cashback Cap's limits. */
+    maxCashback: MicroUsdc,
+    /** The owner's Cashback Cap: a fixed amount (null is off) and a share of Free Reserve (basis points). */
+    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.Int })
+  }),
+  /** A Checkout with Lucky cards plays at least this much Lucky Amount. */
+  minLuckyCheckout: MicroUsdc,
+  /** For the Live Average: settled Lucky Buys, their Lucky Amounts, and what was paid for them. */
+  stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc })
+}) {}
+
+export class ChainUnavailable extends Schema.TaggedError<ChainUnavailable>()(
+  "ChainUnavailable",
+  { message: Schema.String },
+  { httpApiStatus: 503 }
+) {}
+
+/**
+ * One card's Draw, as the program recorded it with `emit_cpi!` (ADR-0015), and what it takes to check it: ORAO's
+ * request as Solana has it now, and the Game Version's table. Bytes are hex; addresses and signatures base58.
+ */
+export const CardDrawProof = Schema.Struct({
+  checkout: Schema.String,
+  customer: Schema.String,
+  /** The card's place in its Checkout, from 0. */
+  card: Schema.Int,
+  /** Which of the Checkout's randomness requests it read: 0 at settle, one more for each request made again. */
+  round: Schema.Int,
+  seed: Schema.String,
+  randomness: Schema.String,
+  random: Schema.String,
+  roll: Schema.Int,
+  gameVersion: Schema.Int,
+  referencePrice: MicroUsdc,
+  luckyAmount: MicroUsdc,
+  maxPrice: MicroUsdc,
+  finalBps: Schema.Int,
+  finalPrice: MicroUsdc,
+  cashback: MicroUsdc,
+  request: Schema.Struct({
+    address: Schema.String,
+    /** What ORAO's request account holds now: the 64-byte value its oracles filled in, or null. */
+    value: Schema.NullOr(Schema.String),
+    /** The transaction that asked for it: the settle that confirmed delivery, or a later request_again. */
+    requestedBy: Schema.optional(Schema.String),
+    /** ORAO's oracles' transactions that filled it in, oldest first: the last one completed it. */
+    filledBy: Schema.Array(Schema.String)
+  }),
+  version: GameVersionTable
+})
+export type CardDrawProof = typeof CardDrawProof.Type
+
+/** The Draws one `finish_draw` transaction recorded: a Draw Proof page's data (ADR-0005). Never changes once landed. */
+export class DrawProof extends Schema.Class<DrawProof>("DrawProof")({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  programId: Schema.String,
+  signature: Schema.String,
+  /** When it landed (Unix seconds), if the chain says. */
+  time: Schema.optional(Schema.Int),
+  draws: Schema.Array(CardDrawProof)
+}) {}
+
 export class SystemApi extends HttpApiGroup.make("system", { topLevel: true }).add(
   HttpApiEndpoint.get("health", "/health", { success: HttpApiSchema.NoContent }),
   HttpApiEndpoint.get("status", "/status", { success: ShopStatus }),
+  HttpApiEndpoint.get("program", "/program", { success: ProgramInfo, error: ChainUnavailable }),
+  /** NotFound for anything that isn't a landed transaction with a Draw (of that card, if one is named). */
+  HttpApiEndpoint.get("drawProof", "/draws/:signature", {
+    params: { signature: Schema.String },
+    query: { card: Schema.optional(Schema.NumberFromString) },
+    success: DrawProof,
+    error: [NotFound, ChainUnavailable]
+  }),
   /** NotFound while the Agent is off (no bot or NEAR AI key) or before its first check. */
   HttpApiEndpoint.get("attestation", "/attestation", { success: AgentAttestation, error: NotFound })
 ) {}
@@ -376,11 +390,14 @@ export class CatalogApi extends HttpApiGroup.make("catalog").add(
   })
 ) {}
 
+/** Privy's tokens after a sign-in (ADR-0015): the access token says who, the identity token what they linked. */
+export class PrivySignIn extends Schema.Class<PrivySignIn>("PrivySignIn")({
+  accessToken: Schema.String.check(Schema.isMaxLength(8192)),
+  identityToken: Schema.String.check(Schema.isMaxLength(16384))
+}) {}
+
 export class AuthApi extends HttpApiGroup.make("auth").add(
-  HttpApiEndpoint.post("challenge", "/auth/challenge", { success: Challenge }),
-  HttpApiEndpoint.post("verify", "/auth/verify", { payload: SignedChallenge, success: Session, error: Unauthorized }),
-  HttpApiEndpoint.post("verifyEvm", "/auth/verify-evm", { payload: SignedEvmChallenge, success: Session, error: Unauthorized }),
-  HttpApiEndpoint.post("verifySolana", "/auth/verify-solana", { payload: SignedSolanaChallenge, success: Session, error: Unauthorized })
+  HttpApiEndpoint.post("privy", "/auth/privy", { payload: PrivySignIn, success: Session, error: Unauthorized })
 ) {}
 
 /** Ends the session the request came with, or every session of the signed-in account, on every device (a lost phone, a shared computer). */
@@ -454,28 +471,18 @@ export class PurchasesApi extends HttpApiGroup.make("purchases").add(
   HttpApiEndpoint.post("disconnectBitrefill", "/bitrefill/disconnect", { success: CheckoutEmail })
 ).middleware(Authorization) {}
 
-export class LinkInvalid extends Schema.TaggedError<LinkInvalid>()(
-  "LinkInvalid",
-  { message: Schema.String },
-  { httpApiStatus: 400 }
-) {}
-
 /**
- * Telegram linking (ADR-0001, ADR-0007): the signed-in web session issues a one-time code and
- * opens the bot with it, so only the wallet owner decides which Telegram account gets access.
+ * The customer's Telegram link (ADR-0015): made by signing in with Telegram in Privy, which the server reads at sign-in.
+ * Unlinking here stops the bot buying for them at once; unlinking in Privy too keeps the next sign-in from linking it again.
  */
 export class TelegramApi extends HttpApiGroup.make("telegram").add(
   HttpApiEndpoint.get("status", "/telegram", {
     success: Schema.Struct({ linked: Schema.Boolean, telegramName: Schema.optional(Schema.String), botUrl: Schema.optional(Schema.String) })
   }),
-  HttpApiEndpoint.post("linkCode", "/telegram/link-code", {
-    success: Schema.Struct({ url: Schema.String, expiresAt: Schema.Number }),
-    error: LinkInvalid
-  }),
   HttpApiEndpoint.post("unlink", "/telegram/unlink", { success: HttpApiSchema.NoContent })
 ).middleware(Authorization) {}
 
-// ---------- top-ups (NEAR Intents 1Click, mainnet) ----------
+// ---------- top-ups (ADR-0015): 1Click from other chains, swaps from the customer's own wallet ----------
 
 export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   assetId: Schema.String,
@@ -484,114 +491,69 @@ export class TopUpAsset extends Schema.Class<TopUpAsset>("TopUpAsset")({
   /** The token's contract on an EVM chain (its mint on Solana), so the wallet can send it; absent for the chain's own coin. */
   contract: Schema.optional(Schema.String),
   decimals: Schema.optional(Schema.Number),
-  /** 1Click's price in USD, for showing what a wallet's holding is worth. */
+  /** 1Click's price in USD (Jupiter's for a swapped token), for showing what a wallet's holding is worth. */
   price: Schema.optional(Schema.Number),
   /**
-   * Paid through a swap Luckout builds (ADR-0014): a Solana wallet signs one transaction that swaps it into the USDC
-   * 1Click needs, from the app or by scanning a Solana Pay code. Never sent to a deposit address as it is.
+   * Swapped from the customer's own wallet (their Deposit Address) by a transaction they sign (TopUpApi.swap): sent
+   * there as it is, never to a 1Click address.
    */
   swap: Schema.optional(Schema.Boolean)
 }) {}
 
 export class TopUpQuote extends Schema.Class<TopUpQuote>("TopUpQuote")({
-  /** Send exactly `amountIn` of `symbol` on `chain` here. */
+  /** Send `amountIn` of `symbol` on `chain` here (empty for a price check). */
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
   amountIn: Schema.String,
   amountInFormatted: Schema.String,
+  /** The least that is swapped (base units): anything above it is, the extra included; less goes back to `refundTo`. */
+  minAmountIn: Schema.optional(Schema.String),
   symbol: Schema.String,
   chain: Schema.String,
-  /** USDC (micro) that lands in the customer's NEAR account, or their NEAR Intents account for an EVM wallet. */
+  /** USDC (micro) that `amountIn` delivers to the customer's Deposit Address, which moves it into their Balance. */
   usdcOut: MicroUsdc,
   timeEstimateSeconds: Schema.Number,
   deadline: Schema.String,
-  /**
-   * A swap-paid token (TopUpAsset.swap): `amountIn` is exactly what the swap takes. `depositAddress` names the Top-Up
-   * but takes only USDC: never show it as somewhere to send the token.
-   */
-  swap: Schema.optional(Schema.Boolean)
+  /** Where 1Click sends back what it can't swap, on `chain`. */
+  refundTo: Schema.String
 }) {}
 
-/** A swap-paid Top-Up's transaction (ADR-0014), built and simulated by Luckout, for the customer's Solana wallet to sign and send. */
+/** A swap of a token in the customer's wallet into their Balance, for them to sign and send to /transactions/submit. */
 export class SwapTx extends Schema.Class<SwapTx>("SwapTx")({
-  /** Base64 of the unsigned v0 transaction. */
   transaction: Schema.String,
-  /** Past this block height it can never land. */
-  lastValidBlockHeight: Schema.Number
+  token: Schema.String,
+  /** Exactly what it swaps (base units of the token). */
+  spend: Schema.String,
+  /** USDC (micro) the route gives, and the least it may, or nothing happens. */
+  usdcOut: MicroUsdc,
+  minUsdcOut: MicroUsdc
 }) {}
 
-/** Where an EVM customer's money leaves for (ADR-0011): send `usdcIn` from their NEAR Intents account to `depositAddress`. */
-export class ExitQuote extends Schema.Class<ExitQuote>("ExitQuote")({
-  depositAddress: Schema.String,
-  usdcIn: MicroUsdc,
-  amountOutFormatted: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  timeEstimateSeconds: Schema.Number
-}) {}
-
-/** 1Click's status, and for an EVM Top-Up, whether its USDC has moved on into Luckout. */
-export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({
-  status: Schema.String,
-  move: Schema.optional(Schema.Literals(["waiting", "moved", "failed"]))
-}) {}
+export class TopUpStatus extends Schema.Class<TopUpStatus>("TopUpStatus")({ status: Schema.String }) {}
 
 /**
- * Where a Top-Up or a withdrawal is, in the customer's words: their money is never out of sight.
- * awaiting-transfer: we're waiting for them to send. swapping: 1Click has it and is converting it.
- * moving: it landed in their NEAR Intents account and is moving into Luckout. in-wallet: it landed in
- * their NEAR wallet, ready to deposit. in-intents: it's in their NEAR Intents account. done: in their
- * Luckout balance (Top-Up) or on the chain they picked (withdrawal). refunded: 1Click sent it back.
+ * Where a Top-Up is, in the customer's words: their money is never out of sight. awaiting-transfer: we're waiting for
+ * them to send. incomplete: 1Click got less than the quote's minimum and waits for the rest until the deadline, then
+ * sends it back. swapping: 1Click has it and is converting it. done: delivered to their Deposit Address, from where it
+ * moves into their Balance. refunded: 1Click sent it back to the refund address.
  */
-/** incomplete: 1Click got less than the quote asked for and waits for the rest until the deadline, then sends it back. */
-export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete", "swapping", "moving", "in-wallet", "in-intents", "done", "refunded"])
+export const TransferPhase = Schema.Literals(["awaiting-transfer", "incomplete", "swapping", "done", "refunded"])
 export type TransferPhase = typeof TransferPhase.Type
 
-/** One of the customer's 1Click swaps: a Top-Up on its way in, or a withdrawal on its way out. */
-/**
- * A token in the customer's own NEAR Intents account that Luckout doesn't use as balance: 1Click returns the
- * extra a customer sent, and refunds, in the token they paid with. (A NEAR wallet's USDC there is listed too.)
- */
-export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
-  assetId: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  /** Formatted, in the token's own units. */
-  amount: Schema.String,
-  /** Luckout can send it to their own wallet: an EVM wallet's on its own chain, a NEAR wallet's as USDC. */
-  sendable: Schema.Boolean
-}) {}
-
-/** Sends a held token to the customer's own wallet: move all `amount` (base units) of `assetId` to `depositAddress`. */
-export class SendBackQuote extends Schema.Class<SendBackQuote>("SendBackQuote")({
-  depositAddress: Schema.String,
-  assetId: Schema.String,
-  amount: Schema.String,
-  amountOutFormatted: Schema.String,
-  symbol: Schema.String,
-  chain: Schema.String,
-  timeEstimateSeconds: Schema.Number
-}) {}
-
+/** One of the customer's 1Click Top-Ups. */
 export class Transfer extends Schema.Class<Transfer>("Transfer")({
   depositAddress: Schema.String,
   depositMemo: Schema.optional(Schema.String),
-  /** in: a Top-Up. out: a withdrawal from Luckout. back: something held in their NEAR Intents account, sent to their own wallet. */
-  direction: Schema.Literals(["in", "out", "back"]),
-  /** USDC (micro): what lands for a Top-Up, what leaves Luckout for a withdrawal. */
+  /** USDC (micro) it delivers. */
   usdc: MicroUsdc,
-  /** The other side: the token and chain it comes from (Top-Up) or goes to (withdrawal). */
+  /** The token and chain it comes from. */
   symbol: Schema.String,
   chain: Schema.String,
-  /** What the customer sends, formatted (a Top-Up). */
+  /** What the customer sends, formatted. */
   amountIn: Schema.optional(Schema.String),
-  /** A Top-Up paid with a swap (ADR-0014): what the customer swaps, readable and rounded up, e.g. "0.26566 ORE". symbol/amountIn are then USDC on Solana. */
-  paidWith: Schema.optional(Schema.String),
-  /** What arrives on the other chain, formatted (a withdrawal). */
-  amountOut: Schema.optional(Schema.String),
-  /** What 1Click has received so far, formatted (a Top-Up short of its amount). */
+  /** What 1Click has received so far, formatted (a Top-Up short of its minimum). */
   deposited: Schema.optional(Schema.String),
-  /** The customer's own transfer to the deposit address, when the app sent it (a Top-Up from an EVM wallet). */
+  /** The customer's own transfer to the deposit address, when the app sent it. */
   depositTx: Schema.optional(Schema.String),
   phase: TransferPhase,
   /** Taking longer than usual: safe, but say so. */
@@ -600,12 +562,11 @@ export class Transfer extends Schema.Class<Transfer>("Transfer")({
   /** Until when 1Click takes the deposit (a Top-Up awaiting the customer's transfer). */
   deadline: Schema.optional(Schema.String),
   timeEstimateSeconds: Schema.optional(Schema.Number),
-  /** The delivery on the other chain (a withdrawal). */
+  /** The delivery to the Deposit Address, on Solana. */
   deliveredTx: Schema.optional(Schema.String),
-  /** What 1Click sent back, formatted, and why. */
+  /** What 1Click sent back, formatted, where, and why. */
   refunded: Schema.optional(Schema.String),
-  /** A Top-Up whose refund (and any extra sent) goes back to the wallet it came from, not to their NEAR Intents account. */
-  refundsToWallet: Schema.optional(Schema.Boolean),
+  refundTo: Schema.optional(Schema.String),
   detail: Schema.optional(Schema.String),
   /** NEAR Intents explorer page for this swap. */
   explorer: Schema.String
@@ -619,9 +580,14 @@ export class TopUpUnavailable extends Schema.TaggedError<TopUpUnavailable>()(
 
 export class TopUpApi extends HttpApiGroup.make("topup").add(
   HttpApiEndpoint.get("assets", "/topup/assets", { success: Schema.Array(TopUpAsset), error: TopUpUnavailable }),
-  /** `dry`: a preview only, with no deposit address and nothing recorded. */
+  /** `dry`: a price check only, with no deposit address and nothing recorded. `refundTo`: an address on the token's chain. */
   HttpApiEndpoint.post("quote", "/topup/quote", {
-    payload: Schema.Struct({ originAsset: Schema.String, usdc: MicroUsdc, dry: Schema.optional(Schema.Boolean) }),
+    payload: Schema.Struct({
+      originAsset: Schema.String,
+      usdc: MicroUsdc,
+      refundTo: Schema.String.check(Schema.isMaxLength(128)),
+      dry: Schema.optional(Schema.Boolean)
+    }),
     success: TopUpQuote,
     error: TopUpUnavailable
   }),
@@ -630,15 +596,9 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: TopUpStatus,
     error: TopUpUnavailable
   }),
-  /** EVM wallets: the signed intent that moves this Top-Up into Luckout once it lands; the server sends it then. */
-  HttpApiEndpoint.post("move", "/topup/move", {
-    payload: Schema.Struct({ depositAddress: Schema.String, signed: SignedIntent }),
-    success: HttpApiSchema.NoContent,
-    error: TopUpUnavailable
-  }),
-  /** Solana wallets, a swap-paid Top-Up (ADR-0014): the transaction that pays it, for their wallet to sign and send. */
-  HttpApiEndpoint.post("swapTx", "/topup/swap-tx", {
-    payload: Schema.Struct({ depositAddress: Schema.String }),
+  /** USDT or ORE in the customer's wallet into their Balance: `amount` in the token's base units, all of it by default. */
+  HttpApiEndpoint.post("swap", "/topup/swap", {
+    payload: Schema.Struct({ assetId: Schema.String, amount: Schema.optional(Schema.String.check(Schema.isPattern(/^[1-9]\d{0,29}$/))) }),
     success: SwapTx,
     error: TopUpUnavailable
   }),
@@ -648,152 +608,61 @@ export class TopUpApi extends HttpApiGroup.make("topup").add(
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
-  /**
-   * A Top-Up the customer hasn't paid into leaves their list; a swap-paid one is cancelled. Money sent anyway still
-   * arrives, and the Top-Up is listed again.
-   */
+  /** A Top-Up the customer hasn't paid into leaves their list. Money sent anyway still arrives, and it's listed again. */
   HttpApiEndpoint.post("dismiss", "/topup/dismiss", {
     payload: Schema.Struct({ depositAddress: Schema.String }),
     success: HttpApiSchema.NoContent,
     error: TopUpUnavailable
   }),
-  /** The customer's Top-Ups and withdrawals still on their way, and those that ended in the last day. */
-  HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable }),
-  /** What else is in the customer's NEAR Intents account: change and refunds from 1Click, in the token paid with. */
-  HttpApiEndpoint.get("held", "/topup/held", { success: Schema.Array(HeldToken), error: TopUpUnavailable }),
-  /** Testnet, EVM wallets: 100 test USDC into their NEAR Intents account, once a day. */
-  HttpApiEndpoint.post("faucet", "/topup/faucet", { success: HttpApiSchema.NoContent, error: TopUpUnavailable }),
-  /** A held token (see HeldToken.sendable), all of it, to the customer's own wallet. */
-  HttpApiEndpoint.post("sendBack", "/topup/send-back", {
-    payload: Schema.Struct({ assetId: Schema.String }),
-    success: SendBackQuote,
-    error: TopUpUnavailable
-  }),
-  /** EVM wallets: a quote to send USDC from their NEAR Intents account to `destinationAsset` on its own chain. */
-  HttpApiEndpoint.post("exit", "/topup/exit", {
-    payload: Schema.Struct({ destinationAsset: Schema.String, usdc: MicroUsdc }),
-    success: ExitQuote,
-    error: TopUpUnavailable
-  })
+  /** The customer's Top-Ups still on their way, and those that ended in the last day. */
+  HttpApiEndpoint.get("transfers", "/topup/transfers", { success: Schema.Array(Transfer), error: TopUpUnavailable })
 ).middleware(Authorization) {}
 
-// ---------- relayer (NEP-366, ADR-0008) ----------
-
-/** We won't pay for this one, or it ran and failed: nothing to retry with the wallet as is. */
-export class RelayFailed extends Schema.TaggedError<RelayFailed>()(
-  "RelayFailed",
-  { message: Schema.String },
-  { httpApiStatus: 400 }
-) {}
-
-/** Not paying fees right now (switched off, or today's free relays are used): send it from the wallet instead. */
-export class RelayUnavailable extends Schema.TaggedError<RelayUnavailable>()(
-  "RelayUnavailable",
-  { message: Schema.String },
-  { httpApiStatus: 503 }
-) {}
-
-export class RelayApi extends HttpApiGroup.make("relay").add(
-  HttpApiEndpoint.get("status", "/relay", { success: Schema.Struct({ available: Schema.Boolean }) }),
-  HttpApiEndpoint.post("send", "/relay", {
-    /** base64 of a borsh SignedDelegate, as the wallet's signDelegateActions returns it. */
-    payload: Schema.Struct({ signedDelegate: Schema.String.check(Schema.isMaxLength(8192)) }),
-    success: Schema.Struct({ hash: Schema.String }),
-    error: [RelayFailed, RelayUnavailable]
-  }),
-  /** EVM wallets (ADR-0011): one signed NEAR Intents payload, sent by our relayer to `intents.near`. */
-  HttpApiEndpoint.post("intent", "/relay/intent", {
-    payload: Schema.Struct({ signed: SignedIntent }),
-    success: Schema.Struct({ hash: Schema.String }),
-    error: [RelayFailed, RelayUnavailable]
-  })
-).middleware(Authorization) {}
+/** A transaction the customer signs and we pay for: unsigned, with the token that binds its bytes. */
+export class PreparedTransaction extends Schema.Class<PreparedTransaction>("PreparedTransaction")({
+  transaction: Schema.String.check(Schema.isMaxLength(4096)),
+  token: Schema.String.check(Schema.isMaxLength(128))
+}) {}
 
 // ---------- admin (whitelisted accounts only; everyone else gets NotFound) ----------
-
-/** The relayer's switch and free-relay caps, changed from the admin panel. */
-export class RelaySettings extends Schema.Class<RelaySettings>("RelaySettings")({
-  enabled: Schema.Boolean,
-  /** Free relays per account per rolling day. */
-  perAccountDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1000 })),
-  /** Free relays for everyone together per rolling day. */
-  allDaily: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100_000 }))
-}) {}
-
-/**
- * What an admin changes in the relayer's settings: only the fields sent. The server keeps the rest as they are
- * now, so a panel opened before another admin's change can't undo it.
- */
-export const RelayChange = Schema.Struct(RelaySettings.fields).mapFields(Struct.map(Schema.optionalKey))
-export type RelayChange = typeof RelayChange.Type
-
-const Yocto = Schema.String
-
-const Usd = MicroUsdc.check(Schema.isBetween({ minimum: 0, maximum: 2_000_000_000 }))
-
-/** How much Bitrefill credit to keep (ADR-0009). All amounts micro-USDC. */
-export class CreditSettings extends Schema.Class<CreditSettings>("CreditSettings")({
-  /** Refill by itself; off, the panel and alerts only say when to. */
-  autoRefill: Schema.Boolean,
-  /** Refills top up to at least this, whatever sales did ("Top up to at least"). */
-  floor: Usd,
-  /**
-   * Idle credit never goes above this: the most that can sit unused at Bitrefill. A refill for
-   * purchases already waiting may go past it, since that credit is spent within minutes.
-   */
-  ceiling: Usd,
-  /** The most the server refills in a rolling day. */
-  dailyRefill: Usd,
-  /** How long a purchase may wait for credit before it's cancelled, uncharged (up to a day). */
-  waitMinutes: Schema.Int.check(Schema.isBetween({ minimum: 5, maximum: 1440 })),
-  /**
-   * USDC kept ready in our Base wallet, so a refill pays Bitrefill in about a minute instead of waiting
-   * on a swap; topped back up in the background. 0 turns it off. Missing (saved before it existed): the
-   * network's default.
-   */
-  baseFloat: Schema.optional(Usd),
-  /**
-   * A refill starts once credit falls under this, so a big card's worth stays ready without every small
-   * sale starting a refill. Kept at least the smallest refill under the target. Missing or 0: half the target,
-   * or the biggest recent card if that's more.
-   */
-  refillBelow: Schema.optional(Usd),
-  /**
-   * The smallest refill: one for less costs relatively more in swap fees. At least $2, the smallest swap.
-   * Missing (saved before it existed): $10.
-   */
-  minRefill: Schema.optional(Usd)
-}) {}
-
-/** What an admin changes in the credit settings: only the fields sent, as with RelayChange. */
-export const CreditChange = Schema.Struct(CreditSettings.fields).mapFields(Struct.map(Schema.optionalKey))
-export type CreditChange = typeof CreditChange.Type
-
-/** One top-up of our Bitrefill credit, paid from the treasury through NEAR Intents. */
-export class RefillView extends Schema.Class<RefillView>("RefillView")({
-  id: Schema.String,
-  amount: MicroUsdc,
-  /** target, waiting (a purchase needed it), manual, or float (tops up the Base wallet; no Bitrefill credit). */
-  reason: Schema.String,
-  /** fund, quote, send, swapping, invoice, pay, crediting, done, refunded, failed, stuck, resolved, or cancelled (a float top-up that gave way). */
-  step: Schema.String,
-  error: Schema.optional(Schema.String),
-  /** The treasury's NEAR transfer into the swap. */
-  sendTx: Schema.optional(Schema.String),
-  /** The swap's NEAR Intents deposit address (its explorer page). */
-  swap: Schema.optional(Schema.String),
-  /** The Base wallet's payment to Bitrefill. */
-  payTx: Schema.optional(Schema.String),
-  invoiceId: Schema.optional(Schema.String),
-  createdAt: Schema.String,
-  updatedAt: Schema.String
-}) {}
 
 export class AdminInvalid extends Schema.TaggedError<AdminInvalid>()(
   "AdminInvalid",
   { message: Schema.String },
   { httpApiStatus: 400 }
 ) {}
+
+const Address = Schema.String.check(Schema.isMaxLength(64))
+const Amount = MicroUsdc.check(Schema.isGreaterThan(0))
+const Setting = MicroUsdc.check(Schema.isGreaterThanOrEqualTo(0))
+
+/**
+ * One owner transaction for the Admin panel (ADR-0015). Each `_tag` is the program instruction it becomes: the server
+ * builds it with our fee payer, the owner's own wallet signs it (the proposed owner's, for `accept_owner`), and
+ * `/transactions/submit` sends it. Proceeds go to the owner's USDC account or the Pay Wallet's; the reserve only to
+ * the owner's, as the program allows.
+ */
+export const OwnerAction = Schema.Union([
+  Schema.TaggedStruct("set_paused", { paused: Schema.Boolean }),
+  /** `fixed` null is off; the share is required and at most 50%, as the program checks. */
+  Schema.TaggedStruct("set_cashback_cap", { fixed: Schema.NullOr(Amount), reserveBps: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5_000 })) }),
+  Schema.TaggedStruct("set_repay_cap", { daily: Setting }),
+  Schema.TaggedStruct("set_min_lucky_checkout", { amount: Setting }),
+  Schema.TaggedStruct("fund_reserve", { amount: Amount }),
+  Schema.TaggedStruct("withdraw_reserve", { amount: Amount }),
+  Schema.TaggedStruct("withdraw_proceeds", { amount: Amount, to: Schema.Literals(["owner", "payWallet"]) }),
+  Schema.TaggedStruct("set_operator", { operator: Address }),
+  /** The new Pay Wallet's own address: its USDC account is what the program keeps. */
+  Schema.TaggedStruct("set_pay_wallet", { payWallet: Address }),
+  /** null withdraws a proposal. */
+  Schema.TaggedStruct("propose_owner", { newOwner: Schema.NullOr(Address) }),
+  Schema.TaggedStruct("accept_owner", {}),
+  /** The guardian can only pause; null removes it. */
+  Schema.TaggedStruct("set_guardian", { guardian: Schema.NullOr(Address) }),
+  /** Replaces the program with the build in `buffer`, signed by the upgrade authority, which must hold the buffer (deploy/README.md). */
+  Schema.TaggedStruct("upgrade", { buffer: Address })
+])
+export type OwnerAction = typeof OwnerAction.Type
 
 /** Rows the admin's Purchases and Users pages get at most, newest first. */
 export const ADMIN_LIST_LIMIT = 300
@@ -808,106 +677,65 @@ export class AttentionPurchase extends Schema.Class<AttentionPurchase>("Attentio
   error: Schema.optional(Schema.String),
   attempts: Schema.Int,
   createdAt: Schema.String,
-  /** "Retry now" is safe for it: an open purchase, or one that gave up at a step NEAR can repeat. */
+  /** "Retry now" is safe for it: an open purchase, or one that gave up at a step the program can repeat. */
   retryable: Schema.Boolean
 }) {}
 
 export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")({
-  network: Schema.Literals(["testnet", "mainnet"]),
-  contract: Schema.Struct({
+  cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
+  program: Schema.Struct({
     id: Schema.String,
     owner: Schema.String,
     /** Proposed by the owner; becomes the owner when it accepts. */
     pendingOwner: Schema.optional(Schema.String),
     operator: Schema.String,
-    usdc: Schema.String,
-    paused: Schema.Boolean
+    usdcMint: Schema.String,
+    vault: Schema.String,
+    /** The Pay Wallet's USDC account, which `settle` repays. */
+    payWallet: Schema.String,
+    paused: Schema.Boolean,
+    /** A key that can only pause, so a pause never waits on the owner. */
+    guardian: Schema.optional(Schema.String)
   }),
-  /** An admin stopped new purchases on the server (any admin can, unlike the contract's pause). */
+  /** An admin stopped new purchases on the server (any admin can, unlike the program's pause). */
   salesStopped: Schema.Boolean,
   reserve: Schema.Struct({
     free: MicroUsdc,
     locked: MicroUsdc,
     proceeds: MicroUsdc,
-    /** The most Cashback one Lucky Buy can pay now: the lower of the Cashback Cap's limits. */
+    /** The most Cashback one card can pay now: the lower of the Cashback Cap's limits. */
     maxCashback: MicroUsdc,
-    /** The owner's Cashback Cap: a fixed amount and a share of Free Reserve (basis points); null is off. */
-    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.NullOr(Schema.Int) }),
-    /** USDC the contract holds in all. */
+    /** The owner's Cashback Cap: a fixed amount (null is off) and a share of Free Reserve (basis points). */
+    cashbackCap: Schema.Struct({ fixed: Schema.NullOr(MicroUsdc), reserveBps: Schema.Int }),
+    /** A Checkout with Lucky cards plays at least this much Lucky Amount (ADR-0015). */
+    minLuckyCheckout: MicroUsdc,
+    /** USDC the Vault holds in all. */
     held: MicroUsdc,
-    /** Customers' money in the contract: what it holds minus the reserve and proceeds. Negative means it holds less than it owes. */
+    /** Customers' money in the Vault: what it holds minus the reserve and Proceeds. Negative means it holds less than it owes. */
     customers: Schema.Int
   }),
+  /** `settle` repays the Pay Wallet up to this much a day; past it, prices wait as Proceeds. */
+  repay: Schema.Struct({ dailyCap: MicroUsdc, repaidToday: MicroUsdc }),
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
-  /** NEAR each of our accounts can spend (yoctoNEAR, after storage), and where the Monitor alerts. */
-  gas: Schema.Array(Schema.Struct({
-    role: Schema.Literals(["operator", "relayer", "treasury", "contract"]),
-    accountId: Schema.String,
-    spendable: Yocto,
-    alertBelow: Yocto
+  /** Our keys' balances and where the Monitor alerts: the fee payer's SOL (lamports), the Pay Wallet's USDC. */
+  keys: Schema.Array(Schema.Struct({
+    role: Schema.Literals(["feePayer", "payWallet"]),
+    /** The wallet: where to send it SOL or USDC. */
+    address: Schema.String,
+    /** The Pay Wallet's USDC account, which the program pays and repays: a detail, never where to send (an exchange can strand USDC sent to it). */
+    usdcAccount: Schema.optional(Schema.String),
+    balance: Schema.String,
+    alertBelow: Schema.String
   })),
-  relay: Schema.Struct({
-    configured: Schema.Boolean,
-    settings: RelaySettings,
-    usedToday: Schema.Int,
-    topAccounts: Schema.Array(Schema.Struct({ accountId: Schema.String, count: Schema.Int }))
-  }),
   purchases: Schema.Struct({
     today: Schema.Int,
     deliveredToday: Schema.Int,
-    /** Bitrefill orders placed in the last 24 hours, against the account's daily cap. */
-    bitrefillOrders: Schema.Int,
-    bitrefillCap: Schema.Int,
     /** The oldest purchases that need a look (closest to the customer's Reclaim), at most 20 of them... */
     attention: Schema.Array(AttentionPurchase),
     /** ...and how many need one in all. */
     attentionTotal: Schema.Int
   }),
-  credit: Schema.Struct({
-    settings: CreditSettings,
-    /** Last balance Bitrefill reported, and when; missing if it hasn't answered yet. */
-    balance: Schema.optional(MicroUsdc),
-    readAt: Schema.optional(Schema.String),
-    /** How much more Bitrefill lets the account hold. */
-    room: MicroUsdc,
-    free: MicroUsdc,
-    held: MicroUsdc,
-    waitingCount: Schema.Int,
-    waitingTotal: MicroUsdc,
-    avgDaily: MicroUsdc,
-    target: MicroUsdc,
-    refillBelow: MicroUsdc,
-    refilledToday: MicroUsdc,
-    /** Why automatic refills are paused, if they are. */
-    paused: Schema.optional(Schema.String),
-    /** Refills need NEAR Intents, which only runs on mainnet. */
-    refillsAvailable: Schema.Boolean
-  }),
-  treasury: Schema.Struct({
-    /** The account the server signs refills with. */
-    accountId: Schema.optional(Schema.String),
-    /** The account the contract lets pull proceeds; it should match. */
-    contractTreasury: Schema.optional(Schema.String),
-    dailyCap: MicroUsdc,
-    sweptToday: MicroUsdc,
-    usdc: MicroUsdc,
-    /** In manual mode: what an open refill is waiting for you to move in. */
-    needs: Schema.optional(MicroUsdc),
-    /** Our Base wallet, which refills swap into and pay Bitrefill from; missing when Base doesn't answer. */
-    wallet: Schema.optional(Schema.Struct({
-      address: Schema.String,
-      usdc: MicroUsdc,
-      /** ETH for gas, in wei, and where the Monitor alerts. */
-      eth: Schema.String,
-      alertBelow: Schema.String
-    }))
-  }),
-  refills: Schema.Array(RefillView),
-  /**
-   * How cards are bought (ADR-0012). `guest`: each is a guest order on Bitrefill's MCP with the customer's
-   * Checkout Email, paid from the Base Float (credit above is then the float); otherwise from the account's
-   * store credit.
-   */
+  /** How cards are bought (ADR-0012): as a guest with the customer's Checkout Email, or on their own Bitrefill account. */
   checkout: Schema.Struct({
     guest: Schema.Boolean,
     /** Customers who have given a Checkout Email. */
@@ -918,13 +746,28 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     limits: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc }),
     /** The busiest Checkout Email: its cards and spend in the last 24 hours, and its spend in 30 days. */
     busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
-  })
+  }),
+  /** What every card the Pay Wallet paid, a guest's or on a customer's own Bitrefill account, has used of our paying address's own limits at Bitrefill (ADR-0015). */
+  paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
+}) {}
+
+/** A build uploaded for an upgrade (deploy/README.md), as the owner checks it before signing. */
+export class AdminBuffer extends Schema.Class<AdminBuffer>("AdminBuffer")({
+  address: Schema.String,
+  /** solana-verify's executable hash: the release's must match the one in CI's program-build summary. */
+  hash: Schema.String,
+  /** Bytes the build needs. */
+  size: Schema.Int,
+  /** Who may use it: an upgrade needs the program's upgrade authority. */
+  authority: Schema.NullOr(Schema.String),
+  /** The program as it runs now: its hash, its upgrade authority (null: it can never change), and its room for a build in bytes. */
+  program: Schema.Struct({ hash: Schema.String, upgradeAuthority: Schema.NullOr(Schema.String), room: Schema.Int })
 }) {}
 
 /** One purchase as the admin's Purchases page lists it: everything but the Redemption Data. */
 export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")({
   id: Schema.String,
-  /** The checkout it was bought in. A Cart's cards share one invoice and one Base payment: `payAmount` is the checkout's. */
+  /** The checkout it was bought in. A Cart's cards share one invoice and one payment from the Pay Wallet: `payAmount` is the checkout's. */
   checkoutId: Schema.String,
   accountId: Schema.String,
   voucherName: Schema.String,
@@ -941,7 +784,7 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   error: Schema.optional(Schema.String),
   attempts: Schema.Int,
   invoiceId: Schema.optional(Schema.String),
-  /** A guest order's payment from the Base Wallet (ADR-0012): its Base transaction, and the USDC it sends. */
+  /** A guest order's payment from the Pay Wallet (ADR-0015): its transaction, and the USDC it sends. */
   payTx: Schema.optional(Schema.String),
   payAmount: Schema.optional(MicroUsdc),
   admitTx: Schema.optional(Schema.String),
@@ -950,7 +793,7 @@ export class AdminPurchase extends Schema.Class<AdminPurchase>("AdminPurchase")(
   updatedAt: Schema.String
 }) {}
 
-/** One customer as the admin's Users page lists it. `balance` is missing when NEAR didn't answer. */
+/** One customer as the admin's Users page lists it. `balance` is missing when the chain didn't answer. */
 export class AdminUser extends Schema.Class<AdminUser>("AdminUser")({
   accountId: Schema.String,
   firstSeen: Schema.String,
@@ -982,30 +825,78 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
     error: NotFound
   }),
   HttpApiEndpoint.get("users", "/admin/users", { success: Schema.Array(AdminUser), error: NotFound }),
-  /** Changes only the fields sent; answers with the settings as saved. */
-  HttpApiEndpoint.post("relay", "/admin/relay", { payload: RelayChange, success: RelaySettings, error: NotFound }),
   /** Stops or restarts new purchases on the server, at once, without the owner's wallet. */
   HttpApiEndpoint.post("sales", "/admin/sales", { payload: Schema.Struct({ open: Schema.Boolean }), success: ShopStatus, error: NotFound }),
-  /** Changes only the fields sent, and refuses settings that wouldn't hang together; answers with the settings as saved. */
-  HttpApiEndpoint.post("credit", "/admin/credit", { payload: CreditChange, success: CreditSettings, error: [NotFound, AdminInvalid] }),
-  /** Refill now, outside the schedule; `amount` defaults to what the target and waiting purchases need. */
-  HttpApiEndpoint.post("refill", "/admin/refills", {
-    payload: Schema.Struct({ amount: Schema.optional(Usd) }),
-    success: RefillView,
-    error: [NotFound, AdminInvalid]
-  }),
-  /** After checking a stuck refill by hand: closes it, which lets automatic refills run again. */
-  HttpApiEndpoint.post("resolveRefill", "/admin/refills/:id/resolve", {
-    params: { id: Schema.String },
-    payload: Schema.Struct({ note: Schema.String.check(Schema.isMinLength(3), Schema.isMaxLength(500)) }),
-    success: HttpApiSchema.NoContent,
-    error: [NotFound, AdminInvalid]
-  }),
   HttpApiEndpoint.post("retry", "/admin/purchases/:id/retry", {
     params: { id: Schema.String },
     success: HttpApiSchema.NoContent,
     error: [NotFound, PurchaseInvalid]
-  })
+  }),
+  /** A buffer holding a build for an upgrade, checked against the program. */
+  HttpApiEndpoint.get("buffer", "/admin/buffers/:address", { params: { address: Address }, success: AdminBuffer, error: [NotFound, AdminInvalid] }),
+  /** An owner transaction, unsigned, for the owner's wallet to sign and `/transactions/submit` to send. */
+  HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] })
 ).middleware(Authorization).annotate(OpenApi.Exclude, true) {}
 
-export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(RelayApi).add(AdminApi) {}
+// ---------- deposits and customer-signed transactions (ADR-0015) ----------
+
+/** A swap-paid token (USDT, ORE) sitting at the Deposit Address: one tap swaps it into the Balance (TopUpApi.swap). */
+export class HeldToken extends Schema.Class<HeldToken>("HeldToken")({
+  /** As in TopUpAsset and TopUpApi.swap. */
+  assetId: Schema.String,
+  symbol: Schema.String,
+  /** Base units. */
+  amount: Schema.String,
+  decimals: Schema.Number
+}) {}
+
+/**
+ * The customer's Deposit Address (their Privy wallet), whether its one-time approval stands, USDC waiting there, and
+ * any swap-paid token there (none when swaps are off).
+ */
+export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress")({
+  address: Schema.String,
+  approved: Schema.Boolean,
+  waiting: Schema.Number,
+  held: Schema.Array(HeldToken)
+}) {}
+
+export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
+
+/**
+ * The customer's Customer account in the program, amounts in micro-USDC as strings ("No limit" is u64's maximum).
+ * `day` is days since 1970 (UTC): `spent_today` counts only on that day.
+ */
+export const CustomerAccount = Schema.Struct({
+  balance: Schema.String,
+  per_purchase_limit: Schema.String,
+  daily_limit: Schema.String,
+  day: Schema.Number,
+  spent_today: Schema.String,
+  default_mode: Mode,
+  premiums_paid: Schema.String,
+  cashback_received: Schema.String
+})
+export type CustomerAccount = typeof CustomerAccount.Type
+
+export class DepositsApi extends HttpApiGroup.make("deposits").add(
+  /** null until the one-time approval opens it. */
+  HttpApiEndpoint.get("account", "/account", { success: Schema.NullOr(CustomerAccount), error: ChainUnavailable }),
+  HttpApiEndpoint.get("address", "/deposits/address", { success: DepositAddress, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("approval", "/deposits/approval", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("submit", "/transactions/submit", { payload: PreparedTransaction, success: Submitted, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("withdrawal", "/transactions/withdrawal", {
+    payload: Schema.Struct({ amount: Schema.Int.check(Schema.isGreaterThan(0)), to: Schema.String.check(Schema.isMaxLength(64)) }),
+    success: PreparedTransaction,
+    error: PurchaseInvalid
+  }),
+  HttpApiEndpoint.post("limits", "/transactions/limits", {
+    payload: Schema.Struct({ perPurchase: Schema.String.check(Schema.isPattern(/^\d{1,20}$/)), daily: Schema.String.check(Schema.isPattern(/^\d{1,20}$/)) }),
+    success: PreparedTransaction,
+    error: PurchaseInvalid
+  }),
+  HttpApiEndpoint.post("defaultMode", "/transactions/default-mode", { payload: Schema.Struct({ mode: Mode }), success: PreparedTransaction, error: PurchaseInvalid }),
+  HttpApiEndpoint.post("reclaim", "/transactions/reclaim", { payload: Schema.Struct({ purchaseId: Schema.String.check(Schema.isMaxLength(64)) }), success: PreparedTransaction, error: PurchaseInvalid })
+).middleware(Authorization) {}
+
+export class Api extends HttpApi.make("luckout").add(SystemApi).add(CatalogApi).add(AuthApi).add(SessionApi).add(PurchasesApi).add(TelegramApi).add(TopUpApi).add(AdminApi).add(DepositsApi) {}

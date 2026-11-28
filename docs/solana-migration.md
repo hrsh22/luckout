@@ -100,6 +100,34 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 
 **Done when** the server's tests pass against a local validator with Bitrefill faked.
 
+**Done 2026-11-28, on branch `solana-server`.** The server's 250 tests pass on LiteSVM, running the real program and ORAO's, with Bitrefill faked.
+- **Built:**
+  - `Program.ts`, which codes the program's instructions, accounts, events and errors from its IDL, committed in `programs/idl`
+  - `Solana.ts`, which separates the transport (RPC, or LiteSVM in tests) from our keys. It saves every transaction before sending it and resumes it after a crash.
+  - Purchases on the program, with the Draw step
+  - Privy sign-in
+  - Bitrefill in `usdc_solana`, with our paying address's limits
+  - `Deposits.ts` and the transactions a customer signs
+  - 1Click Top-Ups to the Deposit Address (`FLEX_INPUT`, with a refund address on the source chain)
+  - USDT and ORE as one swap-and-deposit transaction
+  - the Agent's deposit tool, and buying once the money lands
+  - Admin, Monitor and MCP on the program
+- **Removed:** `Near`, `Relay`, `Intents`, `Base`, `Credit` and `Refill`, their scripts, and `near-api-js`.
+- **Carried into Phase 3:**
+  - the web app still calls the old endpoints and fails its type check
+  - in the bot, 1Click addresses for other chains wait for a refund-address question; until then it gives the Deposit Address
+  - `deploy/README.md` still describes NEAR
+- **Carried into Phase 4:** Jupiter's `payer` (the fee payer funding the customer's token accounts) must be proved with real money.
+- **Decisions made while building:**
+  - **Accounts and sessions:** a customer's account id is their Privy wallet's address. Privy's tokens are checked once, at sign-in. After that our own session cookie carries it, bound to the cluster and the program.
+  - **Transactions a customer signs:** we build each one with our fee payer and hand it out unsigned with a token that binds its bytes (`/transactions/*`). The fee payer signs only those bytes, and only once the customer has signed them.
+  - **A short float:** a checkout the Pay Wallet's float can't cover waits uncharged, and the owner is told. It goes ahead once the float covers it, or is cancelled after 60 minutes. A charged one is refunded in full.
+  - **Our paying address's limits:** checked when a checkout is placed, against every card the Pay Wallet pays, guest or Connect ($10k a day, $50k a month).
+  - **Deposits:** a sweep every two minutes, plus Alchemy's signed webhook (`ALCHEMY_WEBHOOK_SIGNING_KEY`).
+  - **Gone:** withdrawals to other chains through 1Click. Withdrawals go to any Solana address.
+  - **Test cards:** off mainnet, only Bitrefill's test cards are sold.
+  - **One program per environment:** staging and production each need a build with their own program id. That's set up in Phase 4.
+
 ## Phase 3: the web app
 
 - **Privy login,** in Privy's own window, replaces NEAR Connect, Reown and the Solana wallet adapter. `lib/near.ts` and `lib/evm.ts` go, and `lib/solana.ts` shrinks.
@@ -113,6 +141,20 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Docs** (`docs/docs-site-plan.md`): rewrite the pages it marks as changing with Solana: sign-in, add-funds and add-funds/other-chains, draw, balance, refunds and telegram, and touch up the ones marked "Lightly". Their URLs stay.
 
 **Done when** a customer on a local validator signs in with email, deposits, buys a Lucky Cart, sees its Draw Proofs and withdraws.
+
+**Done 2026-11-28, on branch `solana-server`,** on devnet rather than a local validator: the devnet program, a test USDC mint, ORAO's devnet oracles and Bitrefill's test cards. The server's 258 tests and the web app's 65 pass, and the web app builds. In a browser:
+- **Signed in** with a Privy test account (email). The one-time approval was signed with no prompt, our fee payer paying.
+- **Deposited:** USDC sent to the Deposit Address was swept into the Balance in 36 s.
+- **Bought** a $20 card on Classic, then a two-card Lucky Cart ($10 + $10 on Classic, $24 in one payment). Each card was delivered with its code, and each Draw finished from ORAO.
+- **Draw Proofs:** the pages for card 1 and card 2 of the Cart recomputed everything in the browser and matched.
+- **Withdrew** $5 to a fresh Solana address, its USDC account opened for it.
+- **Admin panel:** the control room reads the program live. Every owner action was signed from it and landed, in a Wallet Standard wallet holding the devnet owner key (as Phantom would) and in a Privy wallet: pause and resume, the repay cap, the smallest Lucky Checkout, the Cashback Cap, funding and withdrawing the reserve, withdrawing Proceeds, changing the operator and the Pay Wallet, and handing ownership over and back. The server now refuses to start if any of its keys is the owner's.
+- **Carried into Phase 4:**
+  - Google, Telegram and Phantom sign-in need a person to click through them
+- **Since, on the same branch:**
+  - the server's quotes and purchases put a checkout's Lucky cards under the smallest Lucky Checkout at Normal (`belowMin` on the quote), as the web does, and the Agent and its Buy line say Lucky plays from that much a checkout
+  - the bot gives a 1Click address for another chain's token once the customer has typed their refund address there; USDC and USDT on Solana still go to the Deposit Address
+  - `deploy/README.md` describes Solana
 
 ## Phase 4: staging on mainnet
 
@@ -129,6 +171,38 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   - a pause
   - an upgrade, and a rollback
   - an upgrade that changes a layout, with the older build refusing the new accounts
+
+**Ready 2026-11-28, waiting for money** (draft PR #217, `solana-server` → `staging`):
+- **One build per environment:** `--features staging` / `--features production` pick each program's own id (staging `FM2mRU3R…`, production `GCeZ67an…`); no feature is devnet. CI builds all three reproducibly. A mainnet build can be initialized only with Circle's USDC.
+- **Staging keys:**
+  - the owner and upgrade authority (`59i8NfY9…`) is the owner's own wallet, with a copy of its key on the operator's Mac for the deploy and setup only; the program keypair stays there until the first deploy
+  - the guardian (`BcyJnVFp…`), which can only pause, is on the operator's Mac
+  - the operator, fee payer and Pay Wallet were made on the VM
+  - the VM's `.env` points at the staging program and a fresh database, `luckout_staging_solana`; NEAR's `.env` is kept as `.env.near-2026-11-28`
+- **Rehearsed on devnet** with the staging build at its own address:
+  - deploying through Alchemy took minutes; the public RPC took over 30
+  - `scripts/solana-init.ts` found the upgrade authority, and the build refused a token other than USDC (`NotUsdc`)
+  - an upgrade in place, after dumping the running build, went through
+  - then the program was closed and the devnet SOL returned
+- **Hardened:**
+  - the server checks a database belongs to its deployment before migrating it, and refuses NEAR's
+  - it refuses to start holding the owner's key
+  - our paying address's limit counts every card
+  - deposit trouble and a card reclaimed after delivery alert the admin
+  - a checkout that gave up says why, and Retry resumes one stopped at `admit` or `pay`
+- **The owner's key can leave the operator's Mac** (ADR-0015):
+  - a guardian named by the owner can only pause (`set_guardian`, `pause`, in Config's spare bytes, so the devnet program upgraded in place); `scripts/solana-pause.ts` pauses with its key
+  - upgrades: the operator uploads the build to a buffer and hands it to the upgrade authority, and the Admin panel shows the build's hash (solana-verify's, matched against a CI build) before the owner's wallet signs one upgrade
+  - proved on devnet through the panel: an upgrade from a buffer, naming and removing the guardian, its pause, the owner's resume
+- **Docs:** `deploy/README.md` and `deploy/RUNBOOK.md` describe Solana.
+- **Left for deploy day:**
+  1. money to the owner (about 5 SOL for the deploy, of which 2.42 stays as the program's rent, plus USDC for the reserve and the Pay Wallet's float)
+  2. deploy and set up the program from CI's build, naming the guardian
+  3. fund the fee payer, the Pay Wallet, the reserve and the guardian
+  4. delete the owner's key and the program keypair from the operator's Mac
+  5. the staging Vercel variables
+  6. `DEPLOY_STAGING=on`, then merge #217
+- **Later:** registering each Deposit Address with Alchemy's webhook (until then, the two-minute sweep).
 
 ## Phase 5: cutover
 

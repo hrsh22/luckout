@@ -1,11 +1,12 @@
-import { CheckoutEmail, Purchase, PurchasePage, Quote, Voucher } from "@luckout/api"
+import { CheckoutEmail, Purchase, PurchasePage, Quote, TopUpAsset, TopUpQuote, TopUpUnavailable, Voucher } from "@luckout/api"
 import { Effect } from "effect"
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { NO_LIMIT } from "@luckout/api"
-import { blocker, makeAgent, type Offer, trimHistory, typedByCustomer, usdUp } from "./Agent.ts"
+import { blocker, makeAgent, type Offer, overLimits, trimHistory, typedAddress, typedByCustomer, usdUp } from "./Agent.ts"
+import { refundProblem } from "./TopUp.ts"
 
 /** The cards behind a turn's Buy button, if it has one. */
 const cards = (turn: { offer?: Offer | undefined }) => (turn.offer && "cards" in turn.offer ? turn.offer.cards : undefined)
@@ -71,8 +72,10 @@ const deps = {
         ]
       }))
   },
-  near: { view: () => Effect.succeed(rich) },
+  account: () => Effect.succeed(rich),
+  deposits: { status: (wallet: string) => Effect.succeed({ address: wallet, approved: true, waiting: 0 }) },
   web: "https://luckout.test",
+  minLuckyCheckout: Effect.succeed(2_500_000),
   shopClosed: Effect.succeed(undefined),
   verify: async () => true
 } as never
@@ -142,21 +145,165 @@ test("history is trimmed in one cut, at a customer message", () => {
   assert.ok(cut.length <= 24 && cut[0]!.role === "user")
 })
 
-test("no Confirm button for a purchase the customer can't pay for", async () => {
-  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "You're short." }])
+test("short of balance, the Buy button still comes, saying what's missing; the tap will wait for the money", async () => {
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "How will you pay?" }])
   const broke = { ...rich, balance: "500000" }
-  const agent = makeAgent({ ...(deps as object), near: { view: () => Effect.succeed(broke) }, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
-  const turn = await agent("alice.testnet", [], "buy it")
+  const agent = makeAgent({ ...(deps as object), account: () => Effect.succeed(broke), testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice", [], "buy it")
+  model.close()
+  assert.equal(turn.offer && "cards" in turn.offer ? turn.offer.short : undefined, 14_500_000)
+  const toolResult = String(model.seen[1]!.messages.at(-1)!.content)
+  assert.match(toolResult, /\$14\.50 short/)
+  assert.match(toolResult, /which token and chain.*deposit_address/)
+  assert.equal(bought, 0)
+})
+
+test("over a Spending Limit there's no Buy button, short of balance or not", async () => {
+  const model = await fakeModel([call("prepare_purchase", { cards: [{ voucher_id: "test-gift-card-code", value: "10", mode: "jackpot" }] }), { role: "assistant", content: "Over your limit." }])
+  const capped = { ...rich, balance: "500000", per_purchase_limit: "10000000" }
+  const agent = makeAgent({ ...(deps as object), account: () => Effect.succeed(capped), testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice", [], "buy it")
   model.close()
   assert.equal(turn.offer, undefined)
-  const toolResult = JSON.stringify(model.seen[1]!.messages.at(-1))
-  assert.match(toolResult, /\$14\.50 short/)
-  assert.match(toolResult, /luckout\.test\/wallet/)
+  assert.match(String(model.seen[1]!.messages.at(-1)!.content), /per-purchase limit of \$10\.00/)
+})
+
+// ---------- deposits (ADR-0015): the Deposit Address is written by code, never by the model ----------
+
+const ADDRESS = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+
+const TRON = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+const TRON_USDT = "nep141:tron-usdt.omft.near"
+/** 1Click's one-time address for a Tron Top-Up. */
+const ONECLICK = "TQ1c1ickDepositAddressXXXXXXXXXXXX"
+const UNTIL = "2026-11-28T12:30:00.000Z"
+
+/**
+ * TopUp as the Agent sees it: what 1Click takes (and USDT swapped from the wallet, which isn't 1Click's), and a quote
+ * that records what it was asked and checks the refund address the way TopUp.quote does.
+ */
+const fakeTopUp = () => {
+  const asked: Array<Array<unknown>> = []
+  const topUp = {
+    assets: Effect.succeed([
+      new TopUpAsset({ assetId: TRON_USDT, symbol: "USDT", chain: "tron", decimals: 6 }),
+      new TopUpAsset({ assetId: "nep141:base-usdc", symbol: "USDC", chain: "base", decimals: 6 }),
+      new TopUpAsset({ assetId: "swap:usdt", symbol: "USDT", chain: "sol", decimals: 6, swap: true })
+    ]),
+    quote: (accountId: string, assetId: string, usdc: number, refundTo: string) => {
+      asked.push([accountId, assetId, usdc, refundTo])
+      const wrong = refundProblem(assetId === TRON_USDT ? "tron" : "base", refundTo)
+      return wrong
+        ? Effect.fail(new TopUpUnavailable({ message: wrong }))
+        : Effect.succeed(new TopUpQuote({
+          depositAddress: ONECLICK, amountIn: "20210000", amountInFormatted: "20.21", minAmountIn: "20009000", symbol: "USDT", chain: "tron",
+          usdcOut: 20_000_000, timeEstimateSeconds: 60, deadline: UNTIL, refundTo
+        }))
+    }
+  }
+  return { asked, topUp }
+}
+
+/**
+ * One turn where the model asks for a Deposit Address with `args`, the customer having typed `say`; `approved` is their
+ * one-time approval. `asked`: what 1Click was asked to quote.
+ */
+const depositTurn = async (args: object, o: { approved?: boolean; say?: string } = {}) => {
+  const model = await fakeModel([call("deposit_address", args), { role: "assistant", content: "Send it there." }])
+  const { asked, topUp } = fakeTopUp()
+  const agent = makeAgent({
+    ...(deps as object),
+    deposits: { status: () => Effect.succeed({ address: ADDRESS, approved: o.approved ?? true, waiting: 0 }) },
+    topUp,
+    testnet: false,
+    apiKey: "test",
+    baseURL: model.url,
+    model: "fake"
+  } as never)
+  const turn = await agent(ADDRESS, [], o.say ?? "I'll send USDC")
+  model.close()
+  return { turn, asked, result: String(model.seen[1]!.messages.at(-1)!.content), seen: JSON.stringify(model.seen) }
+}
+/** What the model saw after the customer's message: the tool results. */
+const afterAsking = (seen: string) => seen.slice(seen.indexOf('"tool"'))
+
+test("USDC or USDT on Solana gets their Deposit Address under the reply, which the model never sees; 1Click isn't asked", async () => {
+  const usdc = await depositTurn({ token: "usdc", chain: "Solana", amount: 15, refund_address: ADDRESS }, { say: ADDRESS })
+  assert.deepEqual(usdc.turn.deposit, { address: ADDRESS, token: "USDC", chain: "Solana", amount: 15_000_000, tapInApp: false })
+  assert.match(usdc.result, /without the address/)
+  assert.ok(!afterAsking(usdc.seen).includes(ADDRESS), "no tool result carries the address")
+  const usdt = await depositTurn({ token: "USDT", chain: "solana", amount: 2.5 })
+  assert.equal(usdt.turn.deposit?.tapInApp, true)
+  assert.match(usdt.result, /USDT needs one tap in the app/)
+  assert.deepEqual([...usdc.asked, ...usdt.asked], [])
+})
+
+test("before the one-time approval, the deposit tool sends them to the app to make it, a 1Click Top-Up too", async () => {
+  const r = await depositTurn({ token: "USDC", chain: "Solana", amount: 15 }, { approved: false })
+  assert.equal(r.turn.deposit, undefined)
+  assert.match(r.result, /one-time approval.*https:\/\/luckout\.test\/wallet/)
+  const tron = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { approved: false, say: TRON })
+  assert.equal(tron.turn.deposit, undefined)
+  assert.match(tron.result, /one-time approval/, "a 1Click Top-Up lands at the Deposit Address too")
+  assert.deepEqual(tron.asked, [])
+})
+
+test("deposits start at $1, and a token or chain 1Click doesn't take is refused with what they can send", async () => {
+  assert.match((await depositTurn({ token: "USDC", chain: "Solana", amount: 0.5 })).result, /start at \$1\.00/)
+  const doge = await depositTurn({ token: "DOGE", chain: "Dogecoin", amount: 20 })
+  assert.equal(doge.turn.deposit, undefined)
+  assert.match(doge.result, /DOGE on Dogecoin can't be added.*USDC or USDT on Solana, or USDT on Tron, USDC on Base/)
+  assert.deepEqual(doge.asked, [])
+})
+
+test("another chain's token: the tool asks for their refund address there first, and quotes nothing until it has one", async () => {
+  const r = await depositTurn({ token: "usdt", chain: "Tron", amount: 20 })
+  assert.equal(r.turn.deposit, undefined)
+  assert.match(r.result, /their own address on Tron.*refund_address/)
+  assert.deepEqual(r.asked, [])
+  const blank = await depositTurn({ token: "USDT", chain: "tron", amount: 20, refund_address: " " })
+  assert.match(blank.result, /their own address on Tron/)
+})
+
+test("a 1Click address comes under the reply: exactly what to send, the least swapped, until when, and where a failed swap refunds", async () => {
+  const r = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: `refunds to ${TRON}.` })
+  assert.deepEqual(r.asked, [[ADDRESS, TRON_USDT, 20_000_000, TRON]], "a quote to their Deposit Address, refunding to what they typed")
+  assert.deepEqual(r.turn.deposit, {
+    address: ONECLICK,
+    token: "USDT",
+    chain: "Tron",
+    amount: 20_000_000,
+    tapInApp: false,
+    oneClick: { send: "20.21", least: "20.01", until: UNTIL, refundTo: TRON }
+  })
+  assert.match(r.result, /without the address/)
+  assert.ok(!afterAsking(r.seen).includes(ONECLICK), "the model never sees 1Click's address")
+})
+
+test("a refund address on another chain, or one the customer didn't type, is refused with a reason the model can relay", async () => {
+  const solana = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: ADDRESS }, { say: ADDRESS })
+  assert.equal(solana.turn.deposit, undefined)
+  assert.match(solana.result, /isn't an address on Tron/)
+  const untyped = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: "my usual address" })
+  assert.equal(untyped.turn.deposit, undefined)
+  assert.match(untyped.result, /isn't in the customer's latest message/)
+  assert.deepEqual(untyped.asked, [], "1Click is never asked")
+  const changed = await depositTurn({ token: "USDT", chain: "Tron", amount: 20, refund_address: TRON }, { say: TRON.toLowerCase() })
+  assert.match(changed.result, /isn't in the customer's latest message/, "case matters: a base58 address in another case is another address")
+})
+
+test("an address counts as typed only exactly, as a whole word", () => {
+  assert.ok(typedAddress(`refund to ${TRON}.`, TRON))
+  assert.ok(typedAddress("alice.near", "alice.near"))
+  assert.ok(!typedAddress(`x${TRON}`, TRON))
+  assert.ok(!typedAddress("bob.alice.near", "alice.near"))
+  assert.ok(!typedAddress("", ""))
 })
 
 test("blocker: balance first, then the per-purchase and daily limits", () => {
   const now = 5 * 86_400_000
   assert.match(blocker(null, 1_000_000, "w")!, /\$0\.00 and this needs \$1\.00/)
+  assert.match(overLimits(null, 300_000_000, "w")!, /per-purchase limit of \$200\.00/, "an account not opened yet has the program's defaults")
   assert.match(blocker({ ...rich, per_purchase_limit: "10000000" } as never, 15_000_000, "w")!, /per-purchase limit of \$10\.00/)
   assert.match(blocker({ ...rich, day: 5, spent_today: "90000000" } as never, 15_000_000, "w", now)!, /daily limit/)
   assert.equal(blocker({ ...rich, day: 4, spent_today: "90000000" } as never, 15_000_000, "w", now), undefined, "yesterday's spending doesn't count")
@@ -264,9 +411,9 @@ test("several cards go under one button, priced as a cart and checked against th
   const big = await agent("alice.testnet", cart.history, "make it eight on jackpot")
   model.close()
   assert.deepEqual(cards(cart)?.map((c) => [c.mode, c.maxPrice]), [[{ lucky: 2 }, 15_000_000], ["normal", 10_000_000]])
-  // $120 in all against a $100 balance, though each card alone fits: no button.
+  // $120 in all against a $100 daily limit, though each card alone fits: no button.
   assert.equal(big.offer, undefined)
-  assert.match(String(model.seen[3]!.messages.at(-1)!.content), /\$100\.00 and this needs \$120\.00/)
+  assert.match(String(model.seen[3]!.messages.at(-1)!.content), /daily limit: \$0\.00 of \$100\.00/)
   assert.equal(bought, 0)
 })
 
@@ -280,6 +427,22 @@ test("a Lucky card the Cashback Reserve can't cover is offered at Normal, and th
   const turn = await agent("alice.testnet", [], "a 10 dollar test card on classic")
   model.close()
   assert.deepEqual(cards(turn)?.map((c) => [c.mode, c.requestedMode]), [["normal", { lucky: 1 }]], "bought at Normal; the Buy line can say Classic wasn't possible")
+})
+
+test("a Lucky card under the smallest Lucky Checkout is quoted and offered at Normal, saying Lucky plays from that much a checkout", async () => {
+  const atNormal = new Quote({ mode: "normal", referencePrice: 1_000_000, luckyAmount: 0, maxPrice: 1_000_000, belowMin: true })
+  const classic = { voucher_id: "test-gift-card-code", value: "10", mode: "classic" }
+  const model = await fakeModel([call("quote", classic), call("prepare_purchase", { cards: [classic] }), { role: "assistant", content: "Tap Buy." }])
+  const purchases = { ...(deps as unknown as { purchases: object }).purchases, quote: () => Effect.succeed(atNormal), quoteCart: () => Effect.succeed([atNormal]) }
+  const agent = makeAgent({ ...(deps as object), purchases, testnet: true, apiKey: "test", baseURL: model.url, model: "fake" } as never)
+  const turn = await agent("alice.testnet", [], "a 1 dollar test card on classic")
+  model.close()
+  const result = (i: number) => JSON.parse(String(model.seen[i]!.messages.at(-1)!.content))
+  assert.equal(result(1).mode, "Normal")
+  assert.equal(result(1).pay_now, "$1.00")
+  assert.match(result(1).lucky_from, /^Lucky plays from \$2\.50 a checkout/)
+  assert.match(result(2).normal_price, /Lucky plays from \$2\.50 a checkout/)
+  assert.deepEqual(cards(turn)?.map((c) => [c.mode, c.requestedMode, c.luckyFrom]), [["normal", { lucky: 1 }, 2_500_000]], "the Buy line can say why")
 })
 
 /** Mainnet with a Checkout Email that has used `used` of Bitrefill's guest limits, selling a real (non-test) card. */

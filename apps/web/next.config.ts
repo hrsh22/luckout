@@ -10,23 +10,20 @@ if (process.env.VERCEL_ENV === "production" && !process.env.NEXT_PUBLIC_API_URL)
   throw new Error("NEXT_PUBLIC_API_URL must be set for production builds")
 }
 
-// A build for one network must never point at the other's accounts or API (testnet and mainnet
-// are separate deployments: docs in deploy/README.md).
-const network = process.env.NEXT_PUBLIC_NEAR_NETWORK === "mainnet" ? "mainnet" : "testnet"
-// Mainnet USDC is the 64-hex bridged token, and the mainnet API lives at api.luckout.wtf.
-const mixed = ["NEXT_PUBLIC_LUCKOUT_CONTRACT_ID", "NEXT_PUBLIC_USDC_CONTRACT_ID"].filter((k) => {
-  const v = process.env[k] ?? ""
-  return network === "mainnet" ? v.endsWith(".testnet") || v === "" : v.endsWith(".near") || /^[0-9a-f]{64}$/.test(v)
-})
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? ""
-const productionApi = URL.parse(apiUrl)?.hostname === "api.luckout.wtf"
-if (network === "mainnet" ? apiUrl.includes("testnet") : productionApi) mixed.push("NEXT_PUBLIC_API_URL")
-// Staging is on mainnet too, with its own contract and API: production's contract goes only with production's API.
-if (network === "mainnet" && (process.env.NEXT_PUBLIC_LUCKOUT_CONTRACT_ID === "app.luckout.near") !== productionApi) mixed.push("NEXT_PUBLIC_LUCKOUT_CONTRACT_ID with NEXT_PUBLIC_API_URL")
-if (mixed.length > 0) throw new Error(`NEXT_PUBLIC_NEAR_NETWORK=${network}, but these point elsewhere: ${mixed.join(", ")}`)
+// A build for one cluster must never point at another's API: off mainnet, never production's (api.luckout.wtf).
+// Staging and production are both on mainnet, each with its own program, API and Privy app (ADR-0015).
+const cluster = process.env.NEXT_PUBLIC_SOLANA_CLUSTER ?? "devnet"
+if (!["localnet", "devnet", "mainnet"].includes(cluster)) throw new Error(`NEXT_PUBLIC_SOLANA_CLUSTER=${cluster} is none of localnet, devnet, mainnet`)
+if (cluster !== "mainnet" && URL.parse(process.env.NEXT_PUBLIC_API_URL ?? "")?.hostname === "api.luckout.wtf") {
+  throw new Error(`NEXT_PUBLIC_SOLANA_CLUSTER=${cluster}, but NEXT_PUBLIC_API_URL is production's`)
+}
+// Sign-in falls back to the staging Privy app locally; production must name its own.
+if (process.env.VERCEL_ENV === "production" && !process.env.NEXT_PUBLIC_PRIVY_APP_ID) {
+  throw new Error("NEXT_PUBLIC_PRIVY_APP_ID must be set for production builds")
+}
 
-// ponytail: no script-src. NEAR Connect runs each wallet's code, fetched from that wallet's own
-// origin, in iframes that inherit this policy; lock scripts down once wallets can live with it.
+// ponytail: no script-src. Privy's window loads its own scripts and iframes (auth.privy.io) and wallets' connectors;
+// lock scripts down once those can live with it.
 const csp = ["frame-ancestors 'none'", "base-uri 'self'", "object-src 'none'", "form-action 'self'"].join("; ")
 
 // The docs (content/docs) are MDX. Turbopack takes plugins by name only.

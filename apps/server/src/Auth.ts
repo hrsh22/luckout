@@ -1,30 +1,11 @@
-import {
-  Authorization,
-  base58Decode,
-  Challenge,
-  CurrentAccount,
-  evmSignInMessage,
-  Session,
-  sessionCookie,
-  type SignedChallenge,
-  type SignedEvmChallenge,
-  type SignedSolanaChallenge,
-  solanaAccountId,
-  solanaSignInMessage,
-  Unauthorized,
-  Wallet,
-  walletOf
-} from "@luckout/api"
+import { Authorization, CurrentAccount, Session, sessionCookie, Unauthorized, Wallet, walletOf } from "@luckout/api"
 import { Config, Context, Effect, Layer, Option, Redacted, Schema } from "effect"
 import { HttpServerRequest } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
-import { getAddress, verifyMessage } from "viem"
-import { ed25519Signed } from "./Intents.ts"
-import { Near, Network } from "./Near.ts"
+import { createHmac, createPublicKey, type KeyObject, randomBytes, timingSafeEqual, verify as verifySignature } from "node:crypto"
+import { Cluster, ProgramId } from "./Solana.ts"
 
-const NONCE_TTL_MINUTES = 5
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /** A new session: its token goes into the cookie (startSession), never into an answer's body. */
@@ -35,13 +16,52 @@ export interface SignedIn {
   readonly expiresAt: number
 }
 
+/** What the customer linked in Privy, besides their wallet: their email, and their Telegram account. */
+export interface Linked {
+  readonly email?: string
+  readonly telegram?: { readonly id: string; readonly name: string }
+}
+
+/** Privy's tokens from the browser: the access token says who, the identity token what they linked. */
+export interface PrivyTokens {
+  readonly accessToken: string
+  readonly identityToken: string
+}
+
+/** One of the accounts in an identity token's `linked_accounts`, as far as we read it. */
+interface PrivyAccount {
+  readonly type?: string
+  readonly address?: string
+  readonly email?: string
+  readonly chain_type?: string
+  readonly wallet_client_type?: string
+  readonly telegram_user_id?: string | number
+  readonly username?: string | null
+  readonly first_name?: string | null
+}
+
+/**
+ * A JWT's claims if it's an ES256 token signed by one of `keys`; "unknown key" if it names a key we don't have
+ * (Privy rotated them); undefined for anything else.
+ */
+export const jwtClaims = (token: string, keys: ReadonlyMap<string, KeyObject>): Record<string, unknown> | "unknown key" | undefined => {
+  const [h, p, sig, ...rest] = token.split(".")
+  if (!h || !p || !sig || rest.length > 0) return undefined
+  try {
+    const header = JSON.parse(Buffer.from(h, "base64url").toString()) as { alg?: unknown; kid?: unknown }
+    if (header.alg !== "ES256") return undefined
+    const key = typeof header.kid === "string" ? keys.get(header.kid) : undefined
+    if (!key) return "unknown key"
+    const ok = verifySignature("sha256", Buffer.from(`${h}.${p}`), { key, dsaEncoding: "ieee-p1363" }, Buffer.from(sig, "base64url"))
+    return ok ? (JSON.parse(Buffer.from(p, "base64url").toString()) as Record<string, unknown>) : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export class Auth extends Context.Service<Auth, {
-  readonly challenge: Effect.Effect<Challenge>
-  verify(signed: SignedChallenge): Effect.Effect<SignedIn, Unauthorized>
-  /** EVM sign-in (ADR-0011): a personal_sign of `evmSignInMessage`, made on one of our own sites, by a regular EVM account (EOA). */
-  verifyEvm(signed: SignedEvmChallenge): Effect.Effect<SignedIn, Unauthorized>
-  /** Solana sign-in (ADR-0011): an ed25519 signature of `solanaSignInMessage`, made on one of our own sites. */
-  verifySolana(signed: SignedSolanaChallenge): Effect.Effect<SignedIn, Unauthorized>
+  /** Signs in with Privy's tokens: the account is the customer's Privy Solana wallet (ADR-0015). */
+  privy(tokens: PrivyTokens): Effect.Effect<SignedIn & { readonly linked: Linked }, Unauthorized>
   /** The account a session token belongs to, and the kind of wallet it signed in with. */
   authenticate(token: string): Effect.Effect<{ readonly accountId: string; readonly wallet: Wallet }, Unauthorized>
   /** Ends the one session `token` is, so a copy of it kept elsewhere stops working. */
@@ -53,15 +73,11 @@ export class Auth extends Context.Service<Auth, {
     Auth,
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
-      const near = yield* Near
-      // Bound to its network: the wallet shows which one, and a session from the other one is refused.
-      const network = yield* Network
-      const message = `Sign in to Luckout (${network})`
-      // The sites a sign-in may come from: the same ones main.ts lets call this server.
-      const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
-      const sites = new Set([webOrigin, ...(yield* Config.String("CORS_ORIGINS").pipe(Config.withDefault(""))).split(",").map((o) => o.trim()).filter(Boolean)])
-      // What a NEAR wallet shows as the message's recipient (NEP-413): our site's host.
-      const recipient = new URL(webOrigin).host
+      // Bound to its deployment: staging and production share mainnet, so their programs tell them apart.
+      const cluster = yield* Cluster
+      const programId = (yield* ProgramId).toBase58()
+      const appId = yield* Config.String("PRIVY_APP_ID").pipe(Config.withDefault(""))
+      const jwksUrl = yield* Config.String("PRIVY_JWKS_URL").pipe(Config.withDefault(`https://auth.privy.io/api/v1/apps/${appId}/jwks.json`))
       const configured = yield* Config.option(Config.Redacted("SESSION_SECRET"))
       if (Option.isNone(configured)) yield* Effect.logWarning("SESSION_SECRET not set: sessions end when the server restarts")
       const secret = Option.match(configured, { onNone: () => randomBytes(32), onSome: (s) => Buffer.from(Redacted.value(s)) })
@@ -69,65 +85,60 @@ export class Auth extends Context.Service<Auth, {
       const mac = (payload: string) => createHmac("sha256", secret).update(payload).digest("base64url")
       const denied = (message: string) => new Unauthorized({ message })
 
-      const challenge = Effect.gen(function*() {
-        const nonce = randomBytes(32).toString("base64")
-        yield* sql`DELETE FROM auth_nonces WHERE expires_at < now()`
-        yield* sql`INSERT INTO auth_nonces (nonce, expires_at) VALUES (${nonce}, now() + make_interval(mins => ${NONCE_TTL_MINUTES}))`
-        return new Challenge({ message, recipient, nonce })
-      }).pipe(Effect.orDie)
+      // Privy's signing keys, fetched when first needed and again when a token names one we don't have (at most once a minute).
+      let keys = new Map<string, KeyObject>()
+      let fetchedAt = 0
+      const fetchKeys = Effect.tryPromise(async () => {
+        const res = await fetch(jwksUrl, { signal: AbortSignal.timeout(10_000) })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const body = (await res.json()) as { keys?: Array<{ kid?: string; kty?: string } & Record<string, unknown>> }
+        keys = new Map((body.keys ?? []).filter((k) => k.kid && k.kty === "EC").map((k) => [k.kid!, createPublicKey({ key: k as never, format: "jwk" })]))
+        fetchedAt = Date.now()
+      }).pipe(Effect.tapError((e) => Effect.logWarning(`couldn't read Privy's keys: ${e}`)), Effect.orElseSucceed(() => undefined))
 
-      // Single use: the nonce is deleted whether or not the signature checks out.
-      const useNonce = (nonce: string) =>
-        sql`DELETE FROM auth_nonces WHERE nonce = ${nonce} AND expires_at > now() RETURNING nonce`.pipe(
-          Effect.orDie,
-          Effect.flatMap((used) => (used.length === 0 ? Effect.fail(denied("Sign-in request expired; try again")) : Effect.void))
-        )
-
-      const verify = Effect.fn("Auth.verify")(function*(signed: SignedChallenge) {
-        yield* useNonce(signed.nonce)
-        const ok = yield* near.verifySignIn({
-          accountId: signed.accountId,
-          publicKey: signed.publicKey,
-          signature: Buffer.from(signed.signature, "base64"),
-          message,
-          recipient,
-          nonce: Buffer.from(signed.nonce, "base64")
+      /** A Privy token's claims, checked: signed by Privy, for our app, not expired. */
+      const privyClaims = (token: string, what: string) =>
+        Effect.gen(function*() {
+          if (!appId) return yield* denied("Sign-in isn't set up on this server (PRIVY_APP_ID)")
+          let claims = jwtClaims(token, keys)
+          if (claims === "unknown key" && Date.now() - fetchedAt > 60_000) {
+            yield* fetchKeys
+            claims = jwtClaims(token, keys)
+          }
+          if (!claims || claims === "unknown key") return yield* denied(`That ${what} isn't from Privy; sign in again`)
+          const aud = claims.aud
+          if (claims.iss !== "privy.io" || (Array.isArray(aud) ? !aud.includes(appId) : aud !== appId)) return yield* denied(`That ${what} is for another app`)
+          if (typeof claims.exp !== "number" || claims.exp * 1000 < Date.now()) return yield* denied("Your sign-in expired; sign in again")
+          if (typeof claims.sub !== "string") return yield* denied(`That ${what} names nobody`)
+          return claims as Record<string, unknown> & { readonly sub: string }
         })
-        if (!ok) return yield* denied("Signature is not from a full-access key of this account")
-        return yield* issue(signed.accountId, walletOf(signed.accountId))
-      })
 
-      const verifyEvm = Effect.fn("Auth.verifyEvm")(function*(signed: SignedEvmChallenge) {
-        yield* useNonce(signed.nonce)
-        const address = signed.address.toLowerCase()
-        if (!/^0x[0-9a-f]{40}$/.test(address) || !/^0x[0-9a-fA-F]{130}$/.test(signed.signature)) return yield* denied("That isn't an EVM signature")
-        // Only a message made on one of our own sites: the wallet showed that site's name, and warns when the
-        // page asking isn't it, so a signature phished on a look-alike site signs nobody in here.
-        if (!sites.has(signed.uri)) return yield* denied("Sign in from Luckout's own site")
-        // Key recovery only: the same check NEAR Intents makes, so a smart-contract wallet can't sign in here
-        // and then find it can't sign intents either. The message is rebuilt from what we expect, never parsed.
-        const ok = yield* Effect.tryPromise(async () =>
-          verifyMessage({
-            address: address as `0x${string}`,
-            message: evmSignInMessage({ challenge: { message, nonce: signed.nonce }, address: getAddress(address), uri: signed.uri, chainId: signed.chainId, issuedAt: signed.issuedAt }),
-            signature: signed.signature as `0x${string}`
-          })
-        ).pipe(Effect.orElseSucceed(() => false))
-        if (!ok) return yield* denied("That signature isn't from this address. Luckout works with regular EVM accounts, not smart-contract wallets.")
-        return yield* issue(address, "evm")
-      })
-
-      const verifySolana = Effect.fn("Auth.verifySolana")(function*(signed: SignedSolanaChallenge) {
-        yield* useNonce(signed.nonce)
-        // The account is the key in hex, as NEAR Intents names it (ADR-0011).
-        const accountId = solanaAccountId(signed.address)
-        const signature = Buffer.from(signed.signature, "base64")
-        if (!accountId || signature.length !== 64) return yield* denied("That isn't a Solana signature")
-        if (!sites.has(signed.uri)) return yield* denied("Sign in from Luckout's own site")
-        // The same check NEAR Intents makes on the raw bytes, so a wallet that signs in can also sign intents.
-        const text = solanaSignInMessage({ challenge: { message, nonce: signed.nonce }, address: signed.address, uri: signed.uri, issuedAt: signed.issuedAt })
-        if (!ed25519Signed(base58Decode(signed.address), text, signature)) return yield* denied("That signature isn't from this Solana address.")
-        return yield* issue(accountId, "solana")
+      const privy = Effect.fn("Auth.privy")(function*(tokens: PrivyTokens) {
+        const access = yield* privyClaims(tokens.accessToken, "access token")
+        const identity = yield* privyClaims(tokens.identityToken, "identity token")
+        if (identity.sub !== access.sub) return yield* denied("Those tokens are for two different people; sign in again")
+        const linked = yield* Effect.try({
+          try: () => {
+            const raw = identity.linked_accounts
+            return (typeof raw === "string" ? JSON.parse(raw) : raw ?? []) as ReadonlyArray<PrivyAccount>
+          },
+          catch: () => denied("Privy's identity token couldn't be read; sign in again")
+        })
+        // Everyone has a Privy Solana wallet, even one who signs in with Phantom: their account belongs to it.
+        const wallet = linked.find((a) => a.type === "wallet" && a.chain_type === "solana" && a.wallet_client_type === "privy")?.address
+        if (!wallet) return yield* denied("Your Solana wallet is still being made; try again in a moment")
+        const email = linked.find((a) => a.type === "email")?.address ?? linked.find((a) => a.type === "google_oauth")?.email
+        const tg = linked.find((a) => a.type === "telegram" && a.telegram_user_id !== undefined)
+        const telegram = tg ? { id: String(tg.telegram_user_id), name: tg.username ?? tg.first_name ?? "" } : undefined
+        // The bot knows the customer by the Telegram account they linked in Privy (its private chat has the user's id).
+        // Unlinking it in Privy unlinks it here too.
+        yield* sql.withTransaction(Effect.gen(function*() {
+          if (!telegram) return yield* sql`DELETE FROM telegram_links WHERE account_id = ${wallet}`
+          yield* sql`DELETE FROM telegram_links WHERE account_id = ${wallet} OR telegram_user_id = ${telegram.id}`
+          yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id, telegram_name) VALUES (${telegram.id}, ${wallet}, ${telegram.id}, ${telegram.name})`
+        })).pipe(Effect.orDie)
+        const signedIn = yield* issue(wallet, "solana")
+        return { ...signedIn, linked: { ...(email ? { email } : {}), ...(telegram ? { telegram } : {}) } }
       })
 
       const issue = (accountId: string, wallet: Wallet) =>
@@ -136,8 +147,8 @@ export class Auth extends Context.Service<Auth, {
           yield* sql`INSERT INTO known_accounts (account_id) VALUES (${accountId}) ON CONFLICT DO NOTHING`.pipe(Effect.orDie)
           const issuedAt = Date.now()
           const expiresAt = issuedAt + SESSION_TTL_MS
-          // `c`: staging and production share mainnet, so the contract, not the network, says which deployment it's for.
-          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: network, c: near.contractId, i: issuedAt, w: wallet })).toString("base64url")
+          // `c`: staging and production share mainnet, so the program, not the cluster, says which deployment it's for.
+          const payload = Buffer.from(JSON.stringify({ a: accountId, e: expiresAt, n: cluster, c: programId, i: issuedAt, w: wallet })).toString("base64url")
           return { accountId, wallet, token: `${payload}.${mac(payload)}`, expiresAt } satisfies SignedIn
         })
 
@@ -152,8 +163,8 @@ export class Auth extends Context.Service<Auth, {
             catch: () => denied("Invalid session")
           })
           if (
-            typeof session.a !== "string" || typeof session.e !== "number" || typeof session.i !== "number" || session.n !== network ||
-            session.c !== near.contractId
+            typeof session.a !== "string" || typeof session.e !== "number" || typeof session.i !== "number" || session.n !== cluster ||
+            session.c !== programId
           ) {
             return yield* denied("Invalid session")
           }
@@ -182,7 +193,7 @@ export class Auth extends Context.Service<Auth, {
         sql`INSERT INTO session_resets (account_id, after) VALUES (${accountId}, now())
             ON CONFLICT (account_id) DO UPDATE SET after = now()`.pipe(Effect.asVoid, Effect.orDie)
 
-      return Auth.of({ challenge, verify, verifyEvm, verifySolana, authenticate, signOut, signOutEverywhere })
+      return Auth.of({ privy, authenticate, signOut, signOutEverywhere })
     })
   )
 }

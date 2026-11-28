@@ -1,61 +1,47 @@
 "use client"
 
-import { Qr } from "@/components/qr"
 import { useLeft } from "@/components/shop-banner"
-import { SolanaPayCode } from "@/components/top-up"
+import { chainLabel } from "@/components/token-picker"
+import { AddressBox, time } from "@/components/top-up"
 import { Button } from "@/components/ui/button"
-import { useWalletActions } from "@/lib/actions"
 import { api, errorMessage } from "@/lib/api"
-import { CHAIN_NAMES } from "@/lib/evm"
+import { explorer } from "@/lib/chain"
 import { receivedAmount, tokenAmount, usd } from "@/lib/format"
-import { ACTIVE_PHASES, useHeld, useTransfers } from "@/lib/queries"
+import { ACTIVE_PHASES, useTransfers } from "@/lib/queries"
 import { useSession } from "@/lib/session"
-import type { HeldToken, Transfer } from "@luckout/api"
+import type { Transfer } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
+import { ArrowDownLeft, CircleCheck, Clock, ExternalLink, RotateCcw } from "lucide-react"
 import { useState } from "react"
-import { ArrowDownLeft, ArrowUpRight, CircleCheck, Clock, Copy, ExternalLink, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
 
+/** Where the customer's own transfer can be seen, by the chain it was sent on. */
 const TX_EXPLORERS: Record<string, string> = {
   eth: "https://etherscan.io/tx/",
   arb: "https://arbiscan.io/tx/",
   base: "https://basescan.org/tx/",
   pol: "https://polygonscan.com/tx/",
-  bsc: "https://bscscan.com/tx/"
+  bsc: "https://bscscan.com/tx/",
+  tron: "https://tronscan.org/#/transaction/",
+  btc: "https://mempool.space/tx/",
+  sol: "https://solscan.io/tx/",
+  near: "https://nearblocks.io/txns/"
 }
-/** Where a customer moves money out of their NEAR Intents account themselves: same wallet, no Luckout needed. */
-const INTENTS_APP = "https://near-intents.org"
 
-const chain = (c: string) => CHAIN_NAMES[c] ?? (c === "near" ? "NEAR" : c)
-/** " on Base", or nothing for a swap recorded before its chain was kept. */
-const on = (c: string) => (c ? ` on ${chain(c)}` : "")
-const walletOn = (c: string) => (c === "near" ? "your NEAR wallet" : `your wallet${on(c)}`)
-/** Where 1Click sends a Top-Up's money if it doesn't go through. */
-const refundPlace = (t: Transfer) => (t.refundsToWallet ? walletOn(t.chain) : "your NEAR Intents account")
 const minutes = (seconds: number | undefined) => (seconds ? `about ${Math.max(1, Math.round(seconds / 60))} min` : "a few minutes")
-const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-/** "under 0.01" opens a title as "Under 0.01". */
-const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const when = (iso: string) => new Date(iso).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
-const titleOf = (t: Transfer) =>
-  t.direction === "in"
-    ? `${usd(t.usdc)} top-up${
-      t.paidWith ? ` from ${t.paidWith}` : t.amountIn ? ` from ${tokenAmount(t.amountIn, t.symbol, "up")} ${t.symbol}` : ""
-    }${on(t.chain)}`
-    : t.direction === "back"
-    ? `${capital(receivedAmount(t.amountOut ?? t.amountIn ?? "", t.symbol))} ${t.symbol} to ${walletOn(t.chain)}`
-    : `${usd(t.usdc)} withdrawal to ${t.symbol}${on(t.chain)}`
-/** The server builds no swap transaction in the last 2 minutes before a swap-paid Top-Up's deadline (SWAP_DEADLINE_MARGIN_MS). */
-const SWAP_MARGIN_MS = 2 * 60_000
-/** When it can last be paid: its deadline, or for a swap-paid one the last moment a transaction is still built. */
-const payBy = (t: Transfer) => Date.parse(t.deadline ?? "") - (t.paidWith ? SWAP_MARGIN_MS : 0)
-/** Still before the deadline, so the rest of a short payment can be sent. */
-const open = (t: Transfer) => t.deadline !== undefined && payBy(t) > Date.now()
+/** "8 USDT on Tron" */
+const paid = (t: Transfer) => `${t.amountIn ? `${tokenAmount(t.amountIn, t.symbol, "up")} ` : ""}${t.symbol} on ${chainLabel(t.chain)}`
+const titleOf = (t: Transfer) => `${usd(t.usdc)} top-up from ${paid(t)}`
+/** Where 1Click sends it back if it doesn't go through. */
+const refundPlace = (t: Transfer) => (t.refundTo ? `${t.refundTo.length > 16 ? `${t.refundTo.slice(0, 6)}…${t.refundTo.slice(-4)}` : t.refundTo} on ${chainLabel(t.chain)}` : "your refund address")
+/** Still before the deadline, so it can be paid, or the rest of a short payment sent. */
+const open = (t: Transfer) => t.deadline !== undefined && Date.parse(t.deadline) > Date.now()
 
 /**
- * Money on its way (Top-Ups from other chains and withdrawals to them), read from the server so it
- * survives a closed tab: where it is now, what usually happens next, and what to do if it's late or
- * was sent back. Nothing here is ever "just gone".
+ * The customer's Top-Ups from other chains still on their way, read from the server so they survive a closed tab:
+ * where each is now, what usually happens next, and what to do if it's late or was sent back. Nothing here is ever
+ * "just gone".
  */
 export function InTransit() {
   const { token } = useSession()
@@ -65,9 +51,9 @@ export function InTransit() {
   const active = list.some((t) => ACTIVE_PHASES.has(t.phase))
   return (
     <section className="card flex flex-col gap-1 p-7" aria-live="polite">
-      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">{active ? "Money on its way" : "Transfers"}</h2>
+      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">{active ? "Money on its way" : "Top-ups"}</h2>
       <p className="mb-3 text-sm text-muted">
-        Top-ups and withdrawals through NEAR Intents. Each one either arrives or is sent back; nothing gets lost in between.
+        Top-ups from other chains, through 1Click. Each one either lands in your balance or goes back to your refund address; nothing gets lost in between.
       </p>
       <ul className="flex flex-col divide-y divide-line">
         {list.map((t) => <Row key={t.depositAddress} t={t} />)}
@@ -76,7 +62,7 @@ export function InTransit() {
   )
 }
 
-/** Finished transfers, one line each, at the bottom of the wallet: they never push the rest of the page down. */
+/** Top-Ups that landed in the last day, one line each, at the bottom of the wallet. */
 export function RecentTransfers() {
   const { token } = useSession()
   const done = (useTransfers(token).data ?? []).filter((t) => t.phase === "done")
@@ -84,7 +70,7 @@ export function RecentTransfers() {
   if (done.length === 0) return null
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="font-display text-3xl font-extrabold">Recent transfers</h2>
+      <h2 className="font-display text-3xl font-extrabold">Recent top-ups</h2>
       <ul className="card flex flex-col divide-y divide-line px-6 py-1">
         {(all ? done : done.slice(0, 3)).map((t) => (
           <li key={t.depositAddress} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
@@ -106,60 +92,13 @@ export function RecentTransfers() {
   )
 }
 
-/**
- * What else is in the customer's own NEAR Intents account: a refund, or the extra a Top-Up asked for, in the
- * token paid with. Luckout can't spend it, but it's the customer's: one tap sends it to their own wallet.
- */
-export function HeldInIntents() {
-  const { token, intents, wallet } = useSession()
-  const actions = useWalletActions()
-  const held = useHeld(token).data ?? []
-  const [sending, setSending] = useState<string>()
-  if (held.length === 0) return null
-  const sendBack = (h: HeldToken) => {
-    setSending(h.assetId)
-    void actions.sendBack(h).finally(() => setSending(undefined))
-  }
-  return (
-    <section className="card flex flex-col gap-3 p-7">
-      <h2 className="font-display text-2xl font-extrabold tracking-[-0.02em]">Also yours, in NEAR Intents</h2>
-      <ul className="flex flex-col gap-2">
-        {held.map((h) => (
-          <li key={h.assetId} className="flex flex-wrap items-center justify-between gap-2">
-            <span className="font-semibold">{receivedAmount(h.amount, h.symbol)} {h.symbol} <span className="font-normal text-muted">on {chain(h.chain)}</span></span>
-            {h.sendable && (
-              <Button size="sm" variant="light" disabled={sending !== undefined} onClick={() => sendBack(h)}>
-                {!intents
-                  ? "Send to my NEAR wallet as USDC"
-                  // An EVM wallet's change from a Solana swap (ADR-0014): it has no Solana address, so it gets USDC on Base.
-                  : wallet === "evm" && h.chain === "sol"
-                  ? "Send to my wallet as USDC on Base"
-                  : `Send to my wallet on ${chain(h.chain)}`}
-              </Button>
-            )}
-          </li>
-        ))}
-      </ul>
-      <p className="text-sm text-ink-soft">
-        A refund, or the extra a top-up asked for, that 1Click sent back to your own NEAR Intents account in the token you paid with.
-        Your wallet controls it, not Luckout.{" "}
-        {held.every((h) => h.sendable)
-          ? "Sending it to your wallet takes one signature, and Luckout pays the network fee."
-          : <>You can also sign in on <a href={INTENTS_APP} target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-2">near-intents.org</a> with this same wallet to move it.</>}
-      </p>
-    </section>
-  )
-}
-
 function Row({ t }: { t: Transfer }) {
-  const { token, intents, walletUsdc } = useSession()
-  const actions = useWalletActions()
+  const { token } = useSession()
   const qc = useQueryClient()
-  const incoming = t.direction === "in"
   // A quote nobody has paid into yet keeps its address behind a tap: it's often one the customer started and left.
   const unpaid = t.phase === "awaiting-transfer" && !t.depositTx
-  // Ticks, so the time left stays current and the row turns over at its deadline.
-  const left = useLeft(payBy(t))
+  // Ticks, so the time left stays current.
+  const left = useLeft(Date.parse(t.deadline ?? ""))
   const waiting = unpaid && open(t)
   const [shown, setShown] = useState(false)
   const [dismissing, setDismissing] = useState(false)
@@ -168,11 +107,7 @@ function Row({ t }: { t: Transfer }) {
     setDismissing(true)
     try {
       await api((c) => c.topup.dismiss({ payload: { depositAddress: t.depositAddress } }), token)
-      toast.success(
-        t.paidWith
-          ? "Cancelled. A payment your wallet already approved still arrives, and shows here again."
-          : "Dismissed. Money already sent to it still arrives, and shows here again."
-      )
+      toast.success("Dismissed. Money already sent to it still arrives, and shows here again.")
       await qc.invalidateQueries({ queryKey: ["transfers"] })
     } catch (e) {
       toast.error(errorMessage(e))
@@ -180,17 +115,8 @@ function Row({ t }: { t: Transfer }) {
       setDismissing(false)
     }
   }
-  const Icon = t.phase === "done" || t.phase === "in-wallet"
-    ? CircleCheck
-    : t.phase === "refunded"
-    ? RotateCcw
-    : t.phase === "incomplete"
-    ? Clock
-    : incoming
-    ? ArrowDownLeft
-    : ArrowUpRight
-  const tone = t.phase === "done" || t.phase === "in-wallet" ? "text-good" : t.phase === "refunded" || t.phase === "incomplete" || t.late ? "text-warn" : "text-ink"
-  const sitting = Number(walletUsdc ?? 0)
+  const Icon = t.phase === "done" ? CircleCheck : t.phase === "refunded" ? RotateCcw : t.phase === "incomplete" ? Clock : ArrowDownLeft
+  const tone = t.phase === "done" ? "text-good" : t.phase === "refunded" || t.phase === "incomplete" || t.late ? "text-warn" : "text-ink"
   return (
     <li className="flex gap-4 py-4">
       <Icon size={20} className={`mt-0.5 shrink-0 ${tone}`} aria-hidden="true" />
@@ -199,45 +125,28 @@ function Row({ t }: { t: Transfer }) {
         {waiting
           ? (
             <p className="text-sm text-ink-soft">
-              {t.paidWith ? "Pay " : "Send "}
-              <span className="font-semibold text-ink">{t.paidWith ?? `${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}`.trim()}</span>
-              {on(t.chain)} <span className="whitespace-nowrap text-muted">· {left} left</span>
-              {!t.paidWith && <span className="block">A little more is fine: the extra comes back.</span>}
+              Send <span className="font-semibold text-ink">{paid(t)}</span> <span className="whitespace-nowrap text-muted">· {left} left</span>
+              <span className="block">More is fine: everything that arrives is swapped into your balance.</span>
             </p>
           )
-          : <p className="text-sm text-ink-soft">{say(t, intents, sitting >= 1_000_000)}</p>}
+          : <p className="text-sm text-ink-soft">{say(t)}</p>}
 
-        {/* A swap-paid Top-Up's deposit address takes only USDC: the token sent there would be lost, so it has its code instead. */}
-        {t.paidWith && unpaid && shown && open(t) && (
-          <div className="rounded-2xl bg-soft p-3 text-sm"><SolanaPayCode depositAddress={t.depositAddress} /></div>
-        )}
-        {!t.paidWith && ((unpaid && shown) || (t.phase === "incomplete" && open(t))) && (
-          <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm sm:flex-row">
-            <Qr value={t.depositAddress} size={112} label="QR code of the deposit address" />
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-              <span className="font-mono break-all select-all">{t.depositAddress}</span>
-              {t.depositMemo && <span>Memo (required): <span className="font-mono select-all">{t.depositMemo}</span></span>}
-              <Button variant="light" size="sm" className="self-start" onClick={() => navigator.clipboard.writeText(t.depositAddress).then(() => toast.success("Address copied"))}>
-                <Copy />Copy address
-              </Button>
-              {t.phase === "awaiting-transfer" && <PasteTx t={t} />}
-            </div>
+        {((waiting && shown) || (t.phase === "incomplete" && open(t))) && (
+          <div className="flex flex-col gap-3 rounded-2xl bg-soft p-3 text-sm">
+            <AddressBox address={t.depositAddress} memo={t.depositMemo} label="QR code of 1Click's deposit address" size={112} />
+            {t.phase === "awaiting-transfer" && <PasteTx t={t} />}
           </div>
         )}
 
         {t.late && (
           <p className="flex items-start gap-2 rounded-2xl bg-warn-soft p-3 text-sm text-warn">
             <Clock size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
-            {t.phase === "moving"
-              ? "Moving it into your balance is taking longer than usual. It's safe in your NEAR Intents account, Luckout keeps trying, and we've been told."
-              : `Taking longer than usual. It's safe: 1Click either delivers it or sends it back to ${refundPlace(t)}. You don't need to do anything.`}
+            Taking longer than usual. It's safe: 1Click either delivers it or sends it back to {refundPlace(t)}. You don't need to do anything.
           </p>
         )}
 
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
-          {unpaid && !shown && (!t.paidWith || open(t)) && (
-            <Button size="sm" onClick={() => setShown(true)}>{t.paidWith ? "Show the code to pay" : "Show address"}</Button>
-          )}
+          {waiting && !shown && <Button size="sm" onClick={() => setShown(true)}>Show address</Button>}
           {unpaid && (
             <button
               type="button"
@@ -245,29 +154,23 @@ function Row({ t }: { t: Transfer }) {
               onClick={() => void dismiss()}
               className="font-semibold text-muted underline-offset-4 hover:text-ink hover:underline disabled:opacity-45"
             >
-              {t.paidWith ? "Cancel this Top-Up" : "Dismiss"}
+              Dismiss
             </button>
-          )}
-          {t.phase === "in-wallet" && sitting >= 1_000_000 && (
-            <Button size="sm" onClick={() => void actions.deposit(Math.min(sitting, t.usdc))}>Deposit {usd(Math.min(sitting, t.usdc))} into Luckout</Button>
-          )}
-          {intents && (t.phase === "in-intents" || (t.phase === "refunded" && t.direction === "out")) && sitting >= 1_000_000 && (
-            <Button size="sm" onClick={() => void actions.deposit(sitting)}>Move {usd(sitting)} into Luckout</Button>
           )}
           {t.depositTx && TX_EXPLORERS[t.chain] && (
             <a href={`${TX_EXPLORERS[t.chain]}${t.depositTx}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
-              Your transfer on {chain(t.chain)}<ExternalLink size={14} aria-hidden="true" />
+              Your transfer on {chainLabel(t.chain)}<ExternalLink size={14} aria-hidden="true" />
             </a>
           )}
-          {t.deliveredTx && TX_EXPLORERS[t.chain] && (
-            <a href={`${TX_EXPLORERS[t.chain]}${t.deliveredTx}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
-              Delivery on {chain(t.chain)}<ExternalLink size={14} aria-hidden="true" />
+          {t.deliveredTx && (
+            <a href={explorer(t.deliveredTx)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline-offset-2 hover:underline">
+              Delivery on Solana<ExternalLink size={14} aria-hidden="true" />
             </a>
           )}
           {/* Nothing to track until something is paid in. */}
           {!unpaid && (
             <a href={t.explorer} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-muted underline-offset-2 hover:underline">
-              Track on NEAR Intents<ExternalLink size={14} aria-hidden="true" />
+              Track it<ExternalLink size={14} aria-hidden="true" />
             </a>
           )}
           {!waiting && <span className="text-muted">{when(t.createdAt)}</span>}
@@ -278,8 +181,8 @@ function Row({ t }: { t: Transfer }) {
 }
 
 /**
- * Sent from an exchange or another wallet: its transaction keeps the Top-Up in sight past its deadline, helps
- * 1Click find the deposit, and gets us told if 1Click doesn't.
+ * Sent from an exchange or another wallet: its transaction keeps the Top-Up in sight past its deadline, helps 1Click
+ * find the deposit, and gets us told if 1Click doesn't.
  */
 function PasteTx({ t }: { t: Transfer }) {
   const { token } = useSession()
@@ -299,7 +202,7 @@ function PasteTx({ t }: { t: Transfer }) {
     }
   }
   return (
-    <form className="mt-1 flex flex-wrap gap-2" onSubmit={(e) => (e.preventDefault(), void save())}>
+    <form className="flex flex-wrap gap-2" onSubmit={(e) => (e.preventDefault(), void save())}>
       <input
         className="field min-w-0 flex-1 !py-1.5 font-mono text-xs"
         placeholder="Already sent it? Paste the transaction hash"
@@ -313,44 +216,28 @@ function PasteTx({ t }: { t: Transfer }) {
 }
 
 /** One sentence: where the money is right now, and what happens next. */
-function say(t: Transfer, intents: boolean, canDeposit: boolean) {
-  const usual = minutes(t.timeEstimateSeconds)
+function say(t: Transfer) {
   switch (t.phase) {
     case "awaiting-transfer":
       if (t.depositTx) {
         // Paid: 1Click has until the deadline itself to see it.
-        return Date.parse(t.deadline ?? "") > Date.now()
+        return open(t)
           ? "You sent it. Waiting for 1Click to confirm it arrived, usually within a minute."
           : `1Click hasn't confirmed your transfer yet. It's at 1Click's deposit address, so it either goes through or comes back to ${refundPlace(t)}. Luckout is looking into it.`
       }
-      // One still open is said by the row itself: what to pay and the time left.
-      if (t.paidWith) return "This price has expired and nothing was paid. Top up again for a new one."
-      return `Waiting for your transfer: send ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol}${on(t.chain)}${t.deadline ? ` before ${time(t.deadline)}` : ""} (a little more is fine: the extra comes back).`
+      // One still open is said by the row itself: what to send and the time left.
+      return "This price has expired and nothing was sent. Top up again for a new one."
     case "incomplete": {
-      const got = t.deposited ? receivedAmount(t.deposited, t.symbol) : "part"
+      const got = t.deposited ? `${receivedAmount(t.deposited, t.symbol)} ${t.symbol}` : "part"
       return open(t)
-        ? `1Click got ${got} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
-        : `1Click got ${got} of the ${t.amountIn ? tokenAmount(t.amountIn, t.symbol, "up") : ""} ${t.symbol} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
+        ? `1Click got ${got} of the ${paid(t)} this needs. Send the rest to the same address before ${time(t.deadline!)}, or what arrived goes back to ${refundPlace(t)}.`
+        : `1Click got ${got} of the ${paid(t)} this needs, too late to finish: it's going back to ${refundPlace(t)}.`
     }
     case "swapping":
-      return t.direction === "in"
-        ? `1Click has your ${t.symbol} and is ${t.symbol === "USDC" ? "bringing it over to NEAR" : "converting it to USDC"}. Usually ${usual}.`
-        : `On its way to ${walletOn(t.chain)}. Usually ${usual}.`
-    case "moving":
-      return "Landed. Moving it into your Luckout balance now."
-    case "in-wallet":
-      return canDeposit ? "Landed in your NEAR wallet. Deposit it to use it in Luckout." : "Landed in your NEAR wallet."
-    case "in-intents":
-      return `Landed in your NEAR Intents account${t.detail ? ` but didn't move into Luckout (${t.detail})` : ""}. ${intents ? "Move it in below." : ""}`.trim()
+      return `1Click has your ${t.symbol} and is converting it to USDC. Usually ${minutes(t.timeEstimateSeconds)}.`
     case "done":
-      return t.direction === "in"
-        ? "In your Luckout balance."
-        : `Arrived: ${t.amountOut ? receivedAmount(t.amountOut, t.symbol) : usd(t.usdc)} ${t.symbol}${on(t.chain)}.`
-    case "refunded": {
-      const why = `Didn't go through${t.detail ? ` (${t.detail})` : ""}.`
-      if (t.direction === "back") return `${why} It's still in your NEAR Intents account, below.`
-      if (t.direction === "out") return `${why} 1Click sent it back to your NEAR Intents account${intents ? "; move it back into Luckout below." : "."}`
-      return `${why} 1Click sent ${t.refunded ? `${receivedAmount(t.refunded, t.symbol)} ${t.symbol}` : "it"} back to ${refundPlace(t)}${t.refundsToWallet ? "." : ", listed below."}`
-    }
+      return "In your Luckout balance."
+    case "refunded":
+      return `Didn't go through${t.detail ? ` (${t.detail})` : ""}. 1Click sent ${t.refunded ? `${receivedAmount(t.refunded, t.symbol)} ${t.symbol}` : "it"} back to ${refundPlace(t)}.`
   }
 }

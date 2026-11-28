@@ -1,39 +1,15 @@
-// Draw Proof (ADR-0005): recompute a Draw from the seed, the purchase id and the immutable Game
-// Version table. The web app runs it in the browser, without our server; the server's MCP
-// verify_draw tool runs the same code. Mirrors draw_random / roll_from_random /
-// final_bps_for_roll / final_price in contract/src/lib.rs.
-
-export interface DrawEvent {
-  purchase_id: number
-  customer: string
-  game_version: number
-  reference_price: string
-  lucky_amount: string
-  max_price: string
-  seed: string
-  random: string
-  roll: number
-  final_bps: number
-  final_price: string
-  cashback: string
-}
+// Draw Proof (ADR-0005, ADR-0015): recompute a card's Draw from ORAO's randomness, the card's place in its Checkout and
+// the immutable Game Version table. The web app runs it in the browser; the server's MCP verify_draw tool runs the same
+// code. Mirrors card_random / roll_from_random / final_bps_for_roll / final_price in the program's game.rs.
 
 export interface GameVersion {
   name: string
   premium_bps: number
-  outcomes: Array<{ final_bps: number; chance_bps: number }>
+  outcomes: ReadonlyArray<{ final_bps: number; chance_bps: number }>
 }
 
-const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")
-const unhex = (s: string) => Uint8Array.from(s.match(/../g) ?? [], (h) => parseInt(h, 16))
-
-/** sha256(seed || purchase_id as little-endian u64) */
-export async function drawRandom(seedHex: string, purchaseId: number): Promise<string> {
-  const input = new Uint8Array(40)
-  input.set(unhex(seedHex))
-  new DataView(input.buffer).setBigUint64(32, BigInt(purchaseId), true)
-  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", input)))
-}
+export const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")
+export const unhex = (s: string) => Uint8Array.from(s.match(/../g) ?? [], (h) => parseInt(h, 16))
 
 /** First 8 bytes as a little-endian u64, modulo 10,000. */
 export const rollFrom = (randomHex: string) =>
@@ -70,9 +46,38 @@ export const plainly = (value: string, unit: NonNullable<Check["unit"]>) =>
     ? `${Number(value) / 100}% of the price`
     : `$${(Number(value) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`
 
-/** Every step of the Draw recomputed and compared with what the contract logged. */
-export async function verify(e: DrawEvent, version: GameVersion): Promise<Array<Check>> {
-  const random = await drawRandom(e.seed, e.purchase_id)
+/**
+ * One card's Draw as the Solana program records it (ADR-0015): byte fields as hex, amounts as integer strings.
+ * `randomness` is ORAO's filled-in value (64 bytes).
+ */
+export interface CardDraw {
+  card: number
+  game_version: number
+  reference_price: string
+  lucky_amount: string
+  max_price: string
+  randomness: string
+  random: string
+  roll: number
+  final_bps: number
+  final_price: string
+  cashback: string
+}
+
+/** sha256(ORAO's value ‖ the card's index as one byte), as the program's `card_random`. */
+export async function cardRandom(randomnessHex: string, card: number): Promise<string> {
+  const input = new Uint8Array(65)
+  input.set(unhex(randomnessHex))
+  input[64] = card
+  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", input)))
+}
+
+/** Every step of a card's Draw on Solana recomputed and compared with what the program recorded. */
+export async function verifyCard(e: CardDraw, version: GameVersion): Promise<Array<Check>> {
+  return checksFrom(e, await cardRandom(e.randomness, e.card), version)
+}
+
+function checksFrom(e: CardDraw, random: string, version: GameVersion): Array<Check> {
   const roll = rollFrom(random)
   const bps = finalBpsFor(version.outcomes, roll)
   const price = finalPrice(BigInt(e.reference_price), BigInt(e.lucky_amount), BigInt(e.max_price), bps)

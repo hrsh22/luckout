@@ -1,36 +1,33 @@
 "use client"
 
-import { shortAccount } from "@/components/avatar"
-import { ShopControls, TransferOwnerSheet } from "@/components/admin/controls"
 import { CashbackCapSheet } from "@/components/admin/cashback-cap"
-import { CreditSection } from "@/components/admin/credit"
-import { BaseGasTile, GasTile, SendNearSheet } from "@/components/admin/gas"
+import { ShopControls, ValueSheet } from "@/components/admin/controls"
+import { OwnerBanner, useOwner } from "@/components/admin/owner"
 import { PurchasesCard } from "@/components/admin/purchases"
-import { RelayerCard } from "@/components/admin/relayer"
 import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
-import { AdminTabs, LastFigures, type Tx } from "@/components/admin/shared"
+import { AddressLink, AdminTabs, Bar, LastFigures, sol } from "@/components/admin/shared"
+import { UpgradeSheet } from "@/components/admin/upgrade"
+import { shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
 import { SignInCard } from "@/components/sign-in-card"
 import { NoPage } from "@/components/site-chrome"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { api, cancelled, errorMessage } from "@/lib/api"
+import { api, errorMessage } from "@/lib/api"
+import { liveAverage } from "@/lib/chain"
 import { capText, maxCashbackAt } from "@/lib/cashback-cap"
-import { usd } from "@/lib/format"
-import { type Call, contractId, explorer, liveAverage, send, usdcId } from "@/lib/near"
+import { dollars, toMicro, usd } from "@/lib/format"
 import { useIsAdmin, useShopStatus } from "@/lib/queries"
 import { useSession } from "@/lib/session"
-import { oneAtATime } from "@/lib/utils"
 import type { AdminOverview, ShopStatus } from "@luckout/api"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { CircleAlert, Pause, Plus, ShieldCheck } from "lucide-react"
-import { useState } from "react"
+import { Fuel, Pause, Plus, ShieldCheck, Wallet } from "lucide-react"
+import { type ReactNode, useState } from "react"
 import { toast } from "sonner"
 
-// The admin panel (/admin). The server only answers whitelisted accounts, and everyone else sees
-// the ordinary "No page here". Money never moves through the server: reserve, proceeds, the shop
-// switch and gas are transactions signed in the admin's own wallet, and the contract checks the
-// owner itself. The relayer's switch and caps are server settings.
+// The admin panel (/admin). The server only answers whitelisted accounts, and everyone else sees the ordinary
+// "No page here". Money never moves through the server: the reserve, Proceeds, the pause and the program's settings
+// are transactions the owner's own wallet signs (components/admin/owner.tsx). Stop sales and Retry are the server's.
 
 export function AdminPanel() {
   const { accountId, token, ready } = useSession()
@@ -41,14 +38,12 @@ export function AdminPanel() {
     refetchInterval: 15_000,
     retry: false
   })
-  // Read alongside the overview, not after it: the shop's status needs only our database (the contract's pause is
-  // read if NEAR answers), so Stop sales can be offered when the overview fails.
+  // Read alongside the overview, not after it: the shop's status needs only our database (the program's pause is
+  // read if Solana answers), so Stop sales can be offered when the overview fails.
   const shop = useShopStatus()
   const isAdmin = useIsAdmin(token)
 
-  if (ready && !accountId) {
-    return <SignInCard title="Sign in to continue" body="Sign in with your NEAR wallet." />
-  }
+  if (ready && !accountId) return <SignInCard title="Sign in to continue" body="Sign in with your admin account." />
   if ((q.error as { _tag?: string } | null)?._tag === "NotFound") return <NoPage />
   if (!q.data) return q.error ? <OverviewFailed error={q.error} shop={isAdmin ? shop.data : undefined} /> : <Loading />
   // A failed poll keeps the last figures (and any open sheet) on screen; the next poll tries again.
@@ -61,7 +56,7 @@ export function AdminPanel() {
 }
 
 /**
- * The overview reads NEAR, Bitrefill and the database together, and fails if any of them does. Stop sales needs only
+ * The overview reads Solana, Bitrefill and the database together, and fails if any of them does. Stop sales needs only
  * the database, and it is the first step in an incident (deploy/RUNBOOK.md), so it is offered here too.
  */
 function OverviewFailed({ error, shop }: { error: unknown; shop: ShopStatus | undefined }) {
@@ -99,9 +94,8 @@ function Loading() {
   return (
     <div className="flex flex-col gap-6" aria-busy="true" aria-label="Loading">
       <div className="skeleton h-14 w-56 rounded-full" />
-      <div className="grid gap-4 lg:grid-cols-4">
+      <div className="grid gap-4 lg:grid-cols-3">
         <div className="skeleton h-64 rounded-[2.25rem] lg:col-span-2" />
-        <div className="skeleton h-64 rounded-[2.25rem]" />
         <div className="skeleton h-64 rounded-[2.25rem]" />
       </div>
       <div className="grid gap-4 md:grid-cols-3">{[0, 1, 2].map((i) => <div key={i} className="skeleton h-52 rounded-[1.75rem]" />)}</div>
@@ -109,54 +103,16 @@ function Loading() {
   )
 }
 
-/** Signs with the admin's own wallet (never the relayer), toasts the result with a link, and refreshes. */
-function useAdminTx(): Tx {
-  const { accountId, refresh } = useSession()
-  const qc = useQueryClient()
-  return (pending: string, done: string, f: (accountId: string) => Promise<unknown>) =>
-    // One wallet request at a time, shared with the customer's own wallet actions (lib/utils.ts).
-    oneAtATime(async () => {
-      if (!accountId) return false
-      const id = toast.loading(pending, { description: "Approve it in your wallet." })
-      try {
-        const result = await f(accountId)
-        const last = (Array.isArray(result) ? result.at(-1) : result) as { transaction?: { hash?: string } } | undefined
-        const hash = last?.transaction?.hash
-        toast.success(done, { id, description: undefined, ...(hash ? { action: { label: "View", onClick: () => window.open(explorer(hash), "_blank", "noopener") } } : {}) })
-        await Promise.all([qc.invalidateQueries({ queryKey: ["admin"] }), refresh().catch(() => {})])
-        return true
-      } catch (e) {
-        if (cancelled(e)) toast("Cancelled in your wallet. Nothing was sent.", { id, description: undefined })
-        else toast.error(errorMessage(e), { id, description: undefined })
-        return false
-      }
-    })
-}
-
-type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "owner" | "cap" | { gas: AdminOverview["gas"][number] }
+type Open = "fund" | "withdraw-reserve" | "withdraw-proceeds" | "pause" | "cap" | "repay" | "min-lucky" | "operator" | "pay-wallet" | "owner" | "guardian" | "upgrade"
 
 function Dashboard({ o }: { o: AdminOverview }) {
-  const { accountId } = useSession()
-  const tx = useAdminTx()
+  const owner = useOwner(o)
   const [open, setOpen] = useState<Open>()
-  const isOwner = accountId === o.contract.owner
-  const proposedToMe = accountId !== undefined && o.contract.pendingOwner === accountId
-  // Owner calls go to the contract this site was built for, never to ids the server reports.
-  const elsewhere = o.contract.id !== contractId || o.contract.usdc !== usdcId
-  // Owner-only actions stay clickable: someone else learns why, instead of staring at a grey button.
-  const asOwner = (f: () => void) => () =>
-    elsewhere
-      ? toast.error("Owner actions are off", { description: "The server reports a different contract or USDC than this site is built for." })
-      : isOwner
-      ? f()
-      : toast(`That needs the owner's wallet: ${o.contract.owner}`, {
-        description: `You're signed in as ${shortAccount(accountId ?? "")}. Sign in with the owner's account to do this.`
-      })
   const setSales = useSetSales()
-  const contractCall = (method: string, args: object, tgas = 30): Call => ({ receiverId: contractId, method, args, deposit: "1", tgas })
-  const average = liveAverage({ lucky_settled: o.stats.luckySettled, lucky_amount_total: String(o.stats.luckyAmountTotal), lucky_paid_total: String(o.stats.luckyPaidTotal) })
   const close = () => setOpen(undefined)
-  const guest = o.checkout.guest
+  const show = (what: Open) => owner.asOwner(() => setOpen(what))
+  const average = liveAverage(o.stats)
+  const amountSheet = { kind: "amount" as const, onClose: close }
 
   return (
     <div className="flex flex-col gap-10">
@@ -165,13 +121,8 @@ function Dashboard({ o }: { o: AdminOverview }) {
           <AdminTabs />
           <p className="mt-4 flex flex-wrap items-center gap-2 text-sm text-muted">
             <span className="pill bg-white! text-ink"><ShieldCheck size={14} aria-hidden="true" />Admin</span>
-            <span className={`pill ${o.network === "mainnet" ? "bg-bad-soft! text-bad" : "bg-gold-soft! text-gold-ink"}`}>{o.network}</span>
-            <span className="pill bg-white!">{shortAccount(accountId ?? "")}{isOwner ? " · owner" : ""}</span>
-            {isOwner && (
-              <button type="button" className="pill bg-white/60! text-muted transition-colors hover:bg-white! hover:text-ink" onClick={asOwner(() => setOpen("owner"))}>
-                Transfer ownership
-              </button>
-            )}
+            <span className={`pill ${o.cluster === "mainnet" ? "bg-bad-soft! text-bad" : "bg-gold-soft! text-gold-ink"}`}>{o.cluster}</span>
+            {owner.wallet && <span className="pill bg-white!">Owner: {owner.wallet.standardWallet.name}</span>}
           </p>
           <h1 className="font-display mt-3 text-5xl leading-[0.95] font-extrabold tracking-[-0.03em] sm:text-[64px]">Control room</h1>
           {average !== undefined && (
@@ -182,58 +133,14 @@ function Dashboard({ o }: { o: AdminOverview }) {
         </div>
         <ShopControls
           salesStopped={o.salesStopped}
-          paused={o.contract.paused}
+          paused={o.program.paused}
           onSales={setSales}
-          onPause={asOwner(() => setOpen("pause"))}
-          onResume={asOwner(() => void tx("Resuming the contract", "The contract is running again", (id) => send(id, contractCall("set_paused", { paused: false }))))}
+          onPause={show("pause")}
+          onResume={owner.asOwner(() => void owner.sign({ _tag: "set_paused", paused: false }, "Resuming the program", "The program takes new purchases again"))}
         />
       </header>
 
-      {elsewhere && (
-        <p role="alert" className="flex items-start gap-3 rounded-[1.5rem] bg-bad-soft p-5 text-[15px] font-medium text-bad">
-          <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
-          <span>
-            The server reports contract {o.contract.id} with USDC {o.contract.usdc}, but this site is built for {contractId} with {usdcId}. Owner
-            actions are off until they match: check the server's and the site's environment.
-          </span>
-        </p>
-      )}
-
-      {proposedToMe
-        ? (
-          <div className="flex flex-col gap-4 rounded-[1.5rem] bg-lilac-soft p-5 sm:flex-row sm:items-center">
-            <p className="flex flex-1 items-start gap-3 text-[15px]">
-              <ShieldCheck size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
-              <span>
-                <b>{o.contract.owner}</b> proposed you as the contract's owner. Accept with your wallet to take over pausing, the reserve, proceeds and the
-                treasury.
-              </span>
-            </p>
-            <Button disabled={elsewhere} onClick={() => tx("Accepting ownership", "You own the contract now", (id) => send(id, contractCall("accept_owner", {})))}>
-              Accept ownership
-            </Button>
-          </div>
-        )
-        : isOwner && o.contract.pendingOwner
-        ? (
-          <div className="flex flex-col gap-4 rounded-[1.5rem] bg-soft p-5 sm:flex-row sm:items-center">
-            <p className="flex-1 text-[15px] text-ink-soft">
-              You proposed <b className="text-ink">{o.contract.pendingOwner}</b> as owner. Nothing changes until they accept from their own wallet.
-            </p>
-            <Button variant="light" size="sm" disabled={elsewhere} onClick={() => tx("Withdrawing the proposal", "Proposal withdrawn", (id) => send(id, contractCall("propose_owner", { new_owner: null })))}>
-              Withdraw the proposal
-            </Button>
-          </div>
-        )
-        : !isOwner && (
-          <p className="flex items-start gap-3 rounded-[1.5rem] bg-lilac-soft p-5 text-[15px]">
-            <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
-            <span>
-              The reserve, its cashback cap, proceeds, the contract's pause and the treasury's mode need the owner's wallet, <b>{o.contract.owner}</b>. Any admin can stop
-              sales, send gas, and change the relayer and {guest ? "float" : "credit"} settings.
-            </span>
-          </p>
-        )}
+      <OwnerBanner o={o} owner={owner} />
 
       <section className="grid gap-4 lg:grid-cols-3">
         <div className="relative overflow-hidden rounded-[2.25rem] bg-ink p-8 text-white lg:col-span-2">
@@ -243,12 +150,14 @@ function Dashboard({ o }: { o: AdminOverview }) {
             <p className="text-white/70">Cashback Reserve, free</p>
             <p className="font-display mt-1 text-6xl leading-none font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.free} /></p>
             <p className="mt-3 text-sm text-white/65">
-              {usd(o.reserve.locked)} locked in open lucky buys. One purchase can get up to {usd(o.reserve.maxCashback)} back: {capText(o.reserve.cashbackCap)}.
+              {usd(o.reserve.locked)} locked in open Lucky cards. One card can get up to {usd(o.reserve.maxCashback)} back: {capText(o.reserve.cashbackCap)}. A
+              Checkout with Lucky cards plays at least {usd(o.reserve.minLuckyCheckout)} of Lucky Amount, so its margin covers the Draw.
             </p>
             <div className="mt-auto flex flex-wrap gap-2 pt-8">
-              <Button variant="gold" onClick={asOwner(() => setOpen("fund"))}><Plus />Fund</Button>
-              <Button variant="onColor" className="text-white!" disabled={!o.reserve.free} onClick={asOwner(() => setOpen("withdraw-reserve"))}>Withdraw</Button>
-              <Button variant="onColor" className="text-white!" onClick={asOwner(() => setOpen("cap"))}>Cashback cap</Button>
+              <Button variant="gold" onClick={show("fund")}><Plus />Fund</Button>
+              <Button variant="onColor" className="text-white!" disabled={!o.reserve.free} onClick={show("withdraw-reserve")}>Withdraw</Button>
+              <Button variant="onColor" className="text-white!" onClick={show("cap")}>Cashback cap</Button>
+              <Button variant="onColor" className="text-white!" onClick={show("min-lucky")}>Smallest Lucky Checkout</Button>
             </div>
           </div>
         </div>
@@ -256,77 +165,150 @@ function Dashboard({ o }: { o: AdminOverview }) {
         <div className="card flex flex-col p-7">
           <p className="text-ink-soft">Proceeds</p>
           <p className="font-display mt-1 text-5xl font-extrabold tracking-[-0.03em]"><Money micro={o.reserve.proceeds} /></p>
-          <p className="mt-2 text-sm text-muted">What customers paid for delivered cards. The treasury refills {guest ? "the Base Float" : "Bitrefill"} from it.</p>
+          <p className="mt-2 text-sm text-muted">Prices of delivered cards that waited past the daily repay cap. They go to the owner, or to the Pay Wallet as float.</p>
           <p className={`mt-4 text-sm ${o.reserve.customers < 0 ? "font-semibold text-bad" : "text-muted"}`}>
             {o.reserve.customers < 0
-              ? `The contract holds ${usd(o.reserve.held)}, less than the reserve and proceeds alone. Pause it and investigate now.`
-              : `Customers hold ${usd(o.reserve.customers)} in Luckout, theirs to withdraw any time. The contract holds ${usd(o.reserve.held)} in all.`}
+              ? `The Vault holds ${usd(o.reserve.held)}, less than the reserve and Proceeds alone. Pause the program and investigate now.`
+              : `Customers hold ${usd(o.reserve.customers)} in Luckout, theirs to withdraw any time. The Vault holds ${usd(o.reserve.held)} in all.`}
           </p>
           <div className="mt-auto pt-6">
-            <Button variant="soft" disabled={!o.reserve.proceeds} onClick={asOwner(() => setOpen("withdraw-proceeds"))}>Withdraw</Button>
+            <Button variant="soft" disabled={!o.reserve.proceeds} onClick={show("withdraw-proceeds")}>Withdraw</Button>
           </div>
         </div>
-
       </section>
 
-      <CreditSection o={o} asOwner={asOwner} tx={tx} />
-
       <section className="flex flex-col gap-4">
-        <SectionTitle title="Gas" body="What our accounts spend on network fees: NEAR on NEAR, ETH on Base. Each alerts below its line; any admin can top it up." />
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {o.gas.map((g) => <GasTile key={g.role} g={g} guest={guest} onSend={() => setOpen({ gas: g })} />)}
-          {o.treasury.wallet && <BaseGasTile w={o.treasury.wallet} guest={guest} />}
+        <SectionTitle
+          title="Paying Bitrefill"
+          body="The Pay Wallet pays each checkout's invoice in USDC, and settle repays it from the Vault up to the daily cap. The fee payer pays every transaction's fee. Each alerts below its line."
+        />
+        <div className="grid gap-4 md:grid-cols-3">
+          <RepayCard r={o.repay} onChange={show("repay")} />
+          {o.keys.map((k) => <KeyTile key={k.role} k={k} />)}
         </div>
+        <LimitsCard o={o} />
       </section>
 
       <section className="grid items-start gap-4 lg:grid-cols-[1fr_1.25fr]">
-        <RelayerCard r={o.relay} />
+        <ProgramCard
+          o={o}
+          onOperator={show("operator")}
+          onPayWallet={show("pay-wallet")}
+          onOwner={show("owner")}
+          onGuardian={show("guardian")}
+          onRemoveGuardian={owner.asOwner(() => void owner.sign({ _tag: "set_guardian", guardian: null }, "Removing the guardian", "The guardian can no longer pause"))}
+          onUpgrade={show("upgrade")}
+        />
         <PurchasesCard p={o.purchases} />
       </section>
 
-      <FundReserveSheet open={open === "fund"} onClose={close} o={o} tx={tx} />
-      <CashbackCapSheet open={open === "cap"} onClose={close} o={o} tx={tx} />
+      <FundReserveSheet open={open === "fund"} onClose={close} owner={owner} />
+      <CashbackCapSheet open={open === "cap"} onClose={close} o={o} owner={owner} />
       <WithdrawSheet
         open={open === "withdraw-reserve"}
         onClose={close}
         title="Withdraw from the reserve"
         available={o.reserve.free}
-        to={o.contract.owner}
+        to={[{ id: "owner", label: `the owner's USDC account (${shortAccount(o.program.owner)})` }]}
         preview={(m) => {
           const after = o.reserve.free - m
-          return `Free reserve after: ${usd(after)}. Most cashback per purchase: ${usd(maxCashbackAt(o.reserve.cashbackCap, after))}.`
+          return `Free reserve after: ${usd(after)}. Most cashback per card: ${usd(maxCashbackAt(o.reserve.cashbackCap, after))}.`
         }}
-        onWithdraw={(m) => tx(`Withdrawing ${usd(m)} from the reserve`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
-          send(id, contractCall("withdraw_reserve", { amount: String(m) }, 60)))}
+        onWithdraw={(m) => owner.sign({ _tag: "withdraw_reserve", amount: m }, `Withdrawing ${usd(m)} from the reserve`, `${usd(m)} sent to the owner`)}
       />
       <WithdrawSheet
         open={open === "withdraw-proceeds"}
         onClose={close}
-        title="Withdraw proceeds"
+        title="Withdraw Proceeds"
         available={o.reserve.proceeds}
-        to={o.contract.owner}
-        preview={() => `Leave enough for ${guest ? "refills of the Base Float" : "Bitrefill refills"}: the treasury pulls them from here.`}
-        onWithdraw={(m) => tx(`Withdrawing ${usd(m)} of proceeds`, `${usd(m)} sent to ${o.contract.owner}`, (id) =>
-          send(id, contractCall("withdraw_proceeds", { amount: String(m) }, 60)))}
+        to={[
+          { id: "owner", label: `the owner's USDC account (${shortAccount(o.program.owner)})` },
+          { id: "payWallet", label: "the Pay Wallet, as float" }
+        ]}
+        preview={() => "Only Proceeds move; customers' Balances and the reserve stay where they are."}
+        onWithdraw={(m, to) =>
+          owner.sign({ _tag: "withdraw_proceeds", amount: m, to }, `Withdrawing ${usd(m)} of Proceeds`, `${usd(m)} sent to ${to === "owner" ? "the owner" : "the Pay Wallet"}`)}
       />
-      <Sheet open={open === "pause"} onOpenChange={(v) => !v && close()} title="Pause the contract?">
+      <Sheet open={open === "pause"} onOpenChange={(v) => !v && close()} title="Pause the program?">
         <div className="flex flex-col gap-5">
           <ul className="flex flex-col gap-2 text-ink-soft">
-            <li>The contract refuses every new purchase, whoever sends it.</li>
-            <li>Purchases already in progress still finish and draw.</li>
-            <li>Withdrawals and reclaims keep working.</li>
+            <li>The program refuses every new Checkout, whoever sends it.</li>
+            <li>Checkouts already admitted still settle and draw.</li>
+            <li>Deposits, withdrawals and Reclaims keep working.</li>
             <li>For a quick stop, <b className="text-ink">Stop sales</b> needs no wallet. This is the hard stop.</li>
           </ul>
           <Button size="lg" variant="danger" onClick={async () => {
             close()
-            await tx("Pausing the contract", "The contract is paused", (id) => send(id, contractCall("set_paused", { paused: true })))
+            await owner.sign({ _tag: "set_paused", paused: true }, "Pausing the program", "The program is paused")
           }}>
-            <Pause />Pause the contract
+            <Pause />Pause the program
           </Button>
         </div>
       </Sheet>
-      <TransferOwnerSheet open={open === "owner"} onClose={close} o={o} tx={tx} contractCall={contractCall} />
-      <SendNearSheet target={typeof open === "object" ? open.gas : undefined} onClose={close} tx={tx} />
+      <ValueSheet
+        {...amountSheet}
+        open={open === "repay"}
+        title="Daily repay cap"
+        description="How much settle repays the Pay Wallet from the Vault in a day (UTC). Past it, prices wait as Proceeds and the float runs down. Keep it at about twice the busiest day."
+        label="Repay up to, each day"
+        initial={dollars(o.repay.dailyCap)}
+        save={(v) => `Set it to ${usd(toMicro(v))} a day`}
+        onSave={(v) => owner.sign({ _tag: "set_repay_cap", daily: toMicro(v) }, "Saving the repay cap", `Repay cap: ${usd(toMicro(v))} a day`)}
+      />
+      <ValueSheet
+        {...amountSheet}
+        open={open === "min-lucky"}
+        title="Smallest Lucky Checkout"
+        description="A Checkout's Lucky Amounts must add up to at least this, so its margin covers the Draw's randomness fee. Move it with SOL's price."
+        label="Lucky Amount per Checkout, at least"
+        initial={dollars(o.reserve.minLuckyCheckout)}
+        save={(v) => `Set it to ${usd(toMicro(v))}`}
+        onSave={(v) => owner.sign({ _tag: "set_min_lucky_checkout", amount: toMicro(v) }, "Saving the smallest Lucky Checkout", `Smallest Lucky Checkout: ${usd(toMicro(v))}`)}
+      />
+      <ValueSheet
+        kind="address"
+        open={open === "operator"}
+        onClose={close}
+        title="Change the operator"
+        description="The key that admits and settles Checkouts. Put the new key on the server as SOLANA_OPERATOR_SECRET_KEY right after: until then, no Checkout can be admitted or settled."
+        label="New operator's address"
+        problem={(v) => (v === o.program.owner || v === o.program.pendingOwner ? "The owner can't be the operator" : v === o.program.operator ? "That's the operator now" : undefined)}
+        save={(v) => `Make ${shortAccount(v)} the operator`}
+        onSave={(v) => owner.sign({ _tag: "set_operator", operator: v }, "Changing the operator", `${shortAccount(v)} is the operator now`)}
+      />
+      <ValueSheet
+        kind="address"
+        open={open === "pay-wallet"}
+        onClose={close}
+        title="Change the Pay Wallet"
+        description="The wallet that pays Bitrefill; settle repays its USDC account, opened now if it has none. Bitrefill must tag the address first. Then put its key on the server as SOLANA_PAY_WALLET_SECRET_KEY: until then, no card can be paid."
+        label="New Pay Wallet's address"
+        save={(v) => `Make ${shortAccount(v)} the Pay Wallet`}
+        onSave={(v) => owner.sign({ _tag: "set_pay_wallet", payWallet: v }, "Changing the Pay Wallet", `${shortAccount(v)} is the Pay Wallet now`)}
+      />
+      <ValueSheet
+        kind="address"
+        open={open === "guardian"}
+        onClose={close}
+        title={o.program.guardian ? "Change the guardian" : "Name a guardian"}
+        description="A key that can only pause the program, so a pause never waits on the owner's wallet. It can't resume, move money or change anything else: only the owner resumes. Keep its key off the server."
+        label="Guardian's address"
+        problem={(v) => (v === o.program.guardian ? "That's the guardian now" : undefined)}
+        save={(v) => `Make ${shortAccount(v)} the guardian`}
+        onSave={(v) => owner.sign({ _tag: "set_guardian", guardian: v }, "Naming the guardian", `${shortAccount(v)} can pause the program now`)}
+      />
+      <UpgradeSheet open={open === "upgrade"} onClose={close} owner={owner} />
+      <ValueSheet
+        kind="address"
+        open={open === "owner"}
+        onClose={close}
+        title="Transfer ownership"
+        description="The new owner accepts from its own wallet, here in the admin panel. Nothing changes until it does, and you can withdraw the proposal until then."
+        label="New owner's address"
+        problem={(v) => (v === o.program.owner ? "That's the owner now" : v === o.program.operator ? "The operator can't own the program" : undefined)}
+        save={(v) => `Propose ${shortAccount(v)}`}
+        onSave={(v) => owner.sign({ _tag: "propose_owner", newOwner: v }, `Proposing ${shortAccount(v)}`, `${shortAccount(v)} can now accept ownership`)}
+      />
     </div>
   )
 }
@@ -335,7 +317,144 @@ function SectionTitle({ title, body }: { title: string; body: string }) {
   return (
     <div>
       <h2 className="font-display text-3xl font-extrabold">{title}</h2>
-      <p className="mt-1 max-w-[62ch] text-ink-soft">{body}</p>
+      <p className="mt-1 max-w-[70ch] text-ink-soft">{body}</p>
     </div>
   )
 }
+
+/** The monitor warns at 80% of the cap (ADR-0015). */
+function RepayCard({ r, onChange }: { r: AdminOverview["repay"]; onChange: () => void }) {
+  const used = r.dailyCap > 0 ? r.repaidToday / r.dailyCap : 1
+  return (
+    <div className="card flex flex-col p-6">
+      <p className="flex items-center gap-2 font-semibold"><Wallet size={18} className="text-muted" aria-hidden="true" />Repaid today</p>
+      <p className="mt-1 text-sm text-muted">What settle has repaid the Pay Wallet since midnight UTC, against the owner's daily cap.</p>
+      <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">
+        {usd(r.repaidToday)} <span className="text-lg font-bold text-muted">of {usd(r.dailyCap)}</span>
+      </p>
+      <div className="mt-3"><Bar value={used} tone={used >= 0.8 ? "warn" : "good"} /></div>
+      <Button size="sm" variant={used >= 0.8 ? "primary" : "soft"} className="mt-5 self-start" onClick={onChange}>Change the cap</Button>
+    </div>
+  )
+}
+
+const KEY_COPY = {
+  feePayer: { label: "Fee payer", purpose: "Pays every transaction's fee and rent, customers' too. Holds only SOL; send it SOL from any wallet." },
+  payWallet: { label: "Pay Wallet float", purpose: "Pays each checkout's Bitrefill invoice. A float that can't cover a checkout holds it, uncharged." }
+} as const
+
+function KeyTile({ k }: { k: AdminOverview["keys"][number] }) {
+  const [balance, line] = [BigInt(k.balance), BigInt(k.alertBelow)]
+  const low = balance < line
+  // The bar is full at four times the alert line, so the line sits at a quarter.
+  const fill = line > 0n ? Number((balance * 1000n) / (line * 4n)) / 1000 : 1
+  const show = (v: string) => (k.role === "feePayer" ? `${sol(v)} SOL` : usd(v))
+  return (
+    <div className="card flex flex-col p-6">
+      <div className="flex items-center justify-between gap-3">
+        <p className="flex items-center gap-2 font-semibold"><Fuel size={18} className="text-muted" aria-hidden="true" />{KEY_COPY[k.role].label}</p>
+        <span className={`pill ${low ? "bg-warn-soft! text-warn" : "bg-good-soft! text-good"}`}>{low ? "Low" : "OK"}</span>
+      </div>
+      <p className="mt-1 text-sm text-muted">{KEY_COPY[k.role].purpose}</p>
+      <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">{show(k.balance)}</p>
+      <div className="relative mt-3">
+        <Bar value={fill} tone={low ? "warn" : "good"} />
+        <span className="absolute top-[-3px] left-1/4 h-3.5 w-0.5 rounded-full bg-ink/30" aria-hidden="true" />
+      </div>
+      <p className="mt-2 text-xs text-muted">Alert under {show(k.alertBelow)}</p>
+      <p className="mt-1 text-xs text-muted">Send {k.role === "feePayer" ? "SOL" : "USDC on Solana"} to <AddressLink address={k.address} full /></p>
+      {/* USDC sent to the token account's own address can be stranded: an exchange would make it a USDC account of its own. */}
+      {k.usdcAccount && <p className="mt-1 text-xs text-muted">Its USDC account, never to send to: <AddressLink address={k.usdcAccount} /></p>}
+    </div>
+  )
+}
+
+/** Bitrefill's limits: our paying address's own (ADR-0015), and each Checkout Email's, shown by the busiest one. */
+function LimitsCard({ o }: { o: AdminOverview }) {
+  const c = o.checkout
+  const groups: ReadonlyArray<[string, ReactNode, ReadonlyArray<{ label: string; used: number; cap: number; show: (n: number) => string }>]> = [
+    ["Our paying address", "Every card counts against the limits Bitrefill set for the address that pays all our invoices, a guest's or one on a customer's own Bitrefill account.", [
+      { label: "Last 24 hours", used: o.paying.daily, cap: o.paying.limits.daily, show: usd },
+      { label: "Last 30 days", used: o.paying.monthly, cap: o.paying.limits.monthly, show: usd }
+    ]],
+    ["The busiest Checkout Email", (
+      <>
+        Bitrefill limits each email to {c.limits.orders} cards and {usd(c.limits.daily)} a day, {usd(c.limits.monthly)} a month. {c.emails}{" "}
+        {c.emails === 1 ? "customer has" : "customers have"} given one, and {c.connected} {c.connected === 1 ? "buys" : "buy"} on their own Bitrefill account instead.
+      </>
+    ), [
+      { label: "Cards today", used: c.busiest.orders, cap: c.limits.orders, show: String },
+      { label: "Spent today", used: c.busiest.daily, cap: c.limits.daily, show: usd },
+      { label: "Spent in 30 days", used: c.busiest.monthly, cap: c.limits.monthly, show: usd }
+    ]]
+  ]
+  return (
+    <div className="card grid gap-8 p-7 lg:grid-cols-2">
+      {groups.map(([title, body, rows]) => (
+        <div key={title} className="flex flex-col gap-4">
+          <div>
+            <p className="font-semibold">{title}</p>
+            <p className="mt-1 text-sm text-muted">{body}</p>
+          </div>
+          {rows.map((r) => (
+            <div key={r.label} className="flex flex-col gap-1.5">
+              <p className="flex justify-between gap-2 text-sm">
+                <span className="text-muted">{r.label}</span>
+                <span className="font-semibold">{r.show(r.used)} <span className="font-normal text-muted">of {r.show(r.cap)}</span></span>
+              </p>
+              <Bar value={r.cap > 0 ? r.used / r.cap : 0} tone={r.used >= r.cap * 0.8 ? "warn" : "good"} />
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** The program's keys and accounts, each linked to Solana Explorer, and the owner's rarer changes. */
+function ProgramCard({ o, onOperator, onPayWallet, onOwner, onGuardian, onRemoveGuardian, onUpgrade }: {
+  o: AdminOverview
+  onOperator: () => void
+  onPayWallet: () => void
+  onOwner: () => void
+  onGuardian: () => void
+  onRemoveGuardian: () => void
+  onUpgrade: () => void
+}) {
+  const p = o.program
+  const rows: ReadonlyArray<[string, string | undefined]> = [
+    ["Program", p.id],
+    ["Owner", p.owner],
+    ["Proposed owner", p.pendingOwner],
+    ["Operator", p.operator],
+    ["Guardian (pause only)", p.guardian],
+    ["Pay Wallet's USDC", p.payWallet],
+    ["Vault", p.vault],
+    ["USDC", p.usdcMint]
+  ]
+  return (
+    <div className="card flex flex-col gap-6 p-7">
+      <div>
+        <h2 className="font-display text-3xl font-extrabold">Program</h2>
+        <p className="mt-1 text-ink-soft">{p.paused ? "Paused: no new Checkouts." : "Running."} Each links to Solana Explorer.</p>
+      </div>
+      <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
+        {rows.filter(([, v]) => v).map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-muted">{k}</dt>
+            <dd className="min-w-0"><AddressLink address={v!} /></dd>
+          </div>
+        ))}
+      </dl>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="light" onClick={onOperator}>Change the operator</Button>
+        <Button size="sm" variant="light" onClick={onPayWallet}>Change the Pay Wallet</Button>
+        <Button size="sm" variant="light" onClick={onOwner}>Transfer ownership</Button>
+        <Button size="sm" variant="light" onClick={onGuardian}>{p.guardian ? "Change the guardian" : "Name a guardian"}</Button>
+        {p.guardian && <Button size="sm" variant="light" onClick={onRemoveGuardian}>Remove the guardian</Button>}
+        <Button size="sm" variant="light" onClick={onUpgrade}>Upgrade the program</Button>
+      </div>
+    </div>
+  )
+}
+

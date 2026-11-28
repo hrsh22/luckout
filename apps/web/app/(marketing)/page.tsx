@@ -1,7 +1,7 @@
 import { HeroArt } from "@/components/hero-art"
 import { OddsGrid } from "@/components/odds-grid"
 import { buttonVariants } from "@/components/ui/button"
-import { contractId, liveAverage, network, type Stats, view } from "@/lib/chain"
+import { cluster, liveAverage, programInfo } from "@/lib/chain"
 import { usdUp } from "@/lib/format"
 import { AMPLE_RESERVE, cashbackChanceBps, MODES, pricedOutcomes, RECOMMENDED, simpleQuote } from "@/lib/modes"
 import { modePalette } from "@/lib/palette"
@@ -14,9 +14,9 @@ export const revalidate = 60
 const EXAMPLE = 20_000_000
 
 const STEPS = [
-  { title: "Add USDC", body: "Deposit USDC on NEAR, or send a token from Ethereum, Base, Solana, Bitcoin and more. Withdraw what you don't spend.", bg: "#E2F4FF" },
+  { title: "Add USDC", body: "Send USDC or USDT on Solana to your own deposit address, from an exchange or any wallet, or pay from another chain. Withdraw what you don't spend.", bg: "#E2F4FF" },
   { title: "Pick a card and a mode", body: "Pay exactly the price, or a little more up front for a chance at cashback. You see every outcome before you buy.", bg: "#EEE8FF" },
-  { title: "Get the code, then the Draw", body: "We buy the card from Bitrefill, our supplier, and the code usually arrives within a minute. Then the contract runs the Draw and any cashback lands in your balance.", bg: "#FFF3CF" }
+  { title: "Get the code, then the Draw", body: "We buy the card from Bitrefill, our supplier, and the code usually arrives within a minute. Then the Draw runs on Solana and any cashback lands in your balance.", bg: "#FFF3CF" }
 ]
 
 // Each answer ends in a link to the docs page with the rest (`more`).
@@ -35,28 +35,28 @@ const FAQ = [
   {
     more: "/docs/balance",
     q: "Where is my money while it's in Luckout?",
-    a: "In the Luckout contract on NEAR, credited to your account, not in a company wallet. You can withdraw anything not locked in a purchase at any time. If we ever neither deliver nor cancel a purchase, you can take the full amount back yourself after 24 hours."
+    a: "In the Luckout program on Solana, credited to your account, not in a company wallet. You can withdraw anything not locked in a purchase at any time. If we ever neither deliver nor cancel a purchase, you can take the full amount back yourself after 24 hours."
   },
   {
     more: "/docs/draw",
     q: "How random is the Draw?",
-    a: `It uses NEAR's block randomness, mixed with the purchase number, in a step that runs a block after delivery is confirmed, so nobody can retry it. Block producers can nudge that randomness slightly, which is why each Draw's cashback is capped: at most the lower of a fixed amount and a share of the reserve.`
+    a: "Once your card's delivery is confirmed, the program asks ORAO's oracles for a random value. Neither we nor you choose it, and once it's in, the result is fixed: anyone can finish the Draw, and doing it again changes nothing. Each card gets its own value, so cards bought together are independent. Only ORAO could force a new value, by never answering, and the Cashback Cap limits what any one Draw can pay."
   },
   {
     q: "Can the Telegram bot spend my money?",
-    a: "Only when you tap its Buy button, and never above the per-purchase and daily limits you set. The contract enforces those limits on every purchase, whoever submits it.",
+    a: "Only when you tap its Buy button, and never above the per-purchase and daily limits you set. The program enforces those limits on every purchase, whoever submits it.",
     more: "/docs/telegram/safety"
   },
   {
     q: "Which wallets work?",
-    a: "NEAR wallets (HOT, Meteor, Intear, Ledger and the others in NEAR Connect; HOT also works inside Telegram), EVM wallets like MetaMask and Rabby, and Solana wallets like Phantom and Solflare. Those need no NEAR at all. Luckout pays the NEAR fee for your deposits, withdrawals and settings, within a daily number of free actions.",
+    a: "You don't need one. Sign in with email, Google, Telegram or a Solana wallet like Phantom, and Privy gives you a Solana wallet of your own. You can export its key whenever you like. Luckout pays the network fee for your deposits, withdrawals and settings, so you never need SOL.",
     more: "/docs/sign-in"
   }
 ]
 
 export default async function Home() {
   // Read again at most every 60 s (revalidate above).
-  const stats = await view<Stats>(contractId, "get_stats").catch(() => undefined)
+  const stats = await programInfo("10 seconds").then((p) => p.stats, () => undefined)
   const avg = stats && liveAverage(stats)
 
   return (
@@ -77,8 +77,8 @@ export default async function Home() {
             <Link href="/welcome" className={buttonVariants({ size: "lg", variant: "light" })}>Create your account</Link>
           </div>
           <p className="mt-6 flex items-center gap-2 text-sm text-muted">
-            <span className={`size-2 rounded-full ${network === "testnet" ? "bg-warn" : "bg-good"}`} />
-            {network === "testnet" ? "Live on NEAR testnet with free test USDC" : "Live on NEAR"}
+            <span className={`size-2 rounded-full ${cluster === "mainnet" ? "bg-good" : "bg-warn"}`} />
+            {cluster === "mainnet" ? "Live on Solana" : `On Solana ${cluster}, test cards only`}
           </p>
         </div>
         <HeroArt />
@@ -146,22 +146,29 @@ export default async function Home() {
             <div>
               <h2 className="font-display text-5xl leading-none font-extrabold tracking-[-0.03em] sm:text-[56px]">Built to be checked, not trusted.</h2>
               <p className="mt-4 max-w-[44ch] text-lg text-white/70">
-                Your balance, your limits and every Draw live in a NEAR contract. This is what lucky buyers have actually paid so far.
+                Your balance, your limits and every Draw live in a program on Solana. This is what lucky buyers have actually paid so far.
               </p>
               <p className="font-display mt-8 text-7xl font-extrabold text-gold">{avg === undefined ? "105.6%" : `${avg.toFixed(1)}%`}</p>
               <p className="text-white/70">
-                {avg === undefined ? "promised average, for every mode" : `of the price, on average, over ${stats!.lucky_settled} Draws. Promised: 105.6%.`}
+                {avg === undefined ? "promised average, for every mode" : `of the price, on average, over ${stats!.luckySettled} Draws. Promised: 105.6%.`}
               </p>
               <Link href="/fair" className={`${buttonVariants({ variant: "light" })} mt-6`}>See the live numbers</Link>
             </div>
             <ul className="grid gap-4 sm:grid-cols-2">
               <Point icon={ShieldCheck} title="Every Draw is public">
-                The contract logs the seed and the roll. Anyone can recompute a Draw in their browser.{" "}
-                <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-gold underline underline-offset-4">See one</Link>
+                The program records each Draw's randomness and roll. Anyone can recompute a Draw in their browser.
+                {EXAMPLE_DRAW_HREF && (
+                  <>
+                    {" "}
+                    <Link href={EXAMPLE_DRAW_HREF} className="font-semibold text-gold underline underline-offset-4">See one</Link>
+                  </>
+                )}
               </Point>
-              <Point icon={Repeat2} title="Nobody can retry a Draw">Delivery is confirmed first. The Draw runs a block later, in a step nothing can undo, not even us.</Point>
+              <Point icon={Repeat2} title="Nobody can retry a Draw">
+                Delivery is confirmed first. Then ORAO's oracles supply the randomness, and once it's in, the result is fixed, even for us.
+              </Point>
               <Point icon={Lock} title="Cashback is covered first">Each lucky purchase locks what its biggest possible cashback would cost, so the money is there whatever the result.</Point>
-              <Point icon={SlidersHorizontal} title="Limits you set">The contract caps every purchase at your per-purchase and daily limits, including the ones the Telegram bot makes.</Point>
+              <Point icon={SlidersHorizontal} title="Limits you set">The program caps every purchase at your per-purchase and daily limits, including the ones the Telegram bot makes.</Point>
             </ul>
           </div>
         </div>
@@ -213,7 +220,7 @@ export default async function Home() {
           <div className="blob -top-24 -right-10 size-80 bg-white opacity-50" aria-hidden="true" />
           <div className="relative text-gold-ink">
             <h2 className="max-w-[14em] font-display text-5xl leading-none font-extrabold tracking-[-0.03em] sm:text-[60px]">Your next card could be 100% off.</h2>
-            <p className="mt-4 text-lg opacity-80">Sign in with a NEAR, EVM or Solana wallet and choose how you like to pay. It takes a minute.</p>
+            <p className="mt-4 text-lg opacity-80">Sign in with email, Google, Telegram or a Solana wallet, and choose how you like to pay. It takes a minute.</p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link href="/welcome" className={buttonVariants({ size: "lg" })}>Create your account</Link>
               <Link href="/shop" className={buttonVariants({ size: "lg", variant: "onColor" })}>Browse cards first</Link>

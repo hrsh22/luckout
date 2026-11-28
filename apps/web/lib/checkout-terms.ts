@@ -14,8 +14,8 @@ export const totals = (quotes: ReadonlyArray<Quote> | undefined) => {
 }
 
 /**
- * Each Cart line with its copies' quotes (units are in line order): what the line costs in all and each, whether the
- * reserve put a Lucky copy at Normal, and the smallest part of a copy that still plays when it covers only some.
+ * Each Cart line with its copies' quotes (units are in line order): what the line costs in all and each, whether a
+ * Lucky copy is at Normal (the reserve, or `belowMin`), and the smallest part of a copy that still plays when it covers only some.
  */
 export const pricedLines = <L extends { readonly mode: Quote["mode"]; readonly keys: ReadonlyArray<string> }>(lines: ReadonlyArray<L>, quotes: ReadonlyArray<Quote> | undefined) => {
   let at = 0
@@ -28,8 +28,10 @@ export const pricedLines = <L extends { readonly mode: Quote["mode"]; readonly k
     const each = mine && mine.every((q) => cents(q) === cents(mine[0]!)) ? mine[0]!.maxPrice : undefined
     const lucky = line.mode !== "normal"
     const normal = !!mine && lucky && mine.some((q) => q.mode === "normal")
+    // At Normal because the checkout's Lucky cards play under the smallest Lucky Checkout (luckyCheckout), not the reserve.
+    const belowMin = !!mine?.some((q) => "belowMin" in q)
     const part = mine?.filter((q) => q.luckyAmount > 0 && q.luckyAmount < q.referencePrice).map((q) => q.luckyAmount)
-    return { line, total, each, normal, plays: part && part.length > 0 ? Math.min(...part) : undefined }
+    return { line, total, each, normal, belowMin, plays: part && part.length > 0 ? Math.min(...part) : undefined }
   })
 }
 
@@ -43,7 +45,7 @@ export const laterPlayLess = (alone: Pick<Quote, "luckyAmount">, priced: { reado
 
 /**
  * One card bought exactly as its quote showed: the quote's mode (Normal when the reserve couldn't cover a Lucky card),
- * its maximum, and a Lucky Buy's Lucky Amount, which the contract plays exactly or refuses. The key makes it one
+ * its maximum, and a Lucky Buy's Lucky Amount, which the program plays exactly or refuses. The key makes it one
  * purchase however often it's sent.
  */
 export const purchaseRequest = (card: { readonly voucherId: string; readonly value: string }, key: string, q: Quote) =>
@@ -60,18 +62,18 @@ export const purchaseRequest = (card: { readonly voucherId: string; readonly val
 export const checkoutRequest = (items: ReadonlyArray<{ readonly line: { readonly voucherId: string; readonly value: string }; readonly key: string; readonly quote: Quote }>) =>
   new NewCart({ items: items.map(({ line, key, quote }) => purchaseRequest(line, key, quote)) })
 
-/** The customer's Spending Limits as the contract keeps them (micro-USDC strings; a limit that's off is u128::MAX). */
+/** The customer's Spending Limits as the program keeps them (micro-USDC strings; a limit that's off is u64::MAX). */
 type Limits = Pick<ContractAccount, "per_purchase_limit" | "daily_limit" | "day" | "spent_today">
 
 /**
  * Whether buying `need` in all, at most `largest` for any one card, passes the Spending Limits, as the contract checks
  * them (each card against the per-purchase limit, the whole against what's left of today's), and what to raise them to
  * if not: up to the new defaults, or what this needs (to the whole dollar) if that's more. A limit that isn't in the
- * way stays as it is, exactly, so "No limit" (u128::MAX) is never rounded through a number.
+ * way stays as it is, exactly, so "No limit" (u64::MAX) is never rounded through a number.
  */
 export const spendingCheck = (limits: Limits, need: number, largest: number, now = Date.now()) => {
   const today = limits.day === Math.floor(now / 86_400_000) ? Number(limits.spent_today) : 0
-  // A limit that's off is u128::MAX, so it's never "over".
+  // A limit that's off is u64::MAX, so it's never "over".
   const overPer = largest > Number(limits.per_purchase_limit)
   const overDay = today + need > Number(limits.daily_limit)
   const raised = (floor: number, needed: number) => String(Math.max(floor, Math.ceil(needed / 1e6) * 1e6))

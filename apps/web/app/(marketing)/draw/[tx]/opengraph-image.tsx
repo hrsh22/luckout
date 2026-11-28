@@ -1,5 +1,5 @@
 import { usd, usdUp } from "@/lib/format"
-import { loadDraw, TX_HASH } from "@/lib/proof"
+import { loadProof, SIGNATURE } from "@/lib/proof"
 import { ImageResponse } from "next/og"
 
 export const size = { width: 1200, height: 630 }
@@ -22,13 +22,13 @@ const grotesk = fetch("https://fonts.googleapis.com/css2?family=Space+Grotesk:wg
   .catch(() => undefined)
 
 // Win Card (ADR-0005): shared link previews show the price paid, never Redemption Data.
-// ponytail: an image gets no query string, so a cart's settlement shows its first Draw; give the purchase its own path
+// ponytail: an image gets no query string, so a Checkout's proof shows its first Draw; give the card its own path
 // segment if shared cart proofs need their own picture.
 export default async function Image({ params }: { params: Promise<{ tx: string }> }) {
   const tx = (await params).tx
-  const [draw, font] = await Promise.all([TX_HASH.test(tx) ? loadDraw(tx).then((d) => d.draw, () => undefined) : undefined, grotesk])
-  const ref = draw ? Number(draw.reference_price) : 0
-  const paid = draw ? Number(draw.final_price) : 0
+  const [draw, font] = await Promise.all([SIGNATURE.test(tx) ? loadProof(tx).then((p) => p.draws[0], () => undefined) : undefined, grotesk])
+  const ref = draw?.referencePrice ?? 0
+  const paid = draw?.finalPrice ?? 0
   const win = draw !== undefined && paid < ref
 
   return new ImageResponse(

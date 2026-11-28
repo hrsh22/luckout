@@ -7,8 +7,10 @@ import Link from "next/link"
 
 export const docLink = "font-semibold text-ink underline decoration-ink/25 underline-offset-4 hover:decoration-ink"
 
-/** A link to the example Draw Proof, whose address depends on the network (JSX in MDX skips mdx-components). */
-export const ExampleDraw = ({ children }: { children: React.ReactNode }) => <Link href={EXAMPLE_DRAW_HREF} className={docLink}>{children}</Link>
+/** A link to the example Draw Proof, whose address depends on the network (JSX in MDX skips mdx-components). Plain
+ * text where there's no example yet (mainnet before its first Draw). */
+export const ExampleDraw = ({ children }: { children: React.ReactNode }) =>
+  EXAMPLE_DRAW_HREF ? <Link href={EXAMPLE_DRAW_HREF} className={docLink}>{children}</Link> : <>{children}</>
 
 /** Docs tables: MDX's GFM tables (mdx-components.tsx) and the ones below share them. */
 export const Table = (p: React.ComponentProps<"table">) => (

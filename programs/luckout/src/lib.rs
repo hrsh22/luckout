@@ -14,7 +14,20 @@ use error::LuckoutError;
 use game::*;
 use state::*;
 
+// One build per environment, each with its own program id: `--features staging` or `--features production`
+// for mainnet, none for devnet and tests.
+#[cfg(all(feature = "staging", feature = "production"))]
+compile_error!("build for staging or production, not both");
+#[cfg(not(any(feature = "staging", feature = "production")))]
 declare_id!("4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3");
+#[cfg(feature = "staging")]
+declare_id!("FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F");
+#[cfg(feature = "production")]
+declare_id!("GCeZ67ann5G1hzNijYtqFiHyAJ4dJy2mwFA6g2eQfssr");
+
+/// Circle's USDC on mainnet: the only token a mainnet build can be set up with.
+#[cfg(any(feature = "staging", feature = "production"))]
+pub const MAINNET_USDC: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
 pub const DAY: i64 = 86_400;
 pub const RECLAIM_AFTER: i64 = DAY;
@@ -129,6 +142,8 @@ pub mod luckout {
     pub fn initialize(ctx: Context<Initialize>, operator: Pubkey) -> Result<()> {
         let owner = ctx.accounts.owner.key();
         require!(operator != owner && operator != crate::ID, LuckoutError::BadRole);
+        #[cfg(any(feature = "staging", feature = "production"))]
+        require_keys_eq!(ctx.accounts.usdc_mint.key(), MAINNET_USDC, LuckoutError::NotUsdc);
         ctx.accounts.config.set_inner(Config {
             layout: LAYOUT,
             bump: ctx.bumps.config,
@@ -151,7 +166,8 @@ pub mod luckout {
             lucky_settled: 0,
             lucky_amount_total: 0,
             lucky_paid_total: 0,
-            spare: [0; 64],
+            guardian: Pubkey::default(),
+            spare: [0; 32],
             versions: default_game_versions(),
         });
         Ok(())
@@ -497,6 +513,18 @@ pub mod luckout {
     /// Stops only new Checkouts.
     pub fn set_paused(ctx: Context<OwnerOnly>, paused: bool) -> Result<()> {
         ctx.accounts.config.paused = paused;
+        Ok(())
+    }
+
+    /// `None` removes the guardian.
+    pub fn set_guardian(ctx: Context<OwnerOnly>, guardian: Option<Pubkey>) -> Result<()> {
+        ctx.accounts.config.guardian = guardian.unwrap_or_default();
+        Ok(())
+    }
+
+    /// The guardian's only power, which the owner has too: stop new Checkouts at once. Only the owner restarts them.
+    pub fn pause(ctx: Context<Pause>) -> Result<()> {
+        ctx.accounts.config.paused = true;
         Ok(())
     }
 
@@ -939,6 +967,18 @@ pub struct Settle<'info> {
 pub struct OwnerOnly<'info> {
     pub owner: Signer<'info>,
     #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = owner @ LuckoutError::NotOwner)]
+    pub config: Account<'info, Config>,
+}
+
+#[derive(Accounts)]
+pub struct Pause<'info> {
+    pub guardian: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = guardian.key() == config.guardian || guardian.key() == config.owner @ LuckoutError::NotGuardian
+    )]
     pub config: Account<'info, Config>,
 }
 

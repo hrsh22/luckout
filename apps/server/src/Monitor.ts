@@ -1,35 +1,24 @@
 import { Config, Effect, Layer, Option, Schedule, Schema } from "effect"
 import { SqlClient } from "effect/sql"
-import { formatEther } from "viem"
+import { PublicKey } from "@solana/web3.js"
 import { Alerts } from "./Alerts.ts"
-import { Base, GAS_RESERVE } from "./Base.ts"
-import { Near, Network, OPERATOR_GAS, RELAY_GAS, TREASURY_GAS, upfront } from "./Near.ts"
+import { Solana } from "./Solana.ts"
 import { OPEN_STEPS } from "./Purchases.ts"
 import { readSetting, writeSetting } from "./Settings.ts"
 
-const NEAR = 10n ** 24n
-/** NEAR storage staking: 1e19 yoctoNEAR per byte. */
-const PER_BYTE = 10n ** 19n
-
+const SOL = 1_000_000_000n
 /**
- * Below these, each of our accounts gets an alert (the admin panel shows the same lines). Production
- * keeps the full lines; staging runs on a fifth of the NEAR, so it sets GAS_ALERT_PERCENT=20.
+ * Below these the owner hears of it (the admin panel shows the same lines). Production keeps the full lines; staging
+ * runs on a fraction, so it sets GAS_ALERT_PERCENT.
  */
 const PERCENT = BigInt(process.env.GAS_ALERT_PERCENT || 100)
-/** Never under what the account's heaviest call needs up front, and a quarter more: the alert comes before NEAR refuses one. */
-const covering = (line: bigint, gas: bigint) => (line > upfront(gas) * 5n / 4n ? line : upfront(gas) * 5n / 4n)
-export const GAS_ALERT = {
-  operator: covering(NEAR * PERCENT / 200n, OPERATOR_GAS),
-  relayer: covering(NEAR * PERCENT / 200n, RELAY_GAS),
-  treasury: covering(NEAR * PERCENT / 1000n, TREASURY_GAS),
-  contract: NEAR * PERCENT / 100n
+export const LOW_LINES = {
+  /** The fee payer pays every fee and rent (Customer and Checkout accounts, ORAO's requests): about a week of it. */
+  feePayer: SOL * PERCENT / 100n,
+  /** The Pay Wallet's float pays Bitrefill until `settle` repays it: about a busy hour of cards. */
+  float: 100_000_000n * PERCENT / 100n
 } as const
-const nearText = (yocto: bigint) => `${Number(yocto / 10n ** 20n) / 1e4} NEAR`
-/**
- * The Base wallet's ETH (wei): twice what Base's node wants on hand before it takes a payment (GAS_RESERVE, plus the
- * payment's L1 fee), so the alert comes while payments still go out. Each one spends far less than that.
- */
-export const BASE_GAS_ALERT = 2n * GAS_RESERVE
+const solText = (lamports: bigint) => `${Number(lamports) / 1e9} SOL`
 /**
  * A low-balance alert is said when an account drops under its line, then once a day while it stays there. When each
  * was last said is kept in the database, so a restart or a deploy doesn't say it again; back over its line, the next
@@ -37,12 +26,6 @@ export const BASE_GAS_ALERT = 2n * GAS_RESERVE
  */
 const LOW_REPEAT_MS = 24 * 60 * 60_000
 const LowSaid = Schema.Record(Schema.String, Schema.Number)
-/** Accounts the contract isn't known to hold money for that the solvency check asks about each round, in turn. */
-const UNSEEN_PER_ROUND = 50
-
-/** NEAR an account can spend: its balance minus what its storage locks. */
-export const spendable = (near: Near["Service"], id: string) =>
-  near.account(id).pipe(Effect.map((a) => a.amount - BigInt(a.storageUsage) * PER_BYTE))
 
 /** How long before the Bitrefill client secret lapses the admin starts hearing about it. */
 const SECRET_WARNING_MS = 14 * 24 * 60 * 60_000
@@ -62,25 +45,18 @@ export const secretWarning = (expiresAt: number, now: number) => {
     : `the Bitrefill client secret expires on ${day}, in ${Math.ceil(left / 86_400_000)} day(s): register a new client before then (deploy/README.md), or cards stop being sold`
 }
 
-/**
- * Every 10 minutes, the things that quietly stop purchases if nobody notices. Bitrefill's USD credit
- * isn't checked here: Credit.ts reads it every two minutes (and alerts on unexplained drops), and
- * Refill.ts tops it up or says why it can't.
- */
+/** Every 10 minutes, the things that quietly stop purchases if nobody notices. */
 export const Monitor = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const near = yield* Near
-    const base = yield* Base
-    // Refills, and so the Base wallet's gas, only matter where refills run.
-    const refills = (yield* Network) === "mainnet"
+    const solana = yield* Solana
     const alerts = yield* Alerts
 
-    // Each check stands alone: one that fails (say, a NEAR view that times out) is logged, and the rest still run.
+    // Each check stands alone: one that fails (say, an RPC read that times out) is logged, and the rest still run.
     const section = <E>(name: string, body: Effect.Effect<void, E>) =>
       body.pipe(Effect.catchCause((cause) => Effect.logError(`monitor: the ${name} check failed`, cause)))
 
-    // Reads only our database, so it runs first: a NEAR outage is exactly when purchases stall.
+    // Reads only our database, so it runs first: an RPC outage is exactly when purchases stall.
     const purchases = Effect.gen(function*() {
       const [r] = yield* sql<{ stuck: number; late: number }>`
         SELECT count(*) FILTER (WHERE step = 'stuck')::int AS stuck,
@@ -106,79 +82,71 @@ export const Monitor = Layer.effectDiscard(
       }).pipe(Effect.provideService(SqlClient.SqlClient, sql))
 
     const gas = Effect.gen(function*() {
-      if (near.operatorId) {
-        yield* low("operator", (yield* spendable(near, near.operatorId)) < GAS_ALERT.operator, `operator ${near.operatorId} has under ${nearText(GAS_ALERT.operator)} left for gas`)
-      }
-      if (near.relayerId) {
+      if (solana.feePayer) {
         yield* low(
-          "relayer",
-          (yield* spendable(near, near.relayerId)) < GAS_ALERT.relayer,
-          `relayer ${near.relayerId} has under ${nearText(GAS_ALERT.relayer)} left; NEAR wallets then pay their own fees, and EVM and Solana wallets' top-ups, withdrawals and settings wait until it has more`
+          "feePayer",
+          (yield* solana.balance(solana.feePayer)) < LOW_LINES.feePayer,
+          `the fee payer ${solana.feePayer.toBase58()} has under ${solText(LOW_LINES.feePayer)} left; every purchase, deposit and Draw stops when it runs out`
         )
       }
-      if (near.treasuryId) {
-        yield* low(
-          "treasury",
-          (yield* spendable(near, near.treasuryId)) < GAS_ALERT.treasury,
-          `treasury ${near.treasuryId} has under ${nearText(GAS_ALERT.treasury)} left for gas; refills and Base payments to Bitrefill stop when it runs out`
-        )
-      }
+      const config = yield* solana.config
+      const float = yield* solana.account(config.pay_wallet)
+      const usdc = float ? float.data.readBigUInt64LE(64) : 0n
+      yield* low("float", usdc < LOW_LINES.float, `the Pay Wallet's float is down to ${Number(usdc) / 1e6} USDC; checkouts wait for it once it can't pay Bitrefill`)
+      // `settle` repays the float only up to the owner's daily cap: past it, the float runs down while Proceeds grow.
+      const today = BigInt(Math.floor(Date.now() / 86_400_000))
+      const repaid = config.repay_day === today ? config.repaid_today : 0n
       yield* low(
-        "contract",
-        (yield* spendable(near, near.contractId)) < GAS_ALERT.contract,
-        `contract ${near.contractId} has under ${nearText(GAS_ALERT.contract)} free for storage; purchases fail when it runs out`
+        "repayCap",
+        config.repay_daily_cap > 0n && repaid * 5n >= config.repay_daily_cap * 4n,
+        `today's repayments to the Pay Wallet reached ${Number(repaid) / 1e6} of the ${Number(config.repay_daily_cap) / 1e6} USDC daily cap; raise it in the admin panel`
       )
     })
 
-    // The contract owes customers' balances, the reserve and the proceeds, and must hold at least that much;
-    // below it, customers' money is gone (a bug or an attack). Balances aren't summed onchain, so this sums
-    // every account we know of (Db: known_accounts). Missing ones only make the debt look smaller, never a
-    // false alarm. (A Draw in flight holds its premium in no bucket for a block: also never a false alarm.)
-    // ponytail: one view per account the contract knows every 10 minutes; batch or add an onchain total when there are thousands.
+    // The Vault must hold at least what the program owes: customers' Balances, the reserve, the Proceeds, and what open
+    // Checkouts debited and haven't paid out. Below it, customers' money is gone (a bug or an attack). Balances aren't
+    // summed onchain, so this sums every customer we know of (Db: known_accounts) and every open Checkout. Missing ones
+    // only make the debt look smaller, never a false alarm.
+    // ponytail: every customer read every 10 minutes, 100 to a call; keep an onchain total when there are hundreds of thousands.
     const solvency = Effect.gen(function*() {
-      const [held, owed, known] = yield* Effect.all([
-        near.view<string>("ft_balance_of", { account_id: near.contractId }, near.usdcId),
-        near.view<{ free: string; locked: string; proceeds: string }>("get_reserve"),
-        // Signing in is free, so not every account that ever did is read every round: those the contract has been
-        // seen to know, or that bought or were relayed, always are; the rest take turns, a few a round.
-        sql<{ account_id: string }>`
-          SELECT account_id FROM known_accounts
-          WHERE onchain
-             OR account_id IN (SELECT account_id FROM purchases UNION SELECT account_id FROM relays)
-             OR account_id IN (SELECT account_id FROM known_accounts WHERE NOT onchain ORDER BY coalesce(checked_at, first_seen) LIMIT ${UNSEEN_PER_ROUND})`
-          .pipe(Effect.orDie)
+      const config = yield* solana.config
+      const [known, open] = yield* Effect.all([
+        sql<{ account_id: string }>`SELECT account_id FROM known_accounts`.pipe(Effect.orDie),
+        sql<{ address: string }>`SELECT address FROM checkouts WHERE address IS NOT NULL AND step NOT IN ('done', 'rejected')`.pipe(Effect.orDie)
       ])
-      const house = BigInt(owed.free) + BigInt(owed.locked) + BigInt(owed.proceeds)
-      const each = yield* Effect.forEach(known, ({ account_id }) =>
-        near.view<{ balance: string } | null>("get_account", { account_id }).pipe(
-          // Checked only once read, so one whose read fails keeps its turn. The contract knows it: from now on it's read every round.
-          Effect.tap((a) => sql`UPDATE known_accounts SET checked_at = now(), onchain = onchain OR ${a !== null} WHERE account_id = ${account_id}`.pipe(Effect.orDie)),
-          Effect.map((a) => BigInt(a?.balance ?? 0))
-        ), { concurrency: 4 })
-      const balances = each.reduce((sum, b) => sum + b, 0n)
-      if (BigInt(held) < house + balances) {
+      const wallets = known.flatMap((r) => {
+        try {
+          return [new PublicKey(r.account_id)]
+        } catch {
+          return []
+        }
+      })
+      const [vault, customers, checkouts] = yield* Effect.all([
+        solana.account(config.vault),
+        Effect.forEach(wallets, (w) => solana.customer(w), { concurrency: 4 }),
+        Effect.forEach(open, (c) => solana.checkout(new PublicKey(c.address)), { concurrency: 4 })
+      ])
+      const held = vault ? vault.data.readBigUInt64LE(64) : 0n
+      const balances = customers.reduce((sum, c) => sum + (c?.balance ?? 0n), 0n)
+      const inFlight = checkouts.reduce((sum, co) =>
+        sum + (co?.cards ?? []).reduce((s, card) =>
+          s + (card.status.kind === "Pending" ? card.max_price : card.status.kind === "Drawing" ? card.max_price - card.reference_price : 0n), 0n), 0n)
+      const owed = balances + config.free_reserve + config.locked_reserve + config.proceeds + inFlight
+      if (held < owed) {
         yield* alerts.admin(
-          `contract ${near.contractId} holds ${Number(held) / 1e6} USDC, less than it owes: reserve and proceeds ${Number(house) / 1e6} plus ` +
-            `customers' balances ${Number(balances) / 1e6}. Pause the contract and investigate now.`
+          `the Vault holds ${Number(held) / 1e6} USDC, less than the program owes: ${Number(owed) / 1e6} (Balances ${Number(balances) / 1e6}, ` +
+            `reserve and Proceeds ${Number(config.free_reserve + config.locked_reserve + config.proceeds) / 1e6}, open Checkouts ${Number(inFlight) / 1e6}). Pause the program and investigate now.`
         )
       }
     })
 
-    const baseGas = Effect.gen(function*() {
-      if (!refills || !base.configured) return
-      // A Base RPC hiccup only skips this check.
-      const w = yield* Effect.all([base.address, base.balances]).pipe(Effect.orElseSucceed(() => undefined))
-      if (w) {
-        yield* low(
-          "base",
-          w[1].eth < BASE_GAS_ALERT,
-          `the Base wallet ${w[0]} has under ${formatEther(BASE_GAS_ALERT)} ETH left for gas; Base payments to Bitrefill stop once it holds under ` +
-            `${formatEther(GAS_RESERVE)} ETH plus a payment's L1 fee, what Base's node wants on hand to take one (send about $1 of ETH on Base)`
-        )
-      }
+    // A Draw waits only for ORAO (4-20 s); one still unfinished after ten minutes needs a look.
+    const draws = Effect.gen(function*() {
+      const [r] = yield* sql<{ n: number }>`SELECT count(*)::int AS n FROM checkouts WHERE step = 'draw' AND updated_at < now() - interval '10 minutes'`.pipe(Effect.orDie)
+      if (r && r.n > 0) yield* alerts.admin(`${r.n} checkout(s) have a Draw still unfinished after 10 minutes`)
     })
 
-    const check = Effect.all([section("purchases", purchases), section("gas", gas), section("solvency", solvency), section("Base gas", baseGas)], { discard: true })
+    const check = Effect.all([section("purchases", purchases), section("gas", gas), section("solvency", solvency), section("draws", draws)], { discard: true })
 
     // A registered Bitrefill client's secret lasts 90 days. Said once a day (and at each start) from two
     // weeks out: by the time a guest login fails, cards have already stopped.

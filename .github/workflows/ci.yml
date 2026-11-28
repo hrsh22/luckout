@@ -17,8 +17,14 @@ permissions:
 jobs:
   apps:
     runs-on: ubuntu-latest
+    # The server's Solana tests run the program and ORAO's on LiteSVM: the program job builds and fetches them.
+    needs: program
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: program-for-tests
+          path: programs
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -136,12 +142,25 @@ jobs:
       - run: cargo build-sbf --manifest-path luckout/Cargo.toml -- --locked
       - run: ./fixtures.sh
       - run: cargo test --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: program-for-tests
+          path: |
+            programs/target/deploy/luckout.so
+            programs/luckout/tests/fixtures/orao_vrf.so
+            programs/luckout/tests/fixtures/orao_network_state.json
+          if-no-files-found: error
 
   # The program built reproducibly, in the image pinned by digest below, so anyone can rebuild it byte for byte
-  # and compare it with the chain (`solana-verify verify-from-repo --mount-path programs`). Deploys use this
-  # job's build: gh run download <run id> -n luckout-so-<commit>
+  # and compare it with the chain (`solana-verify verify-from-repo --mount-path programs`, adding
+  # `-- --features staging` or `-- --features production` for mainnet). One build per environment, each with its
+  # own program id (programs/luckout/src/lib.rs). Deploys use this job's build:
+  # gh run download <run id> -n luckout-so-<environment>-<commit>
   program-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [devnet, staging, production]
     defaults:
       run:
         working-directory: programs
@@ -152,11 +171,11 @@ jobs:
           path: ~/.cargo/bin/solana-verify
           key: solana-verify-0.5.2
       - run: command -v solana-verify || cargo install solana-verify --version 0.5.2 --locked
-      - run: solana-verify build --library-name luckout --base-image solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd
-      - run: echo "luckout.so executable hash $(solana-verify get-executable-hash target/deploy/luckout.so)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: solana-verify build --library-name luckout --base-image solanafoundation/solana-verifiable-build@sha256:12fd4c0a0790f0fc41ef74b0cdb6bccc167ba6137eb1adb749bac649481c86bd ${{ matrix.environment != 'devnet' && format('-- --features {0}', matrix.environment) || '' }}
+      - run: echo "luckout.so (${{ matrix.environment }}) executable hash $(solana-verify get-executable-hash target/deploy/luckout.so)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: luckout-so-${{ github.sha }}
+          name: luckout-so-${{ matrix.environment }}-${{ github.sha }}
           path: programs/target/deploy/luckout.so
           if-no-files-found: error
 

@@ -1,7 +1,5 @@
 "use client"
 
-import type { Holding } from "@/lib/balances"
-import { CHAIN_NAMES } from "@/lib/evm"
 import { Select } from "@base-ui/react/select"
 import type { TopUpAsset } from "@luckout/api"
 import { Check, ChevronDown } from "lucide-react"
@@ -10,9 +8,12 @@ import { Check, ChevronDown } from "lucide-react"
 // badge per chain. wNEAR shares NEAR's.
 const TOKENS = new Set(["usdc", "usdt", "eth", "btc", "sol", "near"])
 const CHAINS = new Set(["base", "eth", "arb", "pol", "bsc", "sol", "btc", "near"])
-const OTHER_CHAINS: Record<string, string> = { sol: "Solana", btc: "Bitcoin", near: "NEAR" }
+/** The chains Top-Ups come from, as the page names them. */
+const CHAIN_NAMES: Record<string, string> = {
+  eth: "Ethereum", arb: "Arbitrum", base: "Base", pol: "Polygon", bsc: "BNB Chain", sol: "Solana", btc: "Bitcoin", near: "NEAR", tron: "Tron"
+}
 
-export const chainLabel = (chain: string) => CHAIN_NAMES[chain] ?? OTHER_CHAINS[chain] ?? chain
+export const chainLabel = (chain: string) => CHAIN_NAMES[chain] ?? chain
 const tokenIcon = (symbol: string) => {
   const k = symbol.toLowerCase().replace(/^wnear$/, "near")
   return TOKENS.has(k) ? `/crypto/${k}.svg` : undefined
@@ -20,7 +21,7 @@ const tokenIcon = (symbol: string) => {
 
 /** Stablecoins first; then each token from the chains cheapest to send from. */
 const SYMBOLS = ["USDC", "USDT", "ETH", "BTC", "SOL", "wNEAR"]
-const CHAIN_ORDER = ["base", "arb", "pol", "bsc", "sol", "eth", "btc", "near"]
+const CHAIN_ORDER = ["base", "arb", "pol", "bsc", "tron", "sol", "eth", "btc", "near"]
 const rank = (order: ReadonlyArray<string>, v: string) => (order.includes(v) ? order.indexOf(v) : order.length)
 export const sortAssets = (assets: ReadonlyArray<TopUpAsset>) =>
   [...assets].sort((a, b) => rank(SYMBOLS, a.symbol) - rank(SYMBOLS, b.symbol) || rank(CHAIN_ORDER, a.chain) - rank(CHAIN_ORDER, b.chain))
@@ -41,61 +42,31 @@ export function TokenMark({ symbol, chain, size = 32 }: { symbol: string; chain:
   )
 }
 
-const amountText = (n: number) => n.toLocaleString("en-US", { maximumSignificantDigits: 5 })
-
-function Option({ a, held, short }: { a: TopUpAsset; held?: Holding | undefined; short?: boolean | undefined }) {
+function Option({ a }: { a: TopUpAsset }) {
   return (
-    <span className={`flex min-w-0 flex-1 items-center gap-3 ${short ? "opacity-50" : ""}`}>
+    <span className="flex min-w-0 flex-1 items-center gap-3">
       <TokenMark symbol={a.symbol} chain={a.chain} />
       <span className="flex min-w-0 flex-col text-left leading-tight">
         <span className="font-semibold">{a.symbol}</span>
         <span className="text-sm text-muted">{chainLabel(a.chain)}</span>
       </span>
-      {held && (
-        <span className="ml-auto flex flex-col text-right leading-tight tabular-nums">
-          <span className="font-semibold">{amountText(held.amount)}</span>
-          <span className="text-sm text-muted">${held.usd.toFixed(2)}</span>
-        </span>
-      )}
     </span>
   )
 }
 
-/** A choice that isn't a token, e.g. keeping a withdrawal in NEAR Intents: value "". */
-function NoToken({ label }: { label: string }) {
-  return (
-    <span className="flex min-w-0 items-center gap-3">
-      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-soft" aria-hidden="true">
-        <img src="/crypto/near.svg" alt="" width={20} height={20} className="rounded-full" />
-      </span>
-      <span className="font-semibold">{label}</span>
-    </span>
-  )
-}
-
-/** Choose a token (to pay with, or to receive): logos and chain badges instead of a long text list. */
-export function TokenPicker({ assets, value, onChange, label = "Pay with", none, holdings, short }: {
+/** Choose a token to pay with: logos and chain badges instead of a long text list. */
+export function TokenPicker({ assets, value, onChange, label = "Pay with" }: {
   assets: ReadonlyArray<TopUpAsset>
   value: string
   onChange: (assetId: string) => void
   label?: string
-  /** Offer a choice with no token (value ""), labelled so. */
-  none?: string
-  /** What the connected wallet holds of each, shown beside it. */
-  holdings?: ReadonlyMap<string, Holding> | undefined
-  /** Tokens that can't cover the amount: dimmed, still selectable. */
-  short?: ((assetId: string) => boolean) | undefined
 }) {
   const selected = assets.find((a) => a.assetId === value)
   return (
     <Select.Root value={value} onValueChange={(v) => typeof v === "string" && onChange(v)}>
       <Select.Trigger className="field flex !h-14 items-center gap-3 !rounded-[1.25rem]" aria-label={label}>
         <Select.Value className="flex min-w-0 flex-1">
-          {() => (selected
-            ? <Option a={selected} held={holdings?.get(selected.assetId)} />
-            : none && value === ""
-            ? <NoToken label={none} />
-            : <span className="text-muted">Choose a token</span>)}
+          {() => (selected ? <Option a={selected} /> : <span className="text-muted">Choose a token</span>)}
         </Select.Value>
         <Select.Icon className="ml-auto text-muted"><ChevronDown size={18} /></Select.Icon>
       </Select.Trigger>
@@ -109,16 +80,10 @@ export function TokenPicker({ assets, value, onChange, label = "Pay with", none,
                 label={`${a.symbol} ${chainLabel(a.chain)}`}
                 className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 outline-none select-none data-[highlighted]:bg-soft"
               >
-                <Option a={a} held={holdings?.get(a.assetId)} short={short?.(a.assetId)} />
+                <Option a={a} />
                 <Select.ItemIndicator className="text-ink"><Check size={16} strokeWidth={3} /></Select.ItemIndicator>
               </Select.Item>
             ))}
-            {none && (
-              <Select.Item value="" label={none} className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 outline-none select-none data-[highlighted]:bg-soft">
-                <NoToken label={none} />
-                <Select.ItemIndicator className="ml-auto text-ink"><Check size={16} strokeWidth={3} /></Select.ItemIndicator>
-              </Select.Item>
-            )}
           </Select.Popup>
         </Select.Positioner>
       </Select.Portal>

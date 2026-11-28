@@ -20,10 +20,10 @@ import { Quantity } from "@/components/quantity"
 import { api, errorMessage, isNotFound, TimedOut } from "@/lib/api"
 import { countryName, flag, WORLDWIDE } from "@/lib/countries"
 import { usd, usdDown, usdUp } from "@/lib/format"
-import { modeInfo, modeName, modeSlug, playable, pricedOutcomes, simpleQuote } from "@/lib/modes"
+import { luckyCheckout, modeInfo, modeName, modeSlug, playable, pricedOutcomes, simpleQuote } from "@/lib/modes"
 import { pendingMode } from "@/lib/onboarding"
 import { modePalette } from "@/lib/palette"
-import { rememberViewed, useCheckoutEmail, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
+import { rememberViewed, useCheckoutEmail, useProgram, useQuote, useReserve, useShopStatus, useSummary, voucherQuery } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { openingAmount, openingMode } from "@/lib/voucher-choice"
 import { MAX_CART, type Mode, type Quote } from "@luckout/api"
@@ -78,16 +78,20 @@ function Voucher() {
   // openingMode only returns modes this build knows, so this is never undefined.
   const info = modeInfo(mode)!
   const reserve = useReserve()
-  // Priced at once from the same tables and reserve the contract uses. A Lucky mode that can't pay a cent of Cashback on
-  // this card right now (playable) is quoted and bought at Normal, as the Cart does, and the receipt says why.
-  const local = pkg && (info.premiumBps === 0 || reserve !== undefined) ? playable({ mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) }) : undefined
+  const min = useProgram().data?.minLuckyCheckout
+  // Priced at once from the same tables and reserve the program uses. A Lucky mode that can't pay a cent of Cashback on
+  // this card right now (playable), or plays less than the smallest Lucky Checkout alone (luckyCheckout), is quoted and
+  // bought at Normal, as the Cart does, and the receipt says why.
+  const local = pkg && (info.premiumBps === 0 || reserve !== undefined)
+    ? luckyCheckout([playable({ mode, ...simpleQuote(info, pkg.priceMicroUsdc, reserve) })], min)[0]
+    : undefined
   const played: Mode = local?.mode ?? mode
   const [round, setRound] = useState(0)
   // A fresh key per choice: double clicks and retries return the same purchase instead of buying twice.
   const idempotencyKey = useMemo(() => crypto.randomUUID(), [id, value, modeSlug(mode), modeSlug(played), round]) // eslint-disable-line react-hooks/exhaustive-deps
   const buy = useMutation({
     mutationFn: async (q: Quote) => {
-      // Exactly what the quote showed: its mode, and the contract refuses to debit above maxPrice
+      // Exactly what the quote showed: its mode, and the program refuses to debit above maxPrice
       // or to play a Lucky Amount other than the one shown.
       const payload = purchaseRequest({ voucherId: id, value: value! }, idempotencyKey, q)
       return api((c) => c.purchases.create({ payload }), token, "150 seconds").catch((e) => {
@@ -117,9 +121,10 @@ function Voucher() {
   const copies = card && many ? pricedLines([{ ...card, keys }], cartQuote)[0] : undefined
   const live = usePolledPurchase(buy.data, token)
   // Not renewed while the purchase runs or its result is on screen; buying again reads a fresh one.
-  const quote = useQuote(id, value, played, !live && !buy.isPending)
+  // Asked in the mode chosen, so the server says why a Lucky card is at Normal (its reserve, or the smallest Lucky Checkout).
+  const quote = useQuote(id, value, mode, !live && !buy.isPending)
   // The server's quote replaces the local one in a moment, under the same rule (its reserve may be fresher).
-  const served = quote.data && playable(quote.data)
+  const served = quote.data && luckyCheckout([playable(quote.data)], min)[0]
   const shown: Quote | undefined = served ?? local
   // Several: the receipt's odds are the Cart quote's first copy, from the same quotes its copies note reads.
   const first = many && cartQuote ? cartQuote[0] : shown
@@ -250,7 +255,7 @@ function Voucher() {
                     info={shownInfo}
                     count={quantity}
                     total={many ? cartQuote && totals(cartQuote).pay : undefined}
-                    copies={copies ?? (fellBack ? { line: { keys: [idempotencyKey] }, normal: true, plays: undefined } : undefined)}
+                    copies={copies ?? (fellBack ? { line: { keys: [idempotencyKey] }, normal: true, belowMin: !!first && "belowMin" in first, plays: undefined } : undefined)}
                     error={buy.error
                       ? errorMessage(buy.error)
                       : checkout.error
@@ -451,14 +456,19 @@ function Receipt({ shown, exact, info, count = 1, total, copies, error, retry, c
 }
 
 /** A line as pricedLines gives it: its copies, and what the reserve did to them. */
-type Copies = { readonly line: { readonly keys: ReadonlyArray<string> }; readonly normal: boolean; readonly plays: number | undefined }
+type Copies = { readonly line: { readonly keys: ReadonlyArray<string> }; readonly normal: boolean; readonly belowMin?: boolean; readonly plays: number | undefined }
 
 /**
  * What the reserve does to a line's copies right now, in the same words on the card page and in the Cart: some bought
- * at the normal price, or only part of each playing.
+ * at the normal price, or only part of each playing. Or the checkout's Lucky cards play under the smallest Lucky
+ * Checkout, so they're all at the normal price.
  */
-export function CopiesNote({ priced: { line, normal, plays } }: { priced: Copies }) {
+export function CopiesNote({ priced: { line, normal, belowMin, plays } }: { priced: Copies }) {
   const many = line.keys.length > 1
+  const min = useProgram().data?.minLuckyCheckout
+  if (belowMin && min !== undefined) {
+    return <p className="text-sm text-warn">Lucky cards play together from {usd(min)} a checkout, so {many ? "these are" : "this one is"} bought at the normal price. Add more Lucky cards to your cart to play.</p>
+  }
   if (normal) return <p className="text-sm text-warn">The Cashback Reserve is used up right now, so {many ? "some of these are" : "this one is"} bought at the normal price.</p>
   if (plays === undefined) return null
   return (
@@ -504,7 +514,7 @@ function BuyAction({ need, largest = need, label, onBuy, onAdd }: {
   onBuy: () => void
   onAdd: (short: number) => void
 }) {
-  const { accountId, account, accountError, refresh, intents, gasFree, token } = useSession()
+  const { accountId, account, accountError, refresh, token } = useSession()
   const actions = useWalletActions()
   const shop = useShopStatus().data
   const checkout = useCheckoutEmail(token).data
@@ -551,7 +561,7 @@ function BuyAction({ need, largest = need, label, onBuy, onAdd }: {
           Raise to {[overPer && `${usd(per)} a purchase`, overDay && `${usd(daily)} a day`].filter(Boolean).join(", ")}
         </Button>
         <p className="text-sm">
-          {intents || gasFree ? "One approval, no fee" : "One approval"}, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
+          One tap, no fee, then you can buy. Or <Link href="/wallet#limits" className="font-semibold underline underline-offset-4">set your own limits</Link>.
         </p>
       </div>
     )

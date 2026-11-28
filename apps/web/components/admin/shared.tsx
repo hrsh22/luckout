@@ -1,16 +1,11 @@
 "use client"
 
+import { shortAccount } from "@/components/avatar"
 import { errorMessage } from "@/lib/api"
-import { network } from "@/lib/chain"
+import { explorerAccount } from "@/lib/chain"
 import { motion } from "motion/react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-
-/** Signs with the admin's own wallet, toasts the result with a link, and refreshes. True if it went through. */
-export type Tx = (pending: string, done: string, f: (accountId: string) => Promise<unknown>) => Promise<boolean>
-
-/** Runs `f` if the signed-in account owns the contract; otherwise explains who must do it. */
-export type AsOwner = (f: () => void) => () => void
 
 export const ago = (iso: string) => {
   const min = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000))
@@ -55,14 +50,16 @@ export const TONE = {
   busy: "bg-lilac-soft! text-ink"
 } as const
 
-/** A purchase's step as the server names it, except a guest order paying Bitrefill from the Base Float (ADR-0012). */
+/** A purchase's step as the server names it, except a guest order paying Bitrefill from the Pay Wallet (ADR-0015). */
 export const stepLabel = (step: string) => (step === "pay" ? "Paying Bitrefill" : step)
 
-/** wei → "0.0012" (ETH, at most 5 decimals). */
-export const eth = (wei: string) => (Number(BigInt(wei) / 10n ** 12n) / 1e6).toFixed(5).replace(/0+$/, "").replace(/\.$/, "")
+/** lamports → "0.0512" SOL */
+export const sol = (lamports: string | number) => (Number(lamports) / 1e9).toLocaleString("en-US", { maximumFractionDigits: 4 })
 
-/** An address or transaction on Basescan (Base Sepolia on testnet), e.g. basescan(`tx/${hash}`). */
-export const basescan = (path: string) => `https://${network === "testnet" ? "sepolia." : ""}basescan.org/${path}`
+/** A Solana address shortened, linked to Solana Explorer on this cluster. */
+export const AddressLink = ({ address, full = false }: { address: string; full?: boolean }) => (
+  <a href={explorerAccount(address)} target="_blank" rel="noreferrer" className="break-all underline underline-offset-2">{full ? address : shortAccount(address)}</a>
+)
 
 export function AdminTabs() {
   const path = usePathname()

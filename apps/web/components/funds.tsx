@@ -1,29 +1,33 @@
 "use client"
 
 import { AmountField } from "@/components/amount-field"
-import { shortAccount } from "@/components/avatar"
 import { HelpLink } from "@/components/help-link"
-import { sortAssets, TokenPicker } from "@/components/token-picker"
-import { TopUp } from "@/components/top-up"
-import { TopUpWallet } from "@/components/top-up-wallet"
-import { Button, buttonVariants } from "@/components/ui/button"
+import { AddressBox, TopUp } from "@/components/top-up"
+import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { useWalletActions } from "@/lib/actions"
-import { api } from "@/lib/api"
-import { walletChain } from "@/lib/evm"
+import { errorMessage } from "@/lib/api"
 import { dollars, toMicro, usd, usdUp } from "@/lib/format"
-import { MIN_GAS_NEAR, network } from "@/lib/near"
-import { pendingMode } from "@/lib/onboarding"
-import { useSession, WALLET_NAMES } from "@/lib/session"
-import type { TopUpAsset } from "@luckout/api"
-import { Copy, Droplets, ExternalLink, Fuel } from "lucide-react"
-import { toast } from "sonner"
-import { useEffect, useState } from "react"
+import { modeName } from "@/lib/modes"
+import { pendingMode, setPendingMode } from "@/lib/onboarding"
+import { useDepositAddress, useProgram, useTopUpAssets } from "@/lib/queries"
+import { useSession } from "@/lib/session"
+import { solanaPayUri, tapsFor, withdrawProblem } from "@/lib/top-up-quote"
+import { useQueryClient } from "@tanstack/react-query"
+import { LoaderCircle } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 
 export { AmountField }
 
-/** Add funds without leaving the page, as a sheet. */
-export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onOpenChange: (o: boolean) => void; need?: number }) {
+type Tab = "solana" | "chain"
+
+/** Add funds without leaving the page, as a sheet. `need` is what's missing for a card. */
+export function AddFundsSheet({ open, onOpenChange, need, tab = "solana" }: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  need?: number
+  tab?: Tab
+}) {
   return (
     <Sheet
       open={open}
@@ -31,60 +35,46 @@ export function AddFundsSheet({ open, onOpenChange, need }: { open: boolean; onO
       title="Add funds"
       description={need ? `You need ${usdUp(need)} more for this card.` : "Your balance pays for cards. Withdraw what you don't spend any time."}
     >
-      <AddFundsPanel key={need ?? 0} need={need} onDone={(ok) => ok && onOpenChange(false)} onContinue={() => onOpenChange(false)} />
+      <AddFundsPanel key={`${need ?? 0}-${tab}`} need={need} tab={tab} onDone={(ok) => ok && onOpenChange(false)} onContinue={() => onOpenChange(false)} />
     </Sheet>
   )
 }
 
 /**
- * Test USDC on testnet, a deposit from the wallet, or (on mainnet) a top-up from any chain. A mode
- * chosen before the first deposit is saved right after it, with one more approval. A top-up from another chain
- * takes minutes and lands by itself: once it's sent, `onContinue` lets the customer go on without waiting for it.
+ * Adding funds (ADR-0015): the one-time approval first, then the Deposit Address for USDC and USDT on Solana, or a
+ * 1Click Top-Up from another chain. Money arrives by itself, so `onContinue` lets the customer go on without waiting;
+ * `onDone(true)` runs once their balance has grown.
  */
-export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | undefined; onDone: (ok: boolean) => void; onContinue?: () => void }) {
-  const { accountId, walletUsdc, walletNear, gasFree, intents, wallet } = useSession()
-  // Unless our relayer pays, every transaction costs a little NEAR. Say so before the wallet fails with "balance 0".
-  const noGas = gasFree === false && walletNear !== undefined && BigInt(walletNear) < MIN_GAS_NEAR
-  const actions = useWalletActions()
-  const inWallet = Number(walletUsdc ?? 0)
-  // What's needed for the card, or else $25, or all of it when the wallet holds less (and at least the $1 minimum).
-  const [amount, setAmount] = useState(() =>
-    need
-      ? dollars(Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000)
-      : inWallet >= 1_000_000 && inWallet < 25_000_000
-      ? dollars(Math.floor(inWallet / 10_000) * 10_000)
-      : "25"
-  )
-  const [busy, setBusy] = useState<"faucet" | "deposit" | "mode">()
-  // An EVM or Solana wallet tops up from its own chain; "wallet" is then the USDC already in its NEAR Intents account.
-  const [tab, setTab] = useState<"wallet" | "chain">(intents ? "chain" : "wallet")
-  const micro = toMicro(amount)
+export function AddFundsPanel({ need, onDone, onContinue, tab: first = "solana" }: {
+  need?: number | undefined
+  onDone: (ok: boolean) => void
+  onContinue?: () => void
+  tab?: Tab
+}) {
+  const { account, token } = useSession()
+  const approved = useDepositAddress(token).data?.approved === true
+  const [tab, setTab] = useState<Tab>(first)
 
-  const done = async (ok: boolean) => {
-    if (ok && accountId && pendingMode(accountId)) {
-      setBusy("mode")
-      await actions.savePendingMode()
+  // The balance when this opened; once it grows, the money has landed.
+  const balance = account === undefined ? undefined : Number(account?.balance ?? 0)
+  const start = useRef<number | undefined>(undefined)
+  const done = useRef(onDone)
+  done.current = onDone
+  useEffect(() => {
+    if (balance === undefined) return
+    if (start.current === undefined) start.current = balance
+    else if (balance > start.current) {
+      start.current = balance
+      done.current(true)
     }
-    setBusy(undefined)
-    onDone(ok)
-  }
+  }, [balance])
 
   return (
     <div className="flex flex-col gap-6">
-      {noGas && accountId && <GasNotice accountId={accountId} />}
-      {network === "testnet" && (
-        <div className="flex flex-col gap-3 rounded-[1.5rem] bg-gold-soft p-5 text-gold-ink">
-          <p className="flex items-center gap-2 font-semibold"><Droplets size={18} aria-hidden="true" />This is the testnet</p>
-          <p className="text-[15px]">Get 100 free test USDC, deposited straight into your balance in one {intents ? "signature" : "approval"}.</p>
-          <Button variant="gold" size="lg" loading={busy === "faucet" || busy === "mode"} disabled={!!busy || noGas} onClick={() => (setBusy("faucet"), actions.faucet().then(done))}>
-            {busy === "mode" ? "Saving your default mode" : "Get 100 test USDC"}
-          </Button>
-        </div>
-      )}
-
-      {network === "mainnet" && (
+      {/* A Top-Up from another chain lands at the Deposit Address too: it needs the approval first. */}
+      {approved && (
         <div role="tablist" className="flex rounded-full bg-soft p-1">
-          {(intents ? (["chain", "wallet"] as const) : (["wallet", "chain"] as const)).map((t) => (
+          {(["solana", "chain"] as const).map((t) => (
             <button
               key={t}
               role="tab"
@@ -93,48 +83,12 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
               onClick={() => setTab(t)}
               className="h-10 flex-1 rounded-full text-sm font-semibold text-muted transition-colors aria-selected:bg-white aria-selected:text-ink aria-selected:shadow-card"
             >
-              {t === "wallet" ? (intents ? "From NEAR Intents" : "From your NEAR wallet") : intents ? `From your ${WALLET_NAMES[wallet!]} wallet` : "From another chain"}
+              {t === "solana" ? "On Solana" : "From another chain"}
             </button>
           ))}
         </div>
       )}
-
-      {tab === "chain" && network === "mainnet"
-        ? intents ? <TopUpWallet need={need} onDone={done} onContinue={onContinue} /> : <TopUp need={need} onDone={done} onContinue={onContinue} />
-        // Testnet with nothing to deposit: the faucet above is the whole story.
-        : network === "testnet" && inWallet < 1_000_000
-        ? null
-        : (
-          <div className="flex flex-col gap-4">
-            {network === "testnet" && <p className="font-semibold">{intents ? "Or move USDC from your NEAR Intents account" : "Or deposit USDC from your wallet"}</p>}
-            <AmountField
-              label="Amount to deposit in USDC"
-              value={amount}
-              onChange={setAmount}
-              picks={[
-                ...(need ? [{ label: `Exactly ${usdUp(Math.max(need, 1_000_000))}`, micro: Math.ceil(Math.max(need, 1_000_000) / 10_000) * 10_000 }] : []),
-                { label: "$10", micro: 10_000_000 },
-                { label: "$25", micro: 25_000_000 },
-                { label: "$50", micro: 50_000_000 },
-                ...(inWallet >= 1_000_000 ? [{ label: "All of it", micro: inWallet }] : [])
-              ]}
-            />
-            <p className="text-sm text-muted">
-              {accountId && (intents ? `Your NEAR Intents account has ${usd(inWallet)} USDC. ` : `${shortAccount(accountId)} has ${usd(inWallet)} USDC. `)}
-              Deposits start at $1.{gasFree && " No network fee: Luckout pays it."}
-            </p>
-            <Button
-              size="lg"
-              loading={busy === "deposit"}
-              disabled={!!busy || noGas || !(micro >= 1_000_000) || micro > inWallet}
-              onClick={() => (setBusy("deposit"), actions.deposit(micro).then(done))}
-            >
-              {micro > inWallet
-                ? `More than your ${intents ? "NEAR Intents account" : "wallet"} holds`
-                : `${intents ? "Move" : "Deposit"} ${micro >= 1_000_000 ? usd(micro) : ""}${intents ? " into Luckout" : ""}`}
-            </Button>
-          </div>
-        )}
+      {approved && tab === "chain" ? <TopUp need={need} onContinue={onContinue} /> : <DepositPanel need={need} onContinue={onContinue} />}
       <p className="text-sm text-muted">
         <HelpLink href="/docs/add-funds">Every way to add funds</HelpLink>, with what each costs.
       </p>
@@ -142,105 +96,194 @@ export function AddFundsPanel({ need, onDone, onContinue }: { need?: number | un
   )
 }
 
-/** The wallet has no NEAR for fees: how to get some, then check again without reloading. */
-function GasNotice({ accountId }: { accountId: string }) {
-  const { refresh } = useSession()
-  const [checking, setChecking] = useState(false)
-  return (
-    <div className="flex flex-col gap-3 rounded-[1.5rem] bg-warn-soft p-5 text-warn">
-      <p className="flex items-center gap-2 font-semibold"><Fuel size={18} aria-hidden="true" />Your wallet needs a little NEAR first</p>
-      <p className="text-[15px]">
-        Every NEAR transaction costs a tiny fee in NEAR (about 0.03), and {shortAccount(accountId)} has none yet.{" "}
-        {network === "testnet" ? "Get free testnet NEAR from the official faucet, then check again." : "Send it about 0.1 NEAR, then check again."}
-      </p>
-      <div className="flex flex-wrap gap-2">
-        {network === "testnet" && (
-          <a href="https://docs.near.org/getting-started/faucet" target="_blank" rel="noreferrer" className={buttonVariants({ size: "sm" })}>
-            Open the faucet<ExternalLink />
-          </a>
-        )}
-        <Button variant="light" size="sm" onClick={() => navigator.clipboard.writeText(accountId).then(() => toast.success("Account copied"))}>
-          <Copy />Copy account
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          loading={checking}
-          onClick={async () => {
-            setChecking(true)
-            await refresh().catch(() => {})
-            setChecking(false)
-          }}
-        >
-          Check again
+/**
+ * The customer's Deposit Address: their own Solana address, where USDC moves into their Balance by itself (ADR-0015).
+ * Before the one-time approval, the approval. After it, the address with its QR, what's waiting there, and a tap for
+ * any USDT or ORE there.
+ */
+export function DepositPanel({ need, onContinue }: { need?: number | undefined; onContinue?: (() => void) | undefined }) {
+  const { accountId, account, token, refresh } = useSession()
+  const actions = useWalletActions()
+  const qc = useQueryClient()
+  const deposit = useDepositAddress(token)
+  const usdcMint = useProgram().data?.usdcMint
+  const assets = useTopUpAssets(token).data ?? []
+  const [busy, setBusy] = useState<string>()
+
+  // Deposits land by themselves: each time the address is read again, so is the balance.
+  useEffect(() => {
+    if (deposit.dataUpdatedAt) refresh().catch(() => {})
+  }, [deposit.dataUpdatedAt, refresh])
+
+  if (!accountId) return null
+  const d = deposit.data
+  if (!d) {
+    return deposit.isError
+      ? (
+        <div className="flex flex-col items-start gap-2">
+          <p role="alert" className="text-sm font-medium text-bad">Couldn't read your Deposit Address. {errorMessage(deposit.error)}</p>
+          <Button variant="light" size="sm" loading={deposit.isFetching} onClick={() => void deposit.refetch()}>Try again</Button>
+        </div>
+      )
+      : <span className="skeleton h-40 rounded-[1.5rem]" />
+  }
+
+  const after = async (key: string, f: () => Promise<boolean>) => {
+    setBusy(key)
+    const ok = await f()
+    await qc.invalidateQueries({ queryKey: ["deposit-address"] })
+    setBusy(undefined)
+    return ok
+  }
+
+  if (!d.approved) {
+    // A new customer's account opens on the mode they chose in Welcome (or here, on Wallet).
+    const mode = account?.default_mode ?? pendingMode(accountId) ?? "normal"
+    const approve = () => after("approve", () => actions.approve(mode)).then((ok) => ok && setPendingMode(accountId, undefined))
+    return (
+      <div className="flex flex-col gap-4">
+        {account
+          ? (
+            <p>
+              Your Deposit Address lost its approval for Luckout: another app replaced it. Until you approve again, what you send there waits
+              at the address, still yours.
+            </p>
+          )
+          : (
+            <>
+              <p>
+                One tap sets up your <b>Deposit Address</b>: your own Solana address, where USDC from any exchange or wallet moves into your
+                balance by itself. The program lets it go into your balance and nowhere else.
+              </p>
+              <p className="text-sm text-muted">It also opens your Luckout account, on {modeName(mode)} as your default mode. No fee: Luckout pays it.</p>
+            </>
+          )}
+        {d.waiting > 0 && <p className="text-sm font-medium">{usd(d.waiting)} USDC is at the address already: it moves into your balance once you approve.</p>}
+        <Button size="lg" className="self-start" loading={busy === "approve"} disabled={!!busy} onClick={() => void approve()}>
+          {account ? "Approve it again" : "Set up deposits"}
         </Button>
       </div>
+    )
+  }
+
+  const taps = tapsFor(d.held, assets)
+  return (
+    <div className="flex flex-col gap-4">
+      <p>
+        Send USDC or USDT <b>on Solana</b> to your Deposit Address, from any exchange or wallet.
+        {need ? <> This card needs at least <b>{usdUp(Math.max(need, 1_000_000))}</b>.</> : null}
+      </p>
+      <AddressBox address={d.address} qr={usdcMint ? solanaPayUri(d.address, usdcMint) : d.address} label="QR code of your Deposit Address" />
+      <ul className="flex list-disc flex-col gap-1.5 pl-5 text-sm text-ink-soft">
+        <li>USDC lands in your balance by itself, in a minute or two. Less than 1 USDC waits here until more arrives.</li>
+        <li>USDT takes one tap here once it arrives{assets.some((a) => a.swap && a.symbol === "ORE") ? ", and so does ORE" : ""}.</li>
+        <li>On an exchange, pick the Solana network. USDC on another network doesn't arrive here: use From another chain.</li>
+        <li>A wallet app that scans the code opens a USDC transfer; on an exchange, paste the address.</li>
+      </ul>
+
+      {d.waiting >= 1_000_000
+        ? (
+          <p className="flex items-center gap-2 rounded-2xl bg-soft p-3 text-sm font-medium" aria-live="polite">
+            <LoaderCircle size={16} className="shrink-0 animate-spin" aria-hidden="true" />
+            {usd(d.waiting)} USDC has arrived and is moving into your balance.
+          </p>
+        )
+        : d.waiting > 0 && (
+          <p className="rounded-2xl bg-soft p-3 text-sm" aria-live="polite">
+            {usd(d.waiting)} USDC is here, under the 1 USDC minimum: it moves into your balance once more arrives.
+          </p>
+        )}
+
+      {taps.map((t) => (
+        <div key={t.held.assetId} className="flex flex-col gap-2 rounded-2xl bg-gold-soft p-4 text-gold-ink">
+          <p>
+            <b>{t.amount} {t.held.symbol}</b> is at your Deposit Address{t.usd !== undefined ? `, worth about ${usd(Math.floor(t.usd * 1e6))}` : ""}.
+          </p>
+          {t.enough
+            ? (
+              <>
+                <p className="text-sm">One tap swaps all of it into USDC through Jupiter and puts it in your balance, in one transaction. Luckout pays the fee.</p>
+                <Button
+                  size="sm"
+                  variant="light"
+                  className="self-start"
+                  loading={busy === t.held.assetId}
+                  disabled={!!busy}
+                  onClick={() => void after(t.held.assetId, () => actions.swap(t.held))}
+                >
+                  Swap it into my balance
+                </Button>
+              </>
+            )
+            : <p className="text-sm">That's under $1 of {t.held.symbol}, the smallest swap. Send a little more to swap it.</p>}
+        </div>
+      ))}
+
+      {onContinue && (
+        <div className="flex flex-col gap-2 rounded-2xl bg-soft p-3 text-sm">
+          <p>Sent it, or sending it later? No need to wait here: it lands in your balance by itself.</p>
+          <Button size="sm" className="self-start" onClick={onContinue}>Continue</Button>
+        </div>
+      )}
     </div>
   )
 }
 
 export function WithdrawSheet({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
-  const { account, accountId, intents, wallet, token } = useSession()
+  const { account, accountId } = useSession()
   const actions = useWalletActions()
   const [amount, setAmount] = useState("")
-  const [busy, setBusy] = useState(false)
-  // EVM and Solana wallets on mainnet pick where it lands (ADR-0011); "" keeps it in their NEAR Intents account.
-  const [assets, setAssets] = useState<ReadonlyArray<TopUpAsset>>([])
   const [to, setTo] = useState("")
+  const [busy, setBusy] = useState(false)
   const balance = Number(account?.balance ?? 0)
   const micro = toMicro(amount)
-  const outward = intents && network === "mainnet"
+  const problem = to.trim() ? withdrawProblem(to.trim(), accountId) : undefined
 
   useEffect(() => {
     if (open) setAmount(dollars(balance))
   }, [open, balance])
-
-  useEffect(() => {
-    if (!open || !outward || !token) return
-    api((c) => c.topup.assets(), token).then((all) => {
-      const usdc = sortAssets(all.filter((a) => walletChain(wallet === "solana" ? "solana" : "evm", a.chain) && (a.symbol === "USDC" || a.symbol === "USDT")))
-      setAssets(usdc)
-      setTo((t) => t || (usdc.find((a) => a.symbol === "USDC" && a.chain === (wallet === "solana" ? "sol" : "base"))?.assetId ?? ""))
-    }, () => {})
-  }, [open, outward, token, wallet])
-  const destination = assets.find((a) => a.assetId === to)
-  // A swap to another chain starts at $1: no quick pick offers less than can be sent.
-  const least = destination ? 1_000_000 : 1
 
   return (
     <Sheet
       open={open}
       onOpenChange={onOpenChange}
       title="Withdraw"
-      description={`${
-        outward
-          ? "USDC goes to your own address on the chain you pick, or stays in your NEAR Intents account."
-          : intents
-          ? `USDC goes to your NEAR Intents account, where your ${WALLET_NAMES[wallet!]} wallet controls it.`
-          : `USDC goes back to ${accountId ? shortAccount(accountId) : "your wallet"}.`
-      } Money locked in a purchase in progress stays until it finishes.`}
+      description="USDC goes to any Solana address: a wallet of yours, or an exchange's USDC deposit address on Solana. Money locked in a purchase in progress stays until it finishes."
     >
       <div className="flex flex-col gap-4">
         <AmountField
           label="Amount to withdraw in USDC"
           value={amount}
           onChange={setAmount}
-          picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }].filter((p) => p.micro >= least)}
+          picks={[{ label: "Half", micro: Math.floor(balance / 2) }, { label: `All ${usd(balance)}`, micro: balance }].filter((p) => p.micro > 0)}
         />
-        {outward && (
-          <div className="flex flex-col gap-2 text-sm">
-            <span className="font-semibold text-muted">Send it to your own address, as</span>
-            <TokenPicker assets={assets} value={to} onChange={setTo} label="Send it to" none="Keep it in NEAR Intents" />
-            {destination && <span className="text-muted">Withdrawals start at $1. The swap's spread comes out of what arrives; there's no fee to Luckout and no gas for you.</span>}
-          </div>
-        )}
+        <div className="flex flex-col gap-2">
+          <label htmlFor="withdraw-to" className="text-sm font-semibold text-muted">To this Solana address</label>
+          <input
+            id="withdraw-to"
+            className="field font-mono text-sm"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            aria-invalid={!!problem}
+            placeholder="Your wallet or exchange address on Solana"
+            spellCheck={false}
+            autoComplete="off"
+            autoCapitalize="off"
+          />
+          {problem
+            ? <p role="alert" className="text-sm font-medium text-bad">{problem}</p>
+            : <p className="text-sm text-muted">Sent as USDC on Solana. Check the address: a transfer can't be undone. No fee: Luckout pays it.</p>}
+        </div>
         <Button
           size="lg"
           loading={busy}
-          disabled={busy || !(micro >= least) || micro > balance}
+          disabled={busy || !(micro > 0) || micro > balance || !to.trim() || !!problem}
           onClick={async () => {
             setBusy(true)
-            if (await (destination ? actions.withdrawTo(micro, destination) : actions.withdraw(micro))) onOpenChange(false)
+            if (await actions.withdraw(micro, to.trim())) {
+              setTo("")
+              onOpenChange(false)
+            }
             setBusy(false)
           }}
         >

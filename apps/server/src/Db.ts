@@ -4,7 +4,7 @@ import { PGlite } from "@electric-sql/pglite"
 import { Config, Effect, Layer, Option } from "effect"
 import { Migrator, SqlClient } from "effect/sql"
 import { mkdirSync } from "node:fs"
-import { ContractId, Network } from "./Near.ts"
+import { Cluster, ProgramId } from "./Solana.ts"
 
 // Exactly one server process per database (ADR-0006): a second one would poll Telegram twice
 // and race the operator's transaction nonces. The lock lives as long as this connection.
@@ -382,34 +382,83 @@ export const migrationSteps = {
   "0029_purchase_used": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE purchases ADD COLUMN used_at TIMESTAMPTZ`
+  }),
+  // Solana (ADR-0015): a checkout is one numbered Checkout account, and a Lucky card waits on one of its randomness
+  // requests (its round) between settle and its Draw.
+  // ponytail: appended while Phase 2 runs; squashed into one migration for the fresh Solana database before it deploys.
+  "0030_solana_checkouts": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE checkouts ADD COLUMN number BIGINT, ADD COLUMN address TEXT`
+    yield* sql`ALTER TABLE purchases ADD COLUMN round SMALLINT`
+    // The reconciler's indexes take the new open steps: a card waiting on its Draw, and its checkout.
+    yield* sql`DROP INDEX purchases_open`
+    yield* sql`CREATE INDEX purchases_open ON purchases (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'confirm', 'fail', 'drawing')`
+    yield* sql`DROP INDEX checkouts_open`
+    yield* sql`CREATE INDEX checkouts_open ON checkouts (next_attempt_at) WHERE step IN ('admit', 'ordering', 'pay', 'delivery', 'settle', 'draw')`
+  }),
+  // When a customer's Deposit Address lost its approval (another app's replaced ours), so they're told once.
+  "0031_deposit_approval": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE known_accounts ADD COLUMN approval_lost_at TIMESTAMPTZ`
+  }),
+  // A Buy tapped in the bot while the Balance was short waits here for the money, until its quote expires (ADR-0015).
+  // Telegram is linked by signing in with it in Privy now, so the bot's link codes go.
+  "0032_pending_buys": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`
+      CREATE TABLE pending_buys (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        chat_id BIGINT NOT NULL,
+        cards JSONB NOT NULL,
+        balance BIGINT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    yield* sql`DROP TABLE telegram_link_codes`
+  }),
+  // Where 1Click refunds a Top-Up: an address on its source chain, which the customer gives (ADR-0015).
+  "0033_swap_refund_to": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE intents_swaps ADD COLUMN refund_to TEXT`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)
 
-const Migrations = Layer.effectDiscard(Migrator.make({})({ loader: migrations }))
-
 /**
- * A database belongs to one deployment for good: the first server to start records its network and
- * contract, and a server for another refuses to start against it. So testnet and mainnet data never
- * mix, and neither do staging and production, which are both on mainnet (ADR-0010).
+ * A database belongs to one deployment for good: the first server to start records its cluster and program, and a
+ * server for another refuses to start against it. So devnet and mainnet data never mix, and neither do staging and
+ * production, which are both on mainnet with programs of their own (ADR-0015). The check comes before any migration,
+ * so a database it refuses is left as it was; the record comes after, once the `settings` table exists.
  */
 export const DeploymentLock = Layer.effectDiscard(
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
-    const network = yield* Network
-    const contract = yield* ContractId
-    for (const [key, value, setting] of [["network", network, "NEAR_NETWORK"], ["contract", contract, "LUCKOUT_CONTRACT_ID"]]) {
-      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(value)}::jsonb, 'server')
-                 ON CONFLICT (key) DO NOTHING`
-      const [row] = yield* sql<{ value: unknown }>`SELECT value FROM settings WHERE key = ${key}`
-      if (row?.value !== value) {
-        return yield* Effect.die(`This database belongs to ${String(row?.value)}, but ${setting} is ${value}. Point DATABASE_URL at that deployment's own database.`)
+    const ours = { cluster: yield* Cluster, program: (yield* ProgramId).toBase58() }
+    const setting = { cluster: "SOLANA_CLUSTER", program: "SOLANA_PROGRAM_ID" }
+    // A fresh database has no settings table yet. The NEAR build recorded its network (and later its contract) there,
+    // and its database ends at migration 0029, which the Solana migrations after it would change.
+    const [table] = yield* sql<{ t: string | null }>`SELECT to_regclass('settings')::text AS t`
+    const recorded = table?.t
+      ? new Map((yield* sql<{ key: string; value: unknown }>`SELECT key, value FROM settings WHERE key IN ('network', 'contract', 'cluster', 'program')`)
+        .map((r) => [r.key, r.value]))
+      : new Map<string, unknown>()
+    const near = recorded.get("contract") ?? recorded.get("network")
+    if (near !== undefined) return yield* Effect.die(`This database belongs to the NEAR deployment (${String(near)}). The Solana deployment needs a fresh database.`)
+    for (const key of ["cluster", "program"] as const) {
+      const value = recorded.get(key)
+      if (value !== undefined && value !== ours[key]) {
+        return yield* Effect.die(`This database belongs to ${String(value)}, but ${setting[key]} is ${ours[key]}. Point DATABASE_URL at that deployment's own database.`)
       }
+    }
+    yield* Migrator.make({})({ loader: migrations })
+    for (const key of ["cluster", "program"] as const) {
+      yield* sql`INSERT INTO settings (key, value, updated_by) VALUES (${key}, ${JSON.stringify(ours[key])}::jsonb, 'server') ON CONFLICT (key) DO NOTHING`
     }
   }).pipe(Effect.orDie)
 )
 
-export const DbLive = DeploymentLock.pipe(Layer.provideMerge(Migrations), Layer.provideMerge(Client))
+export const DbLive = DeploymentLock.pipe(Layer.provideMerge(Client))
 
 // Tests migrate one database per process and start each fresh one from its dump: ~70ms instead of
 // ~1s to boot and migrate. (The template is closed once dumped; left open, the process lingers 10s.)

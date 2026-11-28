@@ -5,7 +5,7 @@ import { useSession } from "@/lib/session"
 import { Wallet } from "lucide-react"
 import { motion } from "motion/react"
 
-/** Shown wherever a page needs an account. Connecting and signing in are one step. */
+/** Shown wherever a page needs an account. Signing in is Privy's window (ADR-0015). */
 export function SignInCard({ title, body }: { title: string; body: string }) {
   const { signInError } = useSession()
   return (
@@ -18,7 +18,7 @@ export function SignInCard({ title, body }: { title: string; body: string }) {
         <p className="mt-3 max-w-md text-ink-soft">{body}</p>
         <div className="mt-6"><SignInButton size="lg" label="Sign in" inline /></div>
         {signInError && <p role="alert" className={`mt-3 text-sm font-medium ${signInError.cancelled ? "text-ink-soft" : "text-bad"}`}>{signInError.message}</p>}
-        <p className="mt-4 text-sm text-muted">Free: you sign one message, no transaction. NEAR wallets (HOT, Meteor, Intear), EVM wallets (MetaMask, Rabby) and Solana wallets (Phantom, Solflare) all work.</p>
+        <p className="mt-4 text-sm text-muted">With your email, Google, Telegram, or a Solana wallet like Phantom, Solflare or Backpack. Free, and you get your own Luckout wallet.</p>
       </div>
     </motion.section>
   )

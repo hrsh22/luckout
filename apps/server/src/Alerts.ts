@@ -1,6 +1,6 @@
 import { Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import { SqlClient } from "effect/sql"
-import { ContractId, Network } from "./Near.ts"
+import { Cluster, ProgramId } from "./Solana.ts"
 
 /**
  * Operator alerts and customer notices. Alerts are logged; with TELEGRAM_BOT_TOKEN set,
@@ -21,9 +21,9 @@ export class Alerts extends Context.Service<Alerts, {
       const sql = yield* SqlClient.SqlClient
       const token = yield* Config.option(Config.Redacted("TELEGRAM_BOT_TOKEN"))
       const adminChat = yield* Config.option(Config.String("ALERT_TELEGRAM_CHAT_ID"))
-      // Every deployment may alert the same chat, so each alert names its own: luckout.near (production),
-      // staging.luckout.near or luckout.testnet, from the contract's account.
-      const where = (yield* ContractId).replace(/^app\./, "") || (yield* Network)
+      // Every deployment may alert the same chat, so each alert names its own: its cluster and the start of its program's
+      // address (staging and production are both on mainnet, each with its own program).
+      const where = `${yield* Cluster} ${(yield* ProgramId).toBase58().slice(0, 4)}`
 
       /**
        * "sent" once Telegram took the message; "retry" when it didn't answer, rate-limited us or failed itself;

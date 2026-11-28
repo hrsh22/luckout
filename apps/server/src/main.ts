@@ -1,41 +1,161 @@
 import { NodeHttpServer, NodeRuntime } from "@effect/platform-node"
-import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, CurrentAccount, NotFound, PopularCards, type PurchaseInvalid, Voucher } from "@luckout/api"
+import { type AdminInvalid, Api, BitrefillUnavailable, CatalogPage, ChainUnavailable, CurrentAccount, DepositAddress, DrawProof, HeldToken, NotFound, PopularCards, PreparedTransaction, ProgramInfo, PurchaseInvalid, Submitted, Voucher } from "@luckout/api"
 import { Admin } from "./Admin.ts"
-import { Credit } from "./Credit.ts"
 import { OneClick } from "./OneClick.ts"
-import { Refill } from "./Refill.ts"
-import { Config, Effect, Layer } from "effect"
+import { Config, Effect, Exit, Layer } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { SqlClient } from "effect/sql"
 import { createServer } from "node:http"
 import { Alerts } from "./Alerts.ts"
 import { Auth, AuthorizationLive, dropCookie, sessionToken, startSession } from "./Auth.ts"
-import { Base } from "./Base.ts"
 import { Bitrefill, NO_SUCH_VOUCHER } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import { DbLive } from "./Db.ts"
+import { Deposits, DepositsWebhook } from "./Deposits.ts"
 import { edge } from "./Edge.ts"
 import { McpRoute } from "./Mcp.ts"
 import { Monitor } from "./Monitor.ts"
-import { checkOperatorKey, Near, Network, otherNetworkAccounts } from "./Near.ts"
+import { decodeEvents, type DrawEvent, filledRandomness, isSignature, maxCashback, ORAO_VRF } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
-import { Relay } from "./Relay.ts"
+import { Chain, checkKeys, Cluster, Solana } from "./Solana.ts"
 import { Sales } from "./Sales.ts"
-import { Swap } from "./Swap.ts"
+import { Swap, swapAssetId } from "./Swap.ts"
 import { Telegram } from "./Telegram.ts"
-import { SolanaPayRoute, TopUp } from "./TopUp.ts"
+import { TopUp } from "./TopUp.ts"
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
+/** Chain trouble, said without its details (RPC URLs, upstream text), which stay in our logs. */
+const chainUnavailable = (e: { readonly message: string }) =>
+  Effect.logWarning(e.message).pipe(Effect.as(new ChainUnavailable({ message: "Solana isn't answering right now. Try again in a moment." })))
+
+/** The program's public state, from its Config (ADR-0015): what the landing page, the shop and Fairness show. */
+export const readProgram = Effect.gen(function*() {
+  const solana = yield* Solana
+  const c = yield* solana.config
+  return new ProgramInfo({
+    cluster: solana.cluster,
+    programId: solana.program.id.toBase58(),
+    usdcMint: c.usdc_mint.toBase58(),
+    versions: c.versions.map((v) => ({
+      name: v.name,
+      premiumBps: v.premium_bps,
+      outcomes: v.outcomes.map((o) => ({ finalBps: o.final_bps, chanceBps: o.chance_bps }))
+    })),
+    reserve: {
+      free: Number(c.free_reserve),
+      locked: Number(c.locked_reserve),
+      maxCashback: Number(maxCashback(c)),
+      cashbackCap: { fixed: c.cashback_cap.fixed === null ? null : Number(c.cashback_cap.fixed), reserveBps: c.cashback_cap.reserve_bps }
+    },
+    minLuckyCheckout: Number(c.min_lucky_checkout),
+    stats: { luckySettled: Number(c.lucky_settled), luckyAmountTotal: Number(c.lucky_amount_total), luckyPaidTotal: Number(c.lucky_paid_total) }
+  })
+})
+
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
+const succeeded = (logs: ReadonlyArray<string> | undefined, line: string) => logs?.includes(line) === true
+
+/**
+ * A Draw Proof (ADR-0005, ADR-0015): the Draws a `finish_draw` transaction recorded, each with ORAO's request as Solana
+ * has it now (its value, the transaction that asked for it, and ORAO's oracles' transactions that filled it in) and its
+ * Game Version's table. Undefined for a transaction Solana hasn't got, a failed one, or one with no Draw.
+ * ponytail: looks at a request's newest 20 transactions; a request someone floods with others loses its links, not its value.
+ */
+export const readDrawProof = (signature: string) =>
+  Effect.gen(function*() {
+    const solana = yield* Solana
+    const ran = yield* solana.landed(signature)
+    // Only our program's own records count (Program.decodeEvents).
+    const draws = ran && !ran.error ? decodeEvents(ran.logs, ran.inner).filter((e) => e.name === "Draw").map((e) => e.data as unknown as DrawEvent) : []
+    if (draws.length === 0) return undefined
+    const { versions } = yield* solana.config
+    const program = `Program ${solana.program.id.toBase58()} invoke [1]`
+    const orao = `Program ${ORAO_VRF.toBase58()} invoke`
+    // One request per settle, so a Checkout's Draws share one: each is read once.
+    const requests = yield* Effect.forEach(new Map(draws.map((d) => [d.request.toBase58(), d.request])), ([address, key]) =>
+      Effect.gen(function*() {
+        const account = yield* solana.account(key)
+        const value = account?.owner.equals(ORAO_VRF) ? filledRandomness(account.data) : undefined
+        const others = (yield* solana.signatures(key, 20)).filter((s) => s !== signature).reverse()
+        const txs = yield* Effect.forEach(others, (s) => Effect.map(solana.landed(s), (r) => ({ s, logs: r && !r.error ? r.logs : undefined })), { concurrency: 4 })
+        // Our settle or request_again calls ORAO; ORAO's oracles call it directly.
+        const asked = txs.find((t) => succeeded(t.logs, program) && succeeded(t.logs, `${orao} [2]`))
+        return [address, {
+          address,
+          value: value ? hex(value) : null,
+          ...(asked ? { requestedBy: asked.s } : {}),
+          filledBy: txs.filter((t) => succeeded(t.logs, `${orao} [1]`)).map((t) => t.s)
+        }] as const
+      }), { concurrency: 2 }).pipe(Effect.map((entries) => new Map(entries)))
+    return new DrawProof({
+      cluster: solana.cluster,
+      programId: solana.program.id.toBase58(),
+      signature,
+      ...(ran?.time === undefined ? {} : { time: ran.time }),
+      draws: draws.map((d) => {
+        const v = versions[d.game_version]!
+        return {
+          checkout: d.checkout.toBase58(),
+          customer: d.customer.toBase58(),
+          card: d.card,
+          round: d.round,
+          seed: hex(d.seed),
+          randomness: hex(d.randomness),
+          random: hex(d.random),
+          roll: d.roll,
+          gameVersion: d.game_version,
+          referencePrice: Number(d.reference_price),
+          luckyAmount: Number(d.lucky_amount),
+          maxPrice: Number(d.max_price),
+          finalBps: d.final_bps,
+          finalPrice: Number(d.final_price),
+          cashback: Number(d.cashback),
+          request: requests.get(d.request.toBase58())!,
+          version: { name: v.name, premiumBps: v.premium_bps, outcomes: v.outcomes.map((o) => ({ finalBps: o.final_bps, chanceBps: o.chance_bps })) }
+        }
+      })
+    })
+  })
+
+/** Landed proofs never change, so the newest are kept. ponytail: per process, in memory. */
+const KEPT_PROOFS = 1_000
+
+export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     const sales = yield* Sales
     const telegram = yield* Telegram
+    // Anyone may ask, so every visitor shares one read every 30 seconds; a failed read isn't kept.
+    const solana = yield* Solana
+    const program = yield* readProgram.pipe(
+      Effect.provideService(Solana, solana),
+      Effect.cachedWithTTL((exit) => (Exit.isSuccess(exit) ? "30 seconds" : 0))
+    )
+    const proofs = new Map<string, DrawProof>()
+    const proof = (signature: string) =>
+      Effect.gen(function*() {
+        const kept = proofs.get(signature)
+        if (kept) return kept
+        const read = yield* readDrawProof(signature).pipe(Effect.provideService(Solana, solana))
+        if (!read) return yield* new NotFound()
+        proofs.set(signature, read)
+        if (proofs.size > KEPT_PROOFS) proofs.delete(proofs.keys().next().value!)
+        return read
+      })
     return handlers.handleAll({
       health: () => sql`select 1`.pipe(Effect.orDie, Effect.asVoid),
       status: () => sales.status,
+      program: () => program.pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
+      drawProof: ({ params, query }) =>
+        Effect.gen(function*() {
+          if (!isSignature(params.signature)) return yield* new NotFound()
+          const all = yield* proof(params.signature)
+          if (query.card === undefined) return all
+          const draws = all.draws.filter((d) => d.card === query.card)
+          return draws.length > 0 ? new DrawProof({ ...all, draws }) : yield* new NotFound()
+        }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
       attestation: () => telegram.attestation
     })
   })
@@ -85,12 +205,53 @@ export const CatalogHandlers = HttpApiBuilder.group(Api, "catalog", (handlers) =
 const AuthHandlers = HttpApiBuilder.group(Api, "auth", (handlers) =>
   Effect.gen(function*() {
     const auth = yield* Auth
+    const purchases = yield* Purchases
     return handlers.handleAll({
-      challenge: () => auth.challenge,
-      // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when.
-      verify: ({ payload }) => startSession(auth.verify(payload)),
-      verifyEvm: ({ payload }) => startSession(auth.verifyEvm(payload)),
-      verifySolana: ({ payload }) => startSession(auth.verifySolana(payload))
+      // The token goes only into the HttpOnly session cookie; the answer says who signed in and until when. The login
+      // email becomes the Checkout Email if the customer has none yet (ADR-0015); they can change it in Wallet.
+      privy: ({ payload }) =>
+        startSession(Effect.tap(auth.privy(payload), (s) =>
+          s.linked.email
+            ? Effect.flatMap(purchases.checkoutEmail(s.accountId), (c) => (c.email ? Effect.void : purchases.setCheckoutEmail(s.accountId, s.linked.email!).pipe(Effect.ignore)))
+            : Effect.void))
+    })
+  })
+)
+
+// Deposits (ADR-0015): the customer's Deposit Address, their one-time approval, and any transaction they sign that we
+// pay for, co-signed only if it's the one we prepared.
+const DepositsHandlers = HttpApiBuilder.group(Api, "deposits", (handlers) =>
+  Effect.gen(function*() {
+    const deposits = yield* Deposits
+    const solana = yield* Solana
+    const swap = yield* Swap
+    const invalid = (e: { readonly message: string }) => new PurchaseInvalid({ message: e.message })
+    const prepared = <E extends { readonly message: string }>(f: (accountId: string) => Effect.Effect<{ transaction: string; token: string }, E>) =>
+      CurrentAccount.use((a) => f(a.accountId)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid))
+    return handlers.handleAll({
+      account: () => CurrentAccount.use((a) => deposits.account(a.accountId)).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.flatMap(chainUnavailable(e), Effect.fail))),
+      address: () =>
+        CurrentAccount.use((a) => Effect.all([deposits.status(a.accountId), swap.held(a.accountId)])).pipe(
+          Effect.map(([d, held]) =>
+            new DepositAddress({
+              ...d,
+              held: held.map((h) => new HeldToken({ assetId: swapAssetId(h.token), symbol: h.token.symbol, amount: String(h.amount), decimals: h.token.decimals }))
+            })
+          ),
+          Effect.mapError(invalid)
+        ),
+      approval: ({ payload }) =>
+        CurrentAccount.use((a) => deposits.approval(a.accountId, payload.mode)).pipe(Effect.map((p) => new PreparedTransaction(p)), Effect.mapError(invalid)),
+      submit: ({ payload }) =>
+        solana.cosign(payload.transaction, payload.token).pipe(
+          Effect.tap(() => deposits.nudge),
+          Effect.map((o) => new Submitted({ signature: o.signature })),
+          Effect.mapError(invalid)
+        ),
+      withdrawal: ({ payload }) => prepared((a) => deposits.withdrawal(a, payload.amount, payload.to)),
+      limits: ({ payload }) => prepared((a) => deposits.limits(a, BigInt(payload.perPurchase), BigInt(payload.daily))),
+      defaultMode: ({ payload }) => prepared((a) => deposits.defaultMode(a, payload.mode)),
+      reclaim: ({ payload }) => prepared((a) => deposits.reclaim(a, payload.purchaseId))
     })
   })
 )
@@ -140,7 +301,6 @@ const TelegramHandlers = HttpApiBuilder.group(Api, "telegram", (handlers) =>
     const telegram = yield* Telegram
     return handlers.handleAll({
       status: () => CurrentAccount.use((a) => telegram.status(a.accountId)),
-      linkCode: () => CurrentAccount.use((a) => telegram.linkCode(a.accountId)),
       unlink: () => CurrentAccount.use((a) => telegram.unlink(a.accountId))
     })
   })
@@ -151,28 +311,13 @@ const TopUpHandlers = HttpApiBuilder.group(Api, "topup", (handlers) =>
     const topup = yield* TopUp
     return handlers.handleAll({
       assets: () => topup.assets,
-      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.dry ?? false, a.wallet)),
+      quote: ({ payload }) => CurrentAccount.use((a) => topup.quote(a.accountId, payload.originAsset, payload.usdc, payload.refundTo, payload.dry ?? false)),
       status: ({ query }) => CurrentAccount.use((a) => topup.status(a.accountId, query.depositAddress)),
-      move: ({ payload }) => CurrentAccount.use((a) => topup.move(a.accountId, payload.depositAddress, payload.signed)),
-      faucet: () => CurrentAccount.use((a) => topup.faucet(a.accountId, a.wallet)),
+      // The transaction it answers is signed in the app and sent to /transactions/submit, like any the customer signs.
+      swap: ({ payload }) => CurrentAccount.use((a) => topup.swap(a.accountId, payload.assetId, payload.amount)),
       transfers: () => CurrentAccount.use((a) => topup.transfers(a.accountId)),
-      held: () => CurrentAccount.use((a) => topup.held(a.accountId, a.wallet)),
       sent: ({ payload }) => CurrentAccount.use((a) => topup.sent(a.accountId, payload.depositAddress, payload.txHash)),
-      dismiss: ({ payload }) => CurrentAccount.use((a) => topup.dismiss(a.accountId, payload.depositAddress)),
-      swapTx: ({ payload }) => CurrentAccount.use((a) => topup.swapTx(a.accountId, payload.depositAddress, a.wallet)),
-      sendBack: ({ payload }) => CurrentAccount.use((a) => topup.sendBack(a.accountId, payload.assetId, a.wallet)),
-      exit: ({ payload }) => CurrentAccount.use((a) => topup.exit(a.accountId, payload.destinationAsset, payload.usdc, a.wallet))
-    })
-  })
-)
-
-const RelayHandlers = HttpApiBuilder.group(Api, "relay", (handlers) =>
-  Effect.gen(function*() {
-    const relay = yield* Relay
-    return handlers.handleAll({
-      status: () => CurrentAccount.use((a) => relay.available(a.accountId).pipe(Effect.map((available) => ({ available })))),
-      send: ({ payload }) => CurrentAccount.use((a) => relay.send(a.accountId, payload.signedDelegate)),
-      intent: ({ payload }) => CurrentAccount.use((a) => relay.sendIntent(a.accountId, payload.signed))
+      dismiss: ({ payload }) => CurrentAccount.use((a) => topup.dismiss(a.accountId, payload.depositAddress))
     })
   })
 )
@@ -193,27 +338,25 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
       purchases: ({ query }) =>
         Effect.andThen(signedInAdmin, query.id !== undefined && !UUID.test(query.id) ? Effect.succeed([]) : admin.purchases(query.account, query.id)),
       users: () => Effect.andThen(signedInAdmin, admin.users),
-      relay: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureRelay(payload, by)),
       sales: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.setSales(payload.open, by)),
-      credit: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.configureCredit(payload, by)),
-      refill: ({ payload }) => Effect.flatMap(signedInAdmin, (by) => admin.refill(payload.amount, by)),
-      resolveRefill: ({ params, payload }) =>
-        Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | AdminInvalid> =>
-          UUID.test(params.id) ? admin.resolveRefill(params.id, payload.note, by) : Effect.fail(new NotFound())),
       retry: ({ params }) =>
         Effect.flatMap(signedInAdmin, (by): Effect.Effect<void, NotFound | PurchaseInvalid> =>
-          UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound()))
+          UUID.test(params.id) ? admin.retry(params.id, by) : Effect.fail(new NotFound())),
+      buffer: ({ params }) => CurrentAccount.use((a) => admin.buffer(a.accountId, params.address)),
+      // Admin.ownerTransaction refuses non-admins itself.
+      owner: ({ payload }) =>
+        CurrentAccount.use((a) => admin.ownerTransaction(a.accountId, payload)).pipe(Effect.map((p) => new PreparedTransaction(p)))
     })
   })
 )
 
-const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer, TopUp.layer).pipe(
-  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Relay.layer)),
-  Layer.provideMerge(Layer.mergeAll(Refill.layer, Sales.layer)),
-  // Credit reads the Base Float for guest checkout (ADR-0012), so Base comes first.
-  Layer.provideMerge(Layer.mergeAll(Credit.layer, Connect.layer)),
-  Layer.provideMerge(Base.layer),
-  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Near.layer, OneClick.layer, Swap.layer, Alerts.layer)),
+const Services = Layer.mergeAll(Telegram.layer, Monitor, Admin.layer).pipe(
+  // The bot makes 1Click Top-Ups as the app does.
+  Layer.provideMerge(TopUp.layer),
+  // Swap builds on Solana (prepare, simulate), as Deposits does.
+  Layer.provideMerge(Layer.mergeAll(Auth.layer, Purchases.layer, Deposits.layer, Swap.layer)),
+  Layer.provideMerge(Layer.mergeAll(Sales.layer, Connect.layer)),
+  Layer.provideMerge(Layer.mergeAll(Bitrefill.layer, Solana.layer.pipe(Layer.provide(Chain.layer)), OneClick.layer, Alerts.layer)),
   Layer.provideMerge(DbLive)
 )
 
@@ -224,15 +367,18 @@ const MAINNET_REQUIRES = [
   "WEB_ORIGIN",
   "SESSION_SECRET",
   "REDEMPTION_KEY",
-  "LUCKOUT_CONTRACT_ID",
-  "OPERATOR_ACCOUNT_ID",
-  "OPERATOR_PRIVATE_KEY",
+  // This deployment's program, a paid RPC, and our three keys (ADR-0015).
+  "SOLANA_PROGRAM_ID",
+  "SOLANA_RPC_URL",
+  "SOLANA_OPERATOR_SECRET_KEY",
+  "SOLANA_FEE_PAYER_SECRET_KEY",
+  "SOLANA_PAY_WALLET_SECRET_KEY",
+  // Sign-in (ADR-0015).
+  "PRIVY_APP_ID",
   // The key only reads the catalog and prices; orders go through the guest client (ADR-0012).
   "BITREFILL_API_KEY",
   "BITREFILL_CLIENT_ID",
   "BITREFILL_CLIENT_SECRET",
-  // Refills pay Bitrefill from our Base wallet; without a Base RPC they can't run.
-  "BASE_RPC_URL",
   // Real money: alerts must reach a human (through the bot), and someone must be able to open the admin panel.
   "TELEGRAM_BOT_TOKEN",
   "ALERT_TELEGRAM_CHAT_ID",
@@ -249,7 +395,7 @@ const mainnetProblems = (env: Record<string, string | undefined>) => [
 
 const Routes = Layer.mergeAll(
   HttpApiBuilder.layer(Api, { openapiPath: "/openapi.json" }).pipe(
-    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, RelayHandlers, AdminHandlers]),
+    Layer.provide([SystemHandlers, CatalogHandlers, AuthHandlers, SessionHandlers, PurchaseHandlers, TelegramHandlers, TopUpHandlers, AdminHandlers, DepositsHandlers]),
     Layer.provide(AuthorizationLive)
   ),
   // Read-only tools for other AI agents (Mcp.ts).
@@ -261,18 +407,15 @@ const Routes = Layer.mergeAll(
     return HttpRouter.add("GET", "/bitrefill/callback", (request) =>
       Effect.map(connect.callback(new URL(request.url, "http://callback").searchParams), (to) => HttpServerResponse.redirect(to)))
   })),
-  // Solana Pay transaction requests (ADR-0014): no session (TopUp.ts).
-  SolanaPayRoute
+  DepositsWebhook
 ).pipe(Layer.provide(Services))
 
 const Server = Layer.unwrap(
   Effect.gen(function*() {
-    const missing = (yield* Network) === "mainnet" ? mainnetProblems(process.env) : []
-    if (missing.length > 0) return yield* Effect.die(`NEAR_NETWORK=mainnet also needs ${missing.join(", ")}`)
-    const mixed = otherNetworkAccounts(yield* Network, process.env)
-    if (mixed.length > 0) return yield* Effect.die(`NEAR_NETWORK=${yield* Network} but these accounts belong to the other network: ${mixed.join(", ")}`)
-    // Before the database is touched, so a server refused here runs no migration and the previous release still fits it.
-    yield* checkOperatorKey.pipe(Effect.provide(Near.layer))
+    const missing = (yield* Cluster) === "mainnet" ? mainnetProblems(process.env) : []
+    if (missing.length > 0) return yield* Effect.die(`SOLANA_CLUSTER=mainnet also needs ${missing.join(", ")}`)
+    // Refuses to start with keys that aren't the program's: every admission, settlement and payment would fail.
+    if (process.env.SOLANA_OPERATOR_SECRET_KEY) yield* checkKeys.pipe(Effect.provide(Solana.layer.pipe(Layer.provide(Chain.layer))))
     const port = yield* Config.Port("PORT").pipe(Config.withDefault(8787))
     // On the VM, HOST=127.0.0.1 so only nginx can reach the server.
     const host = yield* Config.String("HOST").pipe(Config.option)

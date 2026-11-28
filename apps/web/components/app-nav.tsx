@@ -3,21 +3,20 @@
 import { Avatar, shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
 import { NavShell } from "@/components/nav-shell"
-import { Button, buttonVariants } from "@/components/ui/button"
-import { useWalletActions } from "@/lib/actions"
+import { Button } from "@/components/ui/button"
 import { cartCount, openCart, useCart } from "@/lib/cart"
 import { CartDrawer } from "@/components/cart-drawer"
 import { AnimatePresence, motion } from "motion/react"
 import { Sheet } from "@/components/ui/sheet"
 import { api, errorMessage } from "@/lib/api"
-import { network } from "@/lib/near"
-import { useSession, WALLET_NAMES } from "@/lib/session"
+import { cluster } from "@/lib/chain"
+import { useSession } from "@/lib/session"
 import { Menu } from "@base-ui/react/menu"
 import { ACTIVE_PHASES, arriving, useIsAdmin, useTransfers } from "@/lib/queries"
 import { usd } from "@/lib/format"
-import { solanaAddress, type Transfer, type TransferPhase } from "@luckout/api"
-import { ChevronDown, Copy, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, ShoppingCart, Wallet } from "lucide-react"
-import { useQueryClient } from "@tanstack/react-query"
+import type { Transfer, TransferPhase } from "@luckout/api"
+import { useExportWallet } from "@privy-io/react-auth/solana"
+import { ChevronDown, Copy, KeyRound, LoaderCircle, LogOut, MonitorSmartphone, ReceiptText, RotateCw, ShieldCheck, ShoppingCart, Wallet } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
@@ -105,9 +104,8 @@ function CartButton() {
 }
 
 /**
- * The one sign-in button: it asks which kind of wallet (NEAR, or EVM or Solana through NEAR Intents, ADR-0011),
- * then says which step the wallet is on. Where there's no room to show why sign-in stopped (the nav,
- * the receipt), it says so in a toast.
+ * The one sign-in button: it opens Privy's window (email, Google, Telegram or a Solana wallet, ADR-0015). Where
+ * there's no room to show why sign-in stopped (the nav, the receipt), it says so in a toast.
  */
 export function SignInButton({ size = "md", label = "Sign in", onDone, inline = false }: {
   size?: "sm" | "md" | "lg"
@@ -117,44 +115,22 @@ export function SignInButton({ size = "md", label = "Sign in", onDone, inline = 
   inline?: boolean
 }) {
   const { signIn, signing, ready } = useSession()
-  const go = (kind: "near" | "evm" | "solana") =>
-    signIn(kind).then((problem) => {
+  const go = () =>
+    signIn().then((problem) => {
       if (!problem) return onDone?.()
       if (!inline) problem.cancelled ? toast(problem.message) : toast.error(problem.message)
     })
-  const item = "flex min-h-14 cursor-pointer flex-col justify-center rounded-2xl px-4 py-2 outline-none select-none data-[highlighted]:bg-soft"
   return (
-    <Menu.Root>
-      <Menu.Trigger className={buttonVariants({ size })} disabled={!ready || !!signing} aria-busy={!!signing || undefined}>
-        {signing && <LoaderCircle className="animate-spin" />}
-        {signing === "wallet" ? "Choose a wallet" : signing === "message" ? "Sign the message in your wallet" : label}
-      </Menu.Trigger>
-      <Menu.Portal>
-        <Menu.Positioner sideOffset={8} align="start" className="z-40">
-          <Menu.Popup className="w-72 origin-[var(--transform-origin)] rounded-[1.75rem] bg-white p-2 shadow-pop outline-none transition-[scale,opacity] duration-150 data-[ending-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:scale-95 data-[starting-style]:opacity-0">
-            <Menu.Item className={item} onClick={() => void go("near")}>
-              <span className="font-semibold">NEAR wallet</span>
-              <span className="text-sm text-muted">HOT, Meteor, Intear and more</span>
-            </Menu.Item>
-            <Menu.Item className={item} onClick={() => void go("evm")}>
-              <span className="font-semibold">EVM wallet</span>
-              <span className="text-sm text-muted">MetaMask, Rabby, Coinbase and more. No NEAR needed.</span>
-            </Menu.Item>
-            <Menu.Item className={item} onClick={() => void go("solana")}>
-              <span className="font-semibold">Solana wallet</span>
-              <span className="text-sm text-muted">Phantom, Solflare, Backpack and more. No NEAR needed.</span>
-            </Menu.Item>
-          </Menu.Popup>
-        </Menu.Positioner>
-      </Menu.Portal>
-    </Menu.Root>
+    <Button size={size} disabled={!ready || signing} aria-busy={signing || undefined} onClick={() => void go()}>
+      {signing && <LoaderCircle className="animate-spin" />}
+      {signing ? "Signing in" : label}
+    </Button>
   )
 }
 
 function AccountMenu({ id }: { id: string }) {
-  const { signOut, token, wallet } = useSession()
-  // A Solana account is its key in hex; people know it by its address.
-  const shown = wallet === "solana" ? solanaAddress(id) : id
+  const { signOut, token } = useSession()
+  const { exportWallet } = useExportWallet()
   const isAdmin = useIsAdmin(token)
   const router = useRouter()
   const [everywhere, setEverywhere] = useState(false)
@@ -165,10 +141,10 @@ function AccountMenu({ id }: { id: string }) {
       <Menu.Root>
         <Menu.Trigger
           className="flex h-10 min-w-0 items-center gap-2 rounded-full bg-soft py-1 pr-3 pl-1 font-semibold transition-colors hover:bg-[#ebe9f3] data-[popup-open]:bg-[#ebe9f3]"
-          aria-label={`Account ${shown}`}
+          aria-label={`Account ${id}`}
         >
           <Avatar id={id} size={32} />
-          <span className="hidden max-w-[9rem] truncate text-sm sm:block">{shortAccount(shown)}</span>
+          <span className="hidden max-w-[9rem] truncate text-sm sm:block">{shortAccount(id)}</span>
           <ChevronDown size={16} className="text-muted" aria-hidden="true" />
         </Menu.Trigger>
         <Menu.Portal>
@@ -177,18 +153,22 @@ function AccountMenu({ id }: { id: string }) {
               <div className="flex items-center gap-3 px-3 pt-2 pb-3">
                 <Avatar id={id} size={40} />
                 <div className="min-w-0">
-                  <p className="truncate font-semibold" title={shown}>{shortAccount(shown)}</p>
-                  <p className="text-sm text-muted">{wallet && wallet !== "near" ? `${WALLET_NAMES[wallet]} wallet · NEAR ${network}` : `NEAR ${network}`}</p>
+                  <p className="truncate font-semibold" title={id}>{shortAccount(id)}</p>
+                  <p className="text-sm text-muted">Solana {cluster}</p>
                 </div>
               </div>
-              <Menu.Item className={item} onClick={() => navigator.clipboard.writeText(shown).then(() => toast.success(shown === id ? "Account copied" : "Address copied"))}>
-                <Copy size={18} className="text-muted" />{shown === id ? "Copy account" : "Copy address"}
+              <Menu.Item className={item} onClick={() => navigator.clipboard.writeText(id).then(() => toast.success("Address copied"))}>
+                <Copy size={18} className="text-muted" />Copy address
               </Menu.Item>
               <Menu.Item className={item} onClick={() => router.push("/wallet")}>
                 <Wallet size={18} className="text-muted" />Wallet and limits
               </Menu.Item>
               <Menu.Item className={item} onClick={() => router.push("/purchases")}>
                 <ReceiptText size={18} className="text-muted" />Your purchases
+              </Menu.Item>
+              {/* The wallet is theirs (ADR-0015): Privy shows the key in its own window, which this page can't read. */}
+              <Menu.Item className={item} onClick={() => void exportWallet({ address: id }).catch((e: unknown) => toast.error(errorMessage(e)))}>
+                <KeyRound size={18} className="text-muted" />Export your key
               </Menu.Item>
               {isAdmin && (
                 <Menu.Item className={item} onClick={() => router.push("/admin")}>
@@ -249,18 +229,15 @@ function SignOutEverywhere({ open, onOpenChange }: { open: boolean; onOpenChange
 const landed = (t: Transfer, toWallet: () => void) => {
   const amount = usd(t.usdc)
   const look = { id: t.depositAddress, action: { label: "Wallet", onClick: toWallet } }
-  if (t.phase === "done") toast.success(`${amount} added to your balance`, { id: t.depositAddress })
-  else if (t.phase === "in-wallet") toast(`Your ${amount} top-up landed in your NEAR wallet`, { ...look, description: "Deposit it into Luckout from Wallet with one tap." })
-  else if (t.phase === "in-intents") toast(`Your ${amount} top-up landed in your NEAR Intents account`, { ...look, description: "Move it into Luckout from Wallet with one tap." })
+  // Delivered to their Deposit Address, from where the server moves it into the Balance within a couple of minutes.
+  if (t.phase === "done") toast.success(`Your ${amount} top-up arrived`, { id: t.depositAddress, description: "It moves into your balance in a minute or two." })
   else if (t.phase === "refunded") toast.error(`Your ${amount} top-up didn't go through`, { ...look, description: "1Click sent it back. Wallet shows where it is." })
 }
 
 /** "+$2.50" while a top-up is on its way into the balance, so it never looks like it vanished. */
 function Arriving() {
   const { token, refresh } = useSession()
-  const qc = useQueryClient()
   const router = useRouter()
-  const actions = useWalletActions()
   const transfers = useTransfers(token)
   const coming = arriving(transfers.data ?? [])
   // When a transfer lands or is sent back, the balances it changed are read again (this is on every page), and a
@@ -275,11 +252,8 @@ function Arriving() {
     const ended = before ? list.filter((t) => ACTIVE_PHASES.has(before.get(t.depositAddress)!) && !ACTIVE_PHASES.has(t.phase)) : []
     if (ended.length === 0) return
     void refresh().catch(() => {})
-    void qc.invalidateQueries({ queryKey: ["held"] })
-    for (const t of ended) if (t.direction === "in") landed(t, () => router.push("/wallet"))
-    // A first Top-Up that moved in by itself: the mode chosen before it is saved now (one more signature).
-    if (ended.some((t) => t.direction === "in" && t.phase === "done")) void actions.savePendingMode()
-  }, [transfers.data, refresh, qc, router]) // eslint-disable-line react-hooks/exhaustive-deps
+    for (const t of ended) landed(t, () => router.push("/wallet"))
+  }, [transfers.data, refresh, router])
   if (coming.length === 0) return null
   const total = coming.reduce((sum, t) => sum + t.usdc, 0)
   return (

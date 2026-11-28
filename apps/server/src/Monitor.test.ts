@@ -1,47 +1,94 @@
+import { address, lamports } from "@solana/kit"
+import { type PublicKey } from "@solana/web3.js"
 import { ConfigProvider, Effect, Layer } from "effect"
 import { SqlClient } from "effect/sql"
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Alerts } from "./Alerts.ts"
-import { Base } from "./Base.ts"
 import { DbMemory } from "./Db.ts"
-import { Monitor, secretWarning } from "./Monitor.ts"
-import { Near, NearUnavailable } from "./Near.ts"
-import { OPEN_STEPS, CHECKOUT_OPEN_STEPS } from "./Purchases.ts"
-import { fakeBase, fakeNear } from "./testing.ts"
+import { LOW_LINES, Monitor, secretWarning } from "./Monitor.ts"
+import { decodeAccount, encode } from "./Program.ts"
+import { CHECKOUT_OPEN_STEPS, OPEN_STEPS } from "./Purchases.ts"
+import { Chain, SolanaUnavailable } from "./Solana.ts"
+import { solanaLayer, solanaWorld, type SolanaWorld } from "./testing.ts"
 
-// The Monitor's first round runs as soon as its layer is built: seed the database, build it, read the alerts.
-const round = (near: Near["Service"], seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>, env: Record<string, string> = {}) => {
-  const alerts: Array<string> = []
-  const deps = Layer.mergeAll(
-    Layer.succeed(Near, near),
-    Layer.succeed(Base, fakeBase({ configured: false })),
+// The Monitor on an in-memory database and the real program on LiteSVM. Its first round runs as soon as its layer is
+// built: seed the database, build it, read the alerts.
+
+const USDC = 1_000_000n
+
+/** A world whose Pay Wallet has its float, so only what a test changes raises an alert. */
+const healthyWorld = () => {
+  const world = solanaWorld()
+  world.give(world.payWalletUsdc, 200n * USDC)
+  return world
+}
+
+/** Sets a token account's balance outright. */
+const setTokens = (world: SolanaWorld, account: PublicKey, amount: bigint) => {
+  const a = world.svm.getAccount(address(account.toBase58()))
+  if (!a.exists) throw new Error("no such token account")
+  const data = Buffer.from(a.data)
+  data.writeBigUInt64LE(amount, 64)
+  world.svm.setAccount({ ...a, data })
+}
+
+/** Changes Config's fields outright, as only the program could. */
+const patchConfig = (world: SolanaWorld, change: Record<string, unknown>) => {
+  const a = world.svm.getAccount(address(world.program.config.toBase58()))
+  if (!a.exists) throw new Error("no Config")
+  const data = Buffer.from(a.data)
+  const out: Array<Uint8Array> = [data.subarray(0, 8)]
+  encode({ defined: { name: "Config" } }, { ...decodeAccount<Record<string, unknown>>("Config", data), ...change }, out)
+  const next = Buffer.alloc(data.length)
+  Buffer.concat(out).copy(next)
+  world.svm.setAccount({ ...a, data: next })
+}
+
+const setSol = (world: SolanaWorld, key: PublicKey, sol: bigint) => {
+  const a = world.svm.getAccount(address(key.toBase58()))
+  if (!a.exists) throw new Error("no such account")
+  world.svm.setAccount({ ...a, lamports: lamports(sol) })
+}
+
+/** A chain whose RPC doesn't answer. */
+const down = (world: SolanaWorld) => {
+  const e = new SolanaUnavailable({ message: "accounts: fetch failed" })
+  return Chain.of({ ...world.chain, accounts: () => Effect.fail(e), balance: () => Effect.fail(e) })
+}
+
+const monitorWith = (world: SolanaWorld, alerts: Array<string>, chain: Chain["Service"] = world.chain) =>
+  Monitor.pipe(Layer.provide(Layer.mergeAll(
+    solanaLayer({ ...world, chain }),
     Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
-  )
+  )))
+
+const round = (
+  world: SolanaWorld,
+  seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>,
+  o: { env?: Record<string, string>; chain?: Chain["Service"] } = {}
+) => {
+  const alerts: Array<string> = []
   return Effect.runPromise(
     Effect.gen(function*() {
       yield* seed
-      yield* Layer.build(Monitor.pipe(Layer.provide(deps)))
+      yield* Layer.build(monitorWith(world, alerts, o.chain))
       yield* Effect.sleep("300 millis")
       return alerts
     }).pipe(
       Effect.scoped,
       Effect.provide(DbMemory),
-      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet", ...env } })))
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: o.env ?? {} })))
     )
   )
 }
 
-const healthy = fakeNear({
-  account: () => Effect.succeed({ amount: 10n ** 26n, storageUsage: 0 }),
-  view: <A>(method: string) =>
-    Effect.succeed((method === "ft_balance_of" ? "0" : method === "get_reserve" ? { free: "0", locked: "0", proceeds: "0" } : null) as A)
-})
+const healthy = healthyWorld()
 
 const purchaseAt = (step: string, minutesAgo: number) =>
   Effect.flatMap(SqlClient.SqlClient, (sql) =>
     sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step, created_at)
-        VALUES ((SELECT id FROM co), 'alice.test', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', 10000000, ${step}, now() - make_interval(mins => ${minutesAgo}))`)
+        VALUES ((SELECT id FROM co), 'alice', ${crypto.randomUUID()}, 'amazon-us', 'Card', '10', 10000000, ${step}, now() - make_interval(mins => ${minutesAgo}))`)
 
 test("a purchase unfinished after 15 minutes raises an alert at every open step, `pay` included", async () => {
   for (const step of OPEN_STEPS) {
@@ -51,14 +98,17 @@ test("a purchase unfinished after 15 minutes raises an alert at every open step,
   assert.deepEqual(await round(healthy, purchaseAt("pay", 5)), [], "a young one is left alone")
 })
 
-test("NEAR being unreachable never hides the purchase alerts", async () => {
-  const down = fakeNear({
-    account: () => Effect.fail(new NearUnavailable({ message: "account: RPC unreachable" })),
-    view: () => Effect.fail(new NearUnavailable({ message: "view: RPC unreachable" }))
-  })
-  const alerts = await round(down, Effect.all([purchaseAt("pay", 20), purchaseAt("stuck", 1)]))
+test("Solana being unreachable never hides the purchase alerts", async () => {
+  const alerts = await round(healthy, Effect.all([purchaseAt("pay", 20), purchaseAt("stuck", 1)]), { chain: down(healthy) })
   assert.ok(alerts.some((a) => a.includes("1 purchase(s) stuck")), JSON.stringify(alerts))
   assert.ok(alerts.some((a) => a.includes("1 purchase(s) still unfinished after 15 minutes")), JSON.stringify(alerts))
+})
+
+test("a Draw still unfinished after 10 minutes raises an alert; a younger one doesn't", async () => {
+  const drawing = (minutesAgo: number) =>
+    Effect.flatMap(SqlClient.SqlClient, (sql) => sql`INSERT INTO checkouts (account_id, step, updated_at) VALUES ('alice', 'draw', now() - make_interval(mins => ${minutesAgo}))`)
+  assert.deepEqual(await round(healthy, drawing(5)), [])
+  assert.deepEqual(await round(healthy, Effect.all([drawing(11), drawing(5)])), ["1 checkout(s) have a Draw still unfinished after 10 minutes"])
 })
 
 test("the reconciler's index covers every open step", async () => {
@@ -94,116 +144,39 @@ test("the Bitrefill client secret is flagged from two weeks before it expires, a
 })
 
 test("an expiry in milliseconds, or not a finite number, stops the server at start instead of never warning", async () => {
-  await assert.rejects(round(healthy, Effect.void, { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "1802528701000" }), /not milliseconds/)
-  await assert.rejects(round(healthy, Effect.void, { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "NaN" }), /finite number/)
+  await assert.rejects(round(healthy, Effect.void, { env: { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "1802528701000" } }), /not milliseconds/)
+  await assert.rejects(round(healthy, Effect.void, { env: { BITREFILL_CLIENT_SECRET_EXPIRES_AT: "NaN" } }), /finite number/)
 })
 
-// ---------- signing in is free: the solvency check's work stays bounded ----------
+// ---------- the money: solvency, and the keys that keep purchases going ----------
 
-/**
- * One Monitor round over seeded `known_accounts`; returns the alerts, the accounts whose balance was read, which ended up
- * marked, and which were marked checked. `down`: every account's read fails, as when no NEAR RPC answers.
- */
-const solvencyRound = (o: { held: string; balances: Record<string, string>; seed: Effect.Effect<unknown, unknown, SqlClient.SqlClient>; down?: boolean }) => {
+test("the Vault must hold every Balance, the reserve and the Proceeds: drained below them, the owner hears at once", async () => {
+  const world = healthyWorld()
+  const alice = world.shopper()
+  world.give(alice.usdc, 120n * USDC)
+  const p = world.program
+  world.send([
+    p.instruction("deposit_for", { config: p.config, customer: p.customer(alice.wallet.publicKey), source: alice.usdc, vault: p.vault, vault_authority: p.vaultAuthority })
+  ], [])
+  const known = Effect.flatMap(SqlClient.SqlClient, (sql) => sql`INSERT INTO known_accounts (account_id) VALUES (${alice.wallet.publicKey.toBase58()}), ('not-a-wallet')`)
+  assert.deepEqual(await round(world, known), [], "the reserve's $1,000 and alice's $120, all there")
+  setTokens(world, p.vault, 1_100n * USDC)
+  const alerts = await round(world, known)
+  assert.equal(alerts.length, 1)
+  assert.match(alerts[0]!, /^the Vault holds 1100 USDC, less than the program owes: 1120 \(Balances 120, reserve and Proceeds 1000, open Checkouts 0\)\. Pause the program/)
+})
+
+test("the fee payer's SOL and the Pay Wallet's float: said when they drop and once a day while they last, not at each restart; recovered, the next drop is said again", async () => {
+  const world = healthyWorld()
+  setSol(world, world.feePayer.publicKey, LOW_LINES.feePayer / 2n)
+  setTokens(world, world.payWalletUsdc, LOW_LINES.float / 2n)
   const alerts: Array<string> = []
-  const read: Array<string> = []
-  const near = fakeNear({
-    account: () => Effect.succeed({ amount: 10n ** 26n, storageUsage: 0 }),
-    view: <A>(method: string, args?: Record<string, unknown>) =>
-      o.down && method === "get_account" ? Effect.fail(new NearUnavailable({ message: "every NEAR RPC failed" })) : Effect.sync(() => {
-        if (method === "ft_balance_of") return o.held as A
-        if (method === "get_reserve") return { free: "0", locked: "0", proceeds: "0" } as A
-        const id = String(args?.account_id)
-        read.push(id)
-        return (id in o.balances ? { balance: o.balances[id] } : null) as A
-      })
-  })
-  const deps = Layer.mergeAll(
-    Layer.succeed(Near, near),
-    Layer.succeed(Base, fakeBase({ configured: false })),
-    Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
-  )
-  return Effect.runPromise(
-    Effect.gen(function*() {
-      const sql = yield* SqlClient.SqlClient
-      yield* o.seed
-      yield* Layer.build(Monitor.pipe(Layer.provide(deps)))
-      yield* Effect.sleep("300 millis")
-      const marked = yield* sql<{ account_id: string }>`SELECT account_id FROM known_accounts WHERE onchain ORDER BY account_id`
-      const checked = yield* sql<{ account_id: string }>`SELECT account_id FROM known_accounts WHERE checked_at IS NOT NULL ORDER BY account_id`
-      return { alerts, read, marked: marked.map((m) => m.account_id), checked: checked.map((c) => c.account_id) }
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(DbMemory),
-      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } })))
-    )
-  )
-}
-
-test("the solvency check reads every account the contract knows and only a few of the rest each round, however many signed in", async () => {
-  const r = await solvencyRound({
-    // The contract holds $5, but owes alice $4 and bob $3.
-    held: "5000000",
-    balances: { "alice.test": "4000000", "bob.test": "3000000" },
-    seed: Effect.flatMap(SqlClient.SqlClient, (sql) =>
-      Effect.all([
-        // alice is known to the contract; bob signed in a while ago and has deposited since; 200 others only signed in.
-        sql`INSERT INTO known_accounts (account_id, onchain) VALUES ('alice.test', true)`,
-        sql`INSERT INTO known_accounts (account_id, first_seen) VALUES ('bob.test', now() - interval '1 day')`,
-        sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.test' FROM generate_series(1, 200) n`
-      ]))
-  })
-  assert.equal(r.read.length, 51, "alice, plus fifty of those the contract isn't known to hold money for")
-  assert.ok(r.read.includes("alice.test") && r.read.includes("bob.test"), "the longest unchecked go first")
-  assert.deepEqual(r.marked, ["alice.test", "bob.test"], "the contract knows bob: from now on he's read every round")
-  assert.ok(r.alerts.some((a) => a.includes("holds 5 USDC, less than it owes") && a.includes("customers' balances 7")), JSON.stringify(r.alerts))
-})
-
-test("an account that bought or was relayed is read every round, wherever it stands in the queue", async () => {
-  const r = await solvencyRound({
-    held: "0",
-    balances: {},
-    seed: Effect.flatMap(SqlClient.SqlClient, (sql) =>
-      Effect.all([
-        sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.test' FROM generate_series(1, 200) n`,
-        // Signed in after all of them, so last in the queue.
-        sql`INSERT INTO known_accounts (account_id, first_seen) VALUES ('buyer.test', now() + interval '1 minute'), ('relayed.test', now() + interval '1 minute')`,
-        sql`WITH co AS (INSERT INTO checkouts (account_id, step) VALUES ('test', 'done') RETURNING id) INSERT INTO purchases (checkout_id, account_id, idempotency_key, voucher_id, voucher_name, package_value, reference_price, step)
-            VALUES ((SELECT id FROM co), 'buyer.test', 'k1', 'amazon-us', 'Card', '10', 10000000, 'settled')`,
-        sql`INSERT INTO relays (delegate_hash, account_id, signed_tx) VALUES ('h1', 'relayed.test', '{}'::jsonb)`
-      ]))
-  })
-  assert.ok(r.read.includes("buyer.test") && r.read.includes("relayed.test"))
-  assert.equal(r.read.length, 52)
-})
-
-test("an account whose balance can't be read keeps its turn in the solvency check", async () => {
-  const signups = (sql: SqlClient.SqlClient) => sql`INSERT INTO known_accounts (account_id) SELECT 'signup' || n || '.test' FROM generate_series(1, 3) n`
-  const failed = await solvencyRound({ held: "0", balances: {}, down: true, seed: Effect.flatMap(SqlClient.SqlClient, signups) })
-  assert.deepEqual(failed.checked, [], "none was read, so none lost its place in the queue")
-  const read = await solvencyRound({ held: "0", balances: {}, seed: Effect.flatMap(SqlClient.SqlClient, signups) })
-  assert.deepEqual(read.checked, ["signup1.test", "signup2.test", "signup3.test"])
-})
-
-test("a low balance is said when it drops and once a day while it lasts, not at each restart; recovered, the next drop is said again", async () => {
-  let amount = 5n * 10n ** 23n // 0.5 NEAR: under every line
-  const near = fakeNear({
-    account: () => Effect.sync(() => ({ amount, storageUsage: 0 })),
-    view: <A>(method: string) =>
-      Effect.succeed((method === "ft_balance_of" ? "0" : method === "get_reserve" ? { free: "0", locked: "0", proceeds: "0" } : null) as A)
-  })
-  const alerts: Array<string> = []
-  const deps = Layer.mergeAll(
-    Layer.succeed(Near, near),
-    Layer.succeed(Base, fakeBase({ configured: false })),
-    Layer.succeed(Alerts, Alerts.of({ admin: (t) => Effect.sync(() => void alerts.push(t)), customer: () => Effect.succeed(true) }))
-  )
   // One server start: its first round runs at once.
   const start = Effect.scoped(Effect.gen(function*() {
-    yield* Layer.build(Monitor.pipe(Layer.provide(deps)))
+    yield* Layer.build(monitorWith(world, alerts))
     yield* Effect.sleep("300 millis")
   }))
-  const said = () => alerts.filter((a) => a.includes("free for storage")).length
+  const said = () => [alerts.filter((a) => a.startsWith("the fee payer")).length, alerts.filter((a) => a.startsWith("the Pay Wallet's float")).length]
   const r = await Effect.runPromise(
     Effect.gen(function*() {
       const sql = yield* SqlClient.SqlClient
@@ -211,17 +184,32 @@ test("a low balance is said when it drops and once a day while it lasts, not at 
       const dropped = said()
       yield* start
       const restarted = said()
-      amount = 10n ** 26n
+      setSol(world, world.feePayer.publicKey, 100n * LOW_LINES.feePayer)
+      setTokens(world, world.payWalletUsdc, 200n * USDC)
       yield* start
       const recovered = said()
-      amount = 5n * 10n ** 23n
+      setTokens(world, world.payWalletUsdc, LOW_LINES.float / 2n)
       yield* start
       const droppedAgain = said()
       // A day after it was last said, still low.
-      yield* sql`UPDATE settings SET value = jsonb_set(value, '{contract}', '0'::jsonb) WHERE key = 'low_balances'`
+      yield* sql`UPDATE settings SET value = jsonb_set(value, '{float}', '0'::jsonb) WHERE key = 'low_balances'`
       yield* start
       return { dropped, restarted, recovered, droppedAgain, dayLater: said() }
-    }).pipe(Effect.provide(DbMemory), Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { NEAR_NETWORK: "testnet" } }))))
+    }).pipe(Effect.provide(DbMemory), Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))))
   )
-  assert.deepEqual(r, { dropped: 1, restarted: 1, recovered: 1, droppedAgain: 2, dayLater: 3 })
+  assert.deepEqual(r, { dropped: [1, 1], restarted: [1, 1], recovered: [1, 1], droppedAgain: [1, 2], dayLater: [1, 3] })
+  assert.match(alerts.find((a) => a.startsWith("the Pay Wallet's float"))!, /down to 50 USDC/)
+})
+
+test("the owner hears when today's repayments to the Pay Wallet reach 80% of the daily cap", async () => {
+  const world = healthyWorld()
+  const today = BigInt(Math.floor(Date.now() / 86_400_000))
+  patchConfig(world, { repay_daily_cap: 500n * USDC, repay_day: today, repaid_today: 399n * USDC })
+  assert.deepEqual(await round(world, Effect.void), [], "79.8%")
+  patchConfig(world, { repaid_today: 400n * USDC })
+  assert.deepEqual(await round(world, Effect.void), [
+    "today's repayments to the Pay Wallet reached 400 of the 500 USDC daily cap; raise it in the admin panel"
+  ])
+  patchConfig(world, { repay_day: today - 1n })
+  assert.deepEqual(await round(world, Effect.void), [], "yesterday's repayments don't count")
 })

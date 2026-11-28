@@ -49,15 +49,15 @@ const routePath = (url: string) => {
 /**
  * Requests per IP per minute. Sign-in is tighter (each challenge writes a row), and so is the relayer
  * (it spends NEAR), and so is building a swap's transaction (each asks Jupiter, whose limit is per key, and
- * simulates on Solana); a card, a search or a quote (a cart's too) asks Bitrefill and NEAR, with room for the shop's
- * hover prefetch.
+ * simulates on Solana); a card, a search or a quote (a cart's too) asks Bitrefill and Solana, with room for the shop's
+ * hover prefetch, and a Draw Proof not read before asks Solana several times.
  */
 export const limitFor = (url: string) => {
   const path = routePath(url)
-  return path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") || path === "/topup/swap-tx" ||
-      path.startsWith("/solana-pay/")
+  return path.startsWith("/auth/") || path.startsWith("/telegram/") || path.startsWith("/relay") || path === "/topup/swap"
     ? 20
-    : path === "/catalog" || path.startsWith("/catalog/") || path === "/quote" || path === "/quote/cart" || path === "/browse" || path === "/mcp"
+    : path === "/catalog" || path.startsWith("/catalog/") || path === "/quote" || path === "/quote/cart" || path === "/browse" || path === "/mcp" ||
+        path.startsWith("/draws/")
     ? 60
     : 120
 }

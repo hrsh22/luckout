@@ -3,7 +3,7 @@
 import { GiftCard } from "@/components/gift-card"
 import { errorMessage } from "@/lib/api"
 import { COUNTRIES, countryName, flag } from "@/lib/countries"
-import { network } from "@/lib/near"
+import { testnet } from "@/lib/site"
 import { browseKey, popularKey, rememberSummary, type ShopFilters, useBrowse, usePopular, viewedCards, voucherQuery } from "@/lib/queries"
 import { CATEGORIES, type Category, type VoucherSummary } from "@luckout/api"
 import { useQueryClient } from "@tanstack/react-query"
@@ -49,7 +49,7 @@ export function Catalog() {
   const [text, setText] = useState(filters.q)
   // Above the full list unless the customer is searching: what they opened lately, and the brands people
   // buy most where they are. Testnet sells only test cards, so it has no popular ones.
-  const popularOn = network !== "testnet" && !filters.q
+  const popularOn = !testnet && !filters.q
   // Until the customer picks a country (or every country), the list is for the visitor's own.
   const guessing = popularOn && !picked.current && !filters.country
   const results = useBrowse(filters, guessing)
@@ -177,7 +177,7 @@ export function Catalog() {
               {c ? CATEGORY_NAMES[c] : "All"}
             </button>
           ))}
-          {network === "testnet" && <span className="ml-1 text-sm text-muted">Testnet: only Bitrefill test cards can be bought.</span>}
+          {testnet && <span className="ml-1 text-sm text-muted">Test network: only Bitrefill test cards can be bought.</span>}
         </div>
         {filters.country && (
           <p className="text-sm text-ink-soft">

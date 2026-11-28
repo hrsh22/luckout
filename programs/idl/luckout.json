@@ -1,0 +1,3099 @@
+{
+  "address": "4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3",
+  "metadata": {
+    "name": "luckout",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Luckout: buy gift cards at the price, or pay a bounded premium for a fair chance at cashback (ADR-0015)",
+    "repository": "https://github.com/hrsh22/luckout"
+  },
+  "instructions": [
+    {
+      "name": "accept_owner",
+      "discriminator": [
+        176,
+        23,
+        41,
+        28,
+        23,
+        111,
+        8,
+        4
+      ],
+      "accounts": [
+        {
+          "name": "new_owner",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "add_game_version",
+      "discriminator": [
+        234,
+        6,
+        39,
+        214,
+        41,
+        67,
+        13,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "version",
+          "type": {
+            "defined": {
+              "name": "GameVersion"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "admit",
+      "docs": [
+        "Admits a Checkout: every card or none, in order, each debiting its Maximum Price and locking the reserve",
+        "as the cards before it left it. `number` must be the customer's next, so a retry of an admitted",
+        "Checkout fails even after its account has closed."
+      ],
+      "discriminator": [
+        192,
+        169,
+        4,
+        138,
+        248,
+        90,
+        184,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "customer.wallet",
+                "account": "Customer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "customer.wallet",
+                "account": "Customer"
+              },
+              {
+                "kind": "arg",
+                "path": "number"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "number",
+          "type": "u64"
+        },
+        {
+          "name": "cards",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "CardOrder"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "deposit_for",
+      "docs": [
+        "Moves the USDC in a customer's approved account into their own Balance, and nowhere else."
+      ],
+      "discriminator": [
+        193,
+        39,
+        228,
+        88,
+        160,
+        254,
+        92,
+        53
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "customer.wallet",
+                "account": "Customer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "source",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "finish_draw",
+      "docs": [
+        "Finishes the Draws of the cards waiting on `round`'s randomness, once ORAO has filled it in. Anyone may",
+        "call it; it only reads the stored value, so calling again can't change a result."
+      ],
+      "discriminator": [
+        206,
+        149,
+        98,
+        145,
+        228,
+        27,
+        190,
+        130
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "randomness"
+        },
+        {
+          "name": "checkout_payer",
+          "writable": true
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "round",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "fund_reserve",
+      "discriminator": [
+        17,
+        82,
+        71,
+        222,
+        117,
+        210,
+        58,
+        12
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "from",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "docs": [
+        "Only the program's upgrade authority can initialize it, and becomes the owner."
+      ],
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116,
+                  45,
+                  117,
+                  115,
+                  100,
+                  99
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "pay_wallet"
+        },
+        {
+          "name": "program",
+          "address": "4Tziwbh1vEDremxPViXgEa91FP3Nv4hUyNmLXMzRK2Z3"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "operator",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "open",
+      "docs": [
+        "Opens the customer's account with the Default Mode they chose. Sent with the one-time approval that",
+        "makes the Vault's authority the delegate of their USDC account."
+      ],
+      "discriminator": [
+        228,
+        220,
+        155,
+        71,
+        199,
+        189,
+        60,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "default_mode",
+          "type": {
+            "defined": {
+              "name": "Mode"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "pause",
+      "docs": [
+        "The guardian's only power, which the owner has too: stop new Checkouts at once. Only the owner restarts them."
+      ],
+      "discriminator": [
+        211,
+        22,
+        221,
+        251,
+        74,
+        121,
+        193,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "guardian",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "propose_owner",
+      "docs": [
+        "Proposes a new owner, or withdraws the proposal with `None`. Nothing changes until it accepts, so the",
+        "owner and the upgrade authority can move to a multisig later without changing the program."
+      ],
+      "discriminator": [
+        90,
+        57,
+        141,
+        110,
+        196,
+        241,
+        172,
+        39
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_owner",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    },
+    {
+      "name": "quote_many",
+      "docs": [
+        "A cart's terms, card by card, as `admit` would take them now: each Lucky card's cap and lock come from",
+        "the Free Reserve the cards before it left. A Lucky card the reserve can't cover comes back Normal; a",
+        "confirmed Lucky Amount it no longer covers is quoted as without one, so the caller sees it moved."
+      ],
+      "discriminator": [
+        240,
+        113,
+        132,
+        43,
+        189,
+        159,
+        169,
+        181
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "items",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "QuoteItem"
+              }
+            }
+          }
+        }
+      ],
+      "returns": {
+        "vec": {
+          "defined": {
+            "name": "Quote"
+          }
+        }
+      }
+    },
+    {
+      "name": "reclaim",
+      "docs": [
+        "The customer takes back the full amount of a card nobody confirmed or failed within 24 hours."
+      ],
+      "discriminator": [
+        44,
+        177,
+        236,
+        249,
+        145,
+        109,
+        163,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout_payer",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "card",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "request_again",
+      "docs": [
+        "Replaces a request ORAO hasn't filled an hour after it was made: its cards move to a new request under",
+        "the next seed. A filled request can't be replaced, so this never re-rolls a Draw."
+      ],
+      "discriminator": [
+        102,
+        179,
+        237,
+        193,
+        24,
+        111,
+        114,
+        59
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "old_request"
+        },
+        {
+          "name": "vrf",
+          "address": "VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"
+        },
+        {
+          "name": "network_state",
+          "writable": true
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "request",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "round",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "set_cashback_cap",
+      "docs": [
+        "One card pays at most the lower of `fixed` (`None` is off) and `reserve_bps` of Free Reserve."
+      ],
+      "discriminator": [
+        33,
+        250,
+        178,
+        227,
+        33,
+        121,
+        53,
+        77
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "fixed",
+          "type": {
+            "option": "u64"
+          }
+        },
+        {
+          "name": "reserve_bps",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "set_default_mode",
+      "discriminator": [
+        19,
+        182,
+        28,
+        38,
+        231,
+        161,
+        90,
+        207
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "mode",
+          "type": {
+            "defined": {
+              "name": "Mode"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_guardian",
+      "docs": [
+        "`None` removes the guardian."
+      ],
+      "discriminator": [
+        147,
+        243,
+        50,
+        121,
+        154,
+        164,
+        50,
+        30
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "guardian",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_limits",
+      "docs": [
+        "`u64::MAX` is \"No limit\"."
+      ],
+      "discriminator": [
+        207,
+        50,
+        250,
+        67,
+        211,
+        33,
+        70,
+        91
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "per_purchase",
+          "type": "u64"
+        },
+        {
+          "name": "daily",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_min_lucky_checkout",
+      "discriminator": [
+        69,
+        64,
+        14,
+        162,
+        172,
+        57,
+        106,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_operator",
+      "discriminator": [
+        238,
+        153,
+        101,
+        169,
+        243,
+        131,
+        36,
+        1
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "operator",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_paused",
+      "docs": [
+        "Stops only new Checkouts."
+      ],
+      "discriminator": [
+        91,
+        60,
+        125,
+        192,
+        176,
+        225,
+        166,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_pay_wallet",
+      "discriminator": [
+        107,
+        108,
+        120,
+        75,
+        144,
+        199,
+        243,
+        246
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pay_wallet"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_repay_cap",
+      "discriminator": [
+        173,
+        214,
+        41,
+        210,
+        189,
+        51,
+        100,
+        187
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "daily",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "settle",
+      "docs": [
+        "Confirms delivery of `delivered` and fails `failed`. Delivered cards' Reference Prices repay the Pay",
+        "Wallet up to the daily cap; past it they wait as Proceeds. Delivered Lucky cards share one randomness",
+        "request, made in this same instruction, after delivery is confirmed (ADR-0001, amended)."
+      ],
+      "discriminator": [
+        175,
+        42,
+        185,
+        87,
+        144,
+        131,
+        102,
+        212
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "checkout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  104,
+                  101,
+                  99,
+                  107,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "checkout.customer",
+                "account": "Checkout"
+              },
+              {
+                "kind": "account",
+                "path": "checkout.number",
+                "account": "Checkout"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pay_wallet",
+          "writable": true
+        },
+        {
+          "name": "checkout_payer",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "vrf",
+          "optional": true,
+          "address": "VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"
+        },
+        {
+          "name": "network_state",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "request",
+          "writable": true,
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "delivered",
+          "type": "bytes"
+        },
+        {
+          "name": "failed",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "customer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  109,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "to",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_proceeds",
+      "docs": [
+        "Proceeds go to the owner, or to the Pay Wallet."
+      ],
+      "discriminator": [
+        124,
+        68,
+        215,
+        12,
+        201,
+        136,
+        54,
+        72
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "to",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_reserve",
+      "discriminator": [
+        165,
+        158,
+        228,
+        5,
+        114,
+        119,
+        194,
+        14
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "vault_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "to",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Checkout",
+      "discriminator": [
+        40,
+        241,
+        164,
+        89,
+        151,
+        55,
+        71,
+        136
+      ]
+    },
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "Customer",
+      "discriminator": [
+        112,
+        147,
+        140,
+        31,
+        93,
+        186,
+        103,
+        18
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Admitted",
+      "discriminator": [
+        40,
+        117,
+        134,
+        192,
+        253,
+        5,
+        247,
+        243
+      ]
+    },
+    {
+      "name": "Deposited",
+      "discriminator": [
+        111,
+        141,
+        26,
+        45,
+        161,
+        35,
+        100,
+        57
+      ]
+    },
+    {
+      "name": "Draw",
+      "discriminator": [
+        119,
+        113,
+        119,
+        167,
+        100,
+        168,
+        83,
+        142
+      ]
+    },
+    {
+      "name": "DrawRequested",
+      "discriminator": [
+        59,
+        172,
+        219,
+        42,
+        28,
+        94,
+        93,
+        75
+      ]
+    },
+    {
+      "name": "OwnerMoved",
+      "discriminator": [
+        166,
+        100,
+        19,
+        206,
+        95,
+        155,
+        85,
+        15
+      ]
+    },
+    {
+      "name": "Reclaimed",
+      "discriminator": [
+        230,
+        25,
+        32,
+        135,
+        40,
+        167,
+        137,
+        130
+      ]
+    },
+    {
+      "name": "Settled",
+      "discriminator": [
+        232,
+        210,
+        40,
+        17,
+        142,
+        124,
+        145,
+        238
+      ]
+    },
+    {
+      "name": "Withdrawn",
+      "discriminator": [
+        20,
+        89,
+        223,
+        198,
+        194,
+        124,
+        219,
+        13
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "NotOwner",
+      "msg": "Only the owner"
+    },
+    {
+      "code": 6001,
+      "name": "NotOperator",
+      "msg": "Only the operator"
+    },
+    {
+      "code": 6002,
+      "name": "NotProposedOwner",
+      "msg": "Not the proposed owner"
+    },
+    {
+      "code": 6003,
+      "name": "BadRole",
+      "msg": "That key can't take this role"
+    },
+    {
+      "code": 6004,
+      "name": "NewerLayout",
+      "msg": "This account was written by a newer build"
+    },
+    {
+      "code": 6005,
+      "name": "Paused",
+      "msg": "New purchases are paused"
+    },
+    {
+      "code": 6006,
+      "name": "BadCart",
+      "msg": "A Checkout holds 1 to 15 cards"
+    },
+    {
+      "code": 6007,
+      "name": "WrongCheckoutNumber",
+      "msg": "Not the customer's next Checkout number"
+    },
+    {
+      "code": 6008,
+      "name": "BelowMinimumPrice",
+      "msg": "Purchases start at 0.5 USDC"
+    },
+    {
+      "code": 6009,
+      "name": "NormalHasLuckyAmount",
+      "msg": "A Normal purchase has no Lucky Amount"
+    },
+    {
+      "code": 6010,
+      "name": "InvalidLuckyAmount",
+      "msg": "Invalid Lucky Amount"
+    },
+    {
+      "code": 6011,
+      "name": "ReserveMoved",
+      "msg": "The Cashback Reserve moved since you confirmed; please confirm again"
+    },
+    {
+      "code": 6012,
+      "name": "ReserveTooSmall",
+      "msg": "Reserve too small for a Lucky Buy; use Normal"
+    },
+    {
+      "code": 6013,
+      "name": "PriceChanged",
+      "msg": "Price changed since you confirmed; please confirm again"
+    },
+    {
+      "code": 6014,
+      "name": "OverPerPurchaseLimit",
+      "msg": "Over the per-purchase spending limit"
+    },
+    {
+      "code": 6015,
+      "name": "OverDailyLimit",
+      "msg": "Over the daily spending limit"
+    },
+    {
+      "code": 6016,
+      "name": "InsufficientBalance",
+      "msg": "Insufficient balance"
+    },
+    {
+      "code": 6017,
+      "name": "LuckyCheckoutTooSmall",
+      "msg": "A Lucky Checkout plays at least the smallest Lucky Checkout"
+    },
+    {
+      "code": 6018,
+      "name": "UnknownGameVersion",
+      "msg": "Unknown game version"
+    },
+    {
+      "code": 6019,
+      "name": "BadGameVersion",
+      "msg": "Invalid game version"
+    },
+    {
+      "code": 6020,
+      "name": "UnknownCard",
+      "msg": "No such card in this Checkout"
+    },
+    {
+      "code": 6021,
+      "name": "DuplicateCard",
+      "msg": "A card is named twice"
+    },
+    {
+      "code": 6022,
+      "name": "NotPending",
+      "msg": "Purchase is already closed"
+    },
+    {
+      "code": 6023,
+      "name": "TooEarlyToReclaim",
+      "msg": "Reclaim opens 24 hours after purchase"
+    },
+    {
+      "code": 6024,
+      "name": "DepositTooSmall",
+      "msg": "Deposit at least 1 USDC"
+    },
+    {
+      "code": 6025,
+      "name": "NothingToWithdraw",
+      "msg": "Nothing to withdraw"
+    },
+    {
+      "code": 6026,
+      "name": "ExceedsFreeReserve",
+      "msg": "Exceeds free reserve"
+    },
+    {
+      "code": 6027,
+      "name": "ExceedsProceeds",
+      "msg": "Exceeds proceeds"
+    },
+    {
+      "code": 6028,
+      "name": "MissingRandomnessAccounts",
+      "msg": "The randomness accounts are missing"
+    },
+    {
+      "code": 6029,
+      "name": "WrongRandomnessAccount",
+      "msg": "Not this Checkout's randomness account"
+    },
+    {
+      "code": 6030,
+      "name": "RandomnessNotFilled",
+      "msg": "The randomness hasn't arrived yet"
+    },
+    {
+      "code": 6031,
+      "name": "RandomnessFilled",
+      "msg": "The randomness has arrived: finish the Draw instead"
+    },
+    {
+      "code": 6032,
+      "name": "NothingToDraw",
+      "msg": "No card is waiting on this request"
+    },
+    {
+      "code": 6033,
+      "name": "TooEarlyToRequestAgain",
+      "msg": "A request can be replaced an hour after it was made"
+    },
+    {
+      "code": 6034,
+      "name": "TooManyRounds",
+      "msg": "Too many randomness requests for one Checkout"
+    },
+    {
+      "code": 6035,
+      "name": "WrongTokenAccount",
+      "msg": "Wrong token account"
+    },
+    {
+      "code": 6036,
+      "name": "BadCashbackCap",
+      "msg": "The fixed limit must be above 0, and the reserve share above 0% and at most 50%"
+    },
+    {
+      "code": 6037,
+      "name": "TooManyVersions",
+      "msg": "Too many game versions"
+    },
+    {
+      "code": 6038,
+      "name": "NotUsdc",
+      "msg": "A mainnet build takes only Circle's USDC"
+    },
+    {
+      "code": 6039,
+      "name": "NotGuardian",
+      "msg": "Only the guardian or the owner can pause"
+    }
+  ],
+  "types": [
+    {
+      "name": "Admitted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "customer",
+            "type": "pubkey"
+          },
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "number",
+            "type": "u64"
+          },
+          {
+            "name": "cards",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Card"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Card",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "reference_price",
+            "type": "u64"
+          },
+          {
+            "name": "lucky_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_price",
+            "docs": [
+              "Debited at admission: the Maximum Price, or the Reference Price for Normal."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "locked",
+            "docs": [
+              "Free Reserve locked for this card: its largest Reference Discount."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "Status"
+              }
+            }
+          },
+          {
+            "name": "cashback",
+            "type": "u64"
+          },
+          {
+            "name": "round",
+            "docs": [
+              "Which of the Checkout's randomness requests draws this card."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CardOrder",
+      "docs": [
+        "One card to admit, as the customer confirmed it. `mode: None` plays their Default Mode."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reference_price",
+            "type": "u64"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "option": {
+                "defined": {
+                  "name": "Mode"
+                }
+              }
+            }
+          },
+          {
+            "name": "max_debit",
+            "docs": [
+              "The most the customer confirmed for this card; a higher Maximum Price is refused."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lucky_amount",
+            "docs": [
+              "The Lucky Amount the customer confirmed; without it, the most the reserve allows now."
+            ],
+            "type": {
+              "option": "u64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CashbackCap",
+      "docs": [
+        "The most Cashback one card can pay: the lower of a fixed amount (`None` is off) and a share of Free Reserve."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fixed",
+            "type": {
+              "option": "u64"
+            }
+          },
+          {
+            "name": "reserve_bps",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Checkout",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "layout",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "customer",
+            "docs": [
+              "The customer's wallet."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "number",
+            "type": "u64"
+          },
+          {
+            "name": "payer",
+            "docs": [
+              "Paid the rent, and gets it back when the Checkout closes."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "rounds",
+            "docs": [
+              "Randomness requests made so far; the next request's seed uses this number."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "requested_at",
+            "type": "i64"
+          },
+          {
+            "name": "spare",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "cards",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Card"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "layout",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_authority_bump",
+            "type": "u8"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_owner",
+            "docs": [
+              "Becomes the owner only when it accepts, so a typo can't hand the program to a key nobody holds."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "operator",
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "pay_wallet",
+            "docs": [
+              "The Pay Wallet's USDC account, which `settle` repays."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "docs": [
+              "Stops only new Checkouts. Settling, Draws, Reclaim, deposits and withdrawals keep working."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "cashback_cap",
+            "type": {
+              "defined": {
+                "name": "CashbackCap"
+              }
+            }
+          },
+          {
+            "name": "min_lucky_checkout",
+            "docs": [
+              "A Checkout with Lucky cards plays at least this much Lucky Amount, so its margin pays for its Draw."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "free_reserve",
+            "type": "u64"
+          },
+          {
+            "name": "locked_reserve",
+            "type": "u64"
+          },
+          {
+            "name": "proceeds",
+            "docs": [
+              "Delivered cards' Reference Prices not yet repaid to the Pay Wallet (past the daily cap), held for the owner."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "repay_daily_cap",
+            "type": "u64"
+          },
+          {
+            "name": "repay_day",
+            "type": "i64"
+          },
+          {
+            "name": "repaid_today",
+            "type": "u64"
+          },
+          {
+            "name": "lucky_settled",
+            "docs": [
+              "Live Average = lucky_paid_total / lucky_amount_total, promised to be about 105.6%."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "lucky_amount_total",
+            "type": "u64"
+          },
+          {
+            "name": "lucky_paid_total",
+            "type": "u64"
+          },
+          {
+            "name": "guardian",
+            "docs": [
+              "May only pause (`pause`), so a time lock on the owner never delays one. All zeros: none."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "spare",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "versions",
+            "docs": [
+              "Append-only. Grows by one entry with each `add_game_version`."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "GameVersion"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Customer",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "layout",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "wallet",
+            "docs": [
+              "The customer's Privy wallet: their Deposit Address, and the key that signs for them."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "balance",
+            "type": "u64"
+          },
+          {
+            "name": "per_purchase_limit",
+            "type": "u64"
+          },
+          {
+            "name": "daily_limit",
+            "type": "u64"
+          },
+          {
+            "name": "default_mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "day",
+            "type": "i64"
+          },
+          {
+            "name": "spent_today",
+            "type": "u64"
+          },
+          {
+            "name": "premiums_paid",
+            "docs": [
+              "Running Total = cashback_received - premiums_paid."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "cashback_received",
+            "type": "u64"
+          },
+          {
+            "name": "checkouts",
+            "docs": [
+              "Checkouts admitted so far: the next one must carry this number."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "spare",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Deposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "customer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Draw",
+      "docs": [
+        "A Draw Proof: anyone can check `randomness` against ORAO's oracle keys and recompute the rest (ADR-0005)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "customer",
+            "type": "pubkey"
+          },
+          {
+            "name": "card",
+            "type": "u8"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "seed",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "randomness",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          },
+          {
+            "name": "random",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "roll",
+            "type": "u32"
+          },
+          {
+            "name": "game_version",
+            "type": "u32"
+          },
+          {
+            "name": "reference_price",
+            "type": "u64"
+          },
+          {
+            "name": "lucky_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_price",
+            "type": "u64"
+          },
+          {
+            "name": "final_bps",
+            "type": "u32"
+          },
+          {
+            "name": "final_price",
+            "type": "u64"
+          },
+          {
+            "name": "cashback",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DrawRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "seed",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "GameVersion",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "premium_bps",
+            "type": "u32"
+          },
+          {
+            "name": "outcomes",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Outcome"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Mode",
+      "docs": [
+        "Normal is a Standard Purchase; Lucky(n) plays Game Version n."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Normal"
+          },
+          {
+            "name": "Lucky",
+            "fields": [
+              "u32"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "Outcome",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "final_bps",
+            "docs": [
+              "Final Price as a share of the Lucky Amount, e.g. 5_000 = pays half."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "chance_bps",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OwnerMoved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "what",
+            "type": "string"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "to",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Quote",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "reference_price",
+            "type": "u64"
+          },
+          {
+            "name": "lucky_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_price",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "QuoteItem",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reference_price",
+            "type": "u64"
+          },
+          {
+            "name": "mode",
+            "type": {
+              "defined": {
+                "name": "Mode"
+              }
+            }
+          },
+          {
+            "name": "lucky_amount",
+            "type": {
+              "option": "u64"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Reclaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "card",
+            "type": "u8"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Settled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "checkout",
+            "type": "pubkey"
+          },
+          {
+            "name": "delivered",
+            "type": "bytes"
+          },
+          {
+            "name": "failed",
+            "type": "bytes"
+          },
+          {
+            "name": "repaid",
+            "type": "u64"
+          },
+          {
+            "name": "to_proceeds",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Status",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Pending"
+          },
+          {
+            "name": "Drawing"
+          },
+          {
+            "name": "Delivered"
+          },
+          {
+            "name": "Failed"
+          },
+          {
+            "name": "Reclaimed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Withdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "customer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "to",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ]
+}

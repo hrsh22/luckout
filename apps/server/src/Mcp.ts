@@ -1,15 +1,16 @@
-import { type DrawEvent, finalPrice, type GameVersion, verify } from "@luckout/api/draw"
+import { finalPrice, verifyCard } from "@luckout/api/draw"
 import { Config, Effect, Layer } from "effect"
 import { HttpRouter, HttpServerResponse } from "effect/http"
 import { MODES, modeName, usd, usdUp, worksIn } from "./Agent.ts"
 import { Bitrefill } from "./Bitrefill.ts"
-import { Near, Network } from "./Near.ts"
+import { type DrawEvent, isSignature, maxCashback } from "./Program.ts"
 import { Purchases } from "./Purchases.ts"
+import { Solana } from "./Solana.ts"
 import { Telegram } from "./Telegram.ts"
 
 // Luckout as a tool for other AI agents: a read-only MCP server (Streamable HTTP at POST /mcp,
 // JSON replies, no sessions). An agent can search gift cards, price one in every mode with its
-// exact odds, read the fairness numbers, and recompute any Draw from the chain. Nothing here can
+// exact odds, read the fairness numbers, and recompute any Draw from the chain (Solana, ADR-0015). Nothing here can
 // spend or sign: buying needs the customer's own sign-in and Confirm, so an agent hands its human
 // the checkout link instead.
 
@@ -42,7 +43,7 @@ export const respond = async (message: unknown, tools: ReadonlyArray<Tool>) => {
         capabilities: { tools: {} },
         serverInfo: { name: "luckout", version: "1.0.0" },
         instructions:
-          "Luckout sells gift cards for USDC on NEAR, at the normal price or with a provably fair chance at cashback. These tools only read: search cards, quote every mode with exact odds, check fairness, verify a Draw. To buy, give your human the buy_url; they sign in and confirm themselves."
+          "Luckout sells gift cards for USDC on Solana, at the normal price or with a provably fair chance at cashback. These tools only read: search cards, quote every mode with exact odds, check fairness, verify a Draw. To buy, give your human the buy_url; they sign in and confirm themselves."
       })
     }
     case "ping":
@@ -69,23 +70,7 @@ export const respond = async (message: unknown, tools: ReadonlyArray<Tool>) => {
   }
 }
 
-interface Receipt {
-  readonly outcome: { readonly logs: ReadonlyArray<string>; readonly executor_id: string; readonly status: Record<string, unknown> }
-}
-
-/** The Draw a transaction logged, counting only receipts our contract ran successfully (no look-alikes). */
-/** A cart's settlement logs several Draws (ADR-0013): `purchaseId` picks one, else the first. */
-export const drawEvent = (receipts: ReadonlyArray<Receipt>, contractId: string, purchaseId?: number) =>
-  receipts
-    .filter((r) => r.outcome.executor_id === contractId && !("Failure" in r.outcome.status))
-    .flatMap((r) => r.outcome.logs)
-    .filter((l) => l.startsWith("EVENT_JSON:"))
-    .map((l) => JSON.parse(l.slice(11)) as { standard: string; event: string; data: Array<unknown> })
-    .find((e) => e.standard === "luckout" && e.event === "draw" && (purchaseId === undefined || Number((e.data[0] as DrawEvent).purchase_id) === purchaseId))
-    ?.data[0] as DrawEvent | undefined
-
-const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/
-const ARCHIVAL = { mainnet: "https://archival-rpc.mainnet.fastnear.com", testnet: "https://archival-rpc.testnet.fastnear.com" } as const
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex")
 
 const text = (args: Record<string, unknown>, key: string, max = 100) => {
   const v = args[key]
@@ -93,27 +78,19 @@ const text = (args: Record<string, unknown>, key: string, max = 100) => {
   return v.trim()
 }
 
-interface Stats {
-  readonly lucky_settled: number
-  readonly lucky_amount_total: string
-  readonly lucky_paid_total: string
-}
-interface Reserve {
-  readonly free: string
-  readonly max_cashback: string
-}
-
 export const McpRoute = Layer.unwrap(Effect.gen(function*() {
   const bitrefill = yield* Bitrefill
   const purchases = yield* Purchases
-  const near = yield* Near
+  const solana = yield* Solana
   const telegram = yield* Telegram
-  const network = yield* Network
   const web = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
 
-  // Same wording as the public catalog endpoints: upstream details stay in our logs.
+  // Same wording as the public catalog endpoints: upstream details (an RPC URL holds its key) stay in our logs.
   const run = async <A>(e: Effect.Effect<A, { message: string }>) => {
-    const r = await Effect.runPromise(Effect.match(e, { onFailure: (err) => ({ failed: err.message }), onSuccess: (ok) => ({ ok }) }))
+    const r = await Effect.runPromise(Effect.match(e, {
+      onFailure: (err) => ({ failed: "_tag" in err && err._tag === "SolanaUnavailable" ? "Solana isn't answering right now. Try again in a moment." : err.message }),
+      onSuccess: (ok) => ({ ok })
+    }))
     if (!("failed" in r)) return r.ok
     if (r.failed.startsWith("Bitrefill request failed")) throw new ToolError("Bitrefill isn't answering right now. Try again in a moment.")
     throw new ToolError(r.failed)
@@ -149,7 +126,7 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
     {
       name: "quote",
       description:
-        "Price one amount of a card in every mode (or one): Normal pays the price; Lite, Classic and Jackpot pay more up front for a chance at cashback. Gives each outcome's exact chance and final price, read from the contract's Game Versions. Every lucky mode averages 105.6% of the price.",
+        "Price one amount of a card in every mode (or one): Normal pays the price; Lite, Classic and Jackpot pay more up front for a chance at cashback. Gives each outcome's exact chance and final price, read from the program's Game Versions. Every lucky mode averages 105.6% of the price.",
       inputSchema: {
         type: "object",
         properties: {
@@ -165,17 +142,24 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
         const asked = args.mode === undefined ? undefined : text(args, "mode", 10).toLowerCase()
         if (asked !== undefined && !MODES[asked]) throw new ToolError("mode must be normal, lite, classic or jackpot")
         const modes = asked === undefined ? Object.values(MODES) : [MODES[asked]!]
-        const versions = await run(near.view<Array<GameVersion>>("get_game_versions"))
+        const { versions, min_lucky_checkout } = await run(solana.config)
         const quotes = await Promise.all(modes.map(async (m) => {
           const q = await run(purchases.quote(id, value, m === "normal" ? undefined : m.lucky))
-          const version = m === "normal" ? undefined : versions[m.lucky]
+          // Under the smallest Lucky Checkout, one card alone is bought at Normal: no odds to give.
+          const version = q.mode === "normal" ? undefined : versions[q.mode.lucky]
           const outcomes = version
             ? version.outcomes.map((o) => {
               const price = Number(finalPrice(BigInt(q.referencePrice), BigInt(q.luckyAmount), BigInt(q.maxPrice), o.final_bps))
               return { chance: `${o.chance_bps / 100}%`, final_price: usd(price), cashback: usd(q.maxPrice - price) }
             })
             : [{ chance: "100%", final_price: usd(q.referencePrice), cashback: usd(0) }]
-          return { price: usd(q.referencePrice), mode: modeName(m), pay_up_front: usdUp(q.maxPrice), outcomes }
+          return {
+            price: usd(q.referencePrice),
+            mode: modeName(m),
+            pay_up_front: usdUp(q.maxPrice),
+            outcomes,
+            ...(q.belowMin ? { note: `Lucky cards play together from ${usd(Number(min_lucky_checkout))} a checkout, so this one alone is bought at the normal price.` } : {})
+          }
         }))
         return { card_price: quotes[0]?.price, quotes: quotes.map(({ price: _, ...q }) => q), buy_url: buyUrl(id) }
       }
@@ -183,19 +167,19 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
     {
       name: "fairness",
       description:
-        "Luckout's live fairness numbers, read from the contract: what lucky buyers have paid on average (promised 105.6%), the Cashback Reserve, the most one purchase can win, and the latest TEE attestation check of the shopping agent's model.",
+        "Luckout's live fairness numbers, read from the program: what lucky buyers have paid on average (promised 105.6%), the Cashback Reserve, the most one purchase can win, and the latest TEE attestation check of the shopping agent's model.",
       inputSchema: { type: "object", properties: {} },
       run: async () => {
-        const [stats, reserve] = await Promise.all([run(near.view<Stats>("get_stats")), run(near.view<Reserve>("get_reserve"))])
+        const config = await run(solana.config)
         const attested = await Effect.runPromise(telegram.attestation.pipe(Effect.orElseSucceed(() => undefined)))
-        const total = Number(stats.lucky_amount_total)
+        const total = Number(config.lucky_amount_total)
         return {
-          contract: near.contractId,
-          network,
+          contract: solana.program.id.toBase58(),
+          network: solana.cluster,
           promised_average: "105.6% of the price, in every lucky mode",
-          live_average: total > 0 ? `${(Number(stats.lucky_paid_total) / total * 100).toFixed(2)}% over ${stats.lucky_settled} Draws` : "no Draws yet",
-          cashback_reserve_free: usd(Number(reserve.free)),
-          max_cashback_per_purchase: usd(Number(reserve.max_cashback)),
+          live_average: total > 0 ? `${(Number(config.lucky_paid_total) / total * 100).toFixed(2)}% over ${config.lucky_settled} Draws` : "no Draws yet",
+          cashback_reserve_free: usd(Number(config.free_reserve)),
+          max_cashback_per_purchase: usd(Number(maxCashback(config))),
           agent_model_attestation: attested
             ? {
               ok: attested.ok,
@@ -211,45 +195,47 @@ export const McpRoute = Layer.unwrap(Effect.gen(function*() {
     {
       name: "verify_draw",
       description:
-        "Recompute a Luckout Draw from its NEAR transaction: random value = sha256(block random seed ‖ purchase id), then the roll, the outcome and the Cashback, each compared with what the contract logged.",
+        "Recompute a Luckout Draw from its Solana transaction: random value = sha256(ORAO's randomness ‖ card), then the roll, the outcome and the Cashback, each compared with what the program recorded.",
       inputSchema: {
         type: "object",
         properties: {
-          tx_hash: { type: "string", description: "The NEAR transaction that ran the Draw" },
-          purchase_id: { type: "integer", description: "Which Draw, when the transaction settled a cart of several (its link's ?purchase=)" }
+          tx_hash: { type: "string", description: "The Solana transaction that finished the Draw" },
+          card: { type: "integer", description: "Which card, when the transaction drew several of a Checkout's cards (its link's ?card=)" }
         },
         required: ["tx_hash"]
       },
       run: async (args) => {
-        const tx = text(args, "tx_hash", 44)
-        if (!TX_HASH.test(tx)) throw new ToolError("tx_hash must be a NEAR transaction hash")
-        const config = await run(near.view<{ operator: string }>("get_config"))
-        // RPC uses the sender only to find the shard; Draws are mostly confirmed by the operator.
-        const res = await fetch(ARCHIVAL[network], {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tx", params: { tx_hash: tx, sender_account_id: config.operator, wait_until: "NONE" } }),
-          signal: AbortSignal.timeout(15_000)
-        }).then((r) => r.json() as Promise<{ result?: { receipts_outcome: Array<Receipt> }; error?: { cause?: { name?: string } } }>).catch(() => undefined)
-        // The archival node saying it has no such transaction (or that the hash can't be one) is an answer; anything
-        // else is NEAR not answering, and asking again may work.
-        if (!res?.result) {
-          throw new ToolError(
-            /^(UNKNOWN_TRANSACTION|PARSE_ERROR)$/.test(res?.error?.cause?.name ?? "") ? "NEAR has no record of that transaction." : "NEAR isn't answering right now. Try again in a moment."
-          )
-        }
-        const purchaseId = Number.isSafeInteger(args.purchase_id) ? Number(args.purchase_id) : undefined
-        const draw = drawEvent(res.result.receipts_outcome, near.contractId, purchaseId)
+        const tx = text(args, "tx_hash", 88)
+        if (!isSignature(tx)) throw new ToolError("tx_hash must be a Solana transaction signature")
+        // Only our program's own records count: a failed transaction has none, and a Draw only another program logged
+        // isn't one (Program.decodeEvents).
+        const out = await run(solana.transaction(tx))
+        if (!out) throw new ToolError("Solana has no record of that transaction, or it failed.")
+        const card = Number.isSafeInteger(args.card) ? Number(args.card) : undefined
+        const draw = out.events.filter((e) => e.name === "Draw").map((e) => e.data as unknown as DrawEvent).find((d) => card === undefined || d.card === card)
         if (!draw) throw new ToolError("That transaction has no Luckout Draw.")
-        const version = (await run(near.view<Array<GameVersion>>("get_game_versions")))[draw.game_version]
+        const version = (await run(solana.config)).versions[draw.game_version]
         if (!version) throw new ToolError(`Unknown Game Version ${draw.game_version}`)
-        const checks = await verify(draw, version)
+        const checks = await verifyCard({
+          card: draw.card,
+          game_version: draw.game_version,
+          reference_price: String(draw.reference_price),
+          lucky_amount: String(draw.lucky_amount),
+          max_price: String(draw.max_price),
+          randomness: hex(draw.randomness),
+          random: hex(draw.random),
+          roll: draw.roll,
+          final_bps: draw.final_bps,
+          final_price: String(draw.final_price),
+          cashback: String(draw.cashback)
+        }, version)
         return {
-          purchase_id: draw.purchase_id,
+          card: draw.card,
+          checkout: draw.checkout.toBase58(),
           mode: version.name,
           all_match: checks.every((c) => c.ok),
           checks: checks.map(({ label, expected, recomputed, ok }) => ({ label, logged: expected, recomputed, ok })),
-          proof_page: `${web}/draw/${tx}?purchase=${draw.purchase_id}`
+          proof_page: `${web}/draw/${tx}?card=${draw.card}`
         }
       }
     }

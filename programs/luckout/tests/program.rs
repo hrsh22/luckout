@@ -803,6 +803,38 @@ fn ownership_moves_only_when_the_new_owner_accepts() {
 }
 
 #[test]
+fn the_guardian_can_only_pause() {
+    let mut e = Env::new();
+    let (owner, guardian, stranger) = (e.owner.insecure_clone(), Keypair::new(), Keypair::new());
+    let pause = |who: &Keypair| Instruction {
+        program_id: luckout::ID,
+        accounts: luckout::accounts::Pause { guardian: who.pubkey(), config: pda(&[CONFIG_SEED]) }.to_account_metas(None),
+        data: luckout::instruction::Pause {}.data(),
+    };
+    let set = |to| e.owner_ix(&owner.pubkey(), luckout::instruction::SetGuardian { guardian: to }.data());
+    let (appoint, remove) = (set(Some(guardian.pubkey())), set(None));
+    assert_eq!(e.config().guardian, Pubkey::default(), "none until the owner appoints one");
+    assert_fails(e.send(&[pause(&guardian)], &[&guardian]), LuckoutError::NotGuardian);
+    let by_guardian = e.owner_ix(&guardian.pubkey(), luckout::instruction::SetGuardian { guardian: Some(guardian.pubkey()) }.data());
+    assert_fails(e.send(&[by_guardian], &[&guardian]), LuckoutError::NotOwner);
+    ok(e.send(&[appoint], &[&owner]));
+    assert_fails(e.send(&[pause(&stranger)], &[&stranger]), LuckoutError::NotGuardian);
+    ok(e.send(&[pause(&guardian)], &[&guardian]));
+    assert!(e.config().paused);
+    // Only the owner starts Checkouts again.
+    let unpause = |who: &Keypair| e.owner_ix(&who.pubkey(), luckout::instruction::SetPaused { paused: false }.data());
+    let (unpause_g, unpause_o) = (unpause(&guardian), unpause(&owner));
+    assert_fails(e.send(&[unpause_g], &[&guardian]), LuckoutError::NotOwner);
+    ok(e.send(&[unpause_o.clone()], &[&owner]));
+    assert!(!e.config().paused);
+    // The owner can pause the same way, and removing the guardian takes the power away.
+    ok(e.send(&[pause(&owner)], &[&owner]));
+    ok(e.send(&[unpause_o], &[&owner]));
+    ok(e.send(&[remove], &[&owner]));
+    assert_fails(e.send(&[pause(&guardian)], &[&guardian]), LuckoutError::NotGuardian);
+}
+
+#[test]
 fn only_the_owner_moves_the_reserve_and_never_the_locked_part() {
     let mut e = Env::new();
     e.fund_reserve(100 * USDC);

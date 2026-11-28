@@ -1,40 +1,41 @@
-import { base58Encode } from "@luckout/api"
+import { address, lamports } from "@solana/kit"
 import {
-  AccountLayout,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createApproveInstruction,
   createAssociatedTokenAccountIdempotentInstruction,
+  createTransferInstruction,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID
 } from "@solana/spl-token"
-import { ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, TransactionInstruction, VersionedTransaction } from "@solana/web3.js"
+import { ComputeBudgetProgram, Keypair, PublicKey, TransactionInstruction, VersionedTransaction } from "@solana/web3.js"
 import { ConfigProvider, Effect, Layer } from "effect"
 import assert from "node:assert/strict"
-import { randomBytes } from "node:crypto"
 import { createServer, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
+import { Chain, type RawAccount, Solana } from "./Solana.ts"
 import {
   type Balances,
   JUPITER_PROGRAM,
   jupiterProblem,
   type JupiterQuote,
-  MAX_PRIORITY_LAMPORTS,
+  MAX_FEE_PAYER_SPEND,
   outcomeProblem,
   quoteProblem,
   simulationProblem,
-  sizeFor,
-  slippageFor,
-  SOL_USDC_MINT,
   Swap,
-  SWAP_TOKENS
+  SWAP_TOKENS,
+  swapInstructions,
+  unitsFor
 } from "./Swap.ts"
+import { solanaLayer, solanaWorld } from "./testing.ts"
 
-const ORE = SWAP_TOKENS[0]!
-// 0.07 ORE for 5 USDC: $71.43 an ORE, against a market at $71.50.
+const ORE = SWAP_TOKENS.find((t) => t.symbol === "ORE")!
+const USDC_MINT = Keypair.generate().publicKey.toBase58()
+// 0.07 ORE for 5.025 USDC: $71.79 an ORE, against a market at $71.50.
 const quote = (o: Partial<JupiterQuote> = {}): JupiterQuote => ({
   inputMint: ORE.mint,
-  outputMint: SOL_USDC_MINT,
+  outputMint: USDC_MINT,
   inAmount: "7000000000",
   outAmount: "5025000",
   otherAmountThreshold: "5000000",
@@ -44,232 +45,215 @@ const quote = (o: Partial<JupiterQuote> = {}): JupiterQuote => ({
   routePlan: [{ swapInfo: { label: "Meteora DLMM" } }],
   ...o
 })
-const check = (q: JupiterQuote, need = 5_000_000n, usdPrice = 71.5) => quoteProblem(q, { token: ORE, spend: 7_000_000_000n, need, usdPrice })
+const check = (q: JupiterQuote, usdPrice = 71.5) => quoteProblem(q, { token: ORE, spend: 7_000_000_000n, usdPrice, usdcMint: USDC_MINT })
 
-test("a route is used only when it swaps exactly what was shown, its minimum out covers the USDC, and its price is the market's", () => {
+test("a route is used only when it swaps exactly what was shown into USDC, near the market, for at least 1 USDC", () => {
   assert.equal(check(quote()), undefined)
   assert.match(check(quote({ swapMode: "ExactOut" }))!, /different swap/)
   assert.match(check(quote({ inAmount: "7000000001" }))!, /different swap/, "never more of the token than the customer was shown")
   assert.match(check(quote({ outputMint: ORE.mint }))!, /different swap/)
-  assert.match(check(quote(), 5_000_001n)!, /price moved/, "a minimum out short of the USDC needed by one unit")
   assert.match(check(quote({ priceImpactPct: "0.0101" }))!, /big swap/)
   assert.match(check(quote({ priceImpactPct: "NaN" }))!, /big swap/)
-  assert.match(check(quote(), 5_000_000n, 73)!, /off the market/, "2% under Jupiter's market price")
-  assert.equal(check(quote(), 5_000_000n, 72.5), undefined, "1.4% under it is within reach of a route's fees")
-  assert.match(check(quote(), 5_000_000n, 0)!, /off the market/, "no market price, no swap")
+  assert.match(check(quote(), 73)!, /off the market/, "2% under Jupiter's market price")
+  assert.equal(check(quote(), 72.5), undefined, "1.4% under it is within reach of a route's fees")
+  assert.match(check(quote(), 0)!, /off the market/, "no market price, no swap")
   assert.match(check(quote({ outAmount: "0" }))!, /off the market/, "a route that gives nothing")
+  assert.match(check(quote({ otherAmountThreshold: "999999" }))!, /at least 1 USDC/, "the program's smallest deposit")
 })
 
-test("the amount to swap covers the USDC after our slippage, by a hair", () => {
-  // A route that gives 71.25 USDC per ORE (11 decimals).
-  const probe = { spend: 100_000_000_000n, out: 71_250_000n }
-  for (const need of [1_000_000n, 5_050_832n, 50_508_416n, 2_000_000_000n]) {
-    const spend = sizeFor(need, probe)
-    const out = (spend * probe.out) / probe.spend
-    assert.ok((out * 9_950n) / 10_000n >= need, `${spend} covers ${need} after 0.5%`)
-    assert.ok(out <= (need * 10_060n) / 10_000n, `${spend} isn't much more than ${need} needs`)
-  }
+test("from Jupiter, only opening the wallet's own token accounts on our fee payer's rent, and a swap without the fee payer in it, pass", () => {
+  const [wallet, feePayer, other, mint] = [0, 0, 0, 0].map(() => Keypair.generate().publicKey) as [PublicKey, PublicKey, PublicKey, PublicKey]
+  const keys = { wallet, feePayer }
+  const own = createAssociatedTokenAccountIdempotentInstruction(feePayer, getAssociatedTokenAddressSync(mint, wallet), wallet, mint)
+  const swap = new TransactionInstruction({ programId: new PublicKey(JUPITER_PROGRAM), keys: [{ pubkey: wallet, isSigner: true, isWritable: false }], data: Buffer.from([1]) })
+  const ok = { budget: [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 })], setup: [own], swap, rest: [] as Array<TransactionInstruction> }
+  assert.equal(jupiterProblem(ok, keys), undefined)
+  const refused = (j: Partial<typeof ok>, why: string) => assert.match(jupiterProblem({ ...ok, ...j }, keys)!, /doesn't allow/, why)
+  refused({ setup: [own, createApproveInstruction(getAssociatedTokenAddressSync(mint, wallet), other, wallet, 1n)] }, "a delegate on the wallet's account")
+  refused({ setup: [createAssociatedTokenAccountIdempotentInstruction(feePayer, getAssociatedTokenAddressSync(mint, other), other, mint)] }, "an account for someone else, on our rent")
+  refused({ setup: [createAssociatedTokenAccountIdempotentInstruction(wallet, getAssociatedTokenAddressSync(mint, wallet), wallet, mint)] }, "the wallet holds no SOL to pay rent")
+  refused({ swap: new TransactionInstruction({ ...swap, keys: [...swap.keys, { pubkey: feePayer, isSigner: true, isWritable: true }] }) }, "the fee payer as an authority in the swap")
+  refused({ swap: new TransactionInstruction({ ...swap, keys: [...swap.keys, { pubkey: feePayer, isSigner: false, isWritable: false }] }) }, "or anywhere in it")
+  refused({ swap: own }, "another program for the swap")
+  refused({ rest: [own] }, "no cleanup or other instructions")
 })
 
-test("slippage is our 0.5% when the route allows, less when the price has moved a little, and no swap past that", () => {
-  assert.equal(slippageFor(5_050_000n, 5_000_000n), 50)
-  assert.equal(slippageFor(5_015_000n, 5_000_000n), 29)
-  assert.equal(slippageFor(5_004_000n, 5_000_000n), undefined, "under 0.1% of room")
-  assert.equal(slippageFor(4_999_999n, 5_000_000n), undefined)
-  assert.equal(slippageFor(0n, 5_000_000n), undefined)
+test("the compute asked for is Jupiter's limit and room for the deposit, at most Solana's", () => {
+  assert.equal(unitsFor([ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })]), 310_000)
+  assert.equal(unitsFor([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_390_000 })]), 1_400_000)
+  assert.equal(unitsFor([]), 1_400_000)
 })
 
-test("from Jupiter, only a compute budget, opening the wallet's own token accounts, and the swap pass: an Approve or anything else is refused", () => {
-  const [payer, other, mint] = [Keypair.generate().publicKey, Keypair.generate().publicKey, Keypair.generate().publicKey]
-  const own = createAssociatedTokenAccountIdempotentInstruction(payer, getAssociatedTokenAddressSync(mint, payer), payer, mint)
-  const swap = new TransactionInstruction({ programId: new PublicKey(JUPITER_PROGRAM), keys: [], data: Buffer.from([1]) })
-  const ok = {
-    budget: [ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000 })],
-    setup: [own],
-    swap,
-    rest: []
-  }
-  assert.equal(jupiterProblem(ok, payer), undefined)
-  const approve = createApproveInstruction(getAssociatedTokenAddressSync(mint, payer), other, payer, 1n)
-  assert.match(jupiterProblem({ ...ok, setup: [own, approve] }, payer)!, /doesn't allow/, "a delegate on the wallet's account leaves today's balances as they are")
-  const forOther = createAssociatedTokenAccountIdempotentInstruction(payer, getAssociatedTokenAddressSync(mint, other), other, mint)
-  assert.match(jupiterProblem({ ...ok, setup: [forOther] }, payer)!, /doesn't allow/, "an account for someone else, on the wallet's rent")
-  assert.match(jupiterProblem({ ...ok, budget: [ComputeBudgetProgram.requestHeapFrame({ bytes: 65_536 })] }, payer)!, /doesn't allow/)
-  assert.match(jupiterProblem({ ...ok, swap: approve }, payer)!, /doesn't allow/)
-  assert.match(jupiterProblem({ ...ok, rest: [own] }, payer)!, /doesn't allow/, "no cleanup or other instructions")
-})
-
-test("a simulated swap is signed only if it pays exactly the USDC needed, takes exactly the token shown, and no more SOL than fees and rent", () => {
-  const authorities = ["- -", "- -", "- -", "- -"]
-  // The wallet's own token accounts (its token, its USDC, the other one): its USDC account is opened by the swap.
-  const before: Balances = { lamports: 10_000_000n, token: 9_000_000_000n, usdc: 0n, deposit: 0n, others: [40n], authorities, owners: ["Payer", undefined, "Payer"] }
-  const after: Balances = { lamports: 7_900_000n, token: 2_000_000_000n, usdc: 25_000n, deposit: 5_000_000n, others: [40n], authorities, owners: ["Payer", "Payer", "Payer"] }
-  const expect = { need: 5_000_000n, spend: 7_000_000_000n, payer: "Payer" }
+test("a simulated swap is signed only if it takes exactly the token shown, puts at least its minimum into the Balance, and our fee payer only pays", () => {
+  const authorities = ["- -", "Vault -", "- -"]
+  // The wallet's own token accounts: its token, its USDC (the Vault's authority its delegate), and one the route passes through.
+  const before: Balances = { lamports: 0n, feePayer: 50_000_000n, token: 9_000_000_000n, usdc: 300n, balance: 1_000_000n, others: [40n], authorities, owners: ["W", "W", "W"] }
+  const after: Balances = { ...before, feePayer: 47_900_000n, token: 2_000_000_000n, usdc: 0n, balance: 1_000_000n + 300n + 5_025_000n }
+  const expect = { spend: 7_000_000_000n, minOut: 5_000_000n, wallet: "W" }
   assert.equal(outcomeProblem(before, after, expect), undefined)
   assert.equal(outcomeProblem(before, { ...after, others: [41n] }, expect), undefined, "a token it routes through may come out ahead")
-  assert.match(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", undefined] }, expect)!, /close one of your wallet's token accounts/, "closing it sends its rent elsewhere")
-  assert.match(outcomeProblem(before, { ...after, token: 0n, owners: [undefined, "Payer", "Payer"] }, { ...expect, spend: 9_000_000_000n })!, /close/, "the token's own, spent whole")
-  assert.match(outcomeProblem(before, { ...after, owners: ["Mallory", "Payer", "Payer"] }, expect)!, /to someone else/)
-  assert.match(outcomeProblem(before, { ...after, owners: ["Payer", "Payer", "Mallory"] }, expect)!, /to someone else/)
-  assert.match(outcomeProblem(before, { ...after, deposit: 4_999_999n }, expect)!, /exactly the USDC/)
-  assert.match(outcomeProblem(before, { ...after, token: 1_999_999_999n }, expect)!, /exactly the amount shown/)
-  assert.match(outcomeProblem({ ...before, usdc: 300n }, { ...after, usdc: 299n }, expect)!, /take USDC from your wallet/)
-  assert.match(outcomeProblem(before, { ...after, others: [39n] }, expect)!, /another token/)
-  assert.match(outcomeProblem(before, { ...after, authorities: ["- -", "Mallory -", "- -", "- -"] }, expect)!, /someone else spend/)
-  assert.equal(outcomeProblem(before, { ...after, lamports: 3_800_000n }, expect), undefined, "rent for three token accounts (a route through another token) is within reach")
-  assert.match(outcomeProblem(before, { ...after, lamports: 2_999_999n }, expect)!, /more SOL/)
+  assert.equal(outcomeProblem(before, { ...after, usdc: 25n, balance: 1_000_000n + 300n + 4_999_975n }, expect), undefined, "what the deposit leaves in the wallet still counts")
+  const refused = (changes: Partial<Balances>, why: RegExp, name = JSON.stringify(changes, (_, v) => typeof v === "bigint" ? String(v) : v)) =>
+    assert.match(outcomeProblem(before, { ...after, ...changes }, expect) ?? "", why, name)
+  refused({ token: 1_999_999_999n }, /exactly the amount shown/)
+  refused({ balance: 1_000_000n + 300n + 4_999_999n }, /at least its minimum/)
+  refused({ balance: 1_000_000n, usdc: 5_025_300n }, /at least its minimum/, "the deposit didn't run")
+  refused({ others: [39n] }, /another token/)
+  refused({ owners: ["W", "W", undefined] }, /close one of your wallet's token accounts/)
+  refused({ owners: ["Mallory", "W", "W"] }, /to someone else/)
+  refused({ authorities: ["Mallory -", "Vault -", "- -"] }, /someone else spend/)
+  refused({ lamports: -1n }, /spend your wallet's SOL/)
+  refused({ feePayer: 50_000_000n - MAX_FEE_PAYER_SPEND - 1n }, /more in fees and rent/)
+  assert.equal(outcomeProblem(before, { ...after, feePayer: 50_000_000n - MAX_FEE_PAYER_SPEND }, expect), undefined, "rent for three token accounts and the fee")
 })
 
 test("a failed simulation is told in the customer's words", () => {
   assert.match(simulationProblem(["Program JUP6… failed: custom program error: 0x1771"], "ORE")!, /ORE's price moved/)
-  assert.match(simulationProblem(["Create Account: account Address { address: 9x…, base: None } already in use"], "ORE")!, /already paid/)
+  assert.match(simulationProblem(["Program log: AnchorError … Error Message: Deposit at least 1 USDC."], "USDT")!, /at least 1 USDC's worth/)
   assert.match(simulationProblem(["Program log: Error: insufficient funds"], "ORE")!, /doesn't hold enough ORE/)
-  assert.match(simulationProblem(["Transfer: insufficient lamports 100, need 2039280"], "ORE")!, /more SOL/)
+  assert.match(simulationProblem(["Transfer: insufficient lamports 100, need 2039280"], "ORE")!, /Luckout can't pay/)
   assert.equal(simulationProblem(["Program log: something else"], "ORE"), undefined)
 })
 
-// ---------- the whole build, against Jupiter and Solana faked on a local port ----------
-// Swap.layer as it runs, with JUPITER_API_URL and SOLANA_RPC_URL pointed at one fake that answers both. Nothing
-// leaves this machine.
+// ---------- the whole build: the program's accounts on LiteSVM, Jupiter faked on a local port ----------
+// LiteSVM has no Jupiter, so a simulation's outcome is scripted; everything it's compared with is read from the chain.
 
-const PAYER = Keypair.generate().publicKey
-const DEPOSIT = Keypair.generate().publicKey
-const USDC_MINT = new PublicKey(SOL_USDC_MINT)
-const SOURCE = getAssociatedTokenAddressSync(new PublicKey(ORE.mint), PAYER)
-const WALLET_USDC = getAssociatedTokenAddressSync(USDC_MINT, PAYER)
-const DEPOSIT_USDC = getAssociatedTokenAddressSync(USDC_MINT, DEPOSIT, true)
-/** Another token the wallet holds, which the route passes through; and a pool's vault, which isn't the wallet's. */
-const HELD = getAssociatedTokenAddressSync(Keypair.generate().publicKey, PAYER)
-const VAULT = Keypair.generate().publicKey
-const BLOCKHASH = Keypair.generate().publicKey.toBase58()
-const NEED = 5_000_000n
-/** 0.073 ORE: at the fake's $70 less 0.3%, 5.09467 USDC, so our usual 0.5% of room covers the 5 USDC. */
-const SPEND = 7_300_000_000n
-const OUT = (SPEND * 70n * 997n) / 100_000_000n
+type World = ReturnType<typeof solanaWorld>
+const TOKEN = TOKEN_PROGRAM_ID
+const put = (w: World, key: PublicKey, owner: PublicKey, data: Buffer, lamport = 2_039_280n) =>
+  w.svm.setAccount({ address: address(key.toBase58()), data, executable: false, lamports: lamports(lamport), programAddress: address(owner.toBase58()), space: BigInt(data.length) })
+const tokenData = (mint: PublicKey, owner: PublicKey, amount: bigint) => {
+  const d = Buffer.alloc(165)
+  mint.toBuffer().copy(d, 0)
+  owner.toBuffer().copy(d, 32)
+  d.writeBigUInt64LE(amount, 64)
+  d[108] = 1
+  return d
+}
+const mintData = (authority: PublicKey) => {
+  const d = Buffer.alloc(82)
+  d.writeUInt32LE(1, 0)
+  authority.toBuffer().copy(d, 4)
+  d[44] = 6
+  d[45] = 1
+  return d
+}
+const raw = (w: World, key: PublicKey): RawAccount | undefined => {
+  const a = w.svm.getAccount(address(key.toBase58()))
+  return a.exists ? { owner: new PublicKey(a.programAddress), lamports: BigInt(a.lamports), data: Buffer.from(a.data) } : undefined
+}
+const amountAt = (a: RawAccount | undefined, offset: number) => (a ? a.data.readBigUInt64LE(offset) : 0n)
+const withAmount = (a: RawAccount, offset: number, amount: bigint): RawAccount => {
+  const data = Buffer.from(a.data)
+  data.writeBigUInt64LE(amount, offset)
+  return { ...a, data }
+}
+/** A Customer account's Balance: after its discriminator, layout, bump and wallet. */
+const BALANCE = 8 + 1 + 1 + 32
 
-type Held = { lamports: number; owner: PublicKey; data: Buffer }
-const tokenData = (mint: PublicKey, owner: PublicKey, amount: bigint, delegate?: PublicKey) => {
-  const b = Buffer.alloc(AccountLayout.span)
-  AccountLayout.encode({
-    mint, owner, amount, delegateOption: delegate ? 1 : 0, delegate: delegate ?? PublicKey.default, state: 1, isNativeOption: 0, isNative: 0n,
-    delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: PublicKey.default
-  }, b)
-  return b
+/** A customer who made the one-time approval (their USDC account's delegate is the Vault's authority), holding `ore`. */
+const approved = (w: World, ore = 10_000_000_000n) => {
+  const wallet = Keypair.generate()
+  const usdc = getAssociatedTokenAddressSync(w.mint, wallet.publicKey)
+  w.send([
+    createAssociatedTokenAccountIdempotentInstruction(w.feePayer.publicKey, usdc, wallet.publicKey, w.mint),
+    createApproveInstruction(usdc, w.program.vaultAuthority, wallet.publicKey, 2n ** 64n - 1n),
+    w.program.instruction("open", { wallet: wallet.publicKey, payer: w.feePayer.publicKey, config: w.program.config, customer: w.program.customer(wallet.publicKey) }, {
+      default_mode: { kind: "Normal" }
+    })
+  ], [wallet])
+  const source = getAssociatedTokenAddressSync(new PublicKey(ORE.mint), wallet.publicKey)
+  if (ore > 0n) put(w, source, TOKEN, tokenData(new PublicKey(ORE.mint), wallet.publicKey, ore))
+  return { wallet, usdc, source, customer: w.program.customer(wallet.publicKey) }
 }
-const tokenAt = (mint: PublicKey, owner: PublicKey, amount: bigint, delegate?: PublicKey): Held => ({ lamports: 2_039_280, owner: TOKEN_PROGRAM_ID, data: tokenData(mint, owner, amount, delegate) })
-const BEFORE: Record<string, Held> = {
-  [PAYER.toBase58()]: { lamports: 50_000_000, owner: SystemProgram.programId, data: Buffer.alloc(0) },
-  [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, 10_000_000_000n),
-  [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, 300n),
-  [HELD.toBase58()]: tokenAt(VAULT, PAYER, 1_000n),
-  [VAULT.toBase58()]: tokenAt(VAULT, VAULT, 10n ** 12n)
-}
-/** What an honest swap leaves: the ORE shown gone, exactly the USDC needed at the deposit address, the rest in the wallet. */
-const HONEST: Record<string, Held> = {
-  ...BEFORE,
-  [PAYER.toBase58()]: { ...BEFORE[PAYER.toBase58()]!, lamports: 50_000_000 - 2_039_280 - 105_000 },
-  [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, 10_000_000_000n - SPEND),
-  [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, 300n + OUT - NEED),
-  [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, NEED)
-}
+
 const asJson = (i: TransactionInstruction) => ({
   programId: i.programId.toBase58(),
   accounts: i.keys.map((k) => ({ pubkey: k.pubkey.toBase58(), isSigner: k.isSigner, isWritable: k.isWritable })),
   data: Buffer.from(i.data).toString("base64")
 })
-const swapIx = new TransactionInstruction({
-  programId: new PublicKey(JUPITER_PROGRAM),
-  keys: [PAYER, SOURCE, WALLET_USDC, HELD, VAULT].map((pubkey, i) => ({ pubkey, isSigner: i === 0, isWritable: i > 0 })),
-  data: Buffer.from([7, 7, 7])
-})
-const INSTRUCTIONS = {
-  computeBudgetInstructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 400_000 })].map(asJson),
-  setupInstructions: [asJson(createAssociatedTokenAccountIdempotentInstruction(PAYER, WALLET_USDC, PAYER, USDC_MINT))],
-  swapInstruction: asJson(swapIx),
-  cleanupInstruction: null,
-  otherInstructions: [],
-  addressLookupTableAddresses: []
-}
 
-/** A transaction that changed the deposit address's USDC from `pre` to `post`, as getTransaction answers it. */
-type Seen = { signature: string; err?: object; pre: bigint; post: bigint }
-const balanceOf = (amount: bigint) => ({ accountIndex: 1, mint: SOL_USDC_MINT, owner: DEPOSIT.toBase58(), programId: TOKEN_PROGRAM_ID.toBase58(), uiTokenAmount: { amount: String(amount), decimals: 6, uiAmount: null } })
-
+type Customer = ReturnType<typeof approved>
+/** A simulation's outcome over an honest swap's, by account (null: gone); or its logs, when it fails. */
+type Scripted = { after?: (c: Customer, w: World) => Record<string, RawAccount | null>; logs?: Array<string> }
 const fake = (o: {
-  instructions?: object
-  /** What each simulation (in order) answers: the accounts it leaves, or an error with its logs. */
-  simulations?: Array<{ after?: Record<string, Held>; err?: object; logs?: Array<string> }>
+  /** What Jupiter's swap-instructions answer, given the customer, the world, and an honest answer. */
+  instructions?: (c: Customer, w: World, honest: object) => object
+  /** What each simulation (in order) leaves, over an honest swap's outcome; or its logs, when it fails. */
+  simulations?: Array<Scripted>
   /** Quote calls answered "busy" before Jupiter answers. */
   busy?: number
-  /** Price calls answered "busy" before Jupiter answers. */
-  busyPrice?: number
-  /** The chain before the swap (BEFORE by default). */
-  before?: Record<string, Held>
-  /** Payments to the deposit address's USDC account, oldest first. */
-  seen?: Array<Seen>
+  ore?: bigint
+  /** The wallet's own SOL: it needs none, but may hold some. */
+  sol?: bigint
+  approve?: boolean
 } = {}) => {
-  const calls: Array<{ to: string; params?: unknown }> = []
+  const w = solanaWorld()
+  const c = o.approve === false ? { wallet: Keypair.generate(), usdc: PublicKey.default, source: PublicKey.default, customer: PublicKey.default } : approved(w, o.ore)
+  if (o.sol) put(w, c.wallet.publicKey, new PublicKey("11111111111111111111111111111111"), Buffer.alloc(0), o.sol)
+  const pool = Keypair.generate().publicKey
+  const calls: Array<{ to: string; body?: unknown }> = []
+  const simulated: Array<{ bytes: Uint8Array; watch: ReadonlyArray<PublicKey> }> = []
   let busy = o.busy ?? 0
-  let busyPrice = o.busyPrice ?? 0
-  const chain = o.before ?? BEFORE
-  let simulated = 0
+  let last = { spend: 0n, out: 0n }
+  const swapIx = () =>
+    new TransactionInstruction({
+      programId: new PublicKey(JUPITER_PROGRAM),
+      keys: [c.wallet.publicKey, c.source, c.usdc, pool].map((pubkey, i) => ({ pubkey, isSigner: i === 0, isWritable: i > 0 })),
+      data: Buffer.from([7, 7, 7])
+    })
+  const honest = () => ({
+    computeBudgetInstructions: [ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 400_000 })].map(asJson),
+    setupInstructions: [asJson(createAssociatedTokenAccountIdempotentInstruction(w.feePayer.publicKey, c.usdc, c.wallet.publicKey, w.mint))],
+    swapInstruction: asJson(swapIx()),
+    cleanupInstruction: null,
+    otherInstructions: [],
+    addressLookupTableAddresses: []
+  })
+  // An honest swap: the token shown gone, and the deposit moves what it gave, with what was waiting, into the Balance.
+  const outcome = (k: PublicKey): RawAccount | undefined => {
+    const now = raw(w, k)
+    if (now && k.equals(c.source)) return withAmount(now, 64, amountAt(now, 64) - last.spend)
+    if (now && k.equals(c.usdc)) return withAmount(now, 64, 0n)
+    if (now && k.equals(c.customer)) return withAmount(now, BALANCE, amountAt(now, BALANCE) + amountAt(raw(w, c.usdc), 64) + last.out)
+    if (now && k.equals(w.feePayer.publicKey)) return { ...now, lamports: now.lamports - 25_000n }
+    return now
+  }
+  const chain = Chain.of({
+    ...w.chain,
+    simulate: (bytes, watch = []) =>
+      Effect.sync(() => {
+        const s = o.simulations?.[simulated.length] ?? {}
+        simulated.push({ bytes, watch })
+        if (s.logs) return { error: { text: "failed" }, logs: s.logs, inner: [], returnData: undefined, units: 1, accounts: watch.map(() => undefined) }
+        const after = s.after?.(c, w) ?? {}
+        return {
+          error: undefined, logs: [], inner: [], returnData: undefined, units: 1,
+          accounts: watch.map((k) => (k.toBase58() in after ? after[k.toBase58()] ?? undefined : outcome(k)))
+        }
+      })
+  })
   const reply = (res: ServerResponse, status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body))
-  const rpcAccount = (a: Held | undefined) =>
-    a ? { data: [a.data.toString("base64"), "base64"], executable: false, lamports: a.lamports, owner: a.owner.toBase58(), rentEpoch: 0, space: a.data.length } : null
   const node = createServer((req, res) => {
     let body = ""
-    req.on("data", (c) => (body += c)).on("end", () => {
+    req.on("data", (x) => (body += x)).on("end", () => {
       const url = new URL(req.url ?? "/", "http://fake")
-      if (url.pathname === "/price/v3") {
-        calls.push({ to: "price" })
-        return busyPrice-- > 0 ? reply(res, 429, { error: "Rate limit exceeded" }) : reply(res, 200, { [ORE.mint]: { usdPrice: 70 } })
-      }
+      if (url.pathname === "/price/v3") return calls.push({ to: "price" }), reply(res, 200, { [ORE.mint]: { usdPrice: 70 } })
       if (url.pathname === "/swap/v1/quote") {
         const p = Object.fromEntries(url.searchParams)
-        calls.push({ to: "quote", params: p })
+        calls.push({ to: "quote", body: p })
         if (busy-- > 0) return reply(res, 429, { error: "Rate limit exceeded" })
-        const inAmount = BigInt(p.amount!)
-        const out = (inAmount * 70n * 997n) / 100_000_000n
+        const spend = BigInt(p.amount!)
+        const out = (spend * 70n * 997n) / 100_000_000n
+        last = { spend, out }
         return reply(res, 200, {
-          inputMint: p.inputMint, outputMint: p.outputMint, inAmount: String(inAmount), outAmount: String(out),
+          inputMint: p.inputMint, outputMint: p.outputMint, inAmount: String(spend), outAmount: String(out),
           otherAmountThreshold: String((out * (10_000n - BigInt(p.slippageBps!))) / 10_000n), swapMode: "ExactIn", slippageBps: Number(p.slippageBps),
           priceImpactPct: "0.001", routePlan: [{ swapInfo: { label: "FakeDex" } }]
         })
       }
-      if (url.pathname === "/swap/v1/swap-instructions") return calls.push({ to: "swap-instructions" }), reply(res, 200, o.instructions ?? INSTRUCTIONS)
-      const { id, method, params } = JSON.parse(body) as { id: string; method: string; params: Array<any> }
-      calls.push({ to: method, params })
-      const ok = (result: unknown) => reply(res, 200, { jsonrpc: "2.0", id, result })
-      const context = { slot: 100 }
-      switch (method) {
-        case "getMultipleAccounts":
-          return ok({ context, value: (params[0] as Array<string>).map((k) => rpcAccount(chain[k])) })
-        case "getLatestBlockhash":
-          return ok({ context, value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1_150 } })
-        case "simulateTransaction": {
-          const s = o.simulations?.[simulated++] ?? {}
-          const after = s.after ?? HONEST
-          return ok({
-            context,
-            value: { err: s.err ?? null, logs: s.logs ?? [], accounts: s.err ? null : (params[1].accounts.addresses as Array<string>).map((k) => rpcAccount(after[k])), unitsConsumed: 1, returnData: null }
-          })
-        }
-        case "getSignaturesForAddress":
-          return ok([...(o.seen ?? [])].reverse().map((s) => ({ signature: s.signature, slot: 90, err: s.err ?? null, memo: null, blockTime: null })))
-        case "getTransaction": {
-          const s = o.seen?.find((x) => x.signature === params[0])!
-          return ok({
-            slot: 90, blockTime: null, version: 0,
-            transaction: {
-              signatures: [s.signature],
-              message: { accountKeys: [PAYER, DEPOSIT_USDC, TOKEN_PROGRAM_ID].map(String), header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 1 }, instructions: [], recentBlockhash: BLOCKHASH, addressTableLookups: [] }
-            },
-            meta: { err: s.err ?? null, fee: 5_000, innerInstructions: [], preBalances: [0, 0, 0], postBalances: [0, 0, 0], logMessages: [], preTokenBalances: [balanceOf(s.pre)], postTokenBalances: [balanceOf(s.post)], loadedAddresses: { writable: [], readonly: [] } }
-          })
-        }
-        default:
-          return reply(res, 500, { jsonrpc: "2.0", id, error: { code: -32601, message: `not faked: ${method}` } })
-      }
+      if (url.pathname === "/swap/v1/swap-instructions") return calls.push({ to: "swap-instructions", body: JSON.parse(body) }), reply(res, 200, o.instructions?.(c, w, honest()) ?? honest())
+      reply(res, 404, {})
     })
   })
   const run = <A, E>(f: (s: Swap["Service"]) => Effect.Effect<A, E>) =>
@@ -277,216 +261,174 @@ const fake = (o: {
       Effect.promise(() => new Promise<string>((ok) => node.listen(0, "127.0.0.1", () => ok(`http://127.0.0.1:${(node.address() as AddressInfo).port}`)))),
       (url) =>
         Swap.use(f).pipe(Effect.provide(Swap.layer.pipe(
-          Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: { JUPITER_API_KEY: "test", JUPITER_API_URL: url, SOLANA_RPC_URL: url } })))
+          Layer.provide(Solana.layer.pipe(Layer.provide(Layer.succeed(Chain, chain)))),
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ ...w.env, JUPITER_API_KEY: "test", JUPITER_API_URL: url })))
         ))),
       () => Effect.promise(() => new Promise<void>((ok) => node.close(() => ok())))
     ))
-  const order = { token: ORE, payer: PAYER.toBase58(), depositAddress: DEPOSIT.toBase58(), need: NEED, spend: SPEND, retryBusy: false }
-  const build = (o: Partial<typeof order> = {}) => run((s) => s.transaction({ ...order, ...o }))
-  const refused = (o: Partial<typeof order> = {}) => run((s) => Effect.flip(s.transaction({ ...order, ...o })))
-  const refusal = (o: Partial<typeof order> = {}) => refused(o).then((e) => e.message)
-  const jupiter = () => calls.filter((c) => ["price", "quote", "swap-instructions"].includes(c.to)).length
-  return { calls, run, build, refused, refusal, jupiter, to: (what: string) => calls.filter((c) => c.to === what) }
+  const build = (spend?: bigint) => run((s) => s.transaction({ token: ORE, wallet: c.wallet.publicKey.toBase58(), spend }))
+  const refusal = (spend?: bigint, wallet = c.wallet.publicKey.toBase58()) =>
+    run((s) => Effect.flip(s.transaction({ token: ORE, wallet, spend }))).then((e) => e.message)
+  const jupiter = () => calls.filter((x) => ["quote", "swap-instructions"].includes(x.to)).length
+  return { w, c, pool, calls, simulated, run, build, refusal, jupiter, swapIx, honest, to: (what: string) => calls.filter((x) => x.to === what) }
 }
 
 const decoded = (base64: string) => {
   const tx = VersionedTransaction.deserialize(Buffer.from(base64, "base64"))
   const keys = tx.message.staticAccountKeys
-  return tx.message.compiledInstructions.map((i) => ({ program: keys[i.programIdIndex]!, data: Buffer.from(i.data), accounts: i.accountKeyIndexes.map((k) => keys[k]!) }))
+  return {
+    tx,
+    signers: keys.slice(0, tx.message.header.numRequiredSignatures),
+    ixs: tx.message.compiledInstructions.map((i) => ({ program: keys[i.programIdIndex]!, data: Buffer.from(i.data), accounts: i.accountKeyIndexes.map((k) => keys[k]!) }))
+  }
 }
 
-test("a swap is built from a fresh route, watched where it could take anything, and handed out only as simulated", async () => {
+test("a swap is one transaction the customer signs and our fee payer pays for: Jupiter's ExactIn swap into their USDC account, then deposit_for", async () => {
   const f = fake()
   const tx = await f.build()
-  const ixs = decoded(tx.transaction)
-  assert.equal(tx.lastValidBlockHeight, 1_150)
-  assert.deepEqual(f.to("quote").map((c) => (c.params as Record<string, string>).amount), [String(SPEND)], "one route, for exactly the ORE shown")
-  // Jupiter's budget with room for our two instructions; then its setup, its swap, our deposit account and transfer.
+  const { tx: v0, signers, ixs } = decoded(tx.transaction)
+  assert.equal(v0.version, 0, "a v0 transaction, for Jupiter's lookup tables")
+  assert.deepEqual(signers.map(String), [f.w.feePayer.publicKey, f.c.wallet.publicKey].map(String), "our fee payer pays; the customer signs")
+  assert.deepEqual(f.to("quote").map((x) => (x.body as Record<string, string>).amount), ["10000000000"], "all the ORE they hold, by default")
+  const asked = f.to("swap-instructions")[0]!.body as Record<string, unknown>
+  assert.deepEqual([asked.userPublicKey, asked.payer, asked.feeAccount, asked.prioritizationFeeLamports], [f.c.wallet.publicKey.toBase58(), f.w.feePayer.publicKey.toBase58(), undefined, undefined])
+  // Our budget, with room for the deposit; then Jupiter's setup and swap; then the deposit.
   const limit = ixs.find((i) => i.program.equals(ComputeBudgetProgram.programId) && i.data[0] === 2)!
   assert.equal(limit.data.readUInt32LE(1), 310_000)
-  const [create, transfer] = ixs.slice(-2)
-  assert.ok(create!.program.equals(ASSOCIATED_TOKEN_PROGRAM_ID) && create!.data.length === 0 && create!.accounts[1]!.equals(DEPOSIT_USDC), "opened, not idempotently")
-  assert.ok(transfer!.program.equals(TOKEN_PROGRAM_ID) && transfer!.data[0] === 12, "transferChecked")
-  assert.deepEqual([transfer!.data.readBigUInt64LE(1), transfer!.data[9]], [NEED, 6], "exactly what 1Click needs, as USDC")
-  // The simulation reads back the wallet's other token account the swap is handed, not the pool's.
-  const watched = (f.to("simulateTransaction")[0]!.params as Array<any>)[1].accounts.addresses as Array<string>
-  assert.deepEqual(watched, [PAYER, SOURCE, WALLET_USDC, DEPOSIT_USDC, HELD].map(String))
+  const price = ixs.find((i) => i.program.equals(ComputeBudgetProgram.programId) && i.data[0] === 3)!
+  assert.equal(price.data.readBigUInt64LE(1), 10_000n, "our own priority price, not Jupiter's")
+  const [setup, swap, deposit] = ixs.slice(-3)
+  assert.ok(setup!.program.equals(ASSOCIATED_TOKEN_PROGRAM_ID) && setup!.accounts[0]!.equals(f.w.feePayer.publicKey), "rent paid by the fee payer")
+  assert.equal(swap!.program.toBase58(), JUPITER_PROGRAM)
+  assert.ok(deposit!.program.equals(f.w.program.id))
+  assert.deepEqual(deposit!.accounts.map(String), [f.w.program.config, f.c.customer, f.c.usdc, f.w.program.vault, f.w.program.vaultAuthority, TOKEN].map(String))
+  // The simulation reads back the wallet, the fee payer, the token, the USDC and the Balance; not the pool's account.
+  assert.deepEqual(f.simulated[0]!.watch.map(String), [f.c.wallet.publicKey, f.w.feePayer.publicKey, f.c.source, f.c.usdc, f.c.customer].map(String))
+  assert.equal(f.simulated[0]!.bytes.toString(), Buffer.from(tx.transaction, "base64").toString(), "what was simulated is what's handed out")
+  const out = (10_000_000_000n * 70n * 997n) / 100_000_000n
+  assert.deepEqual([tx.spend, tx.usdcOut, tx.minUsdcOut], [10_000_000_000n, out, (out * 9_950n) / 10_000n])
+  // A chosen amount: exactly that.
+  assert.equal((await fake().build(7_300_000_000n)).spend, 7_300_000_000n)
+})
+
+test("the swap-paid tokens a wallet holds are listed for the app's tap, read from the chain alone", async () => {
+  const f = fake()
+  assert.deepEqual(await f.run((s) => s.held(f.c.wallet.publicKey.toBase58())), [{ token: ORE, amount: 10_000_000_000n }], "its ORE; no USDT account, so no USDT")
+  const empty = fake({ ore: 0n })
+  assert.deepEqual(await empty.run((s) => s.held(empty.c.wallet.publicKey.toBase58())), [])
+  assert.deepEqual(await f.run((s) => s.held("not-a-key")), [])
+  assert.equal(f.jupiter() + empty.jupiter(), 0, "Jupiter isn't asked")
+})
+
+test("refused before Jupiter is asked: no approval, none of the token or not enough, or not a wallet", async () => {
+  const none = fake({ approve: false })
+  assert.match(await none.refusal(), /Approve your Deposit Address first/)
+  const empty = fake({ ore: 0n })
+  assert.match(await empty.refusal(), /holds no ORE/)
+  const short = fake()
+  assert.match(await short.refusal(10_000_000_001n), /doesn't hold the 0.10000000001 ORE/)
+  assert.match(await short.refusal(undefined, "not-a-key"), /isn't a Solana wallet/)
+  for (const f of [none, empty, short]) assert.equal(f.jupiter(), 0)
 })
 
 test("an instruction from Jupiter we don't allow is refused before anything is simulated", async () => {
-  const approve = asJson(createApproveInstruction(SOURCE, Keypair.generate().publicKey, PAYER, 1n))
-  const f = fake({ instructions: { ...INSTRUCTIONS, otherInstructions: [approve] } })
-  assert.match(await f.refusal(), /doesn't allow/)
-  assert.equal(f.to("simulateTransaction").length, 0)
-})
-
-test("a simulation that takes more than it says is refused: short USDC, another token of the wallet's, or a delegate on its account", async () => {
-  const leaves = (changes: Record<string, Held>) => fake({ simulations: [{ after: { ...HONEST, ...changes } }] }).refusal()
-  assert.match(await leaves({ [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, NEED - 1n) }), /exactly the USDC/)
-  assert.match(await leaves({ [HELD.toBase58()]: tokenAt(VAULT, PAYER, 999n) }), /another token/)
-  assert.match(await leaves({ [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, 10_000_000_000n - SPEND, Keypair.generate().publicKey) }), /someone else spend/)
-})
-
-test("a wallet token account the swap is given read-only is watched too: another instruction may make it writable for the whole transaction", async () => {
-  const mint = Keypair.generate().publicKey
-  const other = getAssociatedTokenAddressSync(mint, PAYER)
-  const swap = new TransactionInstruction({
-    programId: new PublicKey(JUPITER_PROGRAM),
-    keys: [PAYER, SOURCE, WALLET_USDC, other, VAULT].map((pubkey, i) => ({ pubkey, isSigner: i === 0, isWritable: i > 0 && pubkey !== other })),
-    data: Buffer.from([7, 7, 7])
+  const fees = fake({
+    instructions: (c, w, honest) => ({
+      ...honest,
+      swapInstruction: asJson(new TransactionInstruction({
+        programId: new PublicKey(JUPITER_PROGRAM),
+        keys: [{ pubkey: c.wallet.publicKey, isSigner: true, isWritable: false }, { pubkey: w.feePayer.publicKey, isSigner: true, isWritable: true }],
+        data: Buffer.from([7])
+      }))
+    })
   })
-  // Opening its account (a no-op, it exists) makes it writable for every instruction, the swap's included.
-  const instructions = {
-    ...INSTRUCTIONS,
-    setupInstructions: [...INSTRUCTIONS.setupInstructions, asJson(createAssociatedTokenAccountIdempotentInstruction(PAYER, other, PAYER, mint))],
-    swapInstruction: asJson(swap)
-  }
-  const f = fake({
-    instructions,
-    before: { ...BEFORE, [other.toBase58()]: tokenAt(mint, PAYER, 1_000n) },
-    simulations: [{ after: { ...HONEST, [other.toBase58()]: tokenAt(mint, PAYER, 0n) } }]
+  assert.match(await fees.refusal(), /doesn't allow/, "the fee payer signing for the swap")
+  const approve = fake({
+    instructions: (c, _, honest) => ({ ...honest, otherInstructions: [asJson(createApproveInstruction(c.source, Keypair.generate().publicKey, c.wallet.publicKey, 1n))] })
   })
-  assert.match(await f.refusal(), /another token/)
-  assert.ok(((f.to("simulateTransaction")[0]!.params as Array<any>)[1].accounts.addresses as Array<string>).includes(other.toBase58()))
+  assert.match(await approve.refusal(), /doesn't allow/)
+  assert.equal(fees.simulated.length + approve.simulated.length, 0)
 })
 
-test("a swap that hands one of the wallet's token accounts to someone else is refused; an account it opens for the wallet passes", async () => {
-  const thief = Keypair.generate().publicKey
-  const handed = (account: PublicKey, held: Held) => fake({ simulations: [{ after: { ...HONEST, [account.toBase58()]: held } }] }).refusal()
-  assert.match(await handed(SOURCE, tokenAt(new PublicKey(ORE.mint), thief, 10_000_000_000n - SPEND)), /to someone else/)
-  assert.match(await handed(HELD, tokenAt(VAULT, thief, 1_000n)), /to someone else/)
-  // No USDC account yet: Jupiter's setup opens the wallet's, owned by the wallet; the deposit address's is 1Click's.
-  const { [WALLET_USDC.toBase58()]: _, ...noUsdc } = BEFORE
-  await fake({ before: noUsdc, simulations: [{ after: { ...HONEST, [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, OUT - NEED) } }] }).build()
-})
-
-/** Jupiter's swap, given one more account of the wallet's (`extra`) besides its token, its USDC and a pool's vault. */
-const swapWith = (extra: PublicKey, isWritable = true) =>
-  asJson(new TransactionInstruction({
-    programId: new PublicKey(JUPITER_PROGRAM),
-    keys: [
-      { pubkey: PAYER, isSigner: true, isWritable: false },
-      { pubkey: SOURCE, isSigner: false, isWritable: true },
-      { pubkey: WALLET_USDC, isSigner: false, isWritable: true },
-      { pubkey: extra, isSigner: false, isWritable },
-      { pubkey: VAULT, isSigner: false, isWritable: true }
-    ],
-    data: Buffer.from([7, 7, 7])
-  }))
-/** The chain as an honest swap leaves it, but with `account` gone. */
-const without = (account: PublicKey, chain: Record<string, Held> = HONEST) => Object.fromEntries(Object.entries(chain).filter(([k]) => k !== account.toBase58()))
-
-test("a swap that closes one of the wallet's token accounts is refused, empty or spent whole: its rent would go elsewhere", async () => {
-  const mint = Keypair.generate().publicKey
-  const empty = getAssociatedTokenAddressSync(mint, PAYER)
-  const closesEmpty = fake({
-    instructions: { ...INSTRUCTIONS, swapInstruction: swapWith(empty) },
-    before: { ...BEFORE, [empty.toBase58()]: tokenAt(mint, PAYER, 0n) },
-    simulations: [{ after: without(empty) }]
-  })
-  assert.match(await closesEmpty.refusal(), /close one of your wallet's token accounts/)
-  // All of its ORE swapped, and its ORE account closed with it.
-  const spend = 10_000_000_000n
-  const out = (spend * 70n * 997n) / 100_000_000n
-  const closesSource = fake({ simulations: [{ after: { ...without(SOURCE), [WALLET_USDC.toBase58()]: tokenAt(USDC_MINT, PAYER, 300n + out - NEED) } }] })
-  assert.match(await closesSource.refusal({ spend }), /close one of your wallet's token accounts/)
-})
-
-test("a token account Jupiter's setup opens for the wallet and hands to the swap is watched: it must end up the wallet's alone", async () => {
-  const mint = Keypair.generate().publicKey
-  const opened = getAssociatedTokenAddressSync(mint, PAYER)
-  const thief = Keypair.generate().publicKey
-  const instructions = {
-    ...INSTRUCTIONS,
-    setupInstructions: [...INSTRUCTIONS.setupInstructions, asJson(createAssociatedTokenAccountIdempotentInstruction(PAYER, opened, PAYER, mint))],
-    swapInstruction: swapWith(opened)
+test("a simulation that does other than it says is refused: short of its minimum, more of the token, a delegate, our fee payer's SOL, the wallet's", async () => {
+  const SPEND = 5_000_000_000n
+  const cases: Array<[RegExp, Scripted["after"]]> = [
+    [/at least its minimum/, (c, w) => ({ [c.customer.toBase58()]: raw(w, c.customer)! })],
+    [/exactly the amount shown/, (c, w) => ({ [c.source.toBase58()]: withAmount(raw(w, c.source)!, 64, 10_000_000_000n - SPEND - 1n) })],
+    [/someone else spend/, (c, w) => {
+      const a = withAmount(raw(w, c.source)!, 64, 10_000_000_000n - SPEND)
+      a.data.writeUInt32LE(1, 72)
+      Keypair.generate().publicKey.toBuffer().copy(a.data, 76)
+      return { [c.source.toBase58()]: a }
+    }],
+    [/more in fees and rent/, (_, w) => {
+      const a = raw(w, w.feePayer.publicKey)!
+      return { [w.feePayer.publicKey.toBase58()]: { ...a, lamports: a.lamports - MAX_FEE_PAYER_SPEND - 1n } }
+    }],
+    // A wallet that does hold some SOL keeps all of it.
+    [/spend your wallet's SOL/, (c, w) => ({ [c.wallet.publicKey.toBase58()]: { ...raw(w, c.wallet.publicKey)!, lamports: 999_999n } })]
+  ]
+  for (const [why, after] of cases) {
+    const f = fake({ simulations: [{ ...(after ? { after } : {}) }], sol: 1_000_000n })
+    assert.match(await f.refusal(SPEND), why)
   }
-  const leaves = (held: Held) => fake({ instructions, simulations: [{ after: { ...HONEST, [opened.toBase58()]: held } }] })
-  const owner = leaves(tokenAt(mint, thief, 0n))
-  assert.match(await owner.refusal(), /to someone else/)
-  assert.ok(((owner.to("simulateTransaction")[0]!.params as Array<any>)[1].accounts.addresses as Array<string>).includes(opened.toBase58()))
-  assert.match(await leaves(tokenAt(mint, PAYER, 0n, thief)).refusal(), /someone else spend/)
-  // Opened for the wallet and left as it should be: built.
-  await leaves(tokenAt(mint, PAYER, 0n)).build()
+  assert.equal((await fake({ sol: 1_000_000n }).build(SPEND)).spend, SPEND, "and an honest outcome passes")
 })
 
-test("a refusal that comes before Jupiter is asked says so, so trying again costs the quote nothing", async () => {
-  const early = async (f: ReturnType<typeof fake>, o: { payer?: string } = {}) => {
-    const e = await f.refused(o)
-    return [e.early === true, f.jupiter(), e.message] as const
-  }
-  const short = await early(fake({ before: { ...BEFORE, [SOURCE.toBase58()]: tokenAt(new PublicKey(ORE.mint), PAYER, SPEND - 1n) } }))
-  assert.deepEqual(short.slice(0, 2), [true, 0])
-  assert.match(short[2], /doesn't hold/)
-  const paid = await early(fake({ before: { ...BEFORE, [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, 0n) } }))
-  assert.deepEqual(paid.slice(0, 2), [true, 0])
-  assert.deepEqual((await early(fake(), { payer: "not-a-key" })).slice(0, 2), [true, 0])
-  // One that Jupiter and a simulation were asked for isn't.
-  const late = await fake({ simulations: [{ after: { ...HONEST, [DEPOSIT_USDC.toBase58()]: tokenAt(USDC_MINT, DEPOSIT, NEED - 1n) } }] }).refused()
-  assert.notEqual(late.early, true)
-})
-
-test("a priority price over our ceiling is lowered, so the whole priority fee stays within it whatever Jupiter answers", async () => {
-  const greedy = [ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10n ** 12n })].map(asJson)
-  const ixs = decoded((await fake({ instructions: { ...INSTRUCTIONS, computeBudgetInstructions: greedy } }).build()).transaction)
-  const budget = ixs.filter((i) => i.program.equals(ComputeBudgetProgram.programId))
-  const units = BigInt(budget.find((i) => i.data[0] === 2)!.data.readUInt32LE(1))
-  const price = budget.find((i) => i.data[0] === 3)!.data.readBigUInt64LE(1)
-  assert.ok((units * price) / 1_000_000n <= BigInt(MAX_PRIORITY_LAMPORTS), `${units} units at ${price} micro-lamports`)
-  assert.ok((units * price) / 1_000_000n > BigInt(MAX_PRIORITY_LAMPORTS) - 1_000n, "lowered to the ceiling, not below it")
-  // An honest one is left as it is: 310,000 units at 400,000 is 124,000 lamports.
-  const honest = decoded((await fake().build()).transaction).find((i) => i.program.equals(ComputeBudgetProgram.programId) && i.data[0] === 3)!
-  assert.equal(honest.data.readBigUInt64LE(1), 400_000n)
-})
-
-test("a route whose quote went stale in the simulation is tried once more without its markets", async () => {
-  const f = fake({ simulations: [{ err: { InstructionError: [2, { Custom: 6001 }] }, logs: ["Program log: Error: SlippageToleranceExceeded"] }] })
+test("a route whose quote went stale in the simulation is tried once more without its markets, and a busy Jupiter is asked again", async () => {
+  const stale = { logs: ["Program log: Error: SlippageToleranceExceeded"] }
+  const f = fake({ simulations: [stale] })
   await f.build()
-  assert.deepEqual(f.to("quote").map((c) => (c.params as Record<string, string>).excludeDexes), [undefined, "FakeDex"])
-  assert.equal(f.to("simulateTransaction").length, 2)
-  // Stale twice: the customer hears the price moved.
-  const twice = fake({ simulations: [0, 1].map(() => ({ err: { InstructionError: [2, { Custom: 6001 }] }, logs: ["Program log: Error: SlippageToleranceExceeded"] })) })
-  assert.match(await twice.refusal(), /price moved/)
+  assert.deepEqual(f.to("quote").map((x) => (x.body as Record<string, string>).excludeDexes), [undefined, "FakeDex"])
+  assert.equal(f.simulated.length, 2)
+  assert.match(await fake({ simulations: [stale, stale] }).refusal(), /price moved/, "stale twice: the price moved")
+  const busy = fake({ busy: 1 })
+  await busy.build()
+  assert.equal(busy.to("quote").length, 2)
 })
 
-test("a busy Jupiter is told at once to a request anyone can make, and asked again for a signed-in customer", async () => {
-  const anyone = fake({ busy: 1 })
-  assert.match(await anyone.refusal({ retryBusy: false }), /Jupiter is busy/)
-  assert.equal(anyone.to("quote").length, 1, "one call to Jupiter, not five")
-  const price = fake({ busyPrice: 1 })
-  assert.match(await price.refusal({ retryBusy: false }), /Jupiter is busy/)
-  assert.equal(price.to("price").length, 1, "its price either")
-  const customer = fake({ busy: 1 })
-  await customer.build({ retryBusy: true })
-  assert.equal(customer.to("quote").length, 2)
-})
+// ---------- on the real program: the customer signs, our fee payer pays, the Balance takes the swap's USDC ----------
+// LiteSVM has no Jupiter: a transfer the customer signs stands in for its swap, so what runs is ours: a v0 transaction
+// prepared and co-signed, the fee payer funding a token account for the wallet, and deposit_for after the swap.
 
-test("a payment is found on chain: the oldest transaction that put at least the USDC needed into the deposit address", async () => {
-  const sig = () => base58Encode(randomBytes(64))
-  const [dust, failed, payment, sweep] = [sig(), sig(), sig(), sig()]
-  const f = fake({
-    seen: [
-      { signature: dust, pre: 0n, post: 1n },
-      { signature: failed, err: { InstructionError: [4, { Custom: 1 }] }, pre: 1n, post: 1n + NEED },
-      { signature: payment, pre: 1n, post: 1n + NEED },
-      { signature: sweep, pre: 1n + NEED, post: 0n }
-    ]
-  })
-  assert.equal(await f.run((s) => s.paidBy(DEPOSIT.toBase58(), NEED)), payment)
-  assert.deepEqual((f.to("getSignaturesForAddress")[0]!.params as Array<string>)[0], DEPOSIT_USDC.toBase58(), "its USDC account, not the address")
-  assert.equal(f.to("getTransaction").length, 2, "the failed one isn't even fetched")
-  assert.equal(await fake({ seen: [{ signature: dust, pre: 0n, post: 1n }] }).run((s) => s.paidBy(DEPOSIT.toBase58(), NEED)), undefined)
-})
-
-// Live: Jupiter's real route for ORE (needs JUPITER_API_KEY; nothing is signed or sent).
-const live = { skip: !(process.env.LIVE_TESTS && process.env.JUPITER_API_KEY) && "set LIVE_TESTS=1 and JUPITER_API_KEY to call Jupiter" }
-
-test("sizes a $5 ORE swap within a percent and a half of the market", live, async () => {
+test("on the program: a prepared v0 swap transaction lands once its customer signs it; the fee payer pays fee and rent; the Balance takes the USDC", async () => {
+  const w = solanaWorld()
+  const c = approved(w, 0n)
+  // Where the stand-in swap's USDC comes from, and a token the route passes through, whose account our fee payer opens.
+  const paying = w.tokenAccount(c.wallet.publicKey, 5_000_000n)
+  const hop = Keypair.generate().publicKey
+  put(w, hop, TOKEN, mintData(w.owner.publicKey), 1_461_600n)
+  const hopAccount = getAssociatedTokenAddressSync(hop, c.wallet.publicKey)
+  const jupiter = {
+    setup: [createAssociatedTokenAccountIdempotentInstruction(w.feePayer.publicKey, hopAccount, c.wallet.publicKey, hop)],
+    swap: createTransferInstruction(paying, c.usdc, c.wallet.publicKey, 5_000_000n)
+  }
+  const feePayerBefore = raw(w, w.feePayer.publicKey)!.lamports
   const r = await Effect.runPromise(Effect.gen(function*() {
-    const s = yield* Swap
-    const [t] = yield* s.tokens
-    return { price: t!.price, spend: yield* s.size(ORE, 5_000_000n, true) }
-  }).pipe(Effect.provide(Swap.layer)))
-  const paying = 5 / (Number(r.spend) / 1e11)
-  assert.ok(paying <= r.price && paying >= r.price * 0.985, `${paying} a token against ${r.price}`)
+    const solana = yield* Solana
+    const prepared = yield* solana.prepare(swapInstructions(solana.program, jupiter, c.wallet.publicKey, c.usdc), c.wallet.publicKey, {
+      units: unitsFor([]),
+      lookupTables: []
+    })
+    const unsigned = yield* Effect.flip(solana.cosign(prepared.transaction, prepared.token))
+    // Its wallet signs it, as Privy does, and hands it back.
+    const tx = VersionedTransaction.deserialize(Buffer.from(prepared.transaction, "base64"))
+    tx.sign([c.wallet])
+    const signed = Buffer.from(tx.serialize()).toString("base64")
+    // A byte of its message changed after signing (in the fee payer's key): not the transaction prepared.
+    const tampered = Buffer.from(tx.serialize())
+    tampered.writeUInt8(tampered.readUInt8(140) ^ 1, 140)
+    const changed = yield* Effect.flip(solana.cosign(tampered.toString("base64"), prepared.token))
+    yield* solana.cosign(signed, prepared.token)
+    return { unsigned: unsigned.message, changed: changed.message, customer: yield* solana.customer(c.wallet.publicKey) }
+  }).pipe(Effect.provide(solanaLayer(w))))
+  assert.match(r.unsigned, /isn't signed by its customer/)
+  assert.match(r.changed, /isn't the one we prepared/)
+  assert.equal(r.customer?.balance, 5_000_000n, "the swap's USDC is in the Balance")
+  assert.equal(w.tokens(c.usdc), 0n)
+  assert.equal(raw(w, c.wallet.publicKey), undefined, "the customer holds no SOL, and spent none")
+  assert.equal(raw(w, hopAccount)?.data.subarray(32, 64).toString("hex"), c.wallet.publicKey.toBuffer().toString("hex"), "the account opened is the wallet's")
+  const spent = feePayerBefore - raw(w, w.feePayer.publicKey)!.lamports
+  const rent = raw(w, hopAccount)!.lamports
+  assert.ok(spent >= rent + 10_000n && spent <= MAX_FEE_PAYER_SPEND, `the fee payer paid two signatures' fee and the rent (${rent}): ${spent}`)
 })

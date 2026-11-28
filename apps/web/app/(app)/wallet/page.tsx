@@ -1,9 +1,9 @@
 "use client"
 
 import { BitrefillAccount, BitrefillLimits, CheckoutEmailForm } from "@/components/checkout-email"
-import { AddFundsSheet, WithdrawSheet } from "@/components/funds"
+import { AddFundsSheet, DepositPanel, WithdrawSheet } from "@/components/funds"
 import { HelpLink } from "@/components/help-link"
-import { HeldInIntents, InTransit, RecentTransfers } from "@/components/in-transit"
+import { InTransit, RecentTransfers } from "@/components/in-transit"
 import { DailyReset } from "@/components/local-time"
 import { ModePicker } from "@/components/mode-picker"
 import { Money } from "@/components/money"
@@ -15,7 +15,7 @@ import { useWalletActions } from "@/lib/actions"
 import { dollars, toMicro, typedAmount, usd } from "@/lib/format"
 import { modeName, sameMode } from "@/lib/modes"
 import { pendingMode, setPendingMode } from "@/lib/onboarding"
-import { useCheckoutEmail } from "@/lib/queries"
+import { useCheckoutEmail, useDepositAddress } from "@/lib/queries"
 import { useSession } from "@/lib/session"
 import { DEFAULT_LIMITS, type Mode, NO_LIMIT, noLimit } from "@luckout/api"
 import { Plus } from "lucide-react"
@@ -23,10 +23,13 @@ import { useEffect, useReducer, useState } from "react"
 import { toast } from "sonner"
 
 export default function WalletPage() {
-  const { accountId, account, walletUsdc, ready, intents, token } = useSession()
+  const { accountId, account, ready, token } = useSession()
   const checkout = useCheckoutEmail(token).data
   const actions = useWalletActions()
+  const approved = useDepositAddress(token).data?.approved
   const [adding, setAdding] = useState(false)
+  const [addTab, setAddTab] = useState<"solana" | "chain">("solana")
+  const add = (tab: "solana" | "chain") => (setAddTab(tab), setAdding(true))
   const [withdrawing, setWithdrawing] = useState(false)
   const [saving, setSaving] = useState<Mode>()
   // The pre-deposit pick lives in localStorage, which doesn't re-render: nudge it.
@@ -45,18 +48,18 @@ export default function WalletPage() {
   const running = account ? Number(account.cashback_received) - Number(account.premiums_paid) : 0
   const today = account && account.day === Math.floor(Date.now() / 86_400_000) ? Number(account.spent_today) : 0
   const daily = account?.daily_limit ?? String(DEFAULT_LIMITS.daily)
-  // Still loading: no figure and no mode is shown as theirs until the chain has answered.
+  // Still loading: no figure and no mode is shown as theirs until the program has answered.
   const loading = account === undefined
   const chosen = loading ? undefined : account?.default_mode ?? (accountId ? pendingMode(accountId) : undefined) ?? "normal"
   const figure = <span className="inline-block h-10 w-32 animate-pulse rounded-full bg-soft align-middle" />
 
   const pickMode = async (m: Mode) => {
     if (!accountId || !chosen || sameMode(m, chosen)) return
-    // Before the first deposit the contract has no account to save it on; it's saved with the deposit.
+    // Before the one-time approval there's no account to save it on; the approval opens it on this mode.
     if (!account) {
       setPendingMode(accountId, m)
       rerender()
-      toast.success(`${modeName(m)} it is`, { description: "It's saved as your default with your first deposit." })
+      toast.success(`${modeName(m)} it is`, { description: "It's saved as your default when you set up deposits." })
       return
     }
     setSaving(m)
@@ -77,9 +80,8 @@ export default function WalletPage() {
             <p className="font-display mt-1 text-6xl leading-none font-extrabold tracking-[-0.03em] sm:text-7xl">
               {account === undefined ? <span className="skeleton inline-block h-14 w-48 rounded-full opacity-30" /> : <Money micro={balance} down />}
             </p>
-            {Number(walletUsdc) ? <p className="mt-3 text-sm text-white/60">{usd(walletUsdc!)} more USDC sits in your {intents ? "NEAR Intents account" : "NEAR wallet"}.</p> : null}
             <div className="mt-8 flex flex-wrap gap-2">
-              <Button variant="gold" onClick={() => setAdding(true)}><Plus />Add funds</Button>
+              <Button variant="gold" onClick={() => add("solana")}><Plus />Add funds</Button>
               <Button variant="light" disabled={!balance} onClick={() => setWithdrawing(true)}>Withdraw</Button>
             </div>
           </div>
@@ -107,14 +109,24 @@ export default function WalletPage() {
         </div>
       </section>
 
+      <section id="deposit" className="flex scroll-mt-28 flex-col gap-4">
+        <div>
+          <h2 className="font-display text-3xl font-extrabold">{approved === false && !account ? "Set up deposits" : "Deposit Address"}</h2>
+          <p className="mt-1 max-w-[60ch] text-ink-soft">Your own address on Solana. What you send there lands in your balance, from any exchange or wallet.</p>
+        </div>
+        <div className="card p-6"><DepositPanel /></div>
+        {approved && (
+          <Button variant="light" className="self-start" onClick={() => add("chain")}>Top up from another chain</Button>
+        )}
+      </section>
+
       <InTransit />
-      <HeldInIntents />
 
       <section className="flex flex-col gap-4">
         <div>
           <h2 className="font-display text-3xl font-extrabold">Default mode</h2>
           <p className="mt-1 max-w-[60ch] text-ink-soft">
-            Used here and in Telegram unless you pick another for a card. Changing it takes one approval.{" "}
+            Used here and in Telegram unless you pick another for a card.{" "}
             <HelpLink href="/docs/modes">Compare the modes</HelpLink>
           </p>
         </div>
@@ -152,13 +164,13 @@ export default function WalletPage() {
 
       <RecentTransfers />
 
-      <AddFundsSheet open={adding} onOpenChange={setAdding} />
+      <AddFundsSheet open={adding} onOpenChange={setAdding} tab={addTab} />
       <WithdrawSheet open={withdrawing} onOpenChange={setWithdrawing} />
     </div>
   )
 }
 
-/** Micro-USDC strings from the contract; "No limit" is u128::MAX, which no JS number holds exactly. */
+/** Micro-USDC strings from the program; "No limit" is u64::MAX, which no JS number holds exactly. */
 function Limits({ per, daily }: { per: string; daily: string }) {
   const actions = useWalletActions()
   const [a, setA] = useState("")
@@ -184,7 +196,7 @@ function Limits({ per, daily }: { per: string; daily: string }) {
       <div>
         <h2 className="font-display text-3xl font-extrabold">Spending limits</h2>
         <p className="mt-1 max-w-[60ch] text-ink-soft">
-          The contract enforces these on every purchase, from here or Telegram. Only your wallet can change them.{" "}
+          The program enforces these on every purchase, from here or Telegram. Only you can change them.{" "}
           <HelpLink href="/docs/limits#your-spending-limits">How limits work</HelpLink>
         </p>
       </div>
@@ -235,7 +247,7 @@ function Limits({ per, daily }: { per: string; daily: string }) {
         {(offA || offB) && (
           <p role="note" className="rounded-2xl bg-warn-soft p-4 text-[15px] text-warn">
             {offA && offB
-              ? "With no limits, the contract only checks your balance. Any purchase, whether you make it, the Telegram bot makes it or our server submits it, can spend up to everything in your balance."
+              ? "With no limits, the program only checks your balance. Any purchase, whether you make it, the Telegram bot makes it or our server submits it, can spend up to everything in your balance."
               : offA
               ? "With no per-purchase limit, one purchase, whether you make it, the Telegram bot makes it or our server submits it, can spend up to your whole daily limit."
               : "With no daily limit, purchases within your per-purchase limit, whether you make them, the Telegram bot makes them or our server submits them, can add up to everything in your balance in a day."}

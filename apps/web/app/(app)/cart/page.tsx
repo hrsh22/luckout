@@ -63,7 +63,7 @@ export default function Cart() {
         : (
           <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-start">
             <ul className="flex flex-col gap-3">
-              {priced.map(({ line, normal, plays }, i) => (
+              {priced.map(({ line, normal, belowMin, plays }, i) => (
                 <li key={line.id} className="card flex gap-4 p-4 sm:p-5">
                   <Link href={`/shop/${encodeURIComponent(line.voucherId)}?value=${encodeURIComponent(line.value)}&mode=${modeSlug(line.mode)}`} className="w-20 shrink-0 sm:w-28">
                     <GiftCard v={line} notch={6} />
@@ -108,7 +108,7 @@ export default function Cart() {
                         <Trash2 size={16} />Remove
                       </button>
                     </div>
-                    <CopiesNote priced={{ line, normal, plays }} />
+                    <CopiesNote priced={{ line, normal, belowMin, plays }} />
                   </div>
                 </li>
               ))}

@@ -1,20 +1,16 @@
 "use client"
 
-import type { Tx } from "@/components/admin/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
-import { type Call, send } from "@/lib/near"
-import type { AdminOverview } from "@luckout/api"
+import { toMicro, typedAmount } from "@/lib/format"
+import { isAddress } from "@solana/kit"
 import { Pause, Play } from "lucide-react"
-import { useEffect, useState } from "react"
-
-/** NEAR account ids: lowercase parts joined by dots, 2 to 64 characters. */
-const NEAR_ACCOUNT = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/
+import { type ReactNode, useEffect, useState } from "react"
 
 /**
- * Two ways to stop new purchases: Stop sales (any admin, on the server, instant) and the contract's
+ * Two ways to stop new purchases: Stop sales (any admin, on the server, instant) and the program's
  * pause (the owner's wallet, the hard stop). The pill says which, if any, is on. Without `onPause` and
- * `onResume` (the overview didn't load, so who owns the contract isn't known) only Stop sales is offered.
+ * `onResume` (the overview didn't load, so who owns the program isn't known) only Stop sales is offered.
  */
 export function ShopControls({ salesStopped, paused, onSales, onPause, onResume }: {
   salesStopped: boolean
@@ -25,7 +21,7 @@ export function ShopControls({ salesStopped, paused, onSales, onPause, onResume 
 }) {
   const [busy, setBusy] = useState(false)
   const state = paused
-    ? { text: "Contract paused", box: "bg-bad-soft text-bad", dot: "bg-bad" }
+    ? { text: "Program paused", box: "bg-bad-soft text-bad", dot: "bg-bad" }
     : salesStopped
     ? { text: "Sales stopped", box: "bg-warn-soft text-warn", dot: "bg-warn" }
     : { text: "Shop open", box: "bg-good-soft text-good", dot: "bg-good" }
@@ -47,39 +43,58 @@ export function ShopControls({ salesStopped, paused, onSales, onPause, onResume 
       </div>
       {onPause && onResume && (
         <button type="button" className="px-2 text-sm text-muted underline-offset-4 hover:text-ink hover:underline" onClick={paused ? onResume : onPause}>
-          {paused ? "Resume the contract" : "Pause the contract"} <span className="text-xs">(owner)</span>
+          {paused ? "Resume the program" : "Pause the program"} <span className="text-xs">(owner)</span>
         </button>
       )}
     </div>
   )
 }
 
-export function TransferOwnerSheet({ open, onClose, o, tx, contractCall }: {
+/**
+ * One owner setting: a USDC amount or a Solana address. It says what saving does before the wallet opens, and
+ * `problem` refuses what the program would refuse.
+ */
+export function ValueSheet({ open, onClose, title, description, label, kind, initial = "", problem, save, onSave }: {
   open: boolean
   onClose: () => void
-  o: AdminOverview
-  tx: Tx
-  contractCall: (method: string, args: object) => Call
+  title: string
+  description: ReactNode
+  label: string
+  kind: "amount" | "address"
+  initial?: string
+  problem?: (value: string) => string | undefined
+  /** The button's text for a valid value. */
+  save: (value: string) => string
+  /** Gets the value as typed (an amount still in dollars); true closes the sheet. */
+  onSave: (value: string) => Promise<boolean>
 }) {
-  const [to, setTo] = useState("")
+  const [value, setValue] = useState(initial)
   useEffect(() => {
-    if (open) setTo("")
-  }, [open])
-  const account = to.trim().toLowerCase()
-  const valid = NEAR_ACCOUNT.test(account) && account !== o.contract.owner
+    if (open) setValue(initial)
+  }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  const v = value.trim()
+  const wrong = v === ""
+    ? "Fill it in first"
+    : kind === "amount" && !(toMicro(v) >= 0)
+    ? "That isn't an amount"
+    : kind === "address" && !isAddress(v)
+    ? "That isn't a Solana address"
+    : problem?.(v)
   return (
-    <Sheet open={open} onOpenChange={(v) => !v && onClose()} title="Transfer ownership" description="The new owner accepts from their own wallet, here in the admin panel. Nothing changes until they do.">
-      <div className="flex flex-col gap-4">
+    <Sheet open={open} onOpenChange={(o) => !o && onClose()} title={title} description={description}>
+      <div className="flex flex-col gap-5">
         <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-semibold">New owner's NEAR account</span>
-          <input className="field" value={to} onChange={(e) => setTo(e.target.value)} placeholder={o.network === "mainnet" ? "name.near" : "name.testnet"} autoCapitalize="none" spellCheck={false} />
-          <span className="text-xs text-muted">The operator and the treasury can never own the contract; the contract refuses them.</span>
+          <span className="text-sm font-semibold">{label}</span>
+          {kind === "amount"
+            ? (
+              <span className="relative">
+                <span className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 font-semibold text-muted">$</span>
+                <input className="field pl-8!" inputMode="decimal" value={value} onChange={(e) => setValue(typedAmount(e.target.value))} />
+              </span>
+            )
+            : <input className="field font-mono text-sm!" value={value} onChange={(e) => setValue(e.target.value)} autoCapitalize="none" spellCheck={false} />}
         </label>
-        <Button size="lg" disabled={!valid} onClick={async () => {
-          if (await tx(`Proposing ${account}`, `${account} can now accept ownership`, (id) => send(id, contractCall("propose_owner", { new_owner: account })))) onClose()
-        }}>
-          Propose {valid ? account : "the new owner"}
-        </Button>
+        <Button size="lg" disabled={!!wrong} onClick={async () => (await onSave(v)) && onClose()}>{wrong ?? save(v)}</Button>
       </div>
     </Sheet>
   )

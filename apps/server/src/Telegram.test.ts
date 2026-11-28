@@ -7,31 +7,30 @@ import { test } from "node:test"
 import type { Pending } from "./Agent.ts"
 import { DbMemory } from "./Db.ts"
 import {
-  addLinkCode,
   buyMessages,
   buySummary,
   deliver,
+  depositLines,
   describe,
   fundedCheck,
+  holdBuy,
   makeOffers,
   messageLimits,
   photoSize,
   privateOnly,
   purchaseItems,
   purchaseLines,
-  redeemLinkCode,
+  QUOTE_TTL_MS,
   replaceCheckoutEmail,
   replyMessages,
   typedText,
-  unlinkAccount
+  unlinkAccount,
+  waitingRound
 } from "./Telegram.ts"
 
-// Linking and limits on an in-memory database; no bot needed.
+// The bot's pieces on an in-memory database; no bot needed.
 
 const run = <A, E>(e: Effect.Effect<A, E, SqlClient.SqlClient>) => Effect.runPromise(e.pipe(Effect.provide(DbMemory)))
-const soon = () => new Date(Date.now() + 10 * 60_000)
-const alice = { id: 1, chatId: 101, name: "@alice" }
-const mallory = { id: 2, chatId: 202, name: "@mallory" }
 
 test("a failed send is logged without the message it carried", () => {
   const e = new GrammyError(
@@ -56,30 +55,12 @@ test("a card's code and PIN are labelled from wherever Bitrefill puts them", () 
   assert.deepEqual(redemptionFields(undefined).secrets, [])
 })
 
-test("only the latest link works, and disconnecting cancels links not opened yet", () =>
+test("disconnecting Telegram here removes only that account's link", () =>
   run(Effect.gen(function*() {
-    yield* addLinkCode("alice.testnet", "first", soon())
-    yield* addLinkCode("alice.testnet", "second", soon())
-    assert.equal(yield* redeemLinkCode("first", alice), undefined, "replaced by the second link")
-    yield* addLinkCode("alice.testnet", "third", soon())
-    yield* unlinkAccount("alice.testnet")
-    assert.equal(yield* redeemLinkCode("third", alice), undefined, "cancelled by disconnecting")
     const sql = yield* SqlClient.SqlClient
-    assert.deepEqual(yield* sql`SELECT code FROM telegram_link_codes`, [])
-  })))
-
-test("a link that replaces another chat says which, so that chat can be told", () =>
-  run(Effect.gen(function*() {
-    yield* addLinkCode("bob.testnet", "a", soon())
-    assert.deepEqual(yield* redeemLinkCode("a", alice), { accountId: "bob.testnet" })
-    yield* addLinkCode("bob.testnet", "b", soon())
-    assert.deepEqual(yield* redeemLinkCode("b", alice), { accountId: "bob.testnet" }, "same chat again: nothing to tell")
-    yield* addLinkCode("bob.testnet", "c", soon())
-    assert.deepEqual(yield* redeemLinkCode("c", mallory), { accountId: "bob.testnet", replacedChat: "101" })
-    assert.equal(yield* redeemLinkCode("c", alice), undefined, "a code links once")
-    const sql = yield* SqlClient.SqlClient
-    const links = yield* sql<{ telegram_user_id: string | number }>`SELECT telegram_user_id FROM telegram_links WHERE account_id = 'bob.testnet'`
-    assert.deepEqual(links.map((l) => Number(l.telegram_user_id)), [2])
+    yield* sql`INSERT INTO telegram_links (telegram_user_id, account_id, chat_id) VALUES (1, 'alice', 1), (2, 'bob', 2)`
+    yield* unlinkAccount("alice")
+    assert.deepEqual((yield* sql<{ account_id: string }>`SELECT account_id FROM telegram_links`).map((r) => r.account_id), ["bob"])
   })))
 
 test("each Telegram user gets so many messages a minute", () => {
@@ -142,7 +123,7 @@ test("an account's Balance is read at most once a minute, and a failed read coun
   assert.equal(await balances.funded("bob.near", t), false)
   assert.equal(reads, 2, "each account its own")
   answer = () => Promise.reject(new Error("429 Too Many Requests"))
-  assert.equal(await balances.funded("alice.near", t + 61_000), true, "NEAR didn't answer: never shut out a paying customer")
+  assert.equal(await balances.funded("alice.near", t + 61_000), true, "the RPC didn't answer: never shut out a paying customer")
   assert.equal(await balances.funded("alice.near", t + 100_000), true)
   assert.equal(reads, 3)
   answer = async () => false
@@ -171,6 +152,10 @@ test("a Lucky card bought at Normal says so on its Buy line", () => {
     "Amazon, 10 USD: $10.00 on Normal: the Cashback Reserve can't cover Classic right now, so there's no Draw. Works in United States only."
   )
   assert.equal(buySummary([{ ...p, requestedMode: "normal" }]), "Amazon, 10 USD: $10.00. Works in United States only.", "Normal as asked: nothing to explain")
+  assert.equal(
+    buySummary([{ ...p, luckyFrom: 2_500_000 }]),
+    "Amazon, 10 USD: $10.00 on Normal: Lucky cards play together from $2.50 a checkout, so there's no Draw. Works in United States only."
+  )
 })
 
 test("only private chats get through: the bot ignores groups and channels", async () => {
@@ -364,3 +349,104 @@ test("a tap on Change it saves the new Checkout Email, unless the one it replace
   assert.match(await Effect.runPromise(replaceCheckoutEmail(purchases, "alice.near", { from: "me@example.com", to: "new@example.com" })), /new@example\.com/)
   assert.equal(email, "new@example.com")
 })
+
+// ---------- a Buy tapped while short waits for its money (ADR-0015) ----------
+
+const T = Date.UTC(2026, 10, 28, 12)
+
+/**
+ * A $15 Jackpot card tapped at T with $0.50 in the Balance, then one waiting round at `now` with `balance` in it:
+ * what it bought and said, and whether the tap still waits.
+ */
+const waitThenLook = (looks: ReadonlyArray<{ readonly now: number; readonly balance: number }>) =>
+  run(Effect.gen(function*() {
+    const lucky = card({ voucherName: "Amazon", value: "10", mode: { lucky: 2 }, requestedMode: { lucky: 2 }, maxPrice: 15_000_000, referencePrice: 10_000_000, luckyAmount: 10_000_000 })
+    yield* holdBuy({ id: "offer-0001", accountId: "alice", chatId: 101, cards: [lucky], expiresAt: new Date(T + QUOTE_TTL_MS), balance: 500_000 })
+    yield* holdBuy({ id: "offer-0001", accountId: "alice", chatId: 101, cards: [lucky], expiresAt: new Date(T + QUOTE_TTL_MS), balance: 500_000 })
+    const bought: Array<{ id: string; accountId: string; chatId: string; items: ReadonlyArray<{ maxPrice: number; luckyAmount?: number | undefined; idempotencyKey: string }> }> = []
+    const said: Array<string> = []
+    let balance = 0
+    const deps = {
+      balance: () => Effect.sync(() => balance),
+      buy: (w: { id: string; accountId: string; chatId: string; cards: ReadonlyArray<Pending> }) =>
+        Effect.sync(() => void bought.push({ id: w.id, accountId: w.accountId, chatId: w.chatId, items: purchaseItems(w.id, w.cards) })),
+      say: (chatId: string, text: string) => Effect.sync(() => void said.push(`${chatId}: ${text}`))
+    }
+    for (const look of looks) {
+      balance = look.balance
+      yield* waitingRound(deps, look.now)
+    }
+    const sql = yield* SqlClient.SqlClient
+    const waiting = (yield* sql`SELECT id FROM pending_buys`).length > 0
+    return { bought, said, waiting }
+  }))
+
+test("money that lands before the quote expires buys the card, at the most it showed", async () => {
+  const r = await waitThenLook([{ now: T + 60_000, balance: 500_000 }, { now: T + 10 * 60_000, balance: 20_500_000 }])
+  assert.deepEqual(r.said, [], "nothing to say while nothing arrives")
+  assert.deepEqual(r.bought.map((b) => [b.id, b.accountId, b.chatId]), [["offer-0001", "alice", "101"]])
+  assert.deepEqual(r.bought[0]!.items.map((i) => [i.maxPrice, i.luckyAmount, i.idempotencyKey]), [[15_000_000, 10_000_000, "offer-0001"]], "the program checks max_debit")
+  assert.equal(r.waiting, false, "bought once")
+})
+
+test("money that lands after the quote expired buys nothing, and they hear why once", async () => {
+  const r = await waitThenLook([{ now: T + QUOTE_TTL_MS + 1, balance: 20_500_000 }, { now: T + QUOTE_TTL_MS + 60_000, balance: 20_500_000 }])
+  assert.deepEqual(r.bought, [])
+  assert.equal(r.said.length, 1)
+  assert.match(r.said[0]!, /^101: The money for your Amazon 10 didn't arrive within 30 minutes, so I didn't buy it\. Anything that lands stays in your balance/)
+  assert.equal(r.waiting, false)
+})
+
+test("money that lands short is said once with what's missing, buys nothing, and the rest can still arrive in time", async () => {
+  const r = await waitThenLook([
+    { now: T + 60_000, balance: 10_500_000 },
+    { now: T + 120_000, balance: 10_500_000 },
+    { now: T + 180_000, balance: 15_000_000 }
+  ])
+  assert.equal(r.said.length, 1, "told once, not every round")
+  assert.equal(r.said[0], "101: $10.00 arrived, but your balance is still $4.50 short of $15.00, so I haven't bought your Amazon 10. Send $4.50 more by 12:30 UTC and I'll buy it then.")
+  assert.deepEqual(r.bought.map((b) => b.id), ["offer-0001"], "bought once the rest arrived")
+})
+
+test("a short Buy line says the tap waits for the money, and a Deposit Address stands alone on its own line", () => {
+  assert.equal(
+    buySummary([card()], 2_000_000),
+    "Swiggy, 500 INR: $5.53. Works in India only. Your balance is $2.00 short: tap Buy and I'll buy it once the money lands, within 30 minutes."
+  )
+  const address = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+  assert.deepEqual(depositLines({ address, token: "USDC", chain: "Solana", amount: 5_000_000, tapInApp: false }), [
+    "Send at least $5.00 of USDC on Solana to your Deposit Address below. It reaches your balance by itself within a few minutes.",
+    address
+  ])
+  assert.match(depositLines({ address, token: "USDT", chain: "Solana", amount: 5_000_000, tapInApp: true })[0]!, /after one tap in the app/)
+})
+
+test("a 1Click address says exactly what to send on which chain, the least, for how long, and where a failed swap refunds", () => {
+  const refundTo = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+  const oneClick = { send: "20.21", least: "20.01", until: new Date(T + 30 * 60_000).toISOString(), refundTo }
+  const d = { address: "TQ1c1ick", token: "USDT", chain: "Tron", amount: 20_000_000, tapInApp: false, oneClick }
+  assert.deepEqual(depositLines(d, T), [
+    "Send 20.21 USDT on Tron to 1Click's address below within 30 minutes (by 12:30 UTC), and about $20.00 lands in your balance. Only USDT on Tron: another token or network can't be swapped.",
+    `More is fine, it's all swapped, but at least 20.01 USDT must arrive. If the swap fails, 1Click refunds it to ${refundTo} on Tron.`,
+    "TQ1c1ick"
+  ])
+  const memo = depositLines({ ...d, oneClick: { send: "20.21", until: oneClick.until, refundTo, memo: "1234" } }, T)
+  assert.deepEqual(memo.slice(1), [
+    `More is fine, it's all swapped. If the swap fails, 1Click refunds it to ${refundTo} on Tron.`,
+    "Include this memo, or 1Click can't match your transfer: 1234",
+    "TQ1c1ick"
+  ], "a memo before the address, which stays alone on the last line")
+})
+
+test("the bot's repeating round reads the clock each time it runs", () =>
+  run(Effect.gen(function*() {
+    const said: Array<string> = []
+    // Built once and run again and again, as the bot repeats it.
+    const look = waitingRound({ balance: () => Effect.succeed(0), buy: () => Effect.void, say: (_, text) => Effect.sync(() => void said.push(text)) })
+    yield* holdBuy({ id: "offer-0002", accountId: "alice", chatId: 101, cards: [card()], expiresAt: new Date(Date.now() + 100), balance: 0 })
+    yield* look
+    assert.deepEqual(said, [])
+    yield* Effect.sleep("150 millis")
+    yield* look
+    assert.equal(said.length, 1, "expired by the second run")
+  })))
