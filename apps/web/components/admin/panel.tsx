@@ -6,6 +6,7 @@ import { OwnerBanner, useOwner } from "@/components/admin/owner"
 import { PurchasesCard } from "@/components/admin/purchases"
 import { FundReserveSheet, WithdrawSheet } from "@/components/admin/reserve"
 import { AddressLink, AdminTabs, Bar, LastFigures, sol } from "@/components/admin/shared"
+import { UndeliveredList } from "@/components/admin/undelivered"
 import { UpgradeSheet } from "@/components/admin/upgrade"
 import { shortAccount } from "@/components/avatar"
 import { Money } from "@/components/money"
@@ -180,13 +181,14 @@ function Dashboard({ o }: { o: AdminOverview }) {
       <section className="flex flex-col gap-4">
         <SectionTitle
           title="Paying Bitrefill"
-          body="The Pay Wallet pays each checkout's invoice in USDC, and settle repays it from the Vault up to the daily cap. The fee payer pays every transaction's fee. Each alerts below its line."
+          body="The Pay Wallet pays each checkout's invoice in USDC. What its float lacks, the payment advances from that checkout's own money in the Vault, and settle repays the float; both count against the daily cap. The fee payer pays every transaction's fee. Each alerts below its line."
         />
         <div className="grid gap-4 md:grid-cols-3">
           <RepayCard r={o.repay} onChange={show("repay")} />
           {o.keys.map((k) => <KeyTile key={k.role} k={k} />)}
         </div>
         <LimitsCard o={o} />
+        <UndeliveredList cards={o.undelivered} />
       </section>
 
       <section className="grid items-start gap-4 lg:grid-cols-[1fr_1.25fr]">
@@ -249,7 +251,7 @@ function Dashboard({ o }: { o: AdminOverview }) {
         {...amountSheet}
         open={open === "repay"}
         title="Daily repay cap"
-        description="How much settle repays the Pay Wallet from the Vault in a day (UTC). Past it, prices wait as Proceeds and the float runs down. Keep it at about twice the busiest day."
+        description="How much may go from the Vault to the Pay Wallet in a day (UTC): settle's repayments and the advances payments make when the float is short. Past it, prices wait as Proceeds, the float runs down, and a checkout the float can't cover waits. Keep it at about twice the busiest day."
         label="Repay up to, each day"
         initial={dollars(o.repay.dailyCap)}
         save={(v) => `Set it to ${usd(toMicro(v))} a day`}
@@ -327,12 +329,19 @@ function RepayCard({ r, onChange }: { r: AdminOverview["repay"]; onChange: () =>
   const used = r.dailyCap > 0 ? r.repaidToday / r.dailyCap : 1
   return (
     <div className="card flex flex-col p-6">
-      <p className="flex items-center gap-2 font-semibold"><Wallet size={18} className="text-muted" aria-hidden="true" />Repaid today</p>
-      <p className="mt-1 text-sm text-muted">What settle has repaid the Pay Wallet since midnight UTC, against the owner's daily cap.</p>
+      <p className="flex items-center gap-2 font-semibold"><Wallet size={18} className="text-muted" aria-hidden="true" />Repaid and advanced today</p>
+      <p className="mt-1 text-sm text-muted">What settle has repaid the Pay Wallet, and payments have advanced to it, since midnight UTC, against the owner's daily cap.</p>
       <p className="font-display mt-5 text-4xl font-extrabold tracking-[-0.02em]">
         {usd(r.repaidToday)} <span className="text-lg font-bold text-muted">of {usd(r.dailyCap)}</span>
       </p>
       <div className="mt-3"><Bar value={used} tone={used >= 0.8 ? "warn" : "good"} /></div>
+      <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
+        <div><dt className="text-muted">Advanced, not yet delivered</dt><dd className="font-semibold">{usd(r.advanced)}</dd></div>
+        <div>
+          <dt className="text-muted">Refunds the Pay Wallet owes</dt>
+          <dd className={`font-semibold ${r.refundsPending > 0 ? "text-warn" : ""}`}>{usd(r.refundsPending)}</dd>
+        </div>
+      </dl>
       <Button size="sm" variant={used >= 0.8 ? "primary" : "soft"} className="mt-5 self-start" onClick={onChange}>Change the cap</Button>
     </div>
   )
@@ -340,7 +349,7 @@ function RepayCard({ r, onChange }: { r: AdminOverview["repay"]; onChange: () =>
 
 const KEY_COPY = {
   feePayer: { label: "Fee payer", purpose: "Pays every transaction's fee and rent, customers' too. Holds only SOL; send it SOL from any wallet." },
-  payWallet: { label: "Pay Wallet float", purpose: "Pays each checkout's Bitrefill invoice. A float that can't cover a checkout holds it, uncharged." }
+  payWallet: { label: "Pay Wallet float", purpose: "Pays each checkout's Bitrefill invoice; what it lacks is advanced within the daily cap. Refunds it owes come out of it first." }
 } as const
 
 function KeyTile({ k }: { k: AdminOverview["keys"][number] }) {

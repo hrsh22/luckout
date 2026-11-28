@@ -25,22 +25,36 @@ If a card can't be delivered, Luckout marks it failed, and the full amount you p
 
 In a [Cart](/docs/buy/cart), only that card comes back. The others are delivered as usual.
 
+The one exception is a big purchase whose money had already paid Bitrefill: then part of the refund follows a little later. See [Part of a refund on its way](#part-of-a-refund-on-its-way).
+
+## Part of a refund on its way
+
+Luckout pays Bitrefill from a wallet of its own, so a card is bought the moment you confirm it. When a purchase is bigger than what that wallet holds at the moment, the contract sends the difference from the money you paid for it, so it still goes through at once.
+
+If such a card then can't be delivered, the part of its price that had already paid Bitrefill can't come back from the contract straight away. It's not lost:
+
+- **The rest of the amount** goes back to your balance at once, as usual.
+- **That part** is recorded on Solana as owed to you, for that purchase. The contract never pays it from anyone else's money.
+- **Luckout's wallet pays it,** before anything else, as soon as it has the money: when Bitrefill returns its refund, or when we top the wallet up.
+
+Until then the purchase shows **Refund on its way**, with the amount and a link to its record on Solana. The bot tells you when it lands, if Telegram is linked. The same goes for a [Reclaim](#reclaim) of such a card.
+
 Luckout sources its gift cards from Bitrefill, which isn't affiliated with Luckout.
 
 ## A card that's getting ready
 
-Now and then a card shows **Getting it ready** while Luckout prepares to buy it. If you haven't been charged yet, the page says so, and you can tap **Cancel** until it's ready: "Cancelled. You weren't charged."
+A purchase goes through at once, however big. Only on a very busy day, past a daily amount Luckout sets for its own safety, can a card show **Getting it ready** while Luckout prepares to buy it. If you haven't been charged yet, the page says so, and you can tap **Cancel** until it's ready: "Cancelled. You weren't charged."
 
 If it isn't ready in time, Luckout cancels it without a charge, or, if you were charged, refunds the full amount before Reclaim would open.
 
 ## Reclaim
 
-If Luckout has neither delivered nor refunded a purchase 24 hours after you bought it, the contract lets you take the full amount back yourself. Only you can, and only for your own purchase.
+If Luckout has neither delivered nor refunded a purchase 24 hours after you bought it, the contract lets you take the full amount back yourself. Only you can, and only for your own purchase. If part of its money had already paid Bitrefill, that part follows from Luckout's wallet, as in [Part of a refund on its way](#part-of-a-refund-on-its-way).
 
 <Steps>
   <Step title="Find the purchase" tint="sky">In [Purchases](/purchases). After 10 minutes in progress, it says **Taking longer than usual** and when Reclaim opens.</Step>
   <Step title="Tap Reclaim it">Once 24 hours have passed, the purchase says the full amount is yours to take back.</Step>
-  <Step title="Approve in your wallet" tint="gold">The full amount you paid is back in your balance. Luckout pays the network fee.</Step>
+  <Step title="Approve in your wallet" tint="gold">The amount you paid is back in your balance, or on its way if it had already paid Bitrefill. Luckout pays the network fee.</Step>
 </Steps>
 
 ## Top-Up refunds

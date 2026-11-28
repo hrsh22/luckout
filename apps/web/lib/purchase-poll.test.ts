@@ -14,6 +14,13 @@ test("a purchase is checked until it settles: fast while pending, slower while w
   assert.equal(purchasePollMs(undefined, now), false)
 })
 
+test("a failed card whose refund is on its way from the Pay Wallet is checked until the refund lands", () => {
+  const now = Date.parse("2026-11-28T12:00:00Z")
+  const createdAt = new Date(now - 60 * 60_000).toISOString()
+  assert.equal(purchasePollMs({ status: "failed", createdAt, refund: { amount: 7_000_000 } }, now), 30_000)
+  assert.equal(purchasePollMs({ status: "failed", createdAt, refund: { amount: 7_000_000, paidAt: createdAt } }, now), false)
+})
+
 test("the newest page, read again, updates the list without losing a purchase or breaking the older pages", () => {
   const p = (id: string, status: "pending" | "delivered" = "delivered") => ({ id, status }) as unknown as Purchase
   // Pages of 3: the first ends at "c", the second is older history.

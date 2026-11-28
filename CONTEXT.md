@@ -76,6 +76,18 @@ _Avoid_: EVM wallet, hot wallet
 The USDC in the Base Wallet that pays each card's Bitrefill invoice; kept between a floor and a ceiling at about a day of sales and topped up from the Treasury by Refills.
 _Avoid_: Buffer, reserve (that's the Cashback Reserve)
 
+**Pay Wallet**:
+Our key on the server that holds a small USDC float and pays each Checkout's Bitrefill invoice on Solana; `settle` repays it from the Vault, within the owner's daily repay cap (ADR-0015).
+_Avoid_: Hot wallet, treasury, float account
+
+**Advance**:
+The part of a Checkout's own money the program sends from the Vault to the Pay Wallet, in the same transaction as the invoice's payment, when the float can't pay all of it. Never more than its Pending cards' Reference Prices, and counted against the daily repay cap; delivered cards take their prices from it first (ADR-0016).
+_Avoid_: Loan, credit, prepayment
+
+**Pending Refund**:
+The part of a failed or reclaimed card's Maximum Price that had been advanced and so already paid Bitrefill: recorded on its Checkout as owed to the customer, and paid into their Balance from the Pay Wallet as soon as it holds the money, before anything else it pays for (ADR-0016). The rest of the refund comes from the Vault at once.
+_Avoid_: Refund owed, IOU, Cashback
+
 **Checkout Email**:
 The email a customer gives for their cards. Each guest order on Bitrefill carries it, so Bitrefill's limits (15 orders a day, $500 a day, $1,000 a month) count per customer, and Luckout counts them per card over the last 24 hours and 30 days; Bitrefill emails each card's code and receipt there, and Bitrefill can reach them about a bad code. A throwaway one is fine.
 _Avoid_: Login, account email
@@ -153,11 +165,11 @@ The long-run expected amount above Reference Price, before operating costs, acro
 _Avoid_: House edge, guaranteed profit, per-order fee, top-up fee
 
 **Failed Purchase**:
-A purchase the operator marks as undeliverable; the full amount debited returns to the customer's Balance with no Draw.
+A purchase the operator marks as undeliverable; the full amount debited returns to the customer's Balance with no Draw, at once, except any part that is a Pending Refund.
 _Avoid_: Cancellation, Draw loss
 
 **Reclaim**:
-The customer's right to recover the full amount debited for a purchase the operator has neither confirmed nor failed within 24 hours.
+The customer's right to recover the full amount debited for a purchase the operator has neither confirmed nor failed within 24 hours; any part of it that had been advanced follows as a Pending Refund.
 _Avoid_: Cancellation, chargeback
 
 **Cashback Reserve**:

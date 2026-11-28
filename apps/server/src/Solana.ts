@@ -216,6 +216,8 @@ export type SignerName = "operator" | "payWallet"
 export interface PrepareOptions {
   readonly units?: number
   readonly lookupTables?: ReadonlyArray<AddressLookupTableAccount>
+  /** Who pays its fee instead of our fee payer: the owner, whose wallet signs and pays alone, then `relay` sends it. */
+  readonly payer?: PublicKey
 }
 
 /** Whether `signature` is `key`'s Ed25519 signature of `message`. */
@@ -269,6 +271,12 @@ export class Solana extends Context.Service<Solana, {
   inspect(transaction: string, watch: ReadonlyArray<PublicKey>): Effect.Effect<Simulated, SolanaUnavailable>
   /** Checks a prepared transaction came back unchanged and signed by its customer, then signs as fee payer, sends and waits. */
   cosign(transaction: string, token: string): Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | NotOurs>
+  /**
+   * Sends a transaction its signers paid for themselves, as they signed it, and waits: the owner's (prepared with
+   * `payer`). We sign nothing, so a wallet that adds its own instructions before signing (Phantom's Lighthouse checks)
+   * changes nothing of ours.
+   */
+  relay(transaction: string): Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | NotOurs>
 }>()("luckout/Solana") {
   static readonly layer = Layer.effect(
     Solana,
@@ -344,7 +352,7 @@ export class Solana extends Context.Service<Solana, {
 
       const prepare: Solana["Service"]["prepare"] = (ixs, signer, options = {}) =>
         Effect.gen(function*() {
-          const payer = yield* need(feePayer, "SOLANA_FEE_PAYER_SECRET_KEY")
+          const payer = options.payer ? { publicKey: options.payer } : yield* need(feePayer, "SOLANA_FEE_PAYER_SECRET_KEY")
           if (!ixs.some((ix) => ix.keys.some((k) => k.isSigner && k.pubkey.equals(signer)))) {
             return yield* new SolanaUnavailable({ message: "the customer signs nothing in this transaction" })
           }
@@ -396,6 +404,22 @@ export class Solana extends Context.Service<Solana, {
           )
         })
 
+      const relay: Solana["Service"]["relay"] = (transaction) =>
+        Effect.gen(function*() {
+          const tx = yield* Effect.try({
+            try: () => VersionedTransaction.deserialize(Buffer.from(transaction, "base64")),
+            catch: () => new NotOurs({ message: "That isn't a transaction" })
+          })
+          const message = tx.message.serialize()
+          const signers = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures)
+          if (feePayer && signers.some((k) => k.equals(feePayer.publicKey))) return yield* new NotOurs({ message: "Our fee payer signs only through cosign" })
+          if (signers.some((key, i) => !signedBy(key, message, tx.signatures[i]!))) return yield* new NotOurs({ message: "That transaction isn't fully signed" })
+          const lastValidBlockHeight = (yield* chain.blockHeight) + 150
+          return yield* deliver({ signature: base58.encode(tx.signatures[0]!), bytes: transaction, lastValidBlockHeight }).pipe(
+            Effect.catchTag("TxExpired", () => Effect.fail(new SolanaUnavailable({ message: "it expired before it landed; prepare it again" })))
+          )
+        })
+
       return Solana.of({
         cluster,
         program,
@@ -416,6 +440,7 @@ export class Solana extends Context.Service<Solana, {
             return yield* outcome("simulation", ran)
           }),
         send,
+        relay,
         resume: deliver,
         balance: chain.balance,
         signatures: chain.signatures,

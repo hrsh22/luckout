@@ -58,6 +58,8 @@ const world = (opts: {
   price?: number
   /** The Pay Wallet's USDC ($1000 unless set). */
   float?: number
+  /** The owner's daily repay cap, which advances share with settle ($500 unless set; 0: no advance can be made). */
+  repayCap?: number
   orders?: Array<Order["_tag"]>
   /** Guest checkout (ADR-0012): orders are invoices the Pay Wallet pays, each to a fresh wallet. */
   guest?: boolean
@@ -88,6 +90,8 @@ const world = (opts: {
   telegramDown?: number
   /** Runs as Bitrefill takes its `n`th order: the chain changes under a checkout on its way. */
   onOrder?: (sw: SolanaWorld, n: number) => void
+  /** Runs as Bitrefill is asked for the `n`th time where an invoice's cards are: after its payment. */
+  onDelivery?: (sw: SolanaWorld, n: number) => void
   /** ORAO fills each request as soon as it's made; false leaves it to the test. */
   autoFill?: boolean
   /** The chain's clock, in seconds after the real time (where it starts). */
@@ -134,6 +138,7 @@ const world = (opts: {
   const owner = (name: string, args: Record<string, unknown>, accounts: Record<string, PublicKey> = {}) =>
     void sw.send([p.instruction(name, { owner: sw.owner.publicKey, config: p.config, ...accounts }, args)], [sw.owner])
   const config = () => decodeAccount<ProgramConfig>("Config", account(p.config)!)
+  if (opts.repayCap !== undefined) owner("set_repay_cap", { daily: BigInt(opts.repayCap) })
 
   /** Every transaction sent to the chain, by its instruction, once however often it's sent: "pay" is a Pay Wallet payment. */
   const calls: Array<string> = []
@@ -222,6 +227,7 @@ const world = (opts: {
   const invoiceCards = new Map<string, number>()
   let bitrefillDown = opts.bitrefillDown
   let telegramDown = opts.telegramDown ?? 0
+  let asked = 0
   let shop = new ShopStatus({ open: true })
   const price = opts.price ?? 10 * USDC
   const mode = opts.mode ?? "normal"
@@ -263,6 +269,7 @@ const world = (opts: {
         ? Effect.fail(new BitrefillUnavailable({ message: `invoice ${invoiceId} is still pending` }))
         : Effect.suspend(() => {
           if (token) calls.push(`delivery:${token}`)
+          opts.onDelivery?.(sw, ++asked)
           const poll = deliveries.shift() ?? []
           const order = listed.shift()
           const inCartOrder = Array.from({ length: invoiceCards.get(invoiceId) ?? cart.length }, (_, j) => {
@@ -346,7 +353,10 @@ const world = (opts: {
     admitted: () => events.filter((e) => e.name === "Admitted").flatMap((e) => e.data.cards as Array<ChainCard>),
     settles: () =>
       events.filter((e) => e.name === "Settled").map((e) => ({ delivered: [...(e.data.delivered as Buffer)], failed: [...(e.data.failed as Buffer)] })),
-    draws: () => events.filter((e) => e.name === "Draw").map((e) => e.data as unknown as DrawEvent)
+    draws: () => events.filter((e) => e.name === "Draw").map((e) => e.data as unknown as DrawEvent),
+    /** What each payment advanced from the Vault (ADR-0016). */
+    advances: () => events.filter((e) => e.name === "Advanced").map((e) => Number(e.data.amount as bigint)),
+    settledEvents: () => events.filter((e) => e.name === "Settled").map((e) => e.data)
   }
 }
 type World = ReturnType<typeof world>
@@ -577,7 +587,7 @@ test("an admission saved before a crash is resumed as signed; one whose blockhas
 
 test("an admission the program refuses leaves every card rejected with the program's own words, and nothing charged", async () => {
   // Each waits for the float, and meanwhile the customer lowers their limit, or the owner takes the reserve out.
-  const w = world({ real: true, guest: true, float: 0 })
+  const w = world({ real: true, guest: true, float: 0, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const p = yield* w.buy()
@@ -597,7 +607,7 @@ test("an admission the program refuses leaves every card rejected with the progr
   assert.ok(r.co.admit_tx, "kept: it counts against the account's recent refusals")
   assert.match(w.notices[0]!, /wasn't bought\. Over the per-purchase spending limit/)
 
-  const lucky = world({ real: true, guest: true, float: 0, mode: { lucky: 1 } })
+  const lucky = world({ real: true, guest: true, float: 0, repayCap: 0, mode: { lucky: 1 } })
   const l = await lucky.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", lucky.alice.id)
     const p = yield* lucky.buy()
@@ -784,8 +794,8 @@ test("a refused settlement whose cards are still open onchain stays pending, and
 
 // ---------- the Pay Wallet's float ----------
 
-test("a checkout the float can't cover waits uncharged while the owner hears of it, and goes on once the float is topped up", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC })
+test("a checkout the float and the repay cap can't cover waits uncharged while the owner hears the cap is why, and goes on once the float is topped up", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, repayCap: 5 * USDC })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const p = yield* w.buy()
@@ -796,14 +806,14 @@ test("a checkout the float can't cover waits uncharged while the owner hears of 
   }))
   assert.equal(r.first, "waiting")
   assert.deepEqual(r.before, { calls: [], balance: 500 * USDC }, "nothing signed or charged while waiting")
-  assert.match(w.alerts.join(" "), /waits for the Pay Wallet: its float can't cover \$12\.00 yet/)
+  assert.match(w.alerts.join(" "), /waits, uncharged: the Pay Wallet's float is \$7\.00 short of its \$12\.00, and today's repay cap has room to advance only \$5\.00 of that/)
   assert.equal(r.after, "settled")
   assert.equal(w.usdcOf(w.payees[0]!), 12_000_000n)
-  assert.equal(w.float(), 35_000_000n, "paid, then repaid")
+  assert.deepEqual([w.float(), w.config().proceeds], [28_000_000n, 7_000_000n], "paid, then repaid up to the cap; the rest waits as Proceeds")
 })
 
 test("a checkout that waits too long is cancelled, and nothing was charged", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0 })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0 })
   const p = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const sql = yield* SqlClient.SqlClient
@@ -818,8 +828,8 @@ test("a checkout that waits too long is cancelled, and nothing was charged", asy
   assert.equal(balanceOf(w), 500 * USDC)
 })
 
-test("two checkouts can never count on the same float", async () => {
-  const w = world({ real: true, guest: true, float: 15 * USDC })
+test("two checkouts can never count on the same float, nor on the same room in the repay cap", async () => {
+  const w = world({ real: true, guest: true, float: 10 * USDC, repayCap: 5 * USDC })
   const statuses = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     yield* withEmail("bob@example.com", w.bob.id)
@@ -829,8 +839,229 @@ test("two checkouts can never count on the same float", async () => {
   assert.deepEqual(statuses, ["delivered", "waiting"])
 })
 
+// ---------- advances (ADR-0016) ----------
+
+test("a checkout bigger than the float is bought at once: its payment advances just what the float lacks, in the same transaction, and settle takes it back", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const p = yield* w.buy()
+    const sql = yield* SqlClient.SqlClient
+    const [co] = yield* sql<{ advance: string }>`SELECT advance::text FROM checkouts`
+    return { p, advance: co!.advance }
+  }))
+  assert.equal(r.p.status, "delivered")
+  assert.deepEqual(w.calls, ["admit", "order:alice@example.com", "advance", "pay", "delivery:secret-token", "settle"], "the advance and the payment are one transaction")
+  assert.deepEqual(w.advances(), [7 * USDC], "only the shortfall")
+  assert.equal(r.advance, String(7 * USDC), "kept with the payment")
+  assert.equal(w.usdcOf(w.payees[0]!), 12_000_000n)
+  assert.equal(w.settledEvents()[0]!.from_advance, 7_000_000n, "the delivered card's price came from the advance first")
+  assert.equal(w.float(), 5_000_000n, "the float is back where it was")
+  assert.deepEqual([w.config().advanced, w.config().repaid_today], [0n, 12_000_000n], "the advance and the repayment both count against the cap")
+  assert.equal(balanceOf(w), 488 * USDC)
+})
+
+test("an order Bitrefill refuses needs no advance: nothing leaves the Vault early, and the customer gets it all back", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, orders: ["Refused"], refusal: "OUT_OF_STOCK" })
+  const p = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const p = yield* w.buy()
+    return yield* get(w.alice.id, p.id)
+  }))
+  assert.equal(p.status, "failed")
+  assert.deepEqual(w.advances(), [])
+  assert.deepEqual([w.float(), w.config().repaid_today], [5_000_000n, 0n])
+  assert.equal(balanceOf(w), 500 * USDC)
+})
+
+test("one past today's repay cap waits uncharged; once the owner raises the cap it goes, advancing what the float lacks", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, repayCap: 5 * USDC })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const p = yield* w.buy()
+    w.owner("set_repay_cap", { daily: 100n * BigInt(USDC) })
+    yield* promote
+    return { first: p.status, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.first, "waiting")
+  assert.match(w.alerts.join(" "), /repay cap has room to advance only \$5\.00/)
+  assert.equal(r.after, "settled")
+  assert.deepEqual(w.advances(), [7 * USDC])
+})
+
+test("two checkouts racing for the float both go at once: only what the float lacks for the second is advanced", async () => {
+  // Bitrefill is slow to deliver, so both are paid before either is settled and repays the float.
+  const w = world({ real: true, guest: true, float: 15 * USDC, deliveryDelay: 300 })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    yield* withEmail("bob@example.com", w.bob.id)
+    const ps = yield* Effect.all([w.buy(), w.buy(undefined, w.bob.id)], { concurrency: 2 })
+    return ps.map((p) => p.status)
+  }))
+  assert.deepEqual(r, ["delivered", "delivered"])
+  assert.deepEqual(w.advances(), [5 * USDC], "the shortfall, once")
+  assert.deepEqual(w.payees.map((x) => w.usdcOf(x)), [10_000_000n, 10_000_000n])
+  assert.deepEqual([w.float(), w.config().advanced], [15_000_000n, 0n])
+})
+
+test("a payment and its advance are one transaction: a crash after it was signed resumes that one, so nothing is advanced or paid twice", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    w.faults.set("advance", "crash")
+    const p = yield* w.buy()
+    const saved = yield* checkoutOf(p.id)
+    const before = { advanced: w.config().advanced, paid: w.usdcOf(w.payees[0]!) }
+    yield* reconcilePass
+    return { saved, before, after: yield* settled(p.id) }
+  }))
+  assert.equal(r.saved.step, "pay")
+  assert.ok(r.saved.pay_tx, "signed and saved, then the server died before sending it")
+  assert.deepEqual(r.before, { advanced: 0n, paid: 0n }, "nothing had moved")
+  assert.equal(r.after, "settled")
+  assert.deepEqual(w.advances(), [7 * USDC], "advanced once")
+  assert.equal(w.usdcOf(w.payees[0]!), 12_000_000n, "paid once")
+  assert.deepEqual(w.calls.filter((c) => c === "advance" || c === "pay"), ["advance", "pay"])
+})
+
+test("a card Bitrefill fails after an advance is refunded from the Pay Wallet in its settlement, when the Pay Wallet holds the money", async () => {
+  // Money reaches the Pay Wallet (here, Bitrefill's refund) before the card is settled.
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, deliveries: [["Failed"]], onDelivery: (sw) => sw.give(sw.payWalletUsdc, 12n * BigInt(USDC)) })
+  const p = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const p = yield* w.buy()
+    return yield* get(w.alice.id, p.id)
+  }))
+  assert.equal(p.status, "failed")
+  assert.equal(p.refund, undefined, "nothing left owed")
+  assert.match(p.error ?? "", /The full amount went back to your balance/)
+  assert.deepEqual(w.calls.slice(-2), ["settle", "pay_refund"], "one transaction")
+  assert.equal(balanceOf(w), 500 * USDC)
+  assert.equal(w.float(), 5_000_000n, "5, +7 advanced, -12 paid, +12 back from Bitrefill, -7 refunded")
+  assert.deepEqual([w.config().advanced, w.config().refunds_pending], [0n, 0n])
+  assert.match(w.alerts.join("\n"), /Bitrefill didn't deliver .* Claim the refund to the Pay Wallet, then mark it received in the admin panel/)
+})
+
+test("in a cart, delivered cards take the advance first and cards still on their way keep backing it: only the rest is owed, and paid with the settlement", async () => {
+  // $25 of the $30 is advanced. Card 0 is delivered and takes $10 of it; card 2, still on its way, backs another $10; so
+  // $5 of failed card 1's money is owed from the Pay Wallet, which by then holds it.
+  const w = world({
+    real: true,
+    guest: true,
+    float: 5 * USDC,
+    deliveries: [["Delivered", "Failed", "Pending"], ["Delivered", "Failed", "Delivered"]],
+    onDelivery: (sw, n) => n === 1 && sw.give(sw.payWalletUsdc, 20n * BigInt(USDC))
+  })
+  const steps = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const placed = yield* w.cart(keys(3))
+    return yield* Effect.forEach(placed, (p) => settled(p.id))
+  }))
+  assert.deepEqual(steps, ["settled", "failed", "settled"])
+  assert.deepEqual(w.advances(), [25 * USDC])
+  assert.deepEqual(w.settledEvents().map((e) => [e.from_advance, e.refund_pending]), [[10_000_000n, 5_000_000n], [10_000_000n, 0n]])
+  assert.equal(w.calls.filter((c) => c === "pay_refund").length, 1, "paid in the first settlement")
+  assert.equal(balanceOf(w), 480 * USDC, "the failed card's $10 is all back")
+  assert.deepEqual([w.float(), w.config().advanced, w.config().refunds_pending], [15_000_000n, 0n, 0n])
+})
+
+test("a refund the Pay Wallet can't pay yet waits onchain and the customer sees it's on its way; it's paid before any payment spends that money", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, deliveries: [["Failed"]] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    yield* withEmail("bob@example.com", w.bob.id)
+    const placed = yield* w.buy()
+    const pending = yield* get(w.alice.id, placed.id)
+    const co = yield* checkoutOf(placed.id)
+    const owed = w.checkout(co.address!)!.refund_pending
+    // Some money comes in, a dollar short of the refund: it's kept for the refund, so Bob's card is advanced in full.
+    w.sw.give(w.sw.payWalletUsdc, 6n * BigInt(USDC))
+    yield* promote
+    const short = yield* get(w.alice.id, placed.id)
+    const bobs = yield* w.buy(undefined, w.bob.id)
+    w.sw.give(w.sw.payWalletUsdc, 1n * BigInt(USDC))
+    yield* promote
+    return { pending, owed, short, bobs, paid: yield* get(w.alice.id, placed.id), account: w.checkout(co.address!) }
+  }))
+  assert.equal(r.pending.status, "failed")
+  assert.deepEqual(r.pending.refund, { amount: 7 * USDC })
+  assert.match(r.pending.error ?? "", /\$5\.00 went back to your balance, and the other \$7\.00 is on its way/)
+  assert.ok(r.pending.settleTx, "its record onchain: the settlement that says it's owed")
+  assert.equal(r.owed, 7_000_000n, "recorded on the Checkout account")
+  assert.equal(r.short.refund?.paidTx, undefined, "not paid while the Pay Wallet is short")
+  assert.equal(r.bobs.status, "delivered")
+  assert.deepEqual(w.advances(), [7 * USDC, 12 * USDC], "Bob's payment left the refund's money alone")
+  assert.ok(r.paid.refund?.paidTx && r.paid.refund.paidAt)
+  assert.match(r.paid.error ?? "", /The full amount went back to your balance/)
+  assert.equal(r.account, undefined, "the Checkout account closed once nothing was owed")
+  assert.equal(balanceOf(w), 500 * USDC)
+  assert.deepEqual([w.float(), w.config().refunds_pending], [0n, 0n])
+  assert.match(w.alerts.join("\n"), /\$7\.00 of a failed card's refund had been advanced, and the Pay Wallet can't pay it yet/)
+  assert.match(w.alerts.join("\n"), /its pending refund of \$7\.00 is paid: \w+/)
+  assert.match(w.notices.join("\n"), /The \$7\.00 still owed for your Card 10 is back in your Luckout balance/)
+})
+
+test("a refund paid outside the server is found on its Checkout account and recorded, with its transaction", async () => {
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, deliveries: [["Failed"]] })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const placed = yield* w.buy()
+    const co = yield* checkoutOf(placed.id)
+    // The owner pays it from their own USDC.
+    const p = w.sw.program
+    const from = w.sw.tokenAccount(w.sw.owner.publicKey, 7n * BigInt(USDC))
+    const onchain = w.checkout(co.address!)!
+    const tx = w.sw.send([
+      p.instruction("pay_refund", {
+        payer: w.sw.owner.publicKey,
+        config: p.config,
+        customer: p.customer(w.alice.wallet.publicKey),
+        checkout: new PublicKey(co.address!),
+        from,
+        vault: p.vault,
+        checkout_payer: onchain.payer
+      }, { amount: 7n * BigInt(USDC) })
+    ], [w.sw.owner])
+    yield* promote
+    return { tx, paid: yield* get(w.alice.id, placed.id) }
+  }))
+  assert.equal(r.paid.refund?.paidTx, r.tx)
+  assert.equal(balanceOf(w), 500 * USDC)
+  assert.equal(w.float(), 0n, "the Pay Wallet paid nothing")
+})
+
+test("a stuck card reclaimed after its money was advanced owes that part from the Pay Wallet, which pays it once it can", async () => {
+  // Bitrefill never says where the card is, so it ends stuck; the customer reclaims it after 24 hours.
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, bitrefillDown: "delivery" })
+  const r = await w.run(Effect.gen(function*() {
+    yield* withEmail("alice@example.com", w.alice.id)
+    const sql = yield* SqlClient.SqlClient
+    const placed = yield* w.buy()
+    yield* sql`UPDATE checkouts SET attempts = 99`
+    yield* reconcilePass
+    const stuck = yield* rowOf(placed.id)
+    const co = yield* checkoutOf(placed.id)
+    w.sw.warp(24 * 3600)
+    const p = w.sw.program
+    w.sw.send([
+      p.instruction("reclaim", { wallet: w.alice.wallet.publicKey, config: p.config, customer: p.customer(w.alice.wallet.publicKey), checkout: new PublicKey(co.address!), checkout_payer: w.sw.feePayer.publicKey }, { card: 0 })
+    ], [w.alice.wallet])
+    yield* Purchases.use((s) => s.settleClosed)
+    const reclaimed = yield* get(w.alice.id, placed.id)
+    w.sw.give(w.sw.payWalletUsdc, 7n * BigInt(USDC))
+    yield* promote
+    return { stuck: stuck.step, reclaimed, paid: yield* get(w.alice.id, placed.id) }
+  }))
+  assert.equal(r.stuck, "stuck")
+  assert.equal(r.reclaimed.status, "failed")
+  assert.deepEqual(r.reclaimed.refund, { amount: 7 * USDC })
+  assert.match(r.reclaimed.error ?? "", /You reclaimed it after 24 hours\. \$5\.00 went back to your balance, and the other \$7\.00 is on its way/)
+  assert.ok(r.paid.refund?.paidTx)
+  assert.equal(balanceOf(w), 500 * USDC)
+})
+
 test("a waiting purchase can be cancelled, uncharged; one going through can't", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0 })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     const purchases = yield* Purchases
     yield* withEmail("alice@example.com", w.alice.id)
@@ -852,7 +1083,7 @@ test("a waiting purchase can be cancelled, uncharged; one going through can't", 
 })
 
 test("one account can have only one purchase waiting", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0 })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0 })
   const e = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     yield* w.buy()
@@ -862,7 +1093,7 @@ test("one account can have only one purchase waiting", async () => {
 })
 
 test("while sales are closed, new purchases are refused and waiting ones keep their place", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0 })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const waiting = yield* w.buy()
@@ -881,7 +1112,7 @@ test("while sales are closed, new purchases are refused and waiting ones keep th
 })
 
 test("each step gets its own retries: a backoff earned earlier never delays the next step", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, bitrefillDown: "delivery" })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0, bitrefillDown: "delivery" })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const sql = yield* SqlClient.SqlClient
@@ -898,9 +1129,9 @@ test("each step gets its own retries: a backoff earned earlier never delays the 
   assert.equal(r.due, true, "and no backoff carried over, so the code isn't held up")
 })
 
-test("a payment that fails moves nothing: the charged checkout waits for the float, then a fresh invoice is paid once", async () => {
-  // Another payment emptied the float between admission and this one.
-  const w = world({ real: true, guest: true, float: 10 * USDC, onOrder: (sw, n) => n === 1 && sw.give(sw.payWalletUsdc, -sw.tokens(sw.payWalletUsdc)) })
+test("a payment that fails moves nothing, its advance included: the charged checkout waits for the float, then a fresh invoice is paid once", async () => {
+  // Another payment emptied the float between admission and this one, and the repay cap has no room to advance it.
+  const w = world({ real: true, guest: true, float: 10 * USDC, repayCap: 0, onOrder: (sw, n) => n === 1 && sw.give(sw.payWalletUsdc, -sw.tokens(sw.payWalletUsdc)) })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const p = yield* w.buy()
@@ -914,7 +1145,7 @@ test("a payment that fails moves nothing: the charged checkout waits for the flo
   assert.equal(r.co.step, "restock")
   assert.match(r.co.error ?? "", /^The payment failed, so nothing was paid/)
   assert.equal(r.charged, 490 * USDC, "charged once, at admission")
-  assert.match(w.alerts.join(" "), /its payment to Bitrefill failed/)
+  assert.match(w.alerts.join(" "), /its payment to Bitrefill failed \(Today's repay cap has no room for this advance\)/)
   assert.equal(r.after, "settled")
   assert.deepEqual(w.payees.map((x) => w.usdcOf(x)), [0n, 10_000_000n], "the first invoice was never paid; a fresh one was, once")
   assert.equal(w.calls.filter((c) => c === "admit").length, 1)
@@ -922,7 +1153,7 @@ test("a payment that fails moves nothing: the charged checkout waits for the flo
 })
 
 test("a charged checkout the float never covers in time is refunded in full", async () => {
-  const w = world({ real: true, guest: true, float: 10 * USDC, onOrder: (sw) => sw.give(sw.payWalletUsdc, -sw.tokens(sw.payWalletUsdc)) })
+  const w = world({ real: true, guest: true, float: 10 * USDC, repayCap: 0, onOrder: (sw) => sw.give(sw.payWalletUsdc, -sw.tokens(sw.payWalletUsdc)) })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const sql = yield* SqlClient.SqlClient
@@ -1583,7 +1814,7 @@ test("a customer marks their own delivered card used, again changes nothing, and
 })
 
 test("only the customer's own card, and only once delivered, can be marked used", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0 })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 0, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     const p = yield* Purchases
     const me = w.alice.id
@@ -1674,8 +1905,8 @@ test("a guest cart counts all its cards against the email's 15 a day", async () 
   assert.deepEqual(w.calls, [])
 })
 
-test("a cart the float can't cover waits whole, uncharged, then goes as one order and one payment", async () => {
-  const w = world({ real: true, guest: true, float: 25 * USDC })
+test("a cart the float and the repay cap can't cover waits whole, uncharged, then goes as one order and one payment", async () => {
+  const w = world({ real: true, guest: true, float: 25 * USDC, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const placed = yield* w.cart(keys(3))
@@ -1791,7 +2022,7 @@ test("a notice Telegram didn't take is sent again on the next pass, and only onc
 })
 
 test("a checkout is ordered with the Checkout Email it was placed under, even if that changed while it waited", async () => {
-  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC })
+  const w = world({ real: true, guest: true, price: 12 * USDC, float: 5 * USDC, repayCap: 0 })
   const r = await w.run(Effect.gen(function*() {
     yield* withEmail("alice@example.com", w.alice.id)
     const p = yield* w.buy()

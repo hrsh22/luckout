@@ -166,7 +166,13 @@ export class Purchase extends Schema.Class<Purchase>("Purchase")({
   /** Redemption Data, only ever sent to its owner. */
   redemption: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   admitTx: Schema.optional(Schema.String),
+  /** The settlement that confirmed or failed it: for a failed card with a `refund`, its onchain record of what's owed. */
   settleTx: Schema.optional(Schema.String),
+  /**
+   * A failed card's refund that had been advanced to pay Bitrefill (ADR-0016), so it comes back from our Pay Wallet rather
+   * than the program's Vault: that part, and once it's in the Balance, when and by which transaction.
+   */
+  refund: Schema.optional(Schema.Struct({ amount: MicroUsdc, paidAt: Schema.optional(Schema.String), paidTx: Schema.optional(Schema.String) })),
   /** The purchase's id in the contract, once admitted: what reclaim and retry_draw take. */
   contractPurchaseId: Schema.optional(Schema.Int),
   createdAt: Schema.String,
@@ -681,6 +687,34 @@ export class AttentionPurchase extends Schema.Class<AttentionPurchase>("Attentio
   retryable: Schema.Boolean
 }) {}
 
+/**
+ * A card we paid Bitrefill for that it didn't deliver: what claiming Bitrefill's refund to the Pay Wallet needs, and where
+ * the customer's own refund is (ADR-0016).
+ */
+export class UndeliveredCard extends Schema.Class<UndeliveredCard>("UndeliveredCard")({
+  purchaseId: Schema.String,
+  checkoutId: Schema.String,
+  accountId: Schema.String,
+  voucherName: Schema.String,
+  value: Schema.String,
+  invoiceId: Schema.String,
+  /** Our payment of the invoice, and when it landed. */
+  payTx: Schema.String,
+  paidAt: Schema.optional(Schema.String),
+  /** The card's price: what Bitrefill owes us back for it. */
+  amount: MicroUsdc,
+  /** What the checkout's payment advanced from the Vault (0: the float paid it all). */
+  advance: MicroUsdc,
+  /** The customer's refund: back at once ("paid"), or partly owed from the Pay Wallet ("pending", then "paidLater"). */
+  refund: Schema.Literals(["paid", "pending", "paidLater"]),
+  /** The part that was owed from the Pay Wallet. */
+  refundPending: Schema.optional(MicroUsdc),
+  /** The transaction that paid the customer back: the settlement, or the later payment. */
+  refundTx: Schema.optional(Schema.String),
+  /** Bitrefill's refund to the Pay Wallet, once an admin saw it arrive: its transaction, when, and who said so. */
+  claimed: Schema.optional(Schema.Struct({ tx: Schema.String, at: Schema.String, by: Schema.String }))
+}) {}
+
 export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")({
   cluster: Schema.Literals(["localnet", "devnet", "mainnet"]),
   program: Schema.Struct({
@@ -714,8 +748,12 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     /** Customers' money in the Vault: what it holds minus the reserve and Proceeds. Negative means it holds less than it owes. */
     customers: Schema.Int
   }),
-  /** `settle` repays the Pay Wallet up to this much a day; past it, prices wait as Proceeds. */
-  repay: Schema.Struct({ dailyCap: MicroUsdc, repaidToday: MicroUsdc }),
+  /**
+   * `settle` repays the Pay Wallet, and `advance` sends it what its float lacks for a payment, up to this much a day in
+   * all; past it, prices wait as Proceeds and advances are refused (ADR-0016). `advanced`: advances not yet taken back
+   * by delivered cards. `refundsPending`: refunds the Pay Wallet owes customers for cards that failed after an advance.
+   */
+  repay: Schema.Struct({ dailyCap: MicroUsdc, repaidToday: MicroUsdc, advanced: MicroUsdc, refundsPending: MicroUsdc }),
   stats: Schema.Struct({ luckySettled: Schema.Int, luckyAmountTotal: MicroUsdc, luckyPaidTotal: MicroUsdc }),
   /** Our keys' balances and where the Monitor alerts: the fee payer's SOL (lamports), the Pay Wallet's USDC. */
   keys: Schema.Array(Schema.Struct({
@@ -748,8 +786,13 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
     busiest: Schema.Struct({ orders: Schema.Int, daily: MicroUsdc, monthly: MicroUsdc })
   }),
   /** What every card the Pay Wallet paid, a guest's or on a customer's own Bitrefill account, has used of our paying address's own limits at Bitrefill (ADR-0015). */
-  paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) })
+  paying: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc, limits: Schema.Struct({ daily: MicroUsdc, monthly: MicroUsdc }) }),
+  /** Cards we paid Bitrefill for that it didn't deliver: the ones whose refund from Bitrefill hasn't arrived first, then the latest. */
+  undelivered: Schema.Array(UndeliveredCard)
 }) {}
+
+/** A transaction that landed: its signature. */
+export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
 
 /** A build uploaded for an upgrade (deploy/README.md), as the owner checks it before signing. */
 export class AdminBuffer extends Schema.Class<AdminBuffer>("AdminBuffer")({
@@ -834,8 +877,21 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   }),
   /** A buffer holding a build for an upgrade, checked against the program. */
   HttpApiEndpoint.get("buffer", "/admin/buffers/:address", { params: { address: Address }, success: AdminBuffer, error: [NotFound, AdminInvalid] }),
-  /** An owner transaction, unsigned, for the owner's wallet to sign and `/transactions/submit` to send. */
-  HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] })
+  /** An owner transaction, unsigned, for the owner's wallet to sign (paying its own fee) and `ownerSend` to send. */
+  HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] }),
+  /** Sends an owner transaction as the owner's wallet signed it, and waits until it lands. */
+  HttpApiEndpoint.post("ownerSend", "/admin/owner/send", {
+    payload: Schema.Struct({ transaction: Schema.String.check(Schema.isMaxLength(4096)) }),
+    success: Submitted,
+    error: [NotFound, AdminInvalid]
+  }),
+  /** Bitrefill's refund for a checkout's undelivered cards reached the Pay Wallet, in transaction `tx`. */
+  HttpApiEndpoint.post("claimed", "/admin/checkouts/:id/claimed", {
+    params: { id: Schema.String },
+    payload: Schema.Struct({ tx: Schema.String.check(Schema.isMaxLength(128)) }),
+    success: HttpApiSchema.NoContent,
+    error: [NotFound, AdminInvalid]
+  })
 ).middleware(Authorization).annotate(OpenApi.Exclude, true) {}
 
 // ---------- deposits and customer-signed transactions (ADR-0015) ----------
@@ -860,8 +916,6 @@ export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress
   waiting: Schema.Number,
   held: Schema.Array(HeldToken)
 }) {}
-
-export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
 
 /**
  * The customer's Customer account in the program, amounts in micro-USDC as strings ("No limit" is u64's maximum).

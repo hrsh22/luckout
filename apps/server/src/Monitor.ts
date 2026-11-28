@@ -15,7 +15,7 @@ const PERCENT = BigInt(process.env.GAS_ALERT_PERCENT || 100)
 export const LOW_LINES = {
   /** The fee payer pays every fee and rent (Customer and Checkout accounts, ORAO's requests): about a week of it. */
   feePayer: SOL * PERCENT / 100n,
-  /** The Pay Wallet's float pays Bitrefill until `settle` repays it: about a busy hour of cards. */
+  /** The Pay Wallet's float pays Bitrefill until `settle` repays it, and advances cover what it lacks: about a busy hour of cards. */
   float: 100_000_000n * PERCENT / 100n
 } as const
 const solText = (lamports: bigint) => `${Number(lamports) / 1e9} SOL`
@@ -58,12 +58,15 @@ export const Monitor = Layer.effectDiscard(
 
     // Reads only our database, so it runs first: an RPC outage is exactly when purchases stall.
     const purchases = Effect.gen(function*() {
-      const [r] = yield* sql<{ stuck: number; late: number }>`
+      const [r] = yield* sql<{ stuck: number; late: number; owed: number }>`
         SELECT count(*) FILTER (WHERE step = 'stuck')::int AS stuck,
-               count(*) FILTER (WHERE step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')::int AS late
+               count(*) FILTER (WHERE step IN ${sql.in(OPEN_STEPS)} AND created_at < now() - interval '15 minutes')::int AS late,
+               count(*) FILTER (WHERE refund_pending > 0 AND refund_paid_at IS NULL AND updated_at < now() - interval '1 hour')::int AS owed
         FROM purchases`
       if (r && r.stuck > 0) yield* alerts.admin(`${r.stuck} purchase(s) stuck; see deploy/RUNBOOK.md`)
       if (r && r.late > 0) yield* alerts.admin(`${r.late} purchase(s) still unfinished after 15 minutes`)
+      // A customer's money (ADR-0016): the Pay Wallet pays it as soon as it holds it, so an hour means it's short.
+      if (r && r.owed > 0) yield* alerts.admin(`${r.owed} failed card(s) still wait over an hour for their refund from the Pay Wallet; top it up or claim Bitrefill's refund (deploy/RUNBOOK.md)`)
     })
 
     /** Says `text` on the drop under the line, then once a day while it lasts (LOW_REPEAT_MS). */
@@ -92,19 +95,25 @@ export const Monitor = Layer.effectDiscard(
       const config = yield* solana.config
       const float = yield* solana.account(config.pay_wallet)
       const usdc = float ? float.data.readBigUInt64LE(64) : 0n
-      yield* low("float", usdc < LOW_LINES.float, `the Pay Wallet's float is down to ${Number(usdc) / 1e6} USDC; checkouts wait for it once it can't pay Bitrefill`)
-      // `settle` repays the float only up to the owner's daily cap: past it, the float runs down while Proceeds grow.
+      yield* low(
+        "float",
+        usdc < LOW_LINES.float,
+        `the Pay Wallet's float is down to ${Number(usdc) / 1e6} USDC; checkouts advance what it lacks from their own money until the repay cap fills, then wait`
+      )
+      // `settle` repays the float, and advances top it up, only up to the owner's daily cap: past it, the float runs down
+      // while Proceeds grow, and checkouts the float can't cover wait.
       const today = BigInt(Math.floor(Date.now() / 86_400_000))
       const repaid = config.repay_day === today ? config.repaid_today : 0n
       yield* low(
         "repayCap",
         config.repay_daily_cap > 0n && repaid * 5n >= config.repay_daily_cap * 4n,
-        `today's repayments to the Pay Wallet reached ${Number(repaid) / 1e6} of the ${Number(config.repay_daily_cap) / 1e6} USDC daily cap; raise it in the admin panel`
+        `today's repayments and advances to the Pay Wallet reached ${Number(repaid) / 1e6} of the ${Number(config.repay_daily_cap) / 1e6} USDC daily cap; raise it in the admin panel`
       )
     })
 
     // The Vault must hold at least what the program owes: customers' Balances, the reserve, the Proceeds, and what open
-    // Checkouts debited and haven't paid out. Below it, customers' money is gone (a bug or an attack). Balances aren't
+    // Checkouts debited and haven't paid out, less what they advanced to the Pay Wallet (ADR-0016; refunds owed for those
+    // are the Pay Wallet's to pay). Below it, customers' money is gone (a bug or an attack). Balances aren't
     // summed onchain, so this sums every customer we know of (Db: known_accounts) and every open Checkout. Missing ones
     // only make the debt look smaller, never a false alarm.
     // ponytail: every customer read every 10 minutes, 100 to a call; keep an onchain total when there are hundreds of thousands.
@@ -131,11 +140,12 @@ export const Monitor = Layer.effectDiscard(
       const inFlight = checkouts.reduce((sum, co) =>
         sum + (co?.cards ?? []).reduce((s, card) =>
           s + (card.status.kind === "Pending" ? card.max_price : card.status.kind === "Drawing" ? card.max_price - card.reference_price : 0n), 0n), 0n)
-      const owed = balances + config.free_reserve + config.locked_reserve + config.proceeds + inFlight
+      const owed = balances + config.free_reserve + config.locked_reserve + config.proceeds + inFlight - config.advanced
       if (held < owed) {
         yield* alerts.admin(
           `the Vault holds ${Number(held) / 1e6} USDC, less than the program owes: ${Number(owed) / 1e6} (Balances ${Number(balances) / 1e6}, ` +
-            `reserve and Proceeds ${Number(config.free_reserve + config.locked_reserve + config.proceeds) / 1e6}, open Checkouts ${Number(inFlight) / 1e6}). Pause the program and investigate now.`
+            `reserve and Proceeds ${Number(config.free_reserve + config.locked_reserve + config.proceeds) / 1e6}, open Checkouts ${Number(inFlight) / 1e6} ` +
+            `less ${Number(config.advanced) / 1e6} advanced). Pause the program and investigate now.`
         )
       }
     })

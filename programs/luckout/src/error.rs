@@ -82,4 +82,10 @@ pub enum LuckoutError {
     NotUsdc,
     #[msg("Only the guardian or the owner can pause")]
     NotGuardian,
+    #[msg("An advance is more than 0 and at most the Pending cards' Reference Prices not yet advanced")]
+    BadAdvance,
+    #[msg("Today's repay cap has no room for this advance")]
+    OverRepayCap,
+    #[msg("A refund payment is more than 0 and at most what is pending")]
+    BadRefund,
 }

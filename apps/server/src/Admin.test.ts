@@ -1,7 +1,7 @@
 import { Api, type OwnerAction } from "@luckout/api"
 import { address, lamports } from "@solana/kit"
 import { getAssociatedTokenAddressSync } from "@solana/spl-token"
-import { Keypair, type PublicKey, Transaction } from "@solana/web3.js"
+import { Keypair, type PublicKey, SystemProgram, Transaction } from "@solana/web3.js"
 import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -14,6 +14,7 @@ import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 import { Sales } from "./Sales.ts"
+import { base58 } from "./Program.ts"
 import { Chain, Solana, SolanaUnavailable } from "./Solana.ts"
 import { fakeBitrefill, solanaLayer, solanaWorld, type SolanaWorld } from "./testing.ts"
 
@@ -78,7 +79,8 @@ test("the overview reads the program's Config and Vault, the fee payer's SOL, th
     assert.equal(o.reserve.held, 1_120 * USDC, "the Vault: the reserve and alice's Balance")
     assert.equal(o.reserve.customers, 120 * USDC, "what the Vault holds minus the reserve and Proceeds")
     assert.equal(o.reserve.maxCashback, 50 * USDC, "the lower of the fixed $50 and 20% of the reserve")
-    assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0 })
+    assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0, advanced: 0, refundsPending: 0 })
+    assert.deepEqual(o.undelivered, [])
     assert.deepEqual(
       o.keys.map((k) => [k.role, k.address, k.usdcAccount, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
       [["feePayer", world.feePayer.publicKey.toBase58(), undefined, "ok"], ["payWallet", world.payWallet.publicKey.toBase58(), world.payWalletUsdc.toBase58(), "low"]],
@@ -178,6 +180,43 @@ test("Retry now moves the checkout the reconciler runs, with its cards, and only
     assert.deepEqual(attention.filter((a) => [id(27), id(29), id(30)].includes(a.id)).map((a) => [a.id, a.retryable]), [[id(27), false], [id(29), false], [id(30), true]])
     const [listed] = yield* admin.purchases(undefined, id(22))
     assert.equal(listed!.checkoutId, gaveUp)
+  })))
+
+test("each card we paid for and Bitrefill didn't deliver is listed with its customer's refund, until an admin marks Bitrefill's refund received", () =>
+  run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const sig = (n: number) => base58.encode(Buffer.alloc(64, n))
+    const signed = (n: number) => JSON.stringify({ signature: sig(n), bytes: "", lastValidBlockHeight: 0 })
+    const [co] = yield* sql<{ id: string }>`
+      INSERT INTO checkouts (account_id, step, invoice_id, pay_tx, advance, ordered_at)
+      VALUES (${alice}, 'done', 'inv-9', ${signed(1)}::jsonb, 7000000, now() - interval '1 hour') RETURNING id`
+    // Unpaid ones aren't listed: nothing to claim from Bitrefill.
+    const [unpaid] = yield* sql<{ id: string }>`INSERT INTO checkouts (account_id, step) VALUES (${alice}, 'done') RETURNING id`
+    const card = (id: string, checkout: string, position: number, step: string, extra: { pending?: number; paid?: string; settle?: string } = {}) =>
+      sql`INSERT INTO purchases (checkout_id, position, id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, invoice_id,
+                                 refund_pending, refund_paid_at, refund_tx, settle_tx)
+          VALUES (${checkout}, ${position}, ${id}, ${alice}, ${id}, 'Card', 'amazon-us', '10', 10000000, ${step}, 'inv-9', ${extra.pending ?? null},
+                  ${extra.paid ? new Date() : null}, ${extra.paid ?? null}, ${extra.settle ? JSON.stringify({ signature: extra.settle }) : null}::jsonb)`
+    yield* card("00000000-0000-4000-8000-0000000000a1", co!.id, 0, "settled")
+    yield* card("00000000-0000-4000-8000-0000000000a2", co!.id, 1, "failed", { settle: sig(2) })
+    yield* card("00000000-0000-4000-8000-0000000000a3", co!.id, 2, "failed", { pending: 7000000 })
+    yield* card("00000000-0000-4000-8000-0000000000a4", unpaid!.id, 0, "failed")
+    const admin = yield* Admin
+    const listed = (yield* admin.overview).undelivered
+    assert.deepEqual(listed.map((u) => [u.purchaseId.slice(-2), u.refund, u.refundPending, u.refundTx]), [
+      ["a2", "paid", undefined, sig(2)],
+      ["a3", "pending", 7 * USDC, undefined]
+    ])
+    assert.deepEqual([listed[0]!.invoiceId, listed[0]!.payTx, listed[0]!.amount, listed[0]!.advance, listed[0]!.claimed], ["inv-9", sig(1), 10 * USDC, 7 * USDC, undefined])
+    assert.ok(listed[0]!.paidAt)
+
+    assert.equal((yield* admin.claimed(co!.id, "not a signature", "boss").pipe(Effect.flip))._tag, "AdminInvalid")
+    assert.equal((yield* admin.claimed(unpaid!.id, sig(3), "boss").pipe(Effect.flip))._tag, "NotFound", "nothing we paid for")
+    yield* admin.claimed(co!.id, sig(3), "boss")
+    const after = (yield* admin.overview).undelivered
+    assert.deepEqual(after.map((u) => u.claimed?.tx), [sig(3), sig(3)])
+    assert.equal(after[0]!.claimed?.by, "boss")
+    assert.match(alerts.at(-1)!, /^boss marked Bitrefill's refund for invoice inv-9 \(checkout .*\) received: /)
   })))
 
 test("the published API spec leaves the admin endpoints out", () => {
@@ -307,7 +346,7 @@ test("a purchase is found by its id however old, past the latest 300 an account'
     assert.deepEqual(yield* admin.purchases(undefined, "00000000-0000-4000-8000-000000000999"), [], "no such purchase")
   })))
 
-// ---------- owner transactions (ADR-0015): prepared here, signed in the owner's own wallet, sent by cosign ----------
+// ---------- owner transactions (ADR-0015): prepared here, paid for and signed in the owner's own wallet, sent as signed ----------
 
 /** What a wallet does with a prepared transaction: signs it, and hands it back. */
 const signAs = (wallet: Keypair, transaction: string) => {
@@ -323,13 +362,13 @@ const asOwner = <A, E>(f: (w: SolanaWorld, sign: (action: OwnerAction, key?: Key
     const admin = yield* Admin
     const solana = yield* Solana
     const sign = (action: OwnerAction, key = w.owner) =>
-      admin.ownerTransaction("boss", action).pipe(Effect.flatMap((t) => solana.cosign(signAs(key, t.transaction), t.token)))
+      admin.ownerTransaction("boss", action).pipe(Effect.flatMap((t) => admin.sendOwner("boss", signAs(key, t.transaction))))
     return yield* f(w, sign)
   })).pipe(Effect.provide(layerFor(w))))
 }
 
 test("the owner pauses and sets the caps from their own wallet; a non-admin can't prepare anything", () =>
-  asOwner((_, sign) =>
+  asOwner((w, sign) =>
     Effect.gen(function*() {
       const admin = yield* Admin
       const solana = yield* Solana
@@ -349,9 +388,17 @@ test("the owner pauses and sets the caps from their own wallet; a non-admin can'
 
       const resume = yield* admin.ownerTransaction("boss", { _tag: "set_paused", paused: false })
       assert.throws(() => signAs(Keypair.generate(), resume.transaction), /unknown signer/, "only the owner's key can sign it")
+      assert.match((yield* Effect.flip(admin.sendOwner("boss", resume.transaction))).message, /fully signed/, "nothing goes out unsigned")
+      assert.equal((yield* Effect.flip(admin.sendOwner(alice, resume.transaction)))._tag, "NotFound")
+      // The owner's wallet may add its own checks before signing, as Phantom does: it signs alone, so it still lands.
+      const theirs = Transaction.from(Buffer.from(resume.transaction, "base64"))
+      theirs.add(SystemProgram.transfer({ fromPubkey: w.owner.publicKey, toPubkey: w.owner.publicKey, lamports: 0 }))
+      theirs.sign(w.owner)
+      yield* admin.sendOwner("boss", theirs.serialize().toString("base64"))
+      assert.equal((yield* solana.config).paused, false)
     })))
 
-test("the reserve leaves only for the owner's USDC account, opened at our cost, and comes back from it", () =>
+test("the reserve leaves only for the owner's USDC account, opened at the owner's cost, and comes back from it", () =>
   asOwner((w, sign) =>
     Effect.gen(function*() {
       const solana = yield* Solana
@@ -382,9 +429,11 @@ test("the owner names a new operator and Pay Wallet, and hands over to a propose
       yield* sign({ _tag: "propose_owner", newOwner: next.publicKey.toBase58() })
       const proposed = yield* solana.config
       assert.ok(proposed.operator.equals(operator.publicKey))
-      assert.ok(proposed.pay_wallet.equals(getAssociatedTokenAddressSync(w.mint, payWallet.publicKey)), "its USDC account, opened at our cost")
+      assert.ok(proposed.pay_wallet.equals(getAssociatedTokenAddressSync(w.mint, payWallet.publicKey)), "its USDC account, opened at the owner's cost")
       assert.ok(proposed.pending_owner?.equals(next.publicKey))
 
+      // The proposed owner's wallet pays its own fee too.
+      w.svm.airdrop(address(next.publicKey.toBase58()), lamports(10_000_000n))
       yield* sign({ _tag: "accept_owner" }, next)
       const after = yield* solana.config
       assert.ok(after.owner.equals(next.publicKey))
@@ -442,5 +491,6 @@ test("an upgrade shows the buffer's hash first, takes only one the upgrade autho
       const before = w.svm.getBalance(owner) ?? 0n
       yield* sign({ _tag: "upgrade", buffer: ours })
       assert.equal(w.svm.getAccount(address(ours)).exists, false, "the buffer is spent")
-      assert.equal((w.svm.getBalance(owner) ?? 0n) - before, 5_000_000_000n, "its rent went back to the owner, who paid no fee")
+      const back = (w.svm.getBalance(owner) ?? 0n) - before
+      assert.ok(back > 4_999_000_000n && back < 5_000_000_000n, "its rent went back to the owner, less the fee its wallet paid")
     })))

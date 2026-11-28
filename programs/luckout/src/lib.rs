@@ -1,5 +1,6 @@
 //! Luckout on Solana (ADR-0015): customer Balances in USDC, Spending Limits and Default Mode, Game Versions,
-//! the Cashback Reserve, Checkouts of up to 15 cards, and Draws from ORAO's VRF that can't be re-rolled.
+//! the Cashback Reserve, Checkouts of up to 15 cards, Draws from ORAO's VRF that can't be re-rolled, and advances
+//! of a Checkout's own money to the Pay Wallet when its float is short (ADR-0016).
 //! See CONTEXT.md for the domain language. All amounts are USDC base units; all rates are basis points.
 
 use anchor_lang::prelude::*;
@@ -86,14 +87,34 @@ pub struct Settled {
     pub checkout: Pubkey,
     pub delivered: Vec<u8>,
     pub failed: Vec<u8>,
+    /// Delivered cards' Reference Prices the Checkout's advance already paid the Pay Wallet.
+    pub from_advance: u64,
     pub repaid: u64,
     pub to_proceeds: u64,
+    /// The failed cards' money that had been advanced: owed to the customer until `pay_refund`.
+    pub refund_pending: u64,
 }
 
 #[event]
 pub struct Reclaimed {
     pub checkout: Pubkey,
     pub card: u8,
+    /// Back in the Balance now.
+    pub amount: u64,
+    /// The rest of the Maximum Price, which had been advanced: owed until `pay_refund`.
+    pub refund_pending: u64,
+}
+
+#[event]
+pub struct Advanced {
+    pub checkout: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct RefundPaid {
+    pub checkout: Pubkey,
+    pub customer: Pubkey,
     pub amount: u64,
 }
 
@@ -167,7 +188,9 @@ pub mod luckout {
             lucky_amount_total: 0,
             lucky_paid_total: 0,
             guardian: Pubkey::default(),
-            spare: [0; 32],
+            advanced: 0,
+            refunds_pending: 0,
+            spare: [0; 16],
             versions: default_game_versions(),
         });
         Ok(())
@@ -181,7 +204,7 @@ pub mod luckout {
         fresh(ctx.accounts.config.layout)?;
         known_mode(&ctx.accounts.config, default_mode)?;
         ctx.accounts.customer.set_inner(Customer {
-            layout: LAYOUT,
+            layout: PLAIN_LAYOUT,
             bump: ctx.bumps.customer,
             wallet: ctx.accounts.wallet.key(),
             balance: 0,
@@ -226,7 +249,8 @@ pub mod luckout {
         Ok(())
     }
 
-    /// The customer takes back the full amount of a card nobody confirmed or failed within 24 hours.
+    /// The customer takes back the full amount of a card nobody confirmed or failed within 24 hours: from the Vault,
+    /// except a part that had been advanced, which is owed as a pending refund (`refund`).
     pub fn reclaim(ctx: Context<Reclaim>, card: u8) -> Result<()> {
         let a = ctx.accounts;
         fresh(a.config.layout)?;
@@ -236,8 +260,9 @@ pub mod luckout {
         require!(now >= a.checkout.created_at + RECLAIM_AFTER, LuckoutError::TooEarlyToReclaim);
         let c = a.checkout.cards.get_mut(card as usize).ok_or(LuckoutError::UnknownCard)?;
         require!(c.status == Status::Pending, LuckoutError::NotPending);
-        let amount = unwind(&mut a.config, &mut a.customer, c, Status::Reclaimed);
-        emit!(Reclaimed { checkout: a.checkout.key(), card, amount });
+        let due = unwind(&mut a.config, c, Status::Reclaimed);
+        let pending = refund(&mut a.config, &mut a.customer, &mut a.checkout, due);
+        emit!(Reclaimed { checkout: a.checkout.key(), card, amount: due - pending, refund_pending: pending });
         close_if_done(&a.checkout, &a.checkout_payer)
     }
 
@@ -414,7 +439,7 @@ pub mod luckout {
         customer.checkouts += 1;
         emit!(Admitted { customer: customer.wallet, checkout: a.checkout.key(), number, cards: admitted.clone() });
         a.checkout.set_inner(Checkout {
-            layout: LAYOUT,
+            layout: PLAIN_LAYOUT,
             bump: ctx.bumps.checkout,
             customer: customer.wallet,
             number,
@@ -422,15 +447,17 @@ pub mod luckout {
             created_at: now,
             rounds: 0,
             requested_at: 0,
-            spare: [0; 16],
+            advanced: 0,
+            refund_pending: 0,
             cards: admitted,
         });
         Ok(())
     }
 
-    /// Confirms delivery of `delivered` and fails `failed`. Delivered cards' Reference Prices repay the Pay
-    /// Wallet up to the daily cap; past it they wait as Proceeds. Delivered Lucky cards share one randomness
-    /// request, made in this same instruction, after delivery is confirmed (ADR-0001, amended).
+    /// Confirms delivery of `delivered` and fails `failed`. Delivered cards' Reference Prices are owed to the Pay
+    /// Wallet: the Checkout's advance covers them first, and the rest is repaid up to the daily cap; past it they wait
+    /// as Proceeds. Failed cards come back in full (`refund`). Delivered Lucky cards share one randomness request,
+    /// made in this same instruction, after delivery is confirmed (ADR-0001, amended).
     pub fn settle(ctx: Context<Settle>, delivered: Vec<u8>, failed: Vec<u8>) -> Result<()> {
         let checkout_key = ctx.accounts.checkout.key();
         let a = &mut *ctx.accounts;
@@ -463,24 +490,36 @@ pub mod luckout {
                 c.status = Status::Delivered;
             }
         }
+        let mut due = 0;
         for &i in &failed {
             let c = &mut a.checkout.cards[check(i)?];
             require!(c.status == Status::Pending, LuckoutError::NotPending);
-            unwind(&mut a.config, &mut a.customer, c, Status::Failed);
+            due += unwind(&mut a.config, c, Status::Failed);
         }
 
+        // What the advance already paid the Pay Wallet isn't paid again, and isn't counted against the cap again.
+        let from_advance = owed.min(a.checkout.advanced);
+        a.checkout.advanced -= from_advance;
+        a.config.advanced -= from_advance;
+        let owed = owed - from_advance;
+        let refund_pending = refund(&mut a.config, &mut a.customer, &mut a.checkout, due);
+
         let now = Clock::get()?.unix_timestamp;
-        if a.config.repay_day != now / DAY {
-            a.config.repay_day = now / DAY;
-            a.config.repaid_today = 0;
-        }
-        let repaid = owed.min(a.config.repay_daily_cap.saturating_sub(a.config.repaid_today));
+        let repaid = owed.min(repay_room(&mut a.config, now));
         a.config.repaid_today += repaid;
         a.config.proceeds += owed - repaid;
         if repaid > 0 {
             pay_out(&a.config, &a.vault, &a.vault_authority, a.pay_wallet.to_account_info(), repaid)?;
         }
-        emit!(Settled { checkout: checkout_key, delivered, failed, repaid, to_proceeds: owed - repaid });
+        emit!(Settled {
+            checkout: checkout_key,
+            delivered,
+            failed,
+            from_advance,
+            repaid,
+            to_proceeds: owed - repaid,
+            refund_pending
+        });
 
         if lucky {
             let missing = || error!(LuckoutError::MissingRandomnessAccounts);
@@ -490,6 +529,57 @@ pub mod luckout {
             require!(a.vrf.is_some(), LuckoutError::MissingRandomnessAccounts);
             request_randomness(&a.payer, ns, tr, req, &a.system_program, &mut a.checkout, checkout_key, now)?;
         }
+        close_if_done(&a.checkout, &a.checkout_payer)
+    }
+
+    /// Sends part of a Checkout's own money from the Vault to the Pay Wallet, when the float alone can't pay its
+    /// invoice (ADR-0016). Never more than its Pending cards' Reference Prices, and counted against the daily repay cap
+    /// as `settle`'s repayments are, so stolen keys can move no more a day than before. Unlike `settle`, it fails when
+    /// the cap has no room: nothing waits as Proceeds.
+    pub fn advance(ctx: Context<Advance>, amount: u64) -> Result<()> {
+        let a = ctx.accounts;
+        fresh(a.config.layout)?;
+        fresh(a.checkout.layout)?;
+        require!(!a.config.paused, LuckoutError::Paused);
+        let room = a.checkout.pending_value().saturating_sub(a.checkout.advanced);
+        require!(amount > 0 && amount <= room, LuckoutError::BadAdvance);
+        let now = Clock::get()?.unix_timestamp;
+        require!(amount <= repay_room(&mut a.config, now), LuckoutError::OverRepayCap);
+        a.config.repaid_today += amount;
+        a.config.advanced += amount;
+        a.checkout.advanced += amount;
+        // An older build would misread it now: it refuses it instead.
+        a.checkout.layout = LAYOUT;
+        pay_out(&a.config, &a.vault, &a.vault_authority, a.pay_wallet.to_account_info(), amount)?;
+        emit!(Advanced { checkout: a.checkout.key(), amount });
+        Ok(())
+    }
+
+    // ---------- anyone who brings the USDC ----------
+
+    /// Pays `amount` of a Checkout's pending refund: `payer` sends it from `from` into the Vault, and it goes to the
+    /// customer's Balance. The Pay Wallet in practice, the owner if ever needed; never more than is pending.
+    pub fn pay_refund(ctx: Context<PayRefund>, amount: u64) -> Result<()> {
+        let a = ctx.accounts;
+        fresh(a.config.layout)?;
+        fresh(a.customer.layout)?;
+        fresh(a.checkout.layout)?;
+        require!(amount > 0 && amount <= a.checkout.refund_pending, LuckoutError::BadRefund);
+        token::transfer(
+            CpiContext::new(
+                token::ID,
+                Transfer {
+                    from: a.from.to_account_info(),
+                    to: a.vault.to_account_info(),
+                    authority: a.payer.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+        a.checkout.refund_pending -= amount;
+        a.config.refunds_pending -= amount;
+        a.customer.balance += amount;
+        emit!(RefundPaid { checkout: a.checkout.key(), customer: a.customer.wallet, amount });
         close_if_done(&a.checkout, &a.checkout_payer)
     }
 
@@ -658,13 +748,35 @@ fn known_mode(config: &Config, mode: Mode) -> Result<()> {
     Ok(())
 }
 
-/// Everything debited for the card returns to the customer, and its lock to Free Reserve. No Draw.
-fn unwind(config: &mut Config, customer: &mut Customer, card: &mut Card, status: Status) -> u64 {
-    customer.balance += card.max_price;
+/// The card's lock returns to Free Reserve, and everything debited for it is due back to the customer (`refund`).
+/// No Draw.
+fn unwind(config: &mut Config, card: &mut Card, status: Status) -> u64 {
     config.locked_reserve -= card.locked;
     config.free_reserve += card.locked;
     card.status = status;
     card.max_price
+}
+
+/// Pays back `due` for cards just failed or reclaimed: from the Vault, except the part of the Checkout's advance its
+/// Pending cards no longer back. That part already left for the Pay Wallet, so it becomes the customer's pending
+/// refund (ADR-0016); the Vault never pays out another customer's money for it. Returns that part.
+fn refund(config: &mut Config, customer: &mut Customer, checkout: &mut Checkout, due: u64) -> u64 {
+    let unbacked = checkout.advanced.saturating_sub(checkout.pending_value());
+    checkout.advanced -= unbacked;
+    checkout.refund_pending += unbacked;
+    config.advanced -= unbacked;
+    config.refunds_pending += unbacked;
+    customer.balance += due - unbacked;
+    unbacked
+}
+
+/// What may still leave the Vault for the Pay Wallet today under the owner's daily repay cap.
+fn repay_room(config: &mut Config, now: i64) -> u64 {
+    if config.repay_day != now / DAY {
+        config.repay_day = now / DAY;
+        config.repaid_today = 0;
+    }
+    config.repay_daily_cap.saturating_sub(config.repaid_today)
 }
 
 fn pay_out<'info>(
@@ -961,6 +1073,53 @@ pub struct Settle<'info> {
     /// CHECK: created by ORAO at our seed's address.
     #[account(mut)]
     pub request: Option<UncheckedAccount<'info>>,
+}
+
+#[derive(Accounts)]
+pub struct Advance<'info> {
+    #[account(address = config.operator @ LuckoutError::NotOperator)]
+    pub operator: Signer<'info>,
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [CHECKOUT_SEED, checkout.customer.as_ref(), &checkout.number.to_le_bytes()],
+        bump = checkout.bump,
+    )]
+    pub checkout: Account<'info, Checkout>,
+    #[account(mut, address = config.vault)]
+    pub vault: Account<'info, TokenAccount>,
+    /// CHECK: the Vault's authority PDA.
+    #[account(seeds = [VAULT_AUTHORITY_SEED], bump = config.vault_authority_bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    #[account(mut, address = config.pay_wallet)]
+    pub pay_wallet: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct PayRefund<'info> {
+    /// Owns `from`, or is its delegate.
+    pub payer: Signer<'info>,
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds = [CUSTOMER_SEED, checkout.customer.as_ref()], bump = customer.bump)]
+    pub customer: Account<'info, Customer>,
+    #[account(
+        mut,
+        seeds = [CHECKOUT_SEED, checkout.customer.as_ref(), &checkout.number.to_le_bytes()],
+        bump = checkout.bump,
+    )]
+    pub checkout: Account<'info, Checkout>,
+    /// Never the Vault: Anchor refuses an account passed twice as writable.
+    #[account(mut, token::mint = config.usdc_mint)]
+    pub from: Account<'info, TokenAccount>,
+    #[account(mut, address = config.vault)]
+    pub vault: Account<'info, TokenAccount>,
+    /// CHECK: gets the Checkout's rent back when it closes.
+    #[account(mut, address = checkout.payer)]
+    pub checkout_payer: UncheckedAccount<'info>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]

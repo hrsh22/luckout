@@ -2,7 +2,7 @@
 
 What to do when something goes wrong on Luckout on Solana (ADR-0015). Keys, settings and deploys are in [README.md](README.md).
 
-Start at the Admin panel (`/admin`, for the Privy wallets in `ADMIN_ACCOUNTS`). Its control room reads the program live: the pause, the reserve and Proceeds, the daily repay cap, the fee payer's SOL, the Pay Wallet's float, and our paying address against Bitrefill's limits. Under Purchases it lists those that need attention, oldest first, each with **Retry now** where going again is safe, or **Manual check**, which links here. **Stop sales** and **Retry now** need no wallet. Owner actions (pause, reserve, Proceeds, caps, operator, Pay Wallet, ownership) build a transaction for the owner's wallet to sign.
+Start at the Admin panel (`/admin`, for the Privy wallets in `ADMIN_ACCOUNTS`). Its control room reads the program live: the pause, the reserve and Proceeds, the daily repay cap with the advances outstanding and the refunds the Pay Wallet owes, the fee payer's SOL, the Pay Wallet's float, our paying address against Bitrefill's limits, and the invoices we paid that Bitrefill didn't deliver. Under Purchases it lists those that need attention, oldest first, each with **Retry now** where going again is safe, or **Manual check**, which links here. **Stop sales** and **Retry now** need no wallet. Owner actions (pause, reserve, Proceeds, caps, operator, Pay Wallet, ownership) build a transaction for the owner's wallet to sign.
 
 Alerts reach the admin chat as `⚠️ Luckout [mainnet FM2m]: …`, naming the cluster and the start of the program's address: `FM2m` is staging, `GCeZ` production. The same alert is sent at most once an hour.
 
@@ -10,10 +10,10 @@ Logs, as the site user: `pm2 logs luckout-api --lines 200`. A checkout that stop
 
 ## Which checkout runs where
 
-- **Mainnet (staging and production): guest checkout** (ADR-0012). Each Checkout is one Bitrefill invoice, placed with the customer's Checkout Email, or on their own Bitrefill account once they've connected it. The Pay Wallet pays it in USDC on Solana (`usdc_solana`) at the step `pay`. `settle` repays the Pay Wallet from the Vault, up to the owner's daily repay cap. A mainnet server doesn't start without a guest client.
+- **Mainnet (staging and production): guest checkout** (ADR-0012). Each Checkout is one Bitrefill invoice, placed with the customer's Checkout Email, or on their own Bitrefill account once they've connected it. The Pay Wallet pays it in USDC on Solana (`usdc_solana`) at the step `pay`. When its float can't pay the whole invoice, the same transaction first advances the rest from that checkout's own money in the Vault (ADR-0016). `settle` takes delivered cards' prices from the advance first and repays the Pay Wallet the rest from the Vault. Advances and repayments together stay under the owner's daily repay cap. A mainnet server doesn't start without a guest client.
 - **Devnet (and a local validator):** only Bitrefill's test cards (ids starting `test-`), bought with our own Bitrefill account's key. They're free: there's no `pay` step, and the Pay Wallet pays nothing for them.
 
-A checkout's steps (`checkouts.step`): `waiting` (only while the float is short) → `admit` → `ordering` → `pay` → `delivery` → `settle` → `draw` → `done`. It ends `rejected`, uncharged, if the program refuses the admission or it's cancelled while waiting. `restock` is a charged checkout waiting for the float. Its cards (`purchases.step`) share its step until `delivery`, then go on alone: `confirm` or `fail`, then `drawing` (Lucky cards waiting for ORAO), then `settled` or `failed`.
+A checkout's steps (`checkouts.step`): `waiting` (only while the float and the repay cap's room together are short) → `admit` → `ordering` → `pay` → `delivery` → `settle` → `draw` → `done`. It ends `rejected`, uncharged, if the program refuses the admission or it's cancelled while waiting. `restock` is a charged checkout waiting for the float. Its cards (`purchases.step`) share its step until `delivery`, then go on alone: `confirm` or `fail`, then `drawing` (Lucky cards waiting for ORAO), then `settled` or `failed`.
 
 Every step is saved before its side effect, and every transaction is saved signed before it's sent, so a restart resumes it rather than signing twice. The reconciler resumes open checkouts every 30 seconds, each with its own backoff. After 12 tries (about six hours) it gives up:
 - a guest checkout still at `ordering`, with nothing paid, is refunded in full;
@@ -67,8 +67,8 @@ A `Gave up after 12 attempts at <step>: …` error, and the alert `checkout <id>
 | `Gave up … at pay: …` | Paying the invoice kept failing. | Fix the cause, then **Retry now**. The server checks the saved payment first: if it landed, the checkout goes on to `delivery`. If it never landed, the server pays again only within 50 minutes of the invoice; past that it asks Bitrefill for a fresh invoice, or refunds the customer in full once the checkout is over an hour old. It never pays one invoice twice. |
 | `failing it was refused, delivered onchain: …`, with the alert `purchase … is delivered onchain but we tried to fail it` | Bitrefill said the card failed, but the program has it Delivered: the customer paid and has no code. | Ask Bitrefill support about the card. Delivered after all: get the code to the customer, and set the card `settled`. Not delivered: send its price in USDC to the customer's Deposit Address (`account_id`), which the sweep moves into their Balance, and set the card `failed`. |
 | Card `drawing`, checkout `draw`, with the alert `… have a Draw still unfinished after 10 minutes` or `… a Draw is still unfinished after 12 tries` | ORAO hasn't filled the request (it takes 4 to 20 s), or finishing it keeps failing (the RPC, the fee payer). The card is delivered and its code shown; only its Cashback waits. | Check the fee payer and the RPC. The server keeps finishing it and never gives up. An hour after the request it asks ORAO again (`ORAO hadn't filled round N after an hour; asked again`). Anyone may finish a Draw. |
-| `waiting`; or `restock`, `The payment failed, so nothing was paid: …` | The float can't cover the checkout yet (uncharged), or its payment was refused, usually because the float ran short (charged). | See [A short Pay Wallet float](#a-short-pay-wallet-float). |
-| Alert `Bitrefill didn't deliver … on paid invoice …; payment …. Claim the refund to the Pay Wallet.` | We paid, and Bitrefill ended the order without a card. The customer was refunded in full. | Ask Bitrefill support to refund the invoice to the Pay Wallet's address, with the invoice id and the payment's signature. |
+| `waiting`; or `restock`, `The payment failed, so nothing was paid: …` | The float and the repay cap can't cover the checkout yet (uncharged), or its payment was refused, usually because the cap filled up or the float ran short (charged). The advance in that payment was refused with it. | See [A short Pay Wallet float](#a-short-pay-wallet-float). |
+| Alert `Bitrefill didn't deliver … on paid invoice …; payment …. Claim the refund to the Pay Wallet, then mark it received in the admin panel.` | We paid, and Bitrefill ended the order without a card. The customer gets the full amount back: from the Vault, except any part the payment had advanced, which the Pay Wallet owes them. | See [A card Bitrefill didn't deliver](#a-card-bitrefill-didnt-deliver). |
 | Alert `Bitrefill matched … to an order another card of it already has …` | Bitrefill listed one order for two cards of a checkout. The second waits at `delivery`, so no code goes to two cards. | If it lasts, compare the invoice's orders with Bitrefill support. |
 | Alert `Bitrefill delivered … with no code or link we recognise …` | The card was delivered, but nothing in what Bitrefill sent looks like a code. | Check the card with Bitrefill support before the customer has to ask. |
 | `Bitrefill refused: …` (card `failed`) | Bitrefill wouldn't take the order. Nothing was paid, and the customer was refunded in full. A guest gets 15 cards a day, $500 a day and $1,000 a month per Checkout Email; the shop and the bot check these first. | Read the reason. A customer at the guest limits can connect their own Bitrefill account. |
@@ -97,6 +97,24 @@ The rules for setting a step by hand:
 
 A stuck card that the customer reclaims, or that is failed onchain, is closed by the server within 5 minutes.
 
+## A card Bitrefill didn't deliver
+
+We paid the invoice and Bitrefill didn't deliver a card. Admin → Paying Bitrefill → **Paid, not delivered** lists each such invoice until its refund is marked received: the customer, the invoice id, our payment's signature, when it landed, what the payment advanced, each card's price (what Bitrefill owes us), and where each customer's refund is.
+
+**The customer's refund** is the program's, and needs nothing from you unless the Pay Wallet stays short (ADR-0016):
+- **Refunded at once:** the Vault still held the card's money, or the Pay Wallet paid the advanced part in the same settlement.
+- **Owed from the Pay Wallet:** the part that had been advanced was already paid to Bitrefill. The program records it on the Checkout account (`refund_pending`, totalled on Config as `refunds_pending`) and keeps the account open. The customer sees **Refund on its way**. Alert: `checkout <id>: $X of a failed card's refund had been advanced, and the Pay Wallet can't pay it yet. …`.
+- **Paid later:** the server pays pending refunds before anything else the float pays for, oldest first, every 10 seconds, as soon as the Pay Wallet's USDC covers one. Alert: `checkout <id>: its pending refund of $X is paid: <signature>`, and the customer hears in Telegram. If it was paid some other way (the owner below), the alert says `though not by the server; check who paid it`.
+- **Still owed after an hour:** the Monitor alerts `N failed card(s) still wait over an hour for their refund from the Pay Wallet; …`. Top up the Pay Wallet (below) or get Bitrefill's refund in; the next pass pays it.
+- **The owner can pay one directly** from any USDC account it controls, with the program's `pay_refund` (the Pay Wallet's key isn't needed). It never takes more than is pending.
+
+**Claim Bitrefill's refund to the Pay Wallet.** Bitrefill doesn't refund a guest invoice by itself.
+1. Write to Bitrefill support with the invoice id and our payment's signature, both in the list, and ask for the refund in USDC on Solana to the Pay Wallet's own address (Admin → Paying Bitrefill → Pay Wallet float, "Send USDC on Solana to"), never to its USDC account.
+2. When it arrives, find its transaction on the Pay Wallet's address (`https://explorer.solana.com/address/<Pay Wallet>`).
+3. In the list, **Mark Bitrefill's refund received** and paste that transaction's signature. It only records it, with your name: no money moves. The admin chat gets `<you> marked Bitrefill's refund for invoice … received: …`.
+
+Any pending refund is paid on the next pass after the money lands, before anything else.
+
 ## The customer reclaimed after we delivered
 
 The alert `purchase <id> was delivered but closed onchain as Reclaimed; its voucher cost is ours` means we had the card's code, but the customer reclaimed it first: `settle` found it already reclaimed, or it was stuck (say, at `confirm`) and the server closed it as `failed` with the error `Reclaimed`. The customer has both the code and their money back, and the card's price is our loss. Nothing to fix in the database. It can only happen to a card left unconfirmed for 24 hours. To list them:
@@ -115,25 +133,25 @@ Each alert below comes when a balance drops under its line, then once a day whil
   - Until then, admissions, payments, settlements, Draws and deposits all fail, and so do customers' withdrawals, settings and Reclaims.
   - Checkouts that gave up meanwhile are `stuck`: **Retry now**, or restart them as above.
   - The operator and the Pay Wallet need no SOL of their own: the fee payer pays their fees too.
-- **`the Pay Wallet's float is down to X USDC; checkouts wait for it once it can't pay Bitrefill`** (under 100 USDC on production). Top it up as below.
-- **`today's repayments to the Pay Wallet reached X of the Y USDC daily cap; raise it in the admin panel`** (at 80% of the cap). Past the cap, `settle` puts delivered cards' prices into Proceeds instead of the float, so the float runs down. **Do:** the owner raises it (Admin → Repaid today → Change the cap). Keep it at about twice the busiest day.
+- **`the Pay Wallet's float is down to X USDC; checkouts advance what it lacks from their own money until the repay cap fills, then wait`** (under 100 USDC on production). Top it up as below.
+- **`today's repayments and advances to the Pay Wallet reached X of the Y USDC daily cap; raise it in the admin panel`** (at 80% of the cap). Past the cap, `settle` puts delivered cards' prices into Proceeds instead of the float, so the float runs down, and no payment can advance what the float lacks. **Do:** the owner raises it (Admin → Repaid and advanced today → Change the cap). Keep it at about twice the busiest day.
 
 ### A short Pay Wallet float
 
-The Pay Wallet pays each checkout's invoice, and `settle` repays it. A new checkout that costs more than the float can cover goes to `waiting`. The float it can use is the Pay Wallet's USDC, less what checkouts at `admit`, `ordering` or `pay` are yet to pay.
+The Pay Wallet pays each checkout's invoice, and `settle` repays it. A checkout bigger than the float is still bought at once: its payment advances what the float lacks from the checkout's own money in the Vault, in the same transaction (ADR-0016). So a checkout goes to `waiting` only when the float and today's room in the repay cap together can't cover it. The float it can use is the Pay Wallet's USDC, less the refunds it owes customers and what checkouts at `admit`, `ordering` or `pay` are yet to pay. The cap's room is the daily repay cap less what was repaid and advanced today.
 
-- **`checkout <id> waits for the Pay Wallet: its float can't cover $X yet. Top it up, or it's cancelled after 60 minutes.`** Nothing is charged.
-  - The checkout goes ahead by itself within 10 seconds of the float covering it.
+- **`checkout <id> waits, uncharged: the Pay Wallet's float is $X short of its $Y, and today's repay cap has room to advance only $Z of that. Raise the repay cap or top up the Pay Wallet, or it's cancelled after 60 minutes.`** Nothing is charged.
+  - The checkout goes ahead by itself within 10 seconds of the float and the cap covering it.
   - The customer can cancel it meanwhile.
   - After 60 minutes it's cancelled, uncharged.
   - Each customer can have one waiting checkout at a time.
-- **`checkout <id>: its payment to Bitrefill failed (…); it waits for the Pay Wallet's float`.** The checkout is at `restock`: charged, but nothing was paid.
-  - Once the float covers it, it is ordered again with a fresh invoice.
+- **`checkout <id>: its payment to Bitrefill failed (…); it waits, charged, until the Pay Wallet's float and today's repay cap cover it`.** The checkout is at `restock`: charged, but nothing was paid or advanced. The reason is the program's, often `Today's repay cap has no room for this advance` (the cap filled up after it was admitted) or `New purchases are paused`.
+  - Once the float and the cap cover it, it is ordered again with a fresh invoice.
   - If that doesn't happen within 60 minutes of placing it, it's refunded in full.
 
-**Top it up**, in any of these ways. Waiting checkouts then go ahead on their own.
+**Top it up**, in any of these ways. Pending refunds are paid first, then waiting checkouts go ahead on their own.
 - **From Proceeds (owner):** Admin → Proceeds → Withdraw, to "the Pay Wallet, as float".
-- **Raise the daily repay cap (owner),** if the repay alert fired.
+- **Raise the daily repay cap (owner),** if the repay alert fired or the waiting alert names the cap.
 - **Send USDC on Solana** to the Pay Wallet's own address, from any wallet or exchange: Admin → Paying Bitrefill → Pay Wallet float shows it under "Send USDC on Solana to" (and `deploy/README.md`, Environments, lists it). Never to its USDC account, which the panel shows below it only as a detail.
 
 While sales are stopped or the program is paused, waiting checkouts keep their place, but their 60 minutes keep running.
@@ -165,9 +183,9 @@ Less than 1 USDC waits until more arrives. Only customers in `known_accounts` (e
   - The server sees the pause within 15 seconds and closes the shop too.
   - **Resume the program** undoes it, and only the owner can.
 - **The Vault holds less than the program owes.** The Monitor alerts `the Vault holds X USDC, less than the program owes: …`. Pause the program now, then investigate.
-- **The server's keys may be stolen.** The operator and the Pay Wallet are both on the VM. Together they can admit Checkouts against customers' Balances and settle them as delivered, and `settle` repays the Pay Wallet up to the daily cap.
-  1. Pause the program.
-  2. Set the daily repay cap to 0. `settle` then sends everything to Proceeds, which only the owner can withdraw.
+- **The server's keys may be stolen.** The operator and the Pay Wallet are both on the VM. Together they can admit Checkouts against customers' Balances, advance their money to the Pay Wallet, and settle them as delivered. Advances and `settle`'s repayments together stay under the daily cap, so no more can leave a day than before advances.
+  1. Pause the program. That also stops advances.
+  2. Set the daily repay cap to 0. `settle` then sends everything to Proceeds, which only the owner can withdraw, and no advance can be made.
   3. Make fresh keys on the VM, once it's clean.
   4. **Change the operator** and **Change the Pay Wallet** in the Admin panel. Bitrefill must tag a new Pay Wallet before it pays anything.
   5. Put the new keys in `.env` and run `pm2 restart luckout-api`.
@@ -207,7 +225,7 @@ A release goes in this order: the program (upgraded by hand, staging's first), t
 
 - **The program upgrade went wrong:**
   - Stop sales, and redeploy the build dumped before the upgrade (`deploy/README.md`, Upgrading a program, steps 1 and 6).
-  - This only works if the release didn't change an account layout. An older build refuses any account a newer one wrote (`This account was written by a newer build`), so after a layout change, fix forward.
+  - This only works if the release didn't change an account layout. An older build refuses any account a newer one wrote (`This account was written by a newer build`), so after a layout change, fix forward. The advances release (ADR-0016) changed only the layout of a Checkout that advanced: an older build refuses those, open or owed a refund, and works on every other account. So go back only when no Checkout has an advance or a pending refund (the Admin panel shows both as $0); otherwise fix forward.
   - Put back the server that goes with that program too.
 - **The server:**
   - A failed deploy prints the command to go back: `bash deploy/remote-deploy.sh <branch> <earlier commit>`.

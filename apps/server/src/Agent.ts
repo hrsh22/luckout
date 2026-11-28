@@ -517,6 +517,9 @@ export const makeAgent = (deps: {
         ...(p.usedAt ? { used: true } : {}),
         price: usd(p.referencePrice),
         paid: p.draw ? usdUp(p.draw.finalPrice) : p.status === "delivered" ? usd(p.referencePrice) : null,
+        // A failed card whose refund is partly still coming from our Pay Wallet (ADR-0016), and why it failed.
+        ...(p.status === "failed" && p.error ? { outcome: p.error } : {}),
+        ...(p.refund && !p.refund.paidAt ? { refund_on_its_way: usd(p.refund.amount) } : {}),
         when: p.createdAt
       })))))
   })

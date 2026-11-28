@@ -61,9 +61,12 @@ export function useWalletActions() {
      */
     swap: (h: Pick<HeldToken, "assetId" | "symbol">) =>
       run(`Swapping your ${h.symbol}`, `${h.symbol} swapped into your balance`, () => api((c) => c.topup.swap({ payload: { assetId: h.assetId } }), token)),
-    /** A card neither delivered nor failed within 24 hours: the full amount comes back. The program checks the time. */
+    /**
+     * A card neither delivered nor failed within 24 hours: the full amount comes back, all at once unless part of it had
+     * already paid Bitrefill (ADR-0016), which follows from our Pay Wallet. The program checks the time.
+     */
     reclaim: (purchaseId: string) =>
-      run("Reclaiming your purchase", "The full amount is back in your balance", () =>
+      run("Reclaiming your purchase", "Reclaimed: the amount you paid comes back to your balance", () =>
         api((c) => c.deposits.reclaim({ payload: { purchaseId } }), token))
   }
 }

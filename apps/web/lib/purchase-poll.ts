@@ -2,10 +2,13 @@ import type { Purchase, PurchasePage } from "@luckout/api"
 
 /**
  * How soon to check a purchase again, in milliseconds; false once it has settled. Every 3 s while it's
- * pending, every 5 s while it waits for the float, and once a minute after 15 minutes (stuck).
+ * pending, every 5 s while it waits for the float, and once a minute after 15 minutes (stuck). A failed card whose
+ * refund is still on its way from our Pay Wallet (ADR-0016) is checked every 30 s, until it lands.
  */
-export const purchasePollMs = (p: Pick<Purchase, "status" | "createdAt"> | undefined, now = Date.now()): number | false =>
-  !p || (p.status !== "pending" && p.status !== "waiting")
+export const purchasePollMs = (p: Pick<Purchase, "status" | "createdAt" | "refund"> | undefined, now = Date.now()): number | false =>
+  p?.status === "failed" && p.refund && !p.refund.paidAt
+    ? 30_000
+    : !p || (p.status !== "pending" && p.status !== "waiting")
     ? false
     : now - new Date(p.createdAt).getTime() > 15 * 60_000
     ? 60_000

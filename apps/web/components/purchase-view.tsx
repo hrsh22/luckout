@@ -57,7 +57,7 @@ const headline = (p: Purchase) =>
     : p.status === "waiting"
     ? "Getting it ready"
     : p.status === "failed"
-    ? "Not delivered, refunded"
+    ? p.refund && !p.refund.paidAt ? "Not delivered, refund on its way" : "Not delivered, refunded"
     : p.status === "rejected"
     ? "Not bought"
     : !p.draw
@@ -98,6 +98,7 @@ export function PurchaseResult({ p, onAgain }: { p: Purchase; onAgain: () => voi
         {p.status === "pending" && <Progress />}
         {p.status === "waiting" && <Waiting p={p} />}
         {p.error && <p className="mt-2 text-[15px] opacity-85">{p.error}</p>}
+        <RefundOnItsWay p={p} className="mt-4" />
         {p.draw && (
           <>
             <div className="perforation mt-6 -mx-6 opacity-70" aria-hidden="true" />
@@ -144,9 +145,40 @@ export function Progress() {
 }
 
 const WAITING_TEXT =
-  "We're topping up our gift card supply for this one: usually a few minutes, longer for big cards. You're only charged once it's ready, and you can cancel until then."
+  "We're topping up our gift card supply for this one, usually a few minutes. You're only charged once it's ready, and you can cancel until then."
 const CHARGED_WAITING_TEXT =
-  "Paid from your balance. We're topping up our gift card supply for this one: usually a few minutes, longer for big cards. If it can't be delivered, the full amount returns to your balance."
+  "Paid from your balance. We're topping up our gift card supply for this one, usually a few minutes. If it can't be delivered, the full amount returns to your balance."
+
+/**
+ * A failed card's refund that had already paid Bitrefill (ADR-0016), so it comes back from our Pay Wallet rather than the
+ * program's Vault: how much, that it's on its way, and its record onchain (the settlement that says it's owed), then the
+ * transaction that paid it.
+ */
+function RefundOnItsWay({ p, className = "" }: { p: Purchase; className?: string }) {
+  if (p.status !== "failed" || !p.refund) return null
+  const paid = !!p.refund.paidAt
+  const tx = paid ? p.refund.paidTx : p.settleTx
+  return (
+    <div className={`flex flex-col gap-2 rounded-[1.25rem] bg-soft p-4 text-ink sm:flex-row sm:items-center ${className}`}>
+      <p className="flex-1 text-[15px]">
+        {paid
+          ? <>The {usd(p.refund.amount)} still owed for this card is back in your balance.</>
+          : (
+            <>
+              <b>{usd(p.refund.amount)}</b> of your refund is on its way. It had already paid Bitrefill for this card, so it comes back from our
+              own wallet as soon as Bitrefill returns it or we top up, and it's recorded onchain until then. This page updates when it lands.{" "}
+              <HelpLink href="/docs/refunds#part-of-a-refund-on-its-way">Why some refunds take longer</HelpLink>
+            </>
+          )}
+      </p>
+      {tx && (
+        <a href={explorer(tx)} target="_blank" rel="noreferrer" className={`${buttonVariants({ variant: "ghost", size: "sm" })} self-start sm:self-auto`}>
+          {paid ? "Refund transaction" : "Onchain record"}<ExternalLink />
+        </a>
+      )}
+    </div>
+  )
+}
 
 /** Cancels a purchase still waiting for credit; nothing was charged. The page's polling shows the result. */
 function CancelWaiting({ id }: { id: string }) {
@@ -408,7 +440,9 @@ export function PurchaseRow({ p, open, onToggle, onUsed }: { p: Purchase; open: 
         <span className="flex shrink-0 flex-col items-end gap-1">
           {p.status === "delivered"
             ? <span className={`font-display text-xl font-extrabold ${used ? "text-muted" : ""}`}>{usdUp(paid)}</span>
-            : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>{STATUS[p.status]}</span>}
+            : <span className={`text-sm font-semibold ${p.status === "pending" || p.status === "waiting" ? "animate-pulse text-ink" : "text-muted"}`}>
+              {p.refund && !p.refund.paidAt ? "Refund on its way" : STATUS[p.status]}
+            </span>}
           {p.draw && p.draw.cashback > 0 && (
             <span className={`rounded-full px-2 py-0.5 text-xs font-bold text-gold-ink ${used ? "bg-gold-soft" : "bg-gold"}`}>
               {p.draw.finalPrice === 0 ? "100% off" : backText(p.draw.cashback)}
@@ -435,6 +469,7 @@ export function PurchaseRow({ p, open, onToggle, onUsed }: { p: Purchase; open: 
                 <div><dt className="text-muted">{onItsWay ? "Paid for now" : "You paid"}</dt><dd className="font-semibold">{p.status === "delivered" || onItsWay ? usdUp(paid) : "Nothing"}</dd></div>
               </dl>
               {p.error && <p className="text-sm text-muted">{p.error}</p>}
+              <RefundOnItsWay p={p} />
               <SafetyNet p={p} />
               {p.status === "pending" && <p className="text-sm text-muted">Bitrefill is delivering the code, usually within a minute. This updates by itself.</p>}
               {p.status === "waiting" && (

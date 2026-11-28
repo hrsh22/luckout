@@ -5,7 +5,7 @@
 use anchor_lang::{
     prelude::{Clock, Pubkey},
     solana_program::{instruction::{AccountMeta, Instruction}, system_program},
-    AccountDeserialize, AccountSerialize, AnchorDeserialize, InstructionData, ToAccountMetas,
+    AccountDeserialize, AccountSerialize, AnchorDeserialize, AnchorSerialize, Discriminator, InstructionData, ToAccountMetas,
 };
 use anchor_spl::token::TokenAccount;
 use litesvm::LiteSVM;
@@ -32,7 +32,9 @@ struct Env {
     operator: Keypair,
     fee_payer: Keypair,
     mint: Pubkey,
+    /// The Pay Wallet's USDC account, and the key that owns it.
     pay_wallet: Pubkey,
+    pay_key: Keypair,
     owner_usdc: Pubkey,
     treasury: Pubkey,
 }
@@ -58,12 +60,16 @@ type Sent = Result<litesvm::types::TransactionMetadata, litesvm::types::FailedTr
 
 /// Anchor's custom errors start at 6000, in enum order.
 fn assert_fails(res: Sent, e: LuckoutError) {
-    let code = 6000 + e as u32;
+    assert_code(res, 6000 + e as u32)
+}
+
+/// Anchor's own errors: 2006 a wrong PDA, 2012 a wrong fixed address, 2040 a writable account passed twice.
+fn assert_code(res: Sent, code: u32) {
     match res {
-        Ok(_) => panic!("expected {e:?}, but it went through"),
+        Ok(_) => panic!("expected error {code}, but it went through"),
         Err(f) => assert!(
             format!("{:?}", f.err).contains(&format!("Custom({code})")),
-            "expected {e:?} ({code}), got {:?}\n{}",
+            "expected {code}, got {:?}\n{}",
             f.err,
             f.meta.logs.join("\n")
         ),
@@ -121,8 +127,9 @@ impl Env {
         let mint = Pubkey::new_unique();
         svm.set_account(mint, Account { lamports: 1_461_600, data: mint_data(&owner.pubkey()), owner: TOKEN, executable: false, rent_epoch: 0 })
             .unwrap();
-        let mut env = Env { svm, owner, operator, fee_payer, mint, pay_wallet: Pubkey::default(), owner_usdc: Pubkey::default(), treasury };
-        env.pay_wallet = env.token_account(&Pubkey::new_unique(), 0);
+        let pay_key = Keypair::new();
+        let mut env = Env { svm, owner, operator, fee_payer, mint, pay_wallet: Pubkey::default(), pay_key, owner_usdc: Pubkey::default(), treasury };
+        env.pay_wallet = env.token_account(&env.pay_key.pubkey(), 0);
         env.owner_usdc = env.token_account(&env.owner.pubkey(), 10_000 * USDC);
 
         let ix = Instruction {
@@ -405,6 +412,74 @@ impl Env {
         self.send(&[ix], &[&kp])
     }
 
+    fn advance_ix(&self, s: &Shopper, number: u64, amount: u64) -> Instruction {
+        Instruction {
+            program_id: luckout::ID,
+            accounts: luckout::accounts::Advance {
+                operator: self.operator.pubkey(),
+                config: pda(&[CONFIG_SEED]),
+                checkout: s.checkout(number),
+                vault: pda(&[VAULT_SEED]),
+                vault_authority: pda(&[VAULT_AUTHORITY_SEED]),
+                pay_wallet: self.pay_wallet,
+                token_program: TOKEN,
+            }
+            .to_account_metas(None),
+            data: luckout::instruction::Advance { amount }.data(),
+        }
+    }
+
+    fn advance(&mut self, s: &Shopper, number: u64, amount: u64) -> Sent {
+        let ix = self.advance_ix(s, number, amount);
+        let op = self.operator.insecure_clone();
+        self.send(&[ix], &[&op])
+    }
+
+    fn pay_refund_ix(&self, s: &Shopper, number: u64, payer: Pubkey, from: Pubkey, amount: u64) -> Instruction {
+        Instruction {
+            program_id: luckout::ID,
+            accounts: luckout::accounts::PayRefund {
+                payer,
+                config: pda(&[CONFIG_SEED]),
+                customer: s.account(),
+                checkout: s.checkout(number),
+                from,
+                vault: pda(&[VAULT_SEED]),
+                checkout_payer: self.fee_payer.pubkey(),
+                token_program: TOKEN,
+            }
+            .to_account_metas(None),
+            data: luckout::instruction::PayRefund { amount }.data(),
+        }
+    }
+
+    /// The Pay Wallet pays (part of) a pending refund, as the server does.
+    fn pay_refund(&mut self, s: &Shopper, number: u64, amount: u64) -> Sent {
+        let ix = self.pay_refund_ix(s, number, self.pay_key.pubkey(), self.pay_wallet, amount);
+        let key = self.pay_key.insecure_clone();
+        self.send(&[ix], &[&key])
+    }
+
+    fn checkout(&self, s: &Shopper, number: u64) -> Checkout {
+        self.read(&s.checkout(number))
+    }
+
+    fn closed(&self, s: &Shopper, number: u64) -> bool {
+        self.svm.get_account(&s.checkout(number)).map_or(true, |a| a.data.is_empty())
+    }
+
+    fn set_repay_cap(&mut self, daily: u64) {
+        let owner = self.owner.insecure_clone();
+        let ix = self.owner_ix(&owner.pubkey(), luckout::instruction::SetRepayCap { daily }.data());
+        ok(self.send(&[ix], &[&owner]));
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        let owner = self.owner.insecure_clone();
+        let ix = self.owner_ix(&owner.pubkey(), luckout::instruction::SetPaused { paused }.data());
+        ok(self.send(&[ix], &[&owner]));
+    }
+
     fn owner_ix(&self, signer: &Pubkey, data: Vec<u8>) -> Instruction {
         Instruction {
             program_id: luckout::ID,
@@ -413,39 +488,50 @@ impl Env {
         }
     }
 
-    /// Every USDC in the Vault is someone's: Balances, the reserve and Proceeds.
+    /// Every USDC in the Vault is someone's: Vault = Balances + open cards' money - outstanding advances + the reserve
+    /// (free and locked) + Proceeds. Pending refunds are owed from outside it. Config's totals are its Checkouts'.
     fn assert_conserved(&self, shoppers: &[&Shopper]) {
         let c = self.config();
         let balances: u64 = shoppers.iter().map(|s| self.customer(s).balance).sum();
+        let (open, advanced, refunds) = self.in_flight(shoppers);
+        assert_eq!((c.advanced, c.refunds_pending), (advanced, refunds), "Config's totals are its Checkouts'");
         assert_eq!(
-            self.tokens(&pda(&[VAULT_SEED])),
-            balances + c.free_reserve + c.locked_reserve + c.proceeds + self.in_flight(shoppers),
+            self.tokens(&pda(&[VAULT_SEED])) + advanced,
+            balances + open + c.free_reserve + c.locked_reserve + c.proceeds,
             "the Vault holds exactly what is owed"
         );
-    }
-
-    /// What open Checkouts debited and the Vault still holds: Pending and Drawing cards' Maximum Prices,
-    /// less the Reference Prices of Drawing cards already repaid or held as Proceeds.
-    fn in_flight(&self, shoppers: &[&Shopper]) -> u64 {
-        let mut total = 0;
         for s in shoppers {
             for n in 0..self.customer(s).checkouts {
-                if let Some(a) = self.svm.get_account(&s.checkout(n)) {
-                    if a.data.is_empty() {
-                        continue;
-                    }
-                    let co: Checkout = self.read(&s.checkout(n));
-                    for card in co.cards {
-                        total += match card.status {
-                            Status::Pending => card.max_price,
-                            Status::Drawing => card.max_price - card.reference_price,
-                            _ => 0,
-                        };
-                    }
+                if !self.closed(s, n) {
+                    let co = self.checkout(s, n);
+                    assert!(co.advanced <= co.pending_value(), "an advance is always its Pending cards' money");
                 }
             }
         }
-        total
+    }
+
+    /// Open Checkouts' money still in the Vault before advances: Pending and Drawing cards' Maximum Prices, less the
+    /// Reference Prices of Drawing cards already repaid or held as Proceeds. And their advances and pending refunds.
+    fn in_flight(&self, shoppers: &[&Shopper]) -> (u64, u64, u64) {
+        let (mut open, mut advanced, mut refunds) = (0, 0, 0);
+        for s in shoppers {
+            for n in 0..self.customer(s).checkouts {
+                if self.closed(s, n) {
+                    continue;
+                }
+                let co = self.checkout(s, n);
+                advanced += co.advanced;
+                refunds += co.refund_pending;
+                for card in co.cards {
+                    open += match card.status {
+                        Status::Pending => card.max_price,
+                        Status::Drawing => card.max_price - card.reference_price,
+                        _ => 0,
+                    };
+                }
+            }
+        }
+        (open, advanced, refunds)
     }
 }
 
@@ -776,6 +862,371 @@ fn a_settle_with_lucky_cards_needs_the_randomness_accounts() {
     assert_fails(e.send(&[ix], &[&op]), LuckoutError::MissingRandomnessAccounts);
     assert_fails(e.settle(&alice, 0, vec![0, 0], vec![]), LuckoutError::DuplicateCard);
     assert_fails(e.settle(&alice, 0, vec![2], vec![]), LuckoutError::UnknownCard);
+}
+
+// ---------- advances (ADR-0016) ----------
+
+#[test]
+fn an_advance_is_the_operators_to_the_pay_wallet_and_never_more_than_the_pending_cards_prices() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(20 * USDC, Mode::Normal)]));
+    assert_fails(e.advance(&alice, 0, 0), LuckoutError::BadAdvance);
+    assert_fails(e.advance(&alice, 0, 30 * USDC + 1), LuckoutError::BadAdvance);
+
+    let stranger = Keypair::new();
+    let mut ix = e.advance_ix(&alice, 0, USDC);
+    ix.accounts[0].pubkey = stranger.pubkey();
+    assert_fails(e.send(&[ix], &[&stranger]), LuckoutError::NotOperator);
+    let theirs = e.token_account(&stranger.pubkey(), 0);
+    let mut ix = e.advance_ix(&alice, 0, USDC);
+    ix.accounts[5].pubkey = theirs;
+    let op = e.operator.insecure_clone();
+    assert_code(e.send(&[ix], &[&op]), 2012);
+
+    ok(e.advance(&alice, 0, 25 * USDC));
+    assert_eq!(e.tokens(&e.pay_wallet), 25 * USDC);
+    assert_fails(e.advance(&alice, 0, 5 * USDC + 1), LuckoutError::BadAdvance);
+    ok(e.advance(&alice, 0, 5 * USDC));
+    let co = e.checkout(&alice, 0);
+    assert_eq!((co.advanced, co.layout, e.config().advanced, e.config().repaid_today), (30 * USDC, LAYOUT, 30 * USDC, 30 * USDC));
+    e.assert_conserved(&[&alice]);
+
+    // A delivered card takes its price from the advance, and the room shrinks with the Pending cards.
+    ok(e.settle(&alice, 0, vec![1], vec![]));
+    assert_eq!((e.tokens(&e.pay_wallet), e.checkout(&alice, 0).advanced), (30 * USDC, 10 * USDC), "nothing paid twice");
+    assert_fails(e.advance(&alice, 0, 1), LuckoutError::BadAdvance);
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn advances_share_the_daily_repay_cap_with_settle_and_are_refused_past_it() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    e.set_repay_cap(25 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Normal)]));
+    ok(e.admit(&alice, 1, vec![card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 15 * USDC));
+    ok(e.settle(&alice, 1, vec![0], vec![]));
+    assert_eq!(e.config().repaid_today, 25 * USDC);
+    assert_fails(e.advance(&alice, 0, 1), LuckoutError::OverRepayCap);
+    // Settle past the cap still goes through: what the advance didn't cover waits as Proceeds.
+    ok(e.settle(&alice, 0, vec![0, 1], vec![]));
+    assert_eq!((e.tokens(&e.pay_wallet), e.config().proceeds, e.config().repaid_today), (25 * USDC, 5 * USDC, 25 * USDC));
+    e.assert_conserved(&[&alice]);
+    // A new day, new room.
+    ok(e.admit(&alice, 2, vec![card(10 * USDC, Mode::Normal)]));
+    assert_fails(e.advance(&alice, 2, 10 * USDC), LuckoutError::OverRepayCap);
+    e.warp(luckout::DAY);
+    ok(e.advance(&alice, 2, 10 * USDC));
+    assert_eq!(e.config().repaid_today, 10 * USDC);
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn an_advance_is_refused_while_paused_and_settling_goes_on() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 5 * USDC));
+    e.set_paused(true);
+    assert_fails(e.advance(&alice, 0, 5 * USDC), LuckoutError::Paused);
+    ok(e.settle(&alice, 0, vec![0], vec![]));
+    e.set_paused(false);
+    ok(e.advance(&alice, 0, 5 * USDC));
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn settle_takes_delivered_cards_prices_from_the_advance_first_and_repays_only_the_rest() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    // Fully advanced: settle pays the Pay Wallet nothing more, and the Checkout closes.
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 20 * USDC));
+    ok(e.settle(&alice, 0, vec![0, 1], vec![]));
+    assert_eq!((e.tokens(&e.pay_wallet), e.config().repaid_today, e.config().advanced), (20 * USDC, 20 * USDC, 0));
+    assert!(e.closed(&alice, 0));
+    // Partly advanced: the rest is repaid as before.
+    ok(e.admit(&alice, 1, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 1, 5 * USDC));
+    ok(e.settle(&alice, 1, vec![0, 1], vec![]));
+    assert_eq!((e.tokens(&e.pay_wallet), e.config().repaid_today), (40 * USDC, 40 * USDC));
+    assert_eq!(e.customer(&alice).balance, 60 * USDC);
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn a_failed_card_comes_back_from_the_vault_while_the_cards_still_pending_back_the_advance() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    ok(e.admit(&alice, 0, (0..3).map(|_| card(10 * USDC, Mode::Normal)).collect()));
+    ok(e.advance(&alice, 0, 15 * USDC));
+    // Delivered 0 takes 10 of the advance; the 5 left is card 2's, still Pending: card 1 comes back in full.
+    ok(e.settle(&alice, 0, vec![0], vec![1]));
+    let co = e.checkout(&alice, 0);
+    assert_eq!((co.advanced, co.refund_pending), (5 * USDC, 0));
+    assert_eq!(e.customer(&alice).balance, 80 * USDC);
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn advanced_money_of_failed_cards_is_owed_as_a_pending_refund_and_paid_in_part_or_in_full() {
+    let mut e = Env::new();
+    e.fund_reserve(1_000 * USDC);
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 100 * USDC);
+    // Normal, Lucky (Classic: 12 debited), Normal; the whole invoice advanced.
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Lucky(1)), card(10 * USDC, Mode::Normal)]));
+    assert!(e.config().locked_reserve > 0);
+    ok(e.advance(&alice, 0, 30 * USDC));
+    e.assert_conserved(&[&alice]);
+    // Delivered 0 takes 10 of the advance, card 2 still backs 10, and card 1's 10 has left the Vault: of its 12, 2 come
+    // back now and 10 are owed. Its lock goes back to the reserve as before.
+    let settled = ok(e.settle(&alice, 0, vec![0], vec![1]));
+    let co = e.checkout(&alice, 0);
+    assert_eq!((co.advanced, co.refund_pending, e.config().refunds_pending), (10 * USDC, 10 * USDC, 10 * USDC));
+    assert_eq!((e.customer(&alice).balance, e.config().locked_reserve), (100 * USDC - 32 * USDC + 2 * USDC, 0));
+    assert!(settled.logs.iter().any(|l| l.starts_with("Program data: ")), "the Settled event records it");
+    e.assert_conserved(&[&alice]);
+
+    assert_fails(e.pay_refund(&alice, 0, 0), LuckoutError::BadRefund);
+    assert_fails(e.pay_refund(&alice, 0, 10 * USDC + 1), LuckoutError::BadRefund);
+    ok(e.pay_refund(&alice, 0, 4 * USDC));
+    assert_eq!((e.checkout(&alice, 0).refund_pending, e.customer(&alice).balance), (6 * USDC, 74 * USDC));
+    e.assert_conserved(&[&alice]);
+    ok(e.pay_refund(&alice, 0, 6 * USDC));
+    assert_eq!((e.config().refunds_pending, e.customer(&alice).balance), (0, 80 * USDC));
+    assert_eq!(e.tokens(&e.pay_wallet), 20 * USDC, "the Pay Wallet paid it back");
+    assert!(!e.closed(&alice, 0), "card 2 is still on its way");
+    e.assert_conserved(&[&alice]);
+
+    // The last card fails too: its 10 were advanced, so all 10 are owed, and the Checkout stays open until paid.
+    ok(e.settle(&alice, 0, vec![], vec![2]));
+    assert_eq!((e.checkout(&alice, 0).refund_pending, e.customer(&alice).balance), (10 * USDC, 80 * USDC));
+    assert!(!e.closed(&alice, 0));
+    e.assert_conserved(&[&alice]);
+    ok(e.pay_refund(&alice, 0, 10 * USDC));
+    assert!(e.closed(&alice, 0), "closes once nothing is owed");
+    assert_eq!(e.customer(&alice).balance, 90 * USDC, "paid 10 for the one delivered card");
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn reclaiming_an_advanced_card_owes_its_advanced_part_until_it_is_paid() {
+    let mut e = Env::new();
+    e.fund_reserve(1_000 * USDC);
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 50 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Lucky(1)), card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 15 * USDC));
+    e.warp(luckout::RECLAIM_AFTER);
+    // Card 1 still backs 10 of the 15: of card 0's 12, 7 come back now and 5 are owed.
+    ok(e.reclaim(&alice, 0, 0));
+    let co = e.checkout(&alice, 0);
+    assert_eq!((co.advanced, co.refund_pending), (10 * USDC, 5 * USDC));
+    assert_eq!((e.customer(&alice).balance, e.config().locked_reserve), (50 * USDC - 22 * USDC + 7 * USDC, 0));
+    e.assert_conserved(&[&alice]);
+    // Card 1's 10 were all advanced.
+    ok(e.reclaim(&alice, 0, 1));
+    assert_eq!((e.checkout(&alice, 0).advanced, e.checkout(&alice, 0).refund_pending), (0, 15 * USDC));
+    assert_eq!(e.customer(&alice).balance, 35 * USDC);
+    assert!(!e.closed(&alice, 0), "open while a refund is owed");
+    e.assert_conserved(&[&alice]);
+    ok(e.pay_refund(&alice, 0, 15 * USDC));
+    assert_eq!(e.customer(&alice).balance, 50 * USDC, "the full amount, in the end");
+    assert!(e.closed(&alice, 0));
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn lucky_cards_with_an_advance_still_lock_and_draw_as_before() {
+    let mut e = Env::new();
+    e.fund_reserve(1_000 * USDC);
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 50 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Lucky(2)), card(10 * USDC, Mode::Lucky(0))]));
+    ok(e.advance(&alice, 0, 20 * USDC));
+    ok(e.settle(&alice, 0, vec![0, 1], vec![]));
+    assert_eq!((e.tokens(&e.pay_wallet), e.checkout(&alice, 0).advanced), (20 * USDC, 0));
+    e.assert_conserved(&[&alice]);
+    e.fill(&alice.checkout(0), 0, [7; 64]);
+    ok(e.finish(&alice, 0, 0));
+    assert!(e.closed(&alice, 0));
+    assert_eq!(e.config().locked_reserve, 0);
+    e.assert_conserved(&[&alice]);
+}
+
+#[test]
+fn a_pending_refund_is_paid_only_into_its_own_customers_balance_from_real_money() {
+    let mut e = Env::new();
+    let (alice, bob) = (e.shopper(Mode::Normal), e.shopper(Mode::Normal));
+    e.deposit(&alice, 50 * USDC);
+    e.deposit(&bob, 50 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal)]));
+    ok(e.admit(&bob, 0, vec![card(10 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 10 * USDC));
+    ok(e.settle(&alice, 0, vec![], vec![0]));
+    assert_eq!(e.checkout(&alice, 0).refund_pending, 10 * USDC);
+
+    let (owner, pay) = (e.owner.insecure_clone(), e.pay_key.insecure_clone());
+    // Not from the Vault, which would pay it with everyone else's money: Anchor refuses the Vault twice.
+    let ix = e.pay_refund_ix(&alice, 0, pay.pubkey(), pda(&[VAULT_SEED]), USDC);
+    assert_code(e.send(&[ix], &[&pay]), 2040);
+    // Only from an account its signer may spend.
+    let ix = e.pay_refund_ix(&alice, 0, pay.pubkey(), e.owner_usdc, USDC);
+    assert!(e.send(&[ix], &[&pay]).is_err());
+    // Into the Checkout's own customer only, and its rent back to its own payer.
+    let mut ix = e.pay_refund_ix(&alice, 0, pay.pubkey(), e.pay_wallet, USDC);
+    ix.accounts[2].pubkey = bob.account();
+    assert_code(e.send(&[ix], &[&pay]), 2006);
+    let mut ix = e.pay_refund_ix(&alice, 0, pay.pubkey(), e.pay_wallet, USDC);
+    ix.accounts[6].pubkey = Pubkey::new_unique();
+    assert_code(e.send(&[ix], &[&pay]), 2012);
+    // Bob has nothing pending.
+    assert_fails(e.pay_refund(&bob, 0, USDC), LuckoutError::BadRefund);
+    // The owner may pay it too, from their own USDC.
+    let ix = e.pay_refund_ix(&alice, 0, owner.pubkey(), e.owner_usdc, 10 * USDC);
+    ok(e.send(&[ix], &[&owner]));
+    assert_eq!((e.customer(&alice).balance, e.customer(&bob).balance), (50 * USDC, 40 * USDC));
+    assert!(e.closed(&alice, 0));
+    e.assert_conserved(&[&alice, &bob]);
+}
+
+/// Config and Checkout as layout 1 wrote them: spare bytes where layout 2 keeps advances and pending refunds.
+#[derive(AnchorSerialize)]
+struct ConfigV1 {
+    layout: u8,
+    bump: u8,
+    vault_authority_bump: u8,
+    owner: Pubkey,
+    pending_owner: Option<Pubkey>,
+    operator: Pubkey,
+    usdc_mint: Pubkey,
+    vault: Pubkey,
+    pay_wallet: Pubkey,
+    paused: bool,
+    cashback_cap: CashbackCap,
+    min_lucky_checkout: u64,
+    free_reserve: u64,
+    locked_reserve: u64,
+    proceeds: u64,
+    repay_daily_cap: u64,
+    repay_day: i64,
+    repaid_today: u64,
+    lucky_settled: u64,
+    lucky_amount_total: u64,
+    lucky_paid_total: u64,
+    guardian: Pubkey,
+    spare: [u8; 32],
+    versions: Vec<GameVersion>,
+}
+
+#[derive(AnchorSerialize)]
+struct CheckoutV1 {
+    layout: u8,
+    bump: u8,
+    customer: Pubkey,
+    number: u64,
+    payer: Pubkey,
+    created_at: i64,
+    rounds: u8,
+    requested_at: i64,
+    spare: [u8; 16],
+    cards: Vec<Card>,
+}
+
+impl Env {
+    /// Overwrites an account's data with `old` as layout 1 serialized it. Layout 2 serializes `new`, the same account,
+    /// to just as many bytes: no account changes size.
+    fn rewrite(&mut self, k: &Pubkey, discriminator: &[u8], old: impl AnchorSerialize, new: impl AnchorSerialize) {
+        let mut a = self.svm.get_account(k).unwrap();
+        let bytes = [discriminator, &borsh_bytes(old)].concat();
+        assert_eq!(bytes.len(), 8 + borsh_bytes(new).len(), "layout 2 kept the account's size");
+        a.data[..bytes.len()].copy_from_slice(&bytes);
+        self.svm.set_account(*k, a).unwrap();
+    }
+}
+
+fn borsh_bytes(value: impl AnchorSerialize) -> Vec<u8> {
+    let mut out = vec![];
+    value.serialize(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn accounts_written_by_layout_1_load_and_work_and_an_advance_marks_its_checkout_layout_2() {
+    let mut e = Env::new();
+    let alice = e.shopper(Mode::Normal);
+    e.deposit(&alice, 50 * USDC);
+    ok(e.admit(&alice, 0, vec![card(10 * USDC, Mode::Normal), card(10 * USDC, Mode::Normal)]));
+    // The upgrade finds a Config, a Customer and an open Checkout that layout 1 wrote.
+    let c = e.config();
+    e.rewrite(&pda(&[CONFIG_SEED]), Config::DISCRIMINATOR, ConfigV1 {
+        layout: 1,
+        bump: c.bump,
+        vault_authority_bump: c.vault_authority_bump,
+        owner: c.owner,
+        pending_owner: c.pending_owner,
+        operator: c.operator,
+        usdc_mint: c.usdc_mint,
+        vault: c.vault,
+        pay_wallet: c.pay_wallet,
+        paused: c.paused,
+        cashback_cap: c.cashback_cap,
+        min_lucky_checkout: c.min_lucky_checkout,
+        free_reserve: c.free_reserve,
+        locked_reserve: c.locked_reserve,
+        proceeds: c.proceeds,
+        repay_daily_cap: c.repay_daily_cap,
+        repay_day: c.repay_day,
+        repaid_today: c.repaid_today,
+        lucky_settled: c.lucky_settled,
+        lucky_amount_total: c.lucky_amount_total,
+        lucky_paid_total: c.lucky_paid_total,
+        guardian: c.guardian,
+        spare: [0; 32],
+        versions: c.versions.clone(),
+    }, c);
+    let mut a = e.svm.get_account(&alice.account()).unwrap();
+    a.data[8] = 1;
+    e.svm.set_account(alice.account(), a).unwrap();
+    let co = e.checkout(&alice, 0);
+    e.rewrite(&alice.checkout(0), Checkout::DISCRIMINATOR, CheckoutV1 {
+        layout: 1,
+        bump: co.bump,
+        customer: co.customer,
+        number: co.number,
+        payer: co.payer,
+        created_at: co.created_at,
+        rounds: co.rounds,
+        requested_at: co.requested_at,
+        spare: [0; 16],
+        cards: co.cards.clone(),
+    }, co);
+    let (c, co) = (e.config(), e.checkout(&alice, 0));
+    assert_eq!((c.layout, c.advanced, c.refunds_pending, co.layout, co.advanced, co.refund_pending), (1, 0, 0, 1, 0, 0));
+    e.assert_conserved(&[&alice]);
+
+    // Everything works on them: a deposit, a new Checkout, an advance (which marks the old Checkout layout 2, so a
+    // rolled-back build refuses it rather than misread it), settling and a pending refund.
+    e.deposit(&alice, 10 * USDC);
+    ok(e.admit(&alice, 1, vec![card(5 * USDC, Mode::Normal)]));
+    ok(e.advance(&alice, 0, 20 * USDC));
+    // A Checkout that never advances, and a Customer opened now, stay as layout 1 wrote them.
+    assert_eq!((e.checkout(&alice, 0).layout, e.checkout(&alice, 1).layout, e.config().layout), (2, 1, 1));
+    let bob = e.shopper(Mode::Normal);
+    assert_eq!(e.customer(&bob).layout, 1);
+    ok(e.settle(&alice, 0, vec![0], vec![1]));
+    ok(e.pay_refund(&alice, 0, 10 * USDC));
+    ok(e.settle(&alice, 1, vec![0], vec![]));
+    assert_eq!(e.customer(&alice).balance, 60 * USDC - 15 * USDC);
+    e.assert_conserved(&[&alice]);
 }
 
 // ---------- owner ----------

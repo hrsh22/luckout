@@ -50,9 +50,9 @@ test("another deployment's database, or NEAR's, is refused before any migration 
   assert.deepEqual(await startOn("0030", { network: "mainnet", contract: "app.luckout.near" }), { started: false, last: 29, codes: "telegram_link_codes" })
   assert.deepEqual(await startOn("0030", { network: "testnet" }), { started: false, last: 29, codes: "telegram_link_codes" }, "one from before it recorded its contract")
   // Staging's database, one migration behind: refused as it stands.
-  assert.deepEqual(await startOn("0033", { cluster: "mainnet", program: STAGING }), { started: false, last: 32, codes: null })
+  assert.deepEqual(await startOn("0034", { cluster: "mainnet", program: STAGING }), { started: false, last: 33, codes: null })
   // This deployment's own, one migration behind: migrated.
-  assert.deepEqual(await startOn("0033", { cluster: "mainnet", program: PRODUCTION }), { started: true, last: 33, codes: null })
+  assert.deepEqual(await startOn("0034", { cluster: "mainnet", program: PRODUCTION }), { started: true, last: 34, codes: null })
 })
 
 test("every purchase made before carts becomes a checkout of its own, under its own id, with its invoice and payment", async () => {

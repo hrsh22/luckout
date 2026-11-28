@@ -1,9 +1,10 @@
-// Checks an owner transaction before the owner's wallet sees it. The server builds every one (only it can have our fee
-// payer co-sign), so a server that was broken into could otherwise slip its own key in as the new owner, operator or
-// Pay Wallet, or add an instruction of its own that the owner's signature would carry. Each one must be exactly the
-// instruction the admin asked for, to the program this site was built for, with nothing else but compute settings and
-// the opening of a USDC account at our fee payer's cost; an upgrade, exactly one upgrade of this program from the
-// buffer the admin checked. No `@/` imports, so `node --test` can load it.
+// Checks an owner transaction before the owner's wallet sees it. The server builds every one, so a server that was broken
+// into could otherwise slip its own key in as the new owner, operator or Pay Wallet, or add an instruction of its own
+// that the owner's signature would carry. The owner's wallet pays its fee and is its only signer, so the wallet may add
+// its own checks before signing (Phantom does). Each one must be exactly the instruction the admin asked for, to the
+// program this site was built for, with nothing else but compute settings and the opening of a USDC account at the
+// owner's cost; an upgrade, exactly one upgrade of this program from the buffer the admin checked. No `@/` imports, so
+// `node --test` can load it.
 
 import type { OwnerAction } from "@luckout/api"
 import { ASSOCIATED_TOKEN_PROGRAM_ADDRESS, findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token"
@@ -56,7 +57,9 @@ export async function ownerTxProblem(transaction: string, action: OwnerAction, s
   // Ours are legacy: every account in plain sight, none from a lookup table.
   if (message.version !== "legacy") return "it isn't a plain transaction"
   const keys = message.staticAccounts
-  if (keys[0] === signer) return "it would make your wallet pay its fee"
+  if (keys[0] !== signer) return "it has another wallet pay its fee"
+  // Checked last, so a wrong signer in the instruction says so first.
+  const alone = message.header.numSignerAccounts === 1 ? undefined : "it needs a signature besides your wallet's"
   if (action._tag === "upgrade") {
     const ixs = message.instructions.filter((ix) => keys[ix.programAddressIndex] !== COMPUTE_BUDGET)
     const ix = ixs[0]
@@ -68,13 +71,13 @@ export async function ownerTxProblem(transaction: string, action: OwnerAction, s
     if (a[2] !== action.buffer) return "it takes another buffer"
     if (a[6] !== signer) return "it's for another signer"
     if (a[3] !== signer) return "it sends the buffer's rent elsewhere"
-    return undefined
+    return alone
   }
   const ours = message.instructions.filter((ix) => keys[ix.programAddressIndex] === PROGRAM_ID)
   for (const ix of message.instructions) {
     const program = keys[ix.programAddressIndex]
     if (program === PROGRAM_ID || program === COMPUTE_BUDGET) continue
-    // Opening a USDC account (CreateIdempotent), funded by our fee payer.
+    // Opening a USDC account (CreateIdempotent), funded by the owner.
     if (program === ASSOCIATED_TOKEN_PROGRAM_ADDRESS && same(ix.data, [1]) && keys[ix.accountIndices?.[0] ?? -1] === keys[0]) continue
     return `it also calls ${program}`
   }
@@ -87,5 +90,5 @@ export async function ownerTxProblem(transaction: string, action: OwnerAction, s
     const [usdc] = await findAssociatedTokenPda({ owner: address(action.payWallet), mint: address(mint), tokenProgram: TOKEN_PROGRAM_ADDRESS })
     if (accounts[2] !== usdc) return "it names another Pay Wallet"
   }
-  return undefined
+  return alone
 }

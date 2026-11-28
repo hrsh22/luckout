@@ -10,7 +10,8 @@ import {
   NotFound,
   type OwnerAction,
   type PurchaseInvalid,
-  type ShopStatus
+  type ShopStatus,
+  UndeliveredCard
 } from "@luckout/api"
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token"
 import { PublicKey, SYSVAR_CLOCK_PUBKEY, SYSVAR_RENT_PUBKEY, TransactionInstruction } from "@solana/web3.js"
@@ -22,7 +23,7 @@ import { Bitrefill } from "./Bitrefill.ts"
 import { LOW_LINES } from "./Monitor.ts"
 import { GUEST_COUNTED_AT, OPEN_STEPS, PAYING_LIMITS, payingUse, retryPurchase, retryStep } from "./Purchases.ts"
 import { Sales } from "./Sales.ts"
-import { maxCashback } from "./Program.ts"
+import { isSignature, maxCashback } from "./Program.ts"
 import { type RawAccount, Solana } from "./Solana.ts"
 
 // The admin panel's server side. Only accounts in ADMIN_ACCOUNTS get anything; everyone else is
@@ -34,6 +35,8 @@ import { type RawAccount, Solana } from "./Solana.ts"
 const USERS_SHOWN = ADMIN_LIST_LIMIT
 /** Purchases the overview lists as needing attention; the count of all of them comes with it. */
 const ATTENTION_SHOWN = 20
+/** Undelivered cards we paid for that the overview lists: those whose refund from Bitrefill hasn't arrived first, then the latest paid. */
+const UNDELIVERED_SHOWN = 50
 
 const LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
 
@@ -76,12 +79,16 @@ export class Admin extends Context.Service<Admin, {
   /** Runs a purchase's next step now instead of after its backoff. Never re-buys or re-charges. */
   retry(id: string, by: string): Effect.Effect<void, PurchaseInvalid>
   /**
-   * An owner transaction for admin `by`, unsigned: our fee payer pays, and the owner signs (the proposed owner, for
-   * `accept_owner`). It goes through /transactions/submit like any other prepared transaction.
+   * An owner transaction for admin `by`, unsigned: the owner pays its fee and signs it alone (the proposed owner, for
+   * `accept_owner`), and `sendOwner` sends it.
    */
   ownerTransaction(by: string, action: OwnerAction): Effect.Effect<{ readonly transaction: string; readonly token: string }, NotFound | AdminInvalid>
+  /** Sends an owner transaction as the owner's wallet signed it (it pays its own fee), and waits until it lands. */
+  sendOwner(by: string, transaction: string): Effect.Effect<{ readonly signature: string }, NotFound | AdminInvalid>
   /** A buffer holding a build for an upgrade: its hash, to check against CI's, and whether the program can take it. */
   buffer(by: string, address: string): Effect.Effect<AdminBuffer, NotFound | AdminInvalid>
+  /** Admin `by` saw Bitrefill's refund for checkout `id`'s undelivered cards reach the Pay Wallet, in transaction `tx`. */
+  claimed(id: string, tx: string, by: string): Effect.Effect<void, NotFound | AdminInvalid>
 }>()("luckout/Admin") {
   static readonly layer = Layer.effect(
     Admin,
@@ -98,7 +105,7 @@ export class Admin extends Context.Service<Admin, {
       const counted = sql.literal(GUEST_COUNTED_AT)
       const overview = Effect.gen(function*() {
         const config = yield* solana.config
-        const [vault, payWallet, feePayerSol, purchases, attention, shop, checkout, paying] = yield* Effect.all([
+        const [vault, payWallet, feePayerSol, purchases, attention, shop, checkout, paying, undelivered] = yield* Effect.all([
           solana.account(config.vault),
           solana.account(config.pay_wallet),
           solana.feePayer ? solana.balance(solana.feePayer) : Effect.succeed(undefined),
@@ -126,7 +133,32 @@ export class Admin extends Context.Service<Admin, {
               WHERE email_key IS NOT NULL AND created_at > now() - interval '32 days'
                 AND step <> 'rejected' AND NOT (step = 'failed' AND invoice_id IS NULL)
               GROUP BY email_key) per_email`,
-          payingUse(sql)
+          payingUse(sql),
+          // Each card we paid Bitrefill for and it didn't deliver: a failed card of a checkout whose payment landed.
+          sql<{
+            id: string
+            checkout_id: string
+            account_id: string
+            voucher_name: string
+            package_value: string
+            invoice_id: string | null
+            pay_tx: { signature: string }
+            ordered_at: Date | string | null
+            reference_price: string | number
+            advance: string | number | null
+            refund_pending: string | number | null
+            refund_paid_at: Date | string | null
+            refund_tx: string | null
+            settle_tx: { signature: string } | null
+            claimed_tx: string | null
+            claimed_at: Date | string | null
+            claimed_by: string | null
+          }>`
+            SELECT p.id, p.checkout_id, p.account_id, p.voucher_name, p.package_value, COALESCE(p.invoice_id, c.invoice_id) AS invoice_id, c.pay_tx,
+                   c.ordered_at, p.reference_price, c.advance, p.refund_pending, p.refund_paid_at, p.refund_tx, p.settle_tx, c.claimed_tx, c.claimed_at, c.claimed_by
+            FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+            WHERE p.step = 'failed' AND c.pay_tx IS NOT NULL
+            ORDER BY c.claimed_at IS NOT NULL, c.ordered_at DESC NULLS LAST, c.id, p.position LIMIT ${UNDELIVERED_SHOWN}`
         ], { concurrency: "unbounded" })
         const p = purchases[0] ?? { today: 0, delivered: 0 }
         const held = vault ? Number(vault.data.readBigUInt64LE(64)) : 0
@@ -157,7 +189,12 @@ export class Admin extends Context.Service<Admin, {
             held,
             customers: held - free - Number(config.locked_reserve) - Number(config.proceeds)
           },
-          repay: { dailyCap: Number(config.repay_daily_cap), repaidToday: config.repay_day === today ? Number(config.repaid_today) : 0 },
+          repay: {
+            dailyCap: Number(config.repay_daily_cap),
+            repaidToday: config.repay_day === today ? Number(config.repaid_today) : 0,
+            advanced: Number(config.advanced),
+            refundsPending: Number(config.refunds_pending)
+          },
           stats: { luckySettled: Number(config.lucky_settled), luckyAmountTotal: Number(config.lucky_amount_total), luckyPaidTotal: Number(config.lucky_paid_total) },
           keys: [
             ...(solana.feePayer && feePayerSol !== undefined
@@ -197,7 +234,26 @@ export class Admin extends Context.Service<Admin, {
             limits: { orders: GUEST_LIMITS.orders, daily: GUEST_LIMITS.daily, monthly: GUEST_LIMITS.monthly },
             busiest: { orders: checkout[0]?.orders ?? 0, daily: Number(checkout[0]?.daily ?? 0), monthly: Number(checkout[0]?.monthly ?? 0) }
           },
-          paying: { ...paying, limits: PAYING_LIMITS }
+          paying: { ...paying, limits: PAYING_LIMITS },
+          undelivered: undelivered.map((r) => {
+            const pending = Number(r.refund_pending ?? 0)
+            return new UndeliveredCard({
+              purchaseId: r.id,
+              checkoutId: r.checkout_id,
+              accountId: r.account_id,
+              voucherName: r.voucher_name,
+              value: r.package_value,
+              invoiceId: r.invoice_id ?? "",
+              payTx: r.pay_tx.signature,
+              ...(r.ordered_at ? { paidAt: new Date(r.ordered_at).toISOString() } : {}),
+              amount: Number(r.reference_price),
+              advance: Number(r.advance ?? 0),
+              refund: pending === 0 ? "paid" : r.refund_paid_at ? "paidLater" : "pending",
+              ...(pending > 0 ? { refundPending: pending } : {}),
+              ...(pending === 0 && r.settle_tx ? { refundTx: r.settle_tx.signature } : r.refund_tx ? { refundTx: r.refund_tx } : {}),
+              ...(r.claimed_tx && r.claimed_at ? { claimed: { tx: r.claimed_tx, at: new Date(r.claimed_at).toISOString(), by: r.claimed_by ?? "" } } : {})
+            })
+          })
         })
       }).pipe(Effect.orDie)
 
@@ -338,15 +394,13 @@ export class Admin extends Context.Service<Admin, {
       const ownerTransaction = (by: string, action: OwnerAction) =>
         Effect.gen(function*() {
           if (!admins.has(by)) return yield* new NotFound()
-          const feePayer = solana.feePayer
-          if (!feePayer) return yield* new AdminInvalid({ message: "The server's fee payer isn't set" })
           const config = yield* solana.config
           const p = solana.program
           const owner = config.owner
           const key = keyOf
           const usdc = (wallet: PublicKey) => getAssociatedTokenAddressSync(config.usdc_mint, wallet)
-          // Opened, if it has none, at our fee payer's cost.
-          const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(feePayer, usdc(wallet), wallet, config.usdc_mint)
+          // Opened, if it has none, at the owner's cost: the owner pays for its own transactions.
+          const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(owner, usdc(wallet), wallet, config.usdc_mint)
           const ix = (accounts: Readonly<Record<string, PublicKey>>, args: Readonly<Record<string, unknown>> = {}) =>
             p.instruction(action._tag, { owner, config: p.config, ...accounts }, args)
           const payout = (to: PublicKey, amount: number) => ix({ vault: p.vault, vault_authority: p.vaultAuthority, to }, { amount: BigInt(amount) })
@@ -421,17 +475,40 @@ export class Admin extends Context.Service<Admin, {
               break
             }
           }
-          return yield* solana.prepare(ixs, signer)
+          // The owner's wallet pays and signs alone, so a wallet that adds its own checks before signing (Phantom) still works.
+          return yield* solana.prepare(ixs, signer, { payer: signer })
         }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.fail(new AdminInvalid({ message: e.message }))))
+
+      const sendOwner = (by: string, transaction: string) =>
+        admins.has(by)
+          ? solana.relay(transaction).pipe(
+            Effect.map((o) => ({ signature: o.signature })),
+            Effect.mapError((e) => new AdminInvalid({ message: e.message }))
+          )
+          : Effect.fail(new NotFound())
+
+      // Only a checkout whose payment landed and whose card Bitrefill didn't deliver; marking it again replaces the record.
+      const claimed = (id: string, tx: string, by: string) =>
+        Effect.gen(function*() {
+          if (!isSignature(tx)) return yield* new AdminInvalid({ message: "That isn't a Solana transaction signature" })
+          const [row] = yield* sql<{ invoice_id: string | null }>`
+            UPDATE checkouts SET claimed_tx = ${tx}, claimed_at = now(), claimed_by = ${by}
+            WHERE id = ${id} AND pay_tx IS NOT NULL AND EXISTS (SELECT 1 FROM purchases WHERE checkout_id = ${id} AND step = 'failed')
+            RETURNING invoice_id`.pipe(Effect.orDie)
+          if (!row) return yield* new NotFound()
+          yield* alerts.admin(`${by} marked Bitrefill's refund for invoice ${row.invoice_id ?? "?"} (checkout ${id}) received: ${tx}`)
+        })
 
       return Admin.of({
         isAdmin: (a) => admins.has(a),
+        claimed,
         overview,
         purchases: purchaseList,
         users,
         setSales: sales.setOpen,
         retry,
         ownerTransaction,
+        sendOwner,
         buffer: (by, address) => (admins.has(by) ? upgradable(address) : Effect.fail(new NotFound()))
       })
     })

@@ -163,7 +163,34 @@ test("the Vault must hold every Balance, the reserve and the Proceeds: drained b
   setTokens(world, p.vault, 1_100n * USDC)
   const alerts = await round(world, known)
   assert.equal(alerts.length, 1)
-  assert.match(alerts[0]!, /^the Vault holds 1100 USDC, less than the program owes: 1120 \(Balances 120, reserve and Proceeds 1000, open Checkouts 0\)\. Pause the program/)
+  assert.match(alerts[0]!, /^the Vault holds 1100 USDC, less than the program owes: 1120 \(Balances 120, reserve and Proceeds 1000, open Checkouts 0 less 0 advanced\)\. Pause the program/)
+})
+
+test("an open Checkout's advance is its own money gone to the Pay Wallet, never a hole in the Vault", async () => {
+  const world = healthyWorld()
+  const alice = world.shopper()
+  world.give(alice.usdc, 120n * USDC)
+  const p = world.program
+  const wallet = alice.wallet.publicKey
+  const checkout = p.checkout(wallet, 0n)
+  world.send([
+    p.instruction("deposit_for", { config: p.config, customer: p.customer(wallet), source: alice.usdc, vault: p.vault, vault_authority: p.vaultAuthority }),
+    p.instruction("admit", { operator: world.operator.publicKey, payer: world.feePayer.publicKey, config: p.config, customer: p.customer(wallet), checkout }, {
+      number: 0n,
+      cards: [{ reference_price: 50n * USDC, mode: { kind: "Normal" }, max_debit: 50n * USDC, lucky_amount: null }]
+    }),
+    p.instruction("advance", { operator: world.operator.publicKey, config: p.config, checkout, vault: p.vault, vault_authority: p.vaultAuthority, pay_wallet: world.payWalletUsdc }, {
+      amount: 30n * USDC
+    })
+  ], [world.operator])
+  const seed = Effect.flatMap(SqlClient.SqlClient, (sql) =>
+    Effect.andThen(
+      sql`INSERT INTO known_accounts (account_id) VALUES (${wallet.toBase58()})`,
+      sql`INSERT INTO checkouts (account_id, step, address) VALUES (${wallet.toBase58()}, 'pay', ${checkout.toBase58()})`
+    ))
+  assert.deepEqual(await round(world, seed), [], "Balances 70, the card's 50 less 30 advanced, and the reserve's 1,000: all there")
+  setTokens(world, p.vault, 1_089n * USDC)
+  assert.match((await round(world, seed))[0]!, /less than the program owes: 1090 \(Balances 70, reserve and Proceeds 1000, open Checkouts 50 less 30 advanced\)/)
 })
 
 test("the fee payer's SOL and the Pay Wallet's float: said when they drop and once a day while they last, not at each restart; recovered, the next drop is said again", async () => {
@@ -208,7 +235,7 @@ test("the owner hears when today's repayments to the Pay Wallet reach 80% of the
   assert.deepEqual(await round(world, Effect.void), [], "79.8%")
   patchConfig(world, { repaid_today: 400n * USDC })
   assert.deepEqual(await round(world, Effect.void), [
-    "today's repayments to the Pay Wallet reached 400 of the 500 USDC daily cap; raise it in the admin panel"
+    "today's repayments and advances to the Pay Wallet reached 400 of the 500 USDC daily cap; raise it in the admin panel"
   ])
   patchConfig(world, { repay_day: today - 1n })
   assert.deepEqual(await round(world, Effect.void), [], "yesterday's repayments don't count")

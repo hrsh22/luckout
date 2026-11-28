@@ -4,21 +4,25 @@ import { AddressLink } from "@/components/admin/shared"
 import { shortAccount } from "@/components/avatar"
 import { Button } from "@/components/ui/button"
 import { api, cancelled, errorMessage } from "@/lib/api"
-import { explorer } from "@/lib/chain"
+import { cluster, explorer } from "@/lib/chain"
 import { ownerTxProblem, PROGRAM_ID } from "@/lib/owner-tx"
 import { useSession } from "@/lib/session"
-import { useSubmitPrepared } from "@/lib/transactions"
 import { oneAtATime } from "@/lib/utils"
 import type { AdminOverview, OwnerAction } from "@luckout/api"
 import { useConnectWallet } from "@privy-io/react-auth"
-import { useWallets } from "@privy-io/react-auth/solana"
+import { useSignTransaction, useWallets } from "@privy-io/react-auth/solana"
 import { useQueryClient } from "@tanstack/react-query"
 import { CircleAlert, ShieldCheck, Wallet } from "lucide-react"
 import { toast } from "sonner"
 
 // The owner is one key in our own wallet (Phantom or similar), never on the server (ADR-0015). The server prepares
-// each owner transaction with our fee payer paying; the panel checks it is exactly what was asked (lib/owner-tx.ts),
-// then the owner's wallet, connected here through Privy, signs it in its own prompt, and /transactions/submit sends it.
+// each owner transaction with the owner paying its fee and signing alone; the panel checks it is exactly what was asked
+// (lib/owner-tx.ts), then the owner's wallet, connected here through Privy, signs it in its own prompt, and
+// /admin/owner/send sends what the wallet returned. A wallet may add its own checks before signing (Phantom's
+// Lighthouse instructions): nobody else signs, so nothing breaks.
+
+const fromBase64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
+const toBase64 = (b: Uint8Array) => btoa(String.fromCharCode(...b))
 
 export type Owner = ReturnType<typeof useOwner>
 
@@ -26,7 +30,7 @@ export function useOwner(o: AdminOverview) {
   const { token } = useSession()
   const { wallets } = useWallets()
   const { connectWallet } = useConnectWallet()
-  const submit = useSubmitPrepared()
+  const { signTransaction } = useSignTransaction()
   const qc = useQueryClient()
   const wallet = wallets.find((w) => w.address === o.program.owner)
   const proposed = wallets.find((w) => w.address === o.program.pendingOwner)
@@ -42,12 +46,17 @@ export function useOwner(o: AdminOverview) {
         toast.error(elsewhere ? "Owner actions are off" : `Connect ${shortAccount(signer)} first`)
         return false
       }
-      const id = toast.loading(pending, { description: `Approve it in ${w.standardWallet.name}. Luckout pays the network fee.` })
+      const id = toast.loading(pending, { description: `Approve it in ${w.standardWallet.name}. Your wallet pays the network fee, a fraction of a cent.` })
       try {
         const prepared = await api((c) => c.admin.owner({ payload: action }), token)
         const problem = await ownerTxProblem(prepared.transaction, action, signer, o.program.usdcMint)
         if (problem) throw new Error(`Nothing was signed: the server's transaction is wrong (${problem}). Check the server before trying again.`)
-        const signature = await submit(prepared, signer)
+        const { signedTransaction } = await signTransaction({
+          transaction: fromBase64(prepared.transaction),
+          wallet: w,
+          ...(cluster === "localnet" ? {} : { chain: `solana:${cluster}` as const })
+        })
+        const { signature } = await api((c) => c.admin.ownerSend({ payload: { transaction: toBase64(signedTransaction) } }), token, "90 seconds")
         toast.success(done, { id, description: undefined, action: { label: "View", onClick: () => window.open(explorer(signature), "_blank", "noopener") } })
         return true
       } catch (e) {
@@ -123,7 +132,7 @@ export function OwnerBanner({ o, owner }: { o: AdminOverview; owner: Owner }) {
         <CircleAlert size={20} className="mt-0.5 shrink-0" aria-hidden="true" />
         <span>
           The pause, the reserve, Proceeds and the program's settings need the owner's wallet, <AddressLink address={o.program.owner} />. Connect it here: it signs
-          in its own prompt, and Luckout pays the fee. {here ? `Connected now: ${here}.` : ""} Any admin can stop sales and retry purchases.
+          in its own prompt and pays the network fee, so keep a little SOL in it. {here ? `Connected now: ${here}.` : ""} Any admin can stop sales and retry purchases.
           {pending && <> <b>{shortAccount(pending)}</b> is proposed as the new owner: connect that wallet to accept.</>}
         </span>
       </p>

@@ -421,6 +421,15 @@ export const migrationSteps = {
   "0033_swap_refund_to": Effect.gen(function*() {
     const sql = yield* SqlClient.SqlClient
     yield* sql`ALTER TABLE intents_swaps ADD COLUMN refund_to TEXT`
+  }),
+  // Advances (ADR-0016). A checkout keeps what its payment advanced from the Vault, and, when Bitrefill didn't deliver
+  // a card it paid for, when an admin saw Bitrefill's refund arrive and its transaction. A failed card keeps the part
+  // of its refund that had to wait for the Pay Wallet, and when that was paid and by which transaction.
+  "0034_advances": Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    yield* sql`ALTER TABLE checkouts ADD COLUMN advance BIGINT, ADD COLUMN claimed_tx TEXT, ADD COLUMN claimed_at TIMESTAMPTZ, ADD COLUMN claimed_by TEXT`
+    yield* sql`ALTER TABLE purchases ADD COLUMN refund_pending BIGINT, ADD COLUMN refund_paid_at TIMESTAMPTZ, ADD COLUMN refund_tx TEXT`
+    yield* sql`CREATE INDEX purchases_refund_pending ON purchases (updated_at) WHERE refund_pending > 0 AND refund_paid_at IS NULL`
   })
 }
 const migrations = Migrator.fromRecord(migrationSteps)
