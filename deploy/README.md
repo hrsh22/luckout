@@ -8,7 +8,7 @@ Luckout runs on Solana (ADR-0015): one program per environment, a server on our 
 |---|---|---|
 | Branch | `staging` (PRs from feature branches, with CI passing) | `main` (only by PR from `staging`, with CI passing) |
 | Program | `FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F` (build `--features staging`) | `GCeZ67ann5G1hzNijYtqFiHyAJ4dJy2mwFA6g2eQfssr` (build `--features production`) |
-| Owner and upgrade authority | `CXob1pBz6wDrZ3Jys3L2vw2MWAMha3B49zMC9mH5psQb`, a key on the operator's Mac until the owner has backed it up | a key in the owner's own wallet |
+| Owner and upgrade authority | `59i8NfY9b2qkeQUzJSSg3c54PLbfYf4XmKEv2YLZxrJW`, the owner's own wallet; a copy of its key on the operator's Mac for deploys | a key in the owner's own wallet |
 | Operator, fee payer | `B6iF2cR8KUeQNS3Gqd6CskP48UZaqbtFa5eHe6KxfuEc`, `Ex44UESieWATsL8JngBeSi8uEKMTBWeMuAH1bPChVQcH`, made on the VM | made on the VM |
 | Pay Wallet | `9vQpDTkUwS8C4o3jpfS1FjdMoyvpbcyfx4UXgNRYq1RP`, made on the VM; Bitrefill tags it | made on the VM; Bitrefill tags it |
 | Web (Vercel) | Preview env vars for branch `staging`, domain `staging.luckout.wtf` | Production env vars, `www.luckout.wtf` (`luckout.wtf` redirects to it) |

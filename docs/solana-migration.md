@@ -175,7 +175,7 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 **Ready 2026-11-28, waiting for money** (draft PR #217, `solana-server` → `staging`):
 - **One build per environment:** `--features staging` / `--features production` pick each program's own id (staging `FM2mRU3R…`, production `GCeZ67an…`); no feature is devnet. CI builds all three reproducibly. A mainnet build can be initialized only with Circle's USDC.
 - **Staging keys:**
-  - the owner and upgrade authority (`CXob1pBz…`) and the program keypair are on the operator's Mac until the owner backs them up
+  - the owner and upgrade authority (`59i8NfY9…`) is the owner's own wallet, with a copy of its key on the operator's Mac for deploys; the program keypair stays there until the owner backs it up
   - the operator, fee payer and Pay Wallet were made on the VM
   - the VM's `.env` points at the staging program and a fresh database, `luckout_staging_solana`; NEAR's `.env` is kept as `.env.near-2026-11-28`
 - **Rehearsed on devnet** with the staging build at its own address:
