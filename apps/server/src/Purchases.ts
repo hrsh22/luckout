@@ -23,6 +23,7 @@ import { Bitrefill, type Card, MIN_PRICE, ORDER_LIMIT } from "./Bitrefill.ts"
 import { Connect } from "./Connect.ts"
 import {
   type Card as ChainCard,
+  type Checkout as ChainCheckout,
   decodeReturn,
   type DrawEvent,
   filledRandomness,
@@ -31,12 +32,13 @@ import {
   ORAO_VRF,
   oraoRequest,
   oraoTreasury,
-  type Quote as ChainQuote
+  type Quote as ChainQuote,
+  refundLeft
 } from "./Program.ts"
 import { json, stepRows } from "./Rows.ts"
 import { closedMessage, Sales } from "./Sales.ts"
 import { SealKey, sealWith, unsealWith } from "./Seal.ts"
-import { type Outcome, ProgramRejected, type Signed, Solana, SolanaUnavailable, type TxExpired } from "./Solana.ts"
+import { type Outcome, ProgramRejected, type Signed, type SignerName, Solana, SolanaUnavailable, type TxExpired } from "./Solana.ts"
 
 // A checkout is the cards a customer confirmed together: one card for Buy, up to 15 for a Cart. It is one numbered
 // Checkout account in the program (ADR-0015), and each card in it has its own Draw, refund and Reclaim:
@@ -52,10 +54,14 @@ import { type Outcome, ProgramRejected, type Signed, Solana, SolanaUnavailable, 
 // draw:     each Draw is finished once ORAO's randomness is in (by us, though anyone could), or asked again after an hour.
 // Until delivery every card is at its checkout's step; from there each card goes on by itself (confirm/fail → drawing
 // → settled, or failed). Every step is saved before its side effect, so after a crash the reconciler resumes it without
-// buying or charging twice. A checkout the Pay Wallet's float can't cover yet starts as "waiting": nothing is charged,
-// the owner hears of it, and it goes on once the float covers it, or is cancelled after WAIT_MINUTES. A payment that
-// fails (the float ran short) waits as "restock" (charged, not yet ordered) and is refunded in full if the money doesn't
-// come in time. "ordering" found by the reconciler on store credit means we may have paid Bitrefill without saving the
+// buying or charging twice. A checkout bigger than the Pay Wallet's free float is still bought at once: its payment
+// advances what the float lacks from the checkout's own money in the Vault, in the same transaction (ADR-0016). Only one
+// the float and today's repay cap together can't cover starts as "waiting": nothing is charged, the owner hears of it,
+// and it goes on once they cover it, or is cancelled after WAIT_MINUTES. A payment that fails (say, the cap filled up
+// meanwhile) waits as "restock" (charged, not yet ordered) and is refunded in full if the money doesn't come in time. A
+// failed card whose money had been advanced is refunded from the Pay Wallet instead of the Vault: in its settlement if
+// the Pay Wallet holds the money, else as soon as it does (payRefunds), before anything else the float pays for.
+// "ordering" found by the reconciler on store credit means we may have paid Bitrefill without saving the
 // invoice id; it becomes "stuck" for a human, and the customer can still Reclaim after 24h. The reconciler backs off on
 // each retry and gives up (stuck, with an alert) after MAX_ATTEMPTS, except on a Draw, which only ever waits for ORAO.
 type Step =
@@ -114,6 +120,11 @@ interface Row {
   draw: Record<string, unknown> | null
   /** When the customer marked it used; null while unused. */
   used_at: Date | string | null
+  /** A failed card's refund that had been advanced, so waited for the Pay Wallet (ADR-0016); null if none did. */
+  refund_pending: number | string | bigint | null
+  /** When that was paid into the Balance, and by which transaction (null if someone else paid it and we couldn't find it). */
+  refund_paid_at: Date | string | null
+  refund_tx: string | null
   created_at: Date | string
   updated_at: Date | string
 }
@@ -136,6 +147,8 @@ interface CheckoutRow {
   pay_to: string | null
   pay_amount: number | string | bigint | null
   pay_tx: Signed | null
+  /** What its payment advanced from its own money in the Vault (ADR-0016), saved with the payment. */
+  advance: number | string | bigint | null
   /** Its Checkout account's number and address, saved with the admission that takes them. */
   number: number | string | bigint | null
   address: string | null
@@ -339,6 +352,28 @@ const proofOf = (d: DrawEvent, finish: string, fill: string | undefined) => ({
   finish,
   ...(fill ? { fill } : {})
 })
+/** A pending refund shared out over the failed cards it's for, in their order, each at most what it debited. */
+const shareOut = (amount: bigint, failed: ReadonlyArray<Row>) => {
+  const out = new Map<string, number>()
+  let left = amount
+  for (const c of failed) {
+    const max = BigInt(c.admitted?.max_price ?? c.reference_price)
+    const part = left < max ? left : max
+    if (part > 0n) out.set(c.id, Number(part))
+    left -= part
+  }
+  return out
+}
+/** What a failed card's customer is told about their money: all back, or part of it still on its way (ADR-0016). */
+const refundWords = (row: Row) => {
+  const pending = Number(row.refund_pending ?? 0)
+  if (pending === 0 || row.refund_paid_at) return "The full amount went back to your balance."
+  const back = Number(row.admitted?.max_price ?? row.reference_price) - pending
+  return back > 0
+    ? `${usd(back)} went back to your balance, and the other ${usd(pending)} is on its way.`
+    : `The full ${usd(pending)} is on its way back to your balance.`
+}
+
 /** Where a checkout goes once no card waits at its own step. */
 const onward = (steps: ReadonlyArray<Step>): CheckoutStep =>
   steps.some((s) => s === "confirm" || s === "fail")
@@ -401,7 +436,12 @@ export class Purchases extends Context.Service<Purchases, {
       /** One admission at a time: each takes the customer's next Checkout number (ADR-0015).
        * ponytail: one lock for every customer; per-customer locks if admissions ever queue. */
       const admitLock = yield* Semaphore.make(1)
-      /** Deciding "go or wait" on the float and recording it happen under one lock, so two checkouts never count on the same money. */
+      /**
+       * Deciding "go or wait" on the float and recording it happen under one lock, so two checkouts never count on the
+       * same money; and so does every spend from the Pay Wallet (a payment with its advance, a pending refund), from
+       * deciding it until it lands or fails.
+       * ponytail: one lock held across a send (seconds, a minute if the chain stalls); placements queue behind it.
+       */
       const floatLock = yield* Semaphore.make(1)
       const webOrigin = yield* Config.String("WEB_ORIGIN").pipe(Config.withDefault("http://localhost:3000"))
       /** How long a buy request waits for its cards before answering "pending" (under Cloudflare's 100 s). */
@@ -491,30 +531,133 @@ export class Purchases extends Context.Service<Purchases, {
       const submit = (
         co: CheckoutRow,
         column: "admit_tx" | "settle_tx",
-        build: Effect.Effect<{ readonly ix: TransactionInstruction; readonly also?: Record<string, unknown> }, Unknown | ProgramRejected>
+        build: Effect.Effect<
+          { readonly ixs: ReadonlyArray<TransactionInstruction>; readonly signers?: ReadonlyArray<SignerName>; readonly also?: Record<string, unknown> },
+          Unknown | ProgramRejected
+        >
       ) => {
         const fresh: Effect.Effect<Outcome, ProgramRejected | Unknown> = Effect.flatMap(
           build,
-          ({ ix, also }) => solana.send([ix], ["operator"], (signed) => saveCheckout(co.id, { [column]: signed, ...also }))
+          ({ ixs, signers = ["operator" as const], also }) => solana.send(ixs, signers, (signed) => saveCheckout(co.id, { [column]: signed, ...also }))
         )
         const saved = co[column]
         const sent: Effect.Effect<Outcome, ProgramRejected | Unknown | TxExpired> = saved ? solana.resume(saved) : fresh
         return sent.pipe(Effect.catchTag("TxExpired", () => fresh))
       }
 
-      /** USDC the Pay Wallet can still spend: its balance, less what checkouts on their way are yet to pay. */
-      const freeFloat = Effect.gen(function*() {
+      /** The Pay Wallet's USDC, and the refunds owed from it (ADR-0016), which come before anything else it pays for. */
+      const payWalletHeld = Effect.gen(function*() {
         const config = yield* solana.config
         const account = yield* solana.account(config.pay_wallet)
-        const balance = account ? Number(account.data.readBigUInt64LE(64)) : 0
+        return { config, balance: account ? account.data.readBigUInt64LE(64) : 0n, owed: config.refunds_pending }
+      })
+      /**
+       * What the Pay Wallet can pay for now (ADR-0016): `float`, its USDC less the refunds it owes and what checkouts on
+       * their way are yet to pay; and `cap`, what today's repay cap still lets their payments advance from their own money
+       * in the Vault. A checkout goes ahead when the two together cover it.
+       */
+      const payRoom = Effect.gen(function*() {
+        const { config, balance, owed } = yield* payWalletHeld
         const [r] = yield* sql<{ owed: string }>`
           SELECT COALESCE(sum(reference_price), 0)::text AS owed FROM purchases
           WHERE step IN ('admit', 'ordering', 'pay') AND voucher_id NOT LIKE 'test-%'`.pipe(Effect.orDie)
-        return balance - Number(r?.owed ?? 0)
+        const repaid = Number(config.repay_day) === Math.floor(Date.now() / DAY_MS) ? Number(config.repaid_today) : 0
+        return { float: Number(balance - owed) - Number(r?.owed ?? 0), cap: Math.max(0, Number(config.repay_daily_cap) - repaid) }
       })
-      /** Runs `f` with the free float, under the float's lock. An unreadable float counts as empty: the checkout waits. */
-      const floatGuard = <A, E>(f: (free: number) => Effect.Effect<A, E>) =>
-        floatLock.withPermits(1)(Effect.flatMap(freeFloat.pipe(Effect.orElseSucceed(() => 0)), f))
+      type Room = Effect.Success<typeof payRoom>
+      /** Runs `f` with the room to pay, under the float's lock. An unreadable one counts as none: the checkout waits. */
+      const floatGuard = <A, E>(f: (room: Room) => Effect.Effect<A, E>) =>
+        floatLock.withPermits(1)(Effect.flatMap(payRoom.pipe(Effect.orElseSucceed((): Room => ({ float: 0, cap: 0 }))), f))
+      const covers = (room: Room, amount: number) => room.float + room.cap >= amount
+      /** A pending refund's `pay_refund`, paid by the Pay Wallet from its USDC account. */
+      const payRefundIx = (co: { readonly address: PublicKey; readonly wallet: PublicKey; readonly payer: PublicKey }, from: PublicKey, amount: bigint) =>
+        program.instruction("pay_refund", {
+          payer: solana.payWallet,
+          config: program.config,
+          customer: program.customer(co.wallet),
+          checkout: co.address,
+          from,
+          vault: program.vault,
+          checkout_payer: co.payer
+        }, { amount })
+
+      /**
+       * A card the chain shows failed or reclaimed without our settlement saying so (a Reclaim, mostly): the part of its
+       * Checkout's pending refund (ADR-0016) that no card of the checkout holds yet is this card's, up to what it debited.
+       */
+      const pendingFor = (co: { readonly id: string }, card: Row, onchain: ChainCheckout | undefined) =>
+        Effect.gen(function*() {
+          if (!onchain || onchain.refund_pending === 0n) return {}
+          const [r] = yield* sql<{ held: string }>`
+            SELECT COALESCE(sum(refund_pending), 0)::text AS held FROM purchases
+            WHERE checkout_id = ${co.id} AND refund_paid_at IS NULL`.pipe(Effect.orDie)
+          const free = onchain.refund_pending - BigInt(r?.held ?? 0)
+          const max = BigInt(card.admitted?.max_price ?? card.reference_price)
+          return free > 0n ? { refund_pending: Number(free < max ? free : max) } : {}
+        })
+      const refundWaits = (checkoutId: string, amount: number) =>
+        alerts.admin(
+          `checkout ${checkoutId}: ${usd(amount)} of a failed card's refund had been advanced, and the Pay Wallet can't pay it yet. It's paid as soon as the float covers it, before anything else; topping up the Pay Wallet, or Bitrefill's refund arriving, pays it.`
+        )
+
+      /** The transaction that paid a Checkout's pending refund, from the account's latest ones. */
+      const refundTx = (address: PublicKey) =>
+        Effect.gen(function*() {
+          for (const signature of yield* solana.signatures(address, 20)) {
+            if ((yield* solana.transaction(signature))?.events.some((e) => e.name === "RefundPaid")) return signature
+          }
+          return undefined
+        })
+      /** Records a checkout's pending refund as paid, and tells the admins and the customer. */
+      const refundPaid = (checkoutId: string, tx: string | undefined) =>
+        Effect.gen(function*() {
+          const rows = yield* sql<Row>`
+            UPDATE purchases SET refund_paid_at = now(), refund_tx = ${tx ?? null}, updated_at = now()
+            WHERE checkout_id = ${checkoutId} AND refund_pending > 0 AND refund_paid_at IS NULL
+            RETURNING *`.pipe(Effect.orDie)
+          if (rows.length === 0) return
+          const amount = usd(rows.reduce((s, r) => s + Number(r.refund_pending), 0))
+          yield* alerts.admin(`checkout ${checkoutId}: its pending refund of ${amount} is paid${tx ? `: ${tx}` : ", though not by the server; check who paid it"}`)
+          const what = rows.length === 1 ? `your ${rows[0]!.voucher_name} ${rows[0]!.package_value}` : `your ${rows.length} cards`
+          yield* alerts.customer(rows[0]!.account_id, `The ${amount} still owed for ${what} is back in your Luckout balance.`)
+        })
+      /**
+       * Pays the refunds the Pay Wallet owes (ADR-0016), oldest first, each as soon as its USDC covers it, from whatever
+       * came in: other settlements, an owner's top-up, Bitrefill's refund. Before anything else the float does: it runs
+       * first in every pass over the waiting checkouts, and under the float's lock. A refund paid outside this pass (by
+       * the owner, or a pass that stopped before saving it) is found on its Checkout account and recorded.
+       */
+      const payRefunds = Effect.gen(function*() {
+        const owed = yield* sql<{ checkout_id: string; account_id: string; address: string }>`
+          SELECT p.checkout_id, min(p.account_id) AS account_id, min(c.address) AS address
+          FROM purchases p JOIN checkouts c ON c.id = p.checkout_id
+          WHERE p.refund_pending > 0 AND p.refund_paid_at IS NULL
+          GROUP BY p.checkout_id ORDER BY min(p.updated_at) LIMIT 20`.pipe(Effect.orDie)
+        if (owed.length === 0 || !solana.payWallet) return
+        const { config, balance: held } = yield* payWalletHeld
+        let balance = held
+        for (const r of owed) {
+          const address = new PublicKey(r.address)
+          const onchain = yield* solana.checkout(address)
+          if (!onchain || onchain.refund_pending === 0n) {
+            yield* refundPaid(r.checkout_id, yield* refundTx(address))
+            continue
+          }
+          // Oldest first: a younger refund never goes ahead of one the float can't cover yet.
+          if (balance < onchain.refund_pending) return
+          const out = yield* solana.send(
+            [payRefundIx({ address, wallet: new PublicKey(r.account_id), payer: onchain.payer }, config.pay_wallet, onchain.refund_pending)],
+            ["payWallet"],
+            () => Effect.void
+          ).pipe(Effect.catchTag("ProgramRejected", (e) => Effect.as(Effect.logWarning(`checkout ${r.checkout_id}: pay_refund refused (${e.message})`), undefined)))
+          if (!out) continue
+          balance -= onchain.refund_pending
+          yield* refundPaid(r.checkout_id, out.signature)
+        }
+      }).pipe(
+        floatLock.withPermits(1),
+        Effect.catchCause((cause) => Effect.logError("pending refunds pass failed", cause))
+      )
 
       /**
        * Finishes the Draws of a checkout's cards waiting on randomness: each request ORAO has filled in is finished (by
@@ -643,7 +786,7 @@ export class Purchases extends Context.Service<Purchases, {
                         lucky_amount: c.quoted_lucky_amount === null ? null : BigInt(c.quoted_lucky_amount)
                       }))
                     })
-                    return { ix, also: { number: String(customer.checkouts), address: address.toBase58() } }
+                    return { ixs: [ix], also: { number: String(customer.checkouts), address: address.toBase58() } }
                   })
                 ).pipe(Effect.catchTag("ProgramRejected", (e: ProgramRejected) => Effect.succeed(e)))
               )
@@ -728,14 +871,17 @@ export class Purchases extends Context.Service<Purchases, {
                   invoice_id: null
                 })
               }
-              if (!solana.payWallet || !solana.feePayer) return yield* new SolanaUnavailable({ message: "the Pay Wallet's or fee payer's key isn't set" })
+              if (!solana.payWallet || !solana.feePayer || !solana.operator) {
+                return yield* new SolanaUnavailable({ message: "the Pay Wallet's, fee payer's or operator's key isn't set" })
+              }
               const payWallet = solana.payWallet
               const feePayer = solana.feePayer
-              // Saved before it's sent, and only over the payment this run was handed (none, or the lost one it replaces),
-              // while the invoice is fresh: a run that loaded the checkout before another saved its payment stops here.
-              const savePayment = (p: Signed) =>
+              // Saved before it's sent, with what it advances, and only over the payment this run was handed (none, or the
+              // lost one it replaces), while the invoice is fresh: a run that loaded the checkout before another saved its
+              // payment stops here.
+              const savePayment = (p: Signed, advance: bigint) =>
                 sql<{ id: string }>`
-                  UPDATE checkouts SET pay_tx = ${JSON.stringify(p)}::jsonb, updated_at = now()
+                  UPDATE checkouts SET pay_tx = ${JSON.stringify(p)}::jsonb, advance = ${Number(advance)}, updated_at = now()
                   WHERE id = ${co.id} AND step = 'pay' AND pay_tx->>'signature' IS NOT DISTINCT FROM ${co.pay_tx?.signature ?? null}
                     AND invoice_at > now() - interval '50 minutes'
                   RETURNING id`.pipe(
@@ -747,36 +893,56 @@ export class Purchases extends Context.Service<Purchases, {
                   )
                 )
               const fresh = Effect.gen(function*() {
-                const config = yield* solana.config
+                const { config, balance, owed } = yield* payWalletHeld
+                const amount = BigInt(co.pay_amount!)
+                // The float pays what it can, after the refunds it owes. The rest is advanced from the checkout's own money
+                // in the Vault, in this same transaction (ADR-0016): an order that's never paid needs no advance, and none
+                // is ever made without its payment. The program checks the repay cap and the card prices.
+                const free = balance > owed ? balance - owed : 0n
+                const advance = amount > free ? amount - free : 0n
                 const payee = new PublicKey(co.pay_to!)
                 const payeeUsdc = getAssociatedTokenAddressSync(config.usdc_mint, payee, true)
                 return yield* solana.send([
+                  ...(advance > 0n
+                    ? [program.instruction("advance", {
+                      operator: solana.operator,
+                      config: program.config,
+                      checkout: new PublicKey(co.address!),
+                      vault: program.vault,
+                      vault_authority: program.vaultAuthority,
+                      pay_wallet: config.pay_wallet
+                    }, { amount: advance })]
+                    : []),
                   createAssociatedTokenAccountIdempotentInstruction(feePayer, payeeUsdc, payee, config.usdc_mint),
-                  createTransferCheckedInstruction(config.pay_wallet, config.usdc_mint, payeeUsdc, payWallet, BigInt(co.pay_amount!), 6)
-                ], ["payWallet"], savePayment)
+                  createTransferCheckedInstruction(config.pay_wallet, config.usdc_mint, payeeUsdc, payWallet, amount, 6)
+                ], advance > 0n ? ["operator", "payWallet"] : ["payWallet"], (p) => savePayment(p, advance))
               })
               // A payment that never landed is signed again while the invoice is fresh; past that, the invoice is asked for again.
               const sent: Effect.Effect<Outcome, ProgramRejected | SolanaUnavailable | TxExpired> = co.pay_tx ? solana.resume(co.pay_tx) : fresh
-              const result: Outcome | ProgramRejected | "late" = yield* sent.pipe(
+              // Under the float's lock until it lands or fails, so nothing else spends the USDC it counted on.
+              const result: Outcome | ProgramRejected | "late" = yield* floatLock.withPermits(1)(sent.pipe(
                 Effect.catchTag("TxExpired", (): Effect.Effect<Outcome | "late", ProgramRejected | SolanaUnavailable> =>
                   Date.now() - time(co.invoice_at!) < PAY_SEND_LIMIT_MS ? fresh : Effect.succeed("late" as const)),
                 Effect.catchTag("ProgramRejected", (e) => Effect.succeed(e))
-              )
+              ))
               if (result === "late") {
-                return yield* move(co, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null, pay_tx: null }, {
+                return yield* move(co, { step: "ordering", invoice_id: null, invoice_token: null, invoice_at: null, pay_to: null, pay_amount: null, pay_tx: null, advance: null }, {
                   step: "ordering",
                   invoice_id: null
                 })
               }
               if (result instanceof ProgramRejected) {
-                // Nothing moved (say, the float ran short): wait for money like any other, then order afresh.
+                // Nothing moved, the advance included (say, the float ran short and the repay cap filled up meanwhile):
+                // wait for money like any other, then order afresh.
                 const error = `The payment failed, so nothing was paid: ${result.message}`
-                yield* move(co, { step: "restock", error, pay_tx: null, invoice_id: null, invoice_token: null, invoice_at: null }, {
+                yield* move(co, { step: "restock", error, pay_tx: null, advance: null, invoice_id: null, invoice_token: null, invoice_at: null }, {
                   step: "restock",
                   error,
                   invoice_id: null
                 })
-                yield* alerts.admin(`checkout ${co.id}: its payment to Bitrefill failed (${result.message}); it waits for the Pay Wallet's float`)
+                yield* alerts.admin(
+                  `checkout ${co.id}: its payment to Bitrefill failed (${result.message}); it waits, charged, until the Pay Wallet's float and today's repay cap cover it`
+                )
                 return false
               }
               const at = new Date().toISOString()
@@ -826,9 +992,10 @@ export class Purchases extends Context.Service<Purchases, {
               // Every card still waiting is still on its way: asked again after the reconciler's backoff, not round settle at once.
               if (each.length === 0) return yield* new BitrefillUnavailable({ message: `invoice ${co.invoice_id} is still on its way` })
               if (undelivered.length > 0 && co.pay_tx) {
-                // We paid this invoice from the Pay Wallet: the customer is refunded in full, and the money is ours to claim back.
+                // We paid this invoice from the Pay Wallet: the customer is refunded in full (from the Pay Wallet, for money that
+                // had been advanced), and the money is ours to claim back.
                 yield* alerts.admin(
-                  `checkout ${co.id}: Bitrefill didn't deliver ${undelivered.join(", ")} on paid invoice ${co.invoice_id}; payment ${co.pay_tx.signature}. Claim the refund to the Pay Wallet.`
+                  `checkout ${co.id}: Bitrefill didn't deliver ${undelivered.join(", ")} on paid invoice ${co.invoice_id}; payment ${co.pay_tx.signature}. Claim the refund to the Pay Wallet, then mark it received in the admin panel.`
                 )
               }
               const moved = yield* move(co, { step: "settle" }, undefined, each)
@@ -848,7 +1015,7 @@ export class Purchases extends Context.Service<Purchases, {
               const address = new PublicKey(co.address!)
               const wallet = new PublicKey(co.account_id)
               const lucky = (c: Row) => typeof c.admitted?.mode === "object"
-              const outcome = yield* submit(
+              const settle = submit(
                 co,
                 "settle_tx",
                 Effect.gen(function*() {
@@ -870,9 +1037,22 @@ export class Purchases extends Context.Service<Purchases, {
                     checkout_payer: onchain.payer,
                     ...randomness
                   }, { delivered: Buffer.from(delivered.map((c) => c.position)), failed: Buffer.from(failed.map((c) => c.position)) })
-                  return { ix }
+                  // A failed card whose money had been advanced is refunded from the Pay Wallet (ADR-0016): in this same
+                  // transaction when it holds the money beyond the refunds it already owes, which come first; else later,
+                  // by payRefunds.
+                  const owed = refundLeft(onchain, delivered.map((c) => c.position), failed.map((c) => c.position))
+                  if (owed > 0n && solana.payWallet) {
+                    const held = yield* payWalletHeld
+                    if (held.balance >= held.owed + owed) {
+                      const refund = payRefundIx({ address, wallet, payer: onchain.payer }, config.pay_wallet, owed)
+                      return { ixs: [ix, refund], signers: ["operator", "payWallet"] as const }
+                    }
+                  }
+                  return { ixs: [ix] }
                 })
               ).pipe(Effect.catchTag("ProgramRejected", (e: ProgramRejected) => Effect.succeed(e)))
+              // One that may pay a refund spends from the Pay Wallet: under the float's lock, as every such spend is.
+              const outcome = yield* (Number(co.advance ?? 0) > 0 ? floatLock.withPermits(1)(settle) : settle)
               if (outcome instanceof ProgramRejected) {
                 // Refused as a whole, say one card was reclaimed meanwhile: read each card onchain before telling the
                 // customer anything, close the ones that are closed, and settle the rest with a fresh transaction.
@@ -900,8 +1080,11 @@ export class Purchases extends Context.Service<Purchases, {
                     }
                     continue
                   }
-                  // Failed or Reclaimed: the customer already has the full amount back.
-                  yield* cards.move(c, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : outcome.message })
+                  // Failed or Reclaimed: the customer has the full amount back, or part of it owed from the Pay Wallet.
+                  const owed = yield* pendingFor(co, c, onchain)
+                  if ((yield* cards.move(c, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : outcome.message, ...owed })) && owed.refund_pending) {
+                    yield* refundWaits(co.id, owed.refund_pending)
+                  }
                   if (confirm) yield* alerts.admin(`purchase ${c.id} was delivered but closed onchain as ${status}; its voucher cost is ours`)
                 }
                 yield* saveCheckout(co.id, { settle_tx: null, error: outcome.message })
@@ -910,12 +1093,17 @@ export class Purchases extends Context.Service<Purchases, {
               }
               const signed = (yield* loadCheckout(co.id)).settle_tx
               const round = Number(outcome.events.find((e) => e.name === "DrawRequested")?.data.round ?? 0)
+              // A refund the Pay Wallet couldn't pay in this transaction waits, each failed card holding its part.
+              const left = BigInt(String(outcome.events.find((e) => e.name === "Settled")?.data.refund_pending ?? 0))
+              const waits = outcome.events.some((e) => e.name === "RefundPaid") ? new Map<string, number>() : shareOut(left, failed)
               const after = [
                 ...delivered.map((c) => [c, lucky(c) ? { step: "drawing" as const, round, settle_tx: signed } : { step: "settled" as const, settle_tx: signed }] as const),
-                ...failed.map((c) => [c, { step: "failed" as const, settle_tx: signed }] as const)
+                ...failed.map((c) => [c, { step: "failed" as const, settle_tx: signed, ...(waits.has(c.id) ? { refund_pending: waits.get(c.id) } : {}) }] as const)
               ]
               const steps = all.map((c) => after.find(([a]) => a.id === c.id)?.[1].step ?? c.step)
-              return yield* move(co, { step: onward(steps), settle_tx: null }, undefined, after)
+              const moved = yield* move(co, { step: onward(steps), settle_tx: null }, undefined, after)
+              if (moved && waits.size > 0) yield* refundWaits(co.id, Number(left))
+              return moved
             }
             case "draw": {
               if (!all.some((c) => c.step === "drawing")) return yield* move(co, { step: onward(all.map((c) => c.step)) })
@@ -944,7 +1132,9 @@ export class Purchases extends Context.Service<Purchases, {
         return row.step === "settled"
           ? `Your ${what} is ready.`
           : row.step === "failed"
-          ? `Your ${what} couldn't be delivered. The full amount is back in your Luckout balance.`
+          ? row.refund_pending && !row.refund_paid_at
+            ? `Your ${what} couldn't be delivered. ${refundWords(row).replace("your balance", "your Luckout balance")} We'll tell you when it lands.`
+            : `Your ${what} couldn't be delivered. The full amount is back in your Luckout balance.`
           : row.step === "stuck"
           ? `Your ${what} needs a manual check by our team. We'll sort it out; you can also reclaim the full amount 24 hours after purchase.`
           : row.step === "rejected"
@@ -1029,14 +1219,23 @@ export class Purchases extends Context.Service<Purchases, {
           ...(status === "failed"
             ? {
               error: row.error === "Reclaimed"
-                ? "You reclaimed the full amount after 24 hours."
+                ? row.refund_pending ? `You reclaimed it after 24 hours. ${refundWords(row)}` : "You reclaimed the full amount after 24 hours."
                 : row.error === LOGIN_LAPSED
                 ? `${LOGIN_LAPSED} The full amount went back to your balance.`
                 : ORDER_LIMIT.test(row.error ?? "")
                 ? row.buyer === "account"
                   ? "Your Bitrefill account's limit was reached just then. The full amount went back to your balance."
                   : "Bitrefill's daily order limit was reached just then. The full amount went back to your balance."
-                : "Bitrefill couldn't deliver this voucher. The full amount went back to your balance."
+                : `Bitrefill couldn't deliver this voucher. ${refundWords(row)}`
+            }
+            : {}),
+          ...(status === "failed" && Number(row.refund_pending ?? 0) > 0
+            ? {
+              refund: {
+                amount: Number(row.refund_pending),
+                ...(row.refund_paid_at ? { paidAt: new Date(row.refund_paid_at).toISOString() } : {}),
+                ...(row.refund_tx ? { paidTx: row.refund_tx } : {})
+              }
             }
             : {}),
           ...(row.step === "stuck" ? { error: "This purchase needs a manual check. If it isn't resolved, you can reclaim the full amount after 24 hours." } : {}),
@@ -1219,8 +1418,9 @@ export class Purchases extends Context.Service<Purchases, {
           ))
         const real = priced.filter((p) => p.real)
         const sum = real.reduce((s, p) => s + p.referencePrice, 0)
-        // No checkout is refused for its size: one the Pay Wallet's float can't cover waits, uncharged, while the owner
-        // tops it up (or the cards before it settle and repay it).
+        // No checkout is refused or held for its size: the Pay Wallet's float pays what it can, and the payment advances
+        // the rest from the checkout's own money (ADR-0016). Only past today's repay cap does one wait, uncharged, while
+        // the owner raises the cap or tops up the float (or the cards before it settle and repay it).
         // A guest order needs the customer's Checkout Email, and stays within Bitrefill's limits for it (ADR-0012).
         // One on the customer's own Bitrefill account is under that account's limits, which Bitrefill checks.
         const asGuest = real.length > 0 && bitrefill.guest && !(yield* connect.connected(accountId))
@@ -1298,7 +1498,7 @@ export class Purchases extends Context.Service<Purchases, {
         const luckyAmounts = requested.map((m, i) => (typeof m !== "object" ? null : confirmedLucky[i] ?? Number(quotes[i]!.lucky_amount)))
         // Deciding "go or wait" and recording it happen under one lock, so two checkouts can never both count on the
         // same money.
-        const placed = yield* floatGuard((free) =>
+        const placed = yield* floatGuard((room) =>
           Effect.gen(function*() {
             // The same cards sent twice at once: the copy that waited for the lock finds the first's, and returns it
             // rather than count it against itself. (Every checkout is recorded under this lock; the keys' unique index
@@ -1312,7 +1512,7 @@ export class Purchases extends Context.Service<Purchases, {
               const over = yield* overGuestLimit(email.key, sum, real.length)
               if (over) return yield* invalid(over)
             }
-            const wait = real.length > 0 && free < sum
+            const wait = real.length > 0 && !covers(room, sum)
             if (wait) {
               const [w] = yield* sql<{ n: number }>`
                 SELECT count(*)::int AS n FROM checkouts WHERE account_id = ${accountId} AND step IN ${sql.in(WAITING_STEPS)}`.pipe(Effect.orDie)
@@ -1333,14 +1533,18 @@ export class Purchases extends Context.Service<Purchases, {
                           ${requested[i] === undefined ? null : JSON.stringify(requested[i])}, ${referencePrice}, ${input.maxPrice}, ${luckyAmounts[i]}, ${first},
                           ${isReal ? email?.key ?? null : null})`
               }
-              return { waiting: wait }
+              return { waiting: wait ? room : undefined }
             })).pipe(Effect.orDie)
           })
         )
         if ("again" in placed) return yield* sentBefore(placed.again)
         const after = yield* byKey
         if (placed.waiting) {
-          yield* alerts.admin(`checkout ${after[0]!.checkout_id} waits for the Pay Wallet: its float can't cover ${usd(sum)} yet. Top it up, or it's cancelled after ${WAIT_MINUTES} minutes.`)
+          yield* alerts.admin(
+            `checkout ${after[0]!.checkout_id} waits, uncharged: the Pay Wallet's float is ${usd(sum - Math.max(0, placed.waiting.float))} short of its ${usd(sum)}, and today's repay cap has room to advance only ${
+              usd(placed.waiting.cap)
+            } of that. Raise the repay cap or top up the Pay Wallet, or it's cancelled after ${WAIT_MINUTES} minutes.`
+          )
         }
         return { checkoutId: after[0]!.checkout_id, ids: after.map((r) => r.id), go: !placed.waiting }
       })
@@ -1470,10 +1674,11 @@ export class Purchases extends Context.Service<Purchases, {
       )
       yield* reconcile.pipe(Effect.repeat(Schedule.spaced("30 seconds")), Effect.forkScoped)
 
-      // Checkouts waiting for money: each goes on as soon as the float covers all its cards (under the same lock as
-      // new ones), or is cancelled after waitMinutes: uncharged if it never reached admission, refunded in full
-      // through `settle` if it did.
+      // Checkouts waiting for money: each goes on as soon as the float and today's repay cap cover all its cards (under the
+      // same lock as new ones), or is cancelled after waitMinutes: uncharged if it never reached admission, refunded in
+      // full through `settle` if it did. Pending refunds are paid first.
       const promote = Effect.gen(function*() {
+        yield* payRefunds
         const waitMinutes = WAIT_MINUTES
         // While sales are closed, nothing new is admitted; waiting checkouts keep their place (and their timer).
         // At Bitrefill's order limit, charged ones wait too, rather than be refused and refunded.
@@ -1499,8 +1704,8 @@ export class Purchases extends Context.Service<Purchases, {
           }
           if ((co.step === "waiting" && !shop.open) || (co.step === "restock" && shop.reason === "limit")) continue
           const next = co.step === "waiting" ? "admit" : "ordering"
-          const go = yield* floatGuard((free) =>
-            free >= total(all) ? move(co, { step: next, error: null }, { step: next, error: null }) : Effect.succeed(false)
+          const go = yield* floatGuard((room) =>
+            covers(room, total(all)) ? move(co, { step: next, error: null }, { step: next, error: null }) : Effect.succeed(false)
           )
           // The customer may have left: tell them in Telegram how it ended.
           if (go) yield* FiberSet.run(workflows, advance(co.id, false, true))
@@ -1515,10 +1720,13 @@ export class Purchases extends Context.Service<Purchases, {
           WHERE p.step = 'stuck' AND c.address IS NOT NULL LIMIT 50`.pipe(Effect.orDie)
         for (const row of rows) {
           // An account that has closed holds no open card: one we gave up on was reclaimed.
-          const card = (yield* solana.checkout(new PublicKey(row.checkout_address)))?.cards[row.position]
+          const onchain = yield* solana.checkout(new PublicKey(row.checkout_address))
+          const card = onchain?.cards[row.position]
           const status = card?.status.kind ?? "Reclaimed"
           if (status === "Reclaimed" || status === "Failed") {
-            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error })) {
+            const owed = yield* pendingFor({ id: row.checkout_id }, row, onchain)
+            if (yield* cards.move(row, { step: "failed", error: status === "Reclaimed" ? "Reclaimed" : row.error, ...owed })) {
+              if (owed.refund_pending) yield* refundWaits(row.checkout_id, owed.refund_pending)
               // We had its code (say, settle kept failing at confirm): the customer has it and their money back.
               if (row.redemption !== null) yield* alerts.admin(`purchase ${row.id} was delivered but closed onchain as ${status}; its voucher cost is ours`)
               yield* tell(row.account_id, [yield* load(row.id)])

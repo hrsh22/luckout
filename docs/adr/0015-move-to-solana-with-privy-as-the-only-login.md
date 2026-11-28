@@ -49,11 +49,11 @@ Balance, Spending Limits, Default Mode, Game Versions, Lucky Amount, Cashback Ca
 - **The Pay Wallet pays invoices.** It is a key on our VM holding a small USDC float, and it pays each Checkout's invoice in USDC on Solana (`usdc_solana`). Cards are bought as a guest or on the customer's Bitrefill Connection, as ADR-0012 says.
 - **Bitrefill agreed to one paying address** (2026-11-27). They screen and tag the address that pays all our invoices, with limits of $10k a day and $50k a month. So each Solana Pay Wallet's address goes to Bitrefill for tagging before it pays anything.
 - **`settle` repays it at once.** In the same instruction, it sends the delivered cards' Reference Prices from the Vault to the Pay Wallet, up to a daily cap the owner sets. Past the cap, they wait as Proceeds for the owner. Reaching the cap fails nothing, but the float runs down, so the monitor warns at 80% and the owner raises the cap as sales grow.
-- **The float stays small.** It only covers Checkouts in flight for a few minutes: about $300–500, not a day of sales.
+- **The float stays small.** It only covers Checkouts in flight for a few minutes: about $300–500, not a day of sales. A bigger Checkout advances what the float lacks (ADR-0016).
 - **A failed card's refund is claimed, as today.** The Pay Wallet paid for the card, and the program refunds the customer from the Vault. Bitrefill doesn't send a guest invoice's refund back by itself, so an alert names the invoice, and we claim the refund to the Pay Wallet.
 - **The shuttle's parts go.** The Treasury, Refills, the Base Wallet, the Base Float and Chain Signatures are no longer needed.
 - **A stolen operator key gets no more than today.** It can confirm cards that were never delivered, and the daily cap bounds what leaves.
-- **Rejected: the program paying invoices straight from the Vault.** The money would leave before delivery, and a failed card would be refunded from the Vault before Bitrefill refunds us. That is the parked advance-against-collateral design.
+- **Rejected: the program paying invoices straight from the Vault.** The money would leave before delivery, and a failed card would be refunded from the Vault before Bitrefill refunds us. That is the parked advance-against-collateral design. **Reversed for the shortfall only by ADR-0016:** a payment the float can't cover advances the rest from that Checkout's own money, and a failed card's advanced part is owed from the Pay Wallet.
 
 ## Privy is the only login
 

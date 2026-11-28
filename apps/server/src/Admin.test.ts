@@ -14,6 +14,7 @@ import { Alerts } from "./Alerts.ts"
 import { Bitrefill } from "./Bitrefill.ts"
 import { DbMemory } from "./Db.ts"
 import { Sales } from "./Sales.ts"
+import { base58 } from "./Program.ts"
 import { Chain, Solana, SolanaUnavailable } from "./Solana.ts"
 import { fakeBitrefill, solanaLayer, solanaWorld, type SolanaWorld } from "./testing.ts"
 
@@ -78,7 +79,8 @@ test("the overview reads the program's Config and Vault, the fee payer's SOL, th
     assert.equal(o.reserve.held, 1_120 * USDC, "the Vault: the reserve and alice's Balance")
     assert.equal(o.reserve.customers, 120 * USDC, "what the Vault holds minus the reserve and Proceeds")
     assert.equal(o.reserve.maxCashback, 50 * USDC, "the lower of the fixed $50 and 20% of the reserve")
-    assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0 })
+    assert.deepEqual(o.repay, { dailyCap: 500 * USDC, repaidToday: 0, advanced: 0, refundsPending: 0 })
+    assert.deepEqual(o.undelivered, [])
     assert.deepEqual(
       o.keys.map((k) => [k.role, k.address, k.usdcAccount, BigInt(k.balance) < BigInt(k.alertBelow) ? "low" : "ok"]),
       [["feePayer", world.feePayer.publicKey.toBase58(), undefined, "ok"], ["payWallet", world.payWallet.publicKey.toBase58(), world.payWalletUsdc.toBase58(), "low"]],
@@ -178,6 +180,43 @@ test("Retry now moves the checkout the reconciler runs, with its cards, and only
     assert.deepEqual(attention.filter((a) => [id(27), id(29), id(30)].includes(a.id)).map((a) => [a.id, a.retryable]), [[id(27), false], [id(29), false], [id(30), true]])
     const [listed] = yield* admin.purchases(undefined, id(22))
     assert.equal(listed!.checkoutId, gaveUp)
+  })))
+
+test("each card we paid for and Bitrefill didn't deliver is listed with its customer's refund, until an admin marks Bitrefill's refund received", () =>
+  run(Effect.gen(function*() {
+    const sql = yield* SqlClient.SqlClient
+    const sig = (n: number) => base58.encode(Buffer.alloc(64, n))
+    const signed = (n: number) => JSON.stringify({ signature: sig(n), bytes: "", lastValidBlockHeight: 0 })
+    const [co] = yield* sql<{ id: string }>`
+      INSERT INTO checkouts (account_id, step, invoice_id, pay_tx, advance, ordered_at)
+      VALUES (${alice}, 'done', 'inv-9', ${signed(1)}::jsonb, 7000000, now() - interval '1 hour') RETURNING id`
+    // Unpaid ones aren't listed: nothing to claim from Bitrefill.
+    const [unpaid] = yield* sql<{ id: string }>`INSERT INTO checkouts (account_id, step) VALUES (${alice}, 'done') RETURNING id`
+    const card = (id: string, checkout: string, position: number, step: string, extra: { pending?: number; paid?: string; settle?: string } = {}) =>
+      sql`INSERT INTO purchases (checkout_id, position, id, account_id, idempotency_key, voucher_name, voucher_id, package_value, reference_price, step, invoice_id,
+                                 refund_pending, refund_paid_at, refund_tx, settle_tx)
+          VALUES (${checkout}, ${position}, ${id}, ${alice}, ${id}, 'Card', 'amazon-us', '10', 10000000, ${step}, 'inv-9', ${extra.pending ?? null},
+                  ${extra.paid ? new Date() : null}, ${extra.paid ?? null}, ${extra.settle ? JSON.stringify({ signature: extra.settle }) : null}::jsonb)`
+    yield* card("00000000-0000-4000-8000-0000000000a1", co!.id, 0, "settled")
+    yield* card("00000000-0000-4000-8000-0000000000a2", co!.id, 1, "failed", { settle: sig(2) })
+    yield* card("00000000-0000-4000-8000-0000000000a3", co!.id, 2, "failed", { pending: 7000000 })
+    yield* card("00000000-0000-4000-8000-0000000000a4", unpaid!.id, 0, "failed")
+    const admin = yield* Admin
+    const listed = (yield* admin.overview).undelivered
+    assert.deepEqual(listed.map((u) => [u.purchaseId.slice(-2), u.refund, u.refundPending, u.refundTx]), [
+      ["a2", "paid", undefined, sig(2)],
+      ["a3", "pending", 7 * USDC, undefined]
+    ])
+    assert.deepEqual([listed[0]!.invoiceId, listed[0]!.payTx, listed[0]!.amount, listed[0]!.advance, listed[0]!.claimed], ["inv-9", sig(1), 10 * USDC, 7 * USDC, undefined])
+    assert.ok(listed[0]!.paidAt)
+
+    assert.equal((yield* admin.claimed(co!.id, "not a signature", "boss").pipe(Effect.flip))._tag, "AdminInvalid")
+    assert.equal((yield* admin.claimed(unpaid!.id, sig(3), "boss").pipe(Effect.flip))._tag, "NotFound", "nothing we paid for")
+    yield* admin.claimed(co!.id, sig(3), "boss")
+    const after = (yield* admin.overview).undelivered
+    assert.deepEqual(after.map((u) => u.claimed?.tx), [sig(3), sig(3)])
+    assert.equal(after[0]!.claimed?.by, "boss")
+    assert.match(alerts.at(-1)!, /^boss marked Bitrefill's refund for invoice inv-9 \(checkout .*\) received: /)
   })))
 
 test("the published API spec leaves the admin endpoints out", () => {

@@ -121,7 +121,7 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
 - **Decisions made while building:**
   - **Accounts and sessions:** a customer's account id is their Privy wallet's address. Privy's tokens are checked once, at sign-in. After that our own session cookie carries it, bound to the cluster and the program.
   - **Transactions a customer signs:** we build each one with our fee payer and hand it out unsigned with a token that binds its bytes (`/transactions/*`). The fee payer signs only those bytes, and only once the customer has signed them.
-  - **A short float:** a checkout the Pay Wallet's float can't cover waits uncharged, and the owner is told. It goes ahead once the float covers it, or is cancelled after 60 minutes. A charged one is refunded in full.
+  - **A short float:** a checkout the Pay Wallet's float can't cover waits uncharged, and the owner is told. It goes ahead once the float covers it, or is cancelled after 60 minutes. A charged one is refunded in full. Since replaced by advances (below, ADR-0016): only a checkout past the daily repay cap waits.
   - **Our paying address's limits:** checked when a checkout is placed, against every card the Pay Wallet pays, guest or Connect ($10k a day, $50k a month).
   - **Deposits:** a sweep every two minutes, plus Alchemy's signed webhook (`ALCHEMY_WEBHOOK_SIGNING_KEY`).
   - **Gone:** withdrawals to other chains through 1Click. Withdrawals go to any Solana address.
@@ -203,6 +203,12 @@ The pre-build checks were answered from primary docs and mainnet reads. What's l
   5. the staging Vercel variables
   6. `DEPLOY_STAGING=on`, then merge #217
 - **Later:** registering each Deposit Address with Alchemy's webhook (until then, the two-minute sweep).
+
+**Advances, 2026-11-28** (ADR-0016, branch `vault-advance` → `staging`), so the float makes purchases instant and never caps their size:
+- **Program:** `advance` sends what a payment's float lacks from that Checkout's own money to the Pay Wallet, never more than its Pending cards' prices and within the daily repay cap it shares with `settle`; it's refused while paused. `settle` takes delivered cards' prices from the advance first. A failed or reclaimed card's advanced part becomes a pending refund on its Checkout, which `pay_refund` pays into the Balance from any USDC its signer brings. Layout 2 keeps the new fields in the old spare bytes, so live accounts load unchanged. The build grows about 22.5 KB, so the staging program is extended before the upgrade.
+- **Server:** a checkout is admitted when the float and the cap's room together cover it. Its payment advances only the shortfall, in the same transaction as the payment, so an order Bitrefill refuses needs none and a crash can't leave one advanced and unpaid. Pending refunds are paid in the failed card's settlement when the Pay Wallet holds the money, else first thing as soon as it does. Every spend from the Pay Wallet runs under the float's lock.
+- **Records:** each paid invoice Bitrefill didn't deliver, with the customer's refund, is listed in the Admin panel until an admin marks Bitrefill's refund received, with its transaction.
+- **Rollout:** extend the staging program, upgrade it (paused), then merge, so CI deploys the server ([deploy/README.md](../deploy/README.md#the-advances-release-adr-0016)). The old server runs fine on the new program in between.
 
 ## Phase 5: cutover
 

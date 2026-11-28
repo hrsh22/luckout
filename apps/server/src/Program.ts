@@ -203,6 +203,9 @@ export interface Config {
   readonly lucky_paid_total: bigint
   /** May only pause; PublicKey.default when there is none. */
   readonly guardian: PublicKey
+  /** Checkouts' outstanding advances, and refunds owed to customers that the Vault doesn't hold (ADR-0016). */
+  readonly advanced: bigint
+  readonly refunds_pending: bigint
   readonly versions: ReadonlyArray<GameVersion>
 }
 
@@ -234,7 +237,22 @@ export interface Checkout {
   readonly created_at: bigint
   readonly rounds: number
   readonly requested_at: bigint
+  /** Sent to the Pay Wallet ahead of delivery, and not yet taken by a delivered card (ADR-0016). */
+  readonly advanced: bigint
+  /** Owed to the customer for failed or reclaimed cards whose money had been advanced: the account stays open until paid. */
+  readonly refund_pending: bigint
   readonly cards: ReadonlyArray<Card>
+}
+
+/**
+ * The pending refund `settle` would leave on a Checkout, as the program works it out (`refund`): the advance that its
+ * cards still Pending no longer back, once the delivered cards have taken their prices from it.
+ */
+export const refundLeft = (co: Checkout, delivered: ReadonlyArray<number>, failed: ReadonlyArray<number>) => {
+  const owed = delivered.reduce((s, i) => s + co.cards[i]!.reference_price, 0n)
+  const left = co.advanced > owed ? co.advanced - owed : 0n
+  const backed = co.cards.reduce((s, c, i) => (c.status.kind === "Pending" && !delivered.includes(i) && !failed.includes(i) ? s + c.reference_price : s), 0n)
+  return left > backed ? left - backed : 0n
 }
 
 export interface Quote {

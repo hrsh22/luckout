@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button"
 import { Sheet } from "@/components/ui/sheet"
 import { toMicro, typedAmount } from "@/lib/format"
-import { isAddress } from "@solana/kit"
+import { isAddress, isSignature } from "@solana/kit"
 import { Pause, Play } from "lucide-react"
 import { type ReactNode, useEffect, useState } from "react"
 
@@ -60,7 +60,7 @@ export function ValueSheet({ open, onClose, title, description, label, kind, ini
   title: string
   description: ReactNode
   label: string
-  kind: "amount" | "address"
+  kind: "amount" | "address" | "signature"
   initial?: string
   problem?: (value: string) => string | undefined
   /** The button's text for a valid value. */
@@ -79,6 +79,8 @@ export function ValueSheet({ open, onClose, title, description, label, kind, ini
     ? "That isn't an amount"
     : kind === "address" && !isAddress(v)
     ? "That isn't a Solana address"
+    : kind === "signature" && !isSignature(v)
+    ? "That isn't a transaction signature"
     : problem?.(v)
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()} title={title} description={description}>

@@ -39,9 +39,9 @@ SSH (22) and CloudPanel (8443) are open only to our Tailscale tailnet; only 80 a
 | Guardian | only the pause: it can't resume, move money or change anything else | the operator's Mac (`~/.luckout/solana-<environment>-guardian.json`), never on the VM; about 0.01 SOL for its fees. The owner names or removes it in the Admin panel. |
 | Upload key | writes an upgrade's build to a buffer and hands the buffer to the upgrade authority | the operator's Mac (`~/.luckout/solana-<environment>-upload.json`); holds SOL only during an upgrade |
 | Program keypair | only the program's address, used once by the first deploy | the operator's Mac; worthless after the first deploy |
-| Operator | admits and settles Checkouts | the VM's `.env` (`SOLANA_OPERATOR_SECRET_KEY`) |
+| Operator | admits and settles Checkouts, and advances a Checkout's own money to the Pay Wallet when its float is short (ADR-0016), within the daily repay cap | the VM's `.env` (`SOLANA_OPERATOR_SECRET_KEY`) |
 | Fee payer | pays every transaction's fee and the rent of customers' accounts | the VM's `.env` (`SOLANA_FEE_PAYER_SECRET_KEY`); holds SOL |
-| Pay Wallet | pays Bitrefill's invoices in USDC; `settle` repays it | the VM's `.env` (`SOLANA_PAY_WALLET_SECRET_KEY`); holds USDC (the fee payer pays its fees) |
+| Pay Wallet | pays Bitrefill's invoices in USDC; `settle` repays it; pays customers the refunds it owes for cards that failed after an advance | the VM's `.env` (`SOLANA_PAY_WALLET_SECRET_KEY`); holds USDC (the fee payer pays its fees) |
 
 The VM's keys are made on the VM, so their secrets never travel: an ed25519 key in Solana's 64-byte form, base58, in `.env` (mode 600). Print only public keys when checking them.
 
@@ -71,10 +71,10 @@ Once per environment. Needs the Solana CLI (Agave 4.4.1) and `solana-verify` on 
      OPERATOR=B6iF2cR8KUeQNS3Gqd6CskP48UZaqbtFa5eHe6KxfuEc PAY_WALLET=9vQpDTkUwS8C4o3jpfS1FjdMoyvpbcyfx4UXgNRYq1RP \
      GUARDIAN=BcyJnVFpEX3ufMdqWEAuuNJte4TJM7p5q3Ao4Kd5SwVE node apps/server/scripts/solana-init.ts          # then again with --send
    ```
-   The program starts unpaused, with a $500 daily repay cap, a 2.5 USDC smallest Lucky Checkout, a Cashback Cap of the lower of $50 and 20% of the free reserve, and an empty reserve.
+   The program starts unpaused, with a $500 daily repay cap (shared by `settle`'s repayments and advances), a 2.5 USDC smallest Lucky Checkout, a Cashback Cap of the lower of $50 and 20% of the free reserve, and an empty reserve.
 6. **Money in place:**
    - the fee payer: about 0.1 SOL for staging (each new customer's account costs about 0.0017 SOL of rent, and each Draw 0.0018 SOL for ORAO's request);
-   - the Pay Wallet: USDC for about a day of sales (its float); the fee payer pays its fees;
+   - the Pay Wallet: USDC for the checkouts on their way at once (its float). A bigger checkout is still bought at once: its payment advances the rest from its own money, within the daily repay cap (ADR-0016). The fee payer pays its fees;
    - the reserve, from the owner's USDC, in the Admin panel (Fund);
    - the guardian: about 0.01 SOL.
 7. **The server** ([Server settings](#server-settings)), then merge the release into the branch and turn its `DEPLOY_*` variable `on`.
@@ -156,6 +156,17 @@ In place: same address, same accounts, new code, so balances never move. The pro
 5. **Upgrade** in the Admin panel: Program → Upgrade the program → paste the buffer → Check the build. The new build's hash must equal the one in CI's summary for the commit. Then the upgrade authority's wallet signs; the panel refuses a transaction that does anything but upgrade this program from that buffer.
 6. **Check:** `solana program show <program>`; `solana-verify verify-from-repo` (step 4 of [A new program](#a-new-program-staging-then-production)); the Admin panel reads the reserve, the caps and a customer as before; a small purchase settles and draws.
 7. **Resume** in the Admin panel (the owner). If anything is wrong: upload the dumped build from step 1 the same way and upgrade to it.
+
+### The advances release (ADR-0016)
+
+It adds `advance` and `pay_refund`, and changes the Config and Checkout layouts within their spare bytes: every existing account loads as it is, with no advance and no refund owed. The server that uses them needs the upgraded program, so the order is:
+
+1. **Extend** the program first: this build is about 22.5 KB bigger than the one before it (471,440 bytes against 448,944 with `cargo build-sbf --features staging`; take the exact figure from CI's build). The panel's Check the build says how many bytes are missing. About 0.12 SOL of rent at 5.08 SOL per MB.
+2. **Upgrade** as above, paused, with nothing at `admit` or `pay`.
+3. **Merge** the release into `staging`, so CI deploys the server. Until then the old server keeps working on the new program: it never advances, so it never needs to repay one.
+4. **Resume**, and prove it with small money: a checkout bigger than the Pay Wallet's float (it shows one `advance` in the payment), and the Admin panel's advance and refund figures.
+
+A rollback after this release is a fix forward: an older build refuses the Customers opened and the Checkouts admitted or advanced after the upgrade.
 
 ## Pausing in an emergency
 
