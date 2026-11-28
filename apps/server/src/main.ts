@@ -348,7 +348,8 @@ const AdminHandlers = HttpApiBuilder.group(Api, "admin", (handlers) =>
           UUID.test(params.id) ? admin.claimed(params.id, payload.tx, by) : Effect.fail(new NotFound())),
       // Admin.ownerTransaction refuses non-admins itself.
       owner: ({ payload }) =>
-        CurrentAccount.use((a) => admin.ownerTransaction(a.accountId, payload)).pipe(Effect.map((p) => new PreparedTransaction(p)))
+        CurrentAccount.use((a) => admin.ownerTransaction(a.accountId, payload)).pipe(Effect.map((p) => new PreparedTransaction(p))),
+      ownerSend: ({ payload }) => CurrentAccount.use((a) => admin.sendOwner(a.accountId, payload.transaction)).pipe(Effect.map((s) => new Submitted(s)))
     })
   })
 )

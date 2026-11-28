@@ -55,7 +55,7 @@ const openUsdc = (funder: string, wallet: string, usdc: string) =>
   ], [1])
 
 /** A transaction as the server's `prepare` makes it, base64. */
-const wire = (ixs: ReadonlyArray<Instruction>, payer = feePayer) =>
+const wire = (ixs: ReadonlyArray<Instruction>, payer = owner) =>
   getBase64Decoder().decode(getTransactionEncoder().encode(compileTransaction(pipe(
     createTransactionMessage({ version: "legacy" }),
     (m) => setTransactionMessageFeePayer(address(payer), m),
@@ -90,9 +90,9 @@ test("every owner action the server builds passes, byte for byte", async () => {
     [{ _tag: "set_repay_cap", daily: 500_000_000 }, [kit(program.instruction("set_repay_cap", ownerOnly, { daily: 500_000_000n }))]],
     [{ _tag: "set_min_lucky_checkout", amount: 2_500_000 }, [kit(program.instruction("set_min_lucky_checkout", ownerOnly, { amount: 2_500_000n }))]],
     [{ _tag: "fund_reserve", amount: 7 }, [kit(program.instruction("fund_reserve", { ...ownerOnly, from: k(attacker), vault: program.vault }, { amount: 7n }))]],
-    [{ _tag: "withdraw_reserve", amount: 2 ** 40 }, [openUsdc(feePayer, owner, attacker), kit(payout(2 ** 40))]],
+    [{ _tag: "withdraw_reserve", amount: 2 ** 40 }, [openUsdc(owner, owner, attacker), kit(payout(2 ** 40))]],
     [{ _tag: "set_operator", operator: attacker }, [kit(program.instruction("set_operator", ownerOnly, { operator: k(attacker) }))]],
-    [{ _tag: "set_pay_wallet", payWallet: attacker }, [openUsdc(feePayer, attacker, payWalletUsdc), kit(program.instruction("set_pay_wallet", { ...ownerOnly, pay_wallet: k(payWalletUsdc) }))]],
+    [{ _tag: "set_pay_wallet", payWallet: attacker }, [openUsdc(owner, attacker, payWalletUsdc), kit(program.instruction("set_pay_wallet", { ...ownerOnly, pay_wallet: k(payWalletUsdc) }))]],
     [{ _tag: "propose_owner", newOwner: attacker }, [kit(program.instruction("propose_owner", ownerOnly, { new_owner: k(attacker) }))]],
     [{ _tag: "propose_owner", newOwner: null }, [kit(program.instruction("propose_owner", ownerOnly, { new_owner: null }))]],
     [{ _tag: "accept_owner" }, [kit(program.instruction("accept_owner", { new_owner: k(owner), config: program.config }))]],
@@ -107,7 +107,7 @@ test("every owner action the server builds passes, byte for byte", async () => {
 
 test("a transaction that isn't exactly what the admin asked for is refused before the wallet sees it", async () => {
   const pause = kit(program.instruction("set_paused", ownerOnly, { paused: true }))
-  const refuse = async (ixs: ReadonlyArray<Instruction>, action: OwnerAction, match: RegExp, payer = feePayer) =>
+  const refuse = async (ixs: ReadonlyArray<Instruction>, action: OwnerAction, match: RegExp, payer = owner) =>
     assert.match((await ownerTxProblem(wire(ixs, payer), action, owner, mint)) ?? "passed", match)
 
   await refuse([kit(program.instruction("set_operator", ownerOnly, { operator: k(attacker) }))], { _tag: "set_operator", operator: feePayer }, /isn't the one you asked for/)
@@ -117,9 +117,11 @@ test("a transaction that isn't exactly what the admin asked for is refused befor
   // The owner's signature carried into a transfer of their own USDC, or into a look-alike program.
   await refuse([pause, raw(tokenProgram, [[attacker, AccountRole.WRITABLE], [feePayer, AccountRole.WRITABLE], [owner, AccountRole.READONLY_SIGNER]], [3, 1, 0, 0, 0, 0, 0, 0, 0])], { _tag: "set_paused", paused: true }, /also calls Tokenkeg/)
   await refuse([{ ...pause, programAddress: address(attacker) }], { _tag: "set_paused", paused: true }, /also calls SysvarC1ock/)
-  await refuse([openUsdc(owner, owner, attacker), kit(payout(10))], { _tag: "withdraw_reserve", amount: 10 }, /also calls ATokenGP/)
+  await refuse([openUsdc(attacker, owner, attacker), kit(payout(10))], { _tag: "withdraw_reserve", amount: 10 }, /also calls ATokenGP/)
   await refuse([pause, pause], { _tag: "set_paused", paused: true }, /2 instructions/)
-  await refuse([pause], { _tag: "set_paused", paused: true }, /pay its fee/, owner)
+  await refuse([pause], { _tag: "set_paused", paused: true }, /another wallet pay its fee/, feePayer)
+  // The owner's wallet signs alone: a second signer could be anyone's key the server holds.
+  await refuse([pause, raw("ComputeBudget111111111111111111111111111111", [[attacker, AccountRole.READONLY_SIGNER]], [2, 0x80, 0x1a, 0x06, 0])], { _tag: "set_paused", paused: true }, /besides your wallet's/)
   await refuse([kit(program.instruction("set_pay_wallet", { ...ownerOnly, pay_wallet: k(feePayer) }))], { _tag: "set_pay_wallet", payWallet: attacker }, /another Pay Wallet/)
   await refuse([kit(program.instruction("set_paused", { owner: k(attacker), config: program.config }, { paused: true }))], { _tag: "set_paused", paused: true }, /another signer/)
   // An upgrade must be exactly one upgrade of this program, from the buffer the admin checked.
@@ -130,5 +132,5 @@ test("a transaction that isn't exactly what the admin asked for is refused befor
   await refuse([upgrade({ programData: feePayer })], up, /another program/)
   await refuse([upgrade({ data: [4, 0, 0, 0] })], up, /isn't one upgrade/)
   await refuse([upgrade(), raw(tokenProgram, [[attacker, AccountRole.WRITABLE], [feePayer, AccountRole.WRITABLE], [owner, AccountRole.READONLY_SIGNER]], [3, 1, 0, 0, 0, 0, 0, 0, 0])], up, /isn't one upgrade/)
-  await refuse([upgrade()], up, /pay its fee/, owner)
+  await refuse([upgrade()], up, /another wallet pay its fee/, feePayer)
 })

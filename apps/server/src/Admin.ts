@@ -79,10 +79,12 @@ export class Admin extends Context.Service<Admin, {
   /** Runs a purchase's next step now instead of after its backoff. Never re-buys or re-charges. */
   retry(id: string, by: string): Effect.Effect<void, PurchaseInvalid>
   /**
-   * An owner transaction for admin `by`, unsigned: our fee payer pays, and the owner signs (the proposed owner, for
-   * `accept_owner`). It goes through /transactions/submit like any other prepared transaction.
+   * An owner transaction for admin `by`, unsigned: the owner pays its fee and signs it alone (the proposed owner, for
+   * `accept_owner`), and `sendOwner` sends it.
    */
   ownerTransaction(by: string, action: OwnerAction): Effect.Effect<{ readonly transaction: string; readonly token: string }, NotFound | AdminInvalid>
+  /** Sends an owner transaction as the owner's wallet signed it (it pays its own fee), and waits until it lands. */
+  sendOwner(by: string, transaction: string): Effect.Effect<{ readonly signature: string }, NotFound | AdminInvalid>
   /** A buffer holding a build for an upgrade: its hash, to check against CI's, and whether the program can take it. */
   buffer(by: string, address: string): Effect.Effect<AdminBuffer, NotFound | AdminInvalid>
   /** Admin `by` saw Bitrefill's refund for checkout `id`'s undelivered cards reach the Pay Wallet, in transaction `tx`. */
@@ -392,15 +394,13 @@ export class Admin extends Context.Service<Admin, {
       const ownerTransaction = (by: string, action: OwnerAction) =>
         Effect.gen(function*() {
           if (!admins.has(by)) return yield* new NotFound()
-          const feePayer = solana.feePayer
-          if (!feePayer) return yield* new AdminInvalid({ message: "The server's fee payer isn't set" })
           const config = yield* solana.config
           const p = solana.program
           const owner = config.owner
           const key = keyOf
           const usdc = (wallet: PublicKey) => getAssociatedTokenAddressSync(config.usdc_mint, wallet)
-          // Opened, if it has none, at our fee payer's cost.
-          const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(feePayer, usdc(wallet), wallet, config.usdc_mint)
+          // Opened, if it has none, at the owner's cost: the owner pays for its own transactions.
+          const open = (wallet: PublicKey) => createAssociatedTokenAccountIdempotentInstruction(owner, usdc(wallet), wallet, config.usdc_mint)
           const ix = (accounts: Readonly<Record<string, PublicKey>>, args: Readonly<Record<string, unknown>> = {}) =>
             p.instruction(action._tag, { owner, config: p.config, ...accounts }, args)
           const payout = (to: PublicKey, amount: number) => ix({ vault: p.vault, vault_authority: p.vaultAuthority, to }, { amount: BigInt(amount) })
@@ -475,8 +475,17 @@ export class Admin extends Context.Service<Admin, {
               break
             }
           }
-          return yield* solana.prepare(ixs, signer)
+          // The owner's wallet pays and signs alone, so a wallet that adds its own checks before signing (Phantom) still works.
+          return yield* solana.prepare(ixs, signer, { payer: signer })
         }).pipe(Effect.catchTag("SolanaUnavailable", (e) => Effect.fail(new AdminInvalid({ message: e.message }))))
+
+      const sendOwner = (by: string, transaction: string) =>
+        admins.has(by)
+          ? solana.relay(transaction).pipe(
+            Effect.map((o) => ({ signature: o.signature })),
+            Effect.mapError((e) => new AdminInvalid({ message: e.message }))
+          )
+          : Effect.fail(new NotFound())
 
       // Only a checkout whose payment landed and whose card Bitrefill didn't deliver; marking it again replaces the record.
       const claimed = (id: string, tx: string, by: string) =>
@@ -499,6 +508,7 @@ export class Admin extends Context.Service<Admin, {
         setSales: sales.setOpen,
         retry,
         ownerTransaction,
+        sendOwner,
         buffer: (by, address) => (admins.has(by) ? upgradable(address) : Effect.fail(new NotFound()))
       })
     })

@@ -1,7 +1,7 @@
 import { Api, type OwnerAction } from "@luckout/api"
 import { address, lamports } from "@solana/kit"
 import { getAssociatedTokenAddressSync } from "@solana/spl-token"
-import { Keypair, type PublicKey, Transaction } from "@solana/web3.js"
+import { Keypair, type PublicKey, SystemProgram, Transaction } from "@solana/web3.js"
 import { Effect, Exit, Layer } from "effect"
 import { OpenApi } from "effect/http-api"
 import { SqlClient } from "effect/sql"
@@ -346,7 +346,7 @@ test("a purchase is found by its id however old, past the latest 300 an account'
     assert.deepEqual(yield* admin.purchases(undefined, "00000000-0000-4000-8000-000000000999"), [], "no such purchase")
   })))
 
-// ---------- owner transactions (ADR-0015): prepared here, signed in the owner's own wallet, sent by cosign ----------
+// ---------- owner transactions (ADR-0015): prepared here, paid for and signed in the owner's own wallet, sent as signed ----------
 
 /** What a wallet does with a prepared transaction: signs it, and hands it back. */
 const signAs = (wallet: Keypair, transaction: string) => {
@@ -362,13 +362,13 @@ const asOwner = <A, E>(f: (w: SolanaWorld, sign: (action: OwnerAction, key?: Key
     const admin = yield* Admin
     const solana = yield* Solana
     const sign = (action: OwnerAction, key = w.owner) =>
-      admin.ownerTransaction("boss", action).pipe(Effect.flatMap((t) => solana.cosign(signAs(key, t.transaction), t.token)))
+      admin.ownerTransaction("boss", action).pipe(Effect.flatMap((t) => admin.sendOwner("boss", signAs(key, t.transaction))))
     return yield* f(w, sign)
   })).pipe(Effect.provide(layerFor(w))))
 }
 
 test("the owner pauses and sets the caps from their own wallet; a non-admin can't prepare anything", () =>
-  asOwner((_, sign) =>
+  asOwner((w, sign) =>
     Effect.gen(function*() {
       const admin = yield* Admin
       const solana = yield* Solana
@@ -388,9 +388,17 @@ test("the owner pauses and sets the caps from their own wallet; a non-admin can'
 
       const resume = yield* admin.ownerTransaction("boss", { _tag: "set_paused", paused: false })
       assert.throws(() => signAs(Keypair.generate(), resume.transaction), /unknown signer/, "only the owner's key can sign it")
+      assert.match((yield* Effect.flip(admin.sendOwner("boss", resume.transaction))).message, /fully signed/, "nothing goes out unsigned")
+      assert.equal((yield* Effect.flip(admin.sendOwner(alice, resume.transaction)))._tag, "NotFound")
+      // The owner's wallet may add its own checks before signing, as Phantom does: it signs alone, so it still lands.
+      const theirs = Transaction.from(Buffer.from(resume.transaction, "base64"))
+      theirs.add(SystemProgram.transfer({ fromPubkey: w.owner.publicKey, toPubkey: w.owner.publicKey, lamports: 0 }))
+      theirs.sign(w.owner)
+      yield* admin.sendOwner("boss", theirs.serialize().toString("base64"))
+      assert.equal((yield* solana.config).paused, false)
     })))
 
-test("the reserve leaves only for the owner's USDC account, opened at our cost, and comes back from it", () =>
+test("the reserve leaves only for the owner's USDC account, opened at the owner's cost, and comes back from it", () =>
   asOwner((w, sign) =>
     Effect.gen(function*() {
       const solana = yield* Solana
@@ -421,9 +429,11 @@ test("the owner names a new operator and Pay Wallet, and hands over to a propose
       yield* sign({ _tag: "propose_owner", newOwner: next.publicKey.toBase58() })
       const proposed = yield* solana.config
       assert.ok(proposed.operator.equals(operator.publicKey))
-      assert.ok(proposed.pay_wallet.equals(getAssociatedTokenAddressSync(w.mint, payWallet.publicKey)), "its USDC account, opened at our cost")
+      assert.ok(proposed.pay_wallet.equals(getAssociatedTokenAddressSync(w.mint, payWallet.publicKey)), "its USDC account, opened at the owner's cost")
       assert.ok(proposed.pending_owner?.equals(next.publicKey))
 
+      // The proposed owner's wallet pays its own fee too.
+      w.svm.airdrop(address(next.publicKey.toBase58()), lamports(10_000_000n))
       yield* sign({ _tag: "accept_owner" }, next)
       const after = yield* solana.config
       assert.ok(after.owner.equals(next.publicKey))
@@ -481,5 +491,6 @@ test("an upgrade shows the buffer's hash first, takes only one the upgrade autho
       const before = w.svm.getBalance(owner) ?? 0n
       yield* sign({ _tag: "upgrade", buffer: ours })
       assert.equal(w.svm.getAccount(address(ours)).exists, false, "the buffer is spent")
-      assert.equal((w.svm.getBalance(owner) ?? 0n) - before, 5_000_000_000n, "its rent went back to the owner, who paid no fee")
+      const back = (w.svm.getBalance(owner) ?? 0n) - before
+      assert.ok(back > 4_999_000_000n && back < 5_000_000_000n, "its rent went back to the owner, less the fee its wallet paid")
     })))

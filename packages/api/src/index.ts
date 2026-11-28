@@ -791,6 +791,9 @@ export class AdminOverview extends Schema.Class<AdminOverview>("AdminOverview")(
   undelivered: Schema.Array(UndeliveredCard)
 }) {}
 
+/** A transaction that landed: its signature. */
+export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
+
 /** A build uploaded for an upgrade (deploy/README.md), as the owner checks it before signing. */
 export class AdminBuffer extends Schema.Class<AdminBuffer>("AdminBuffer")({
   address: Schema.String,
@@ -874,8 +877,14 @@ export class AdminApi extends HttpApiGroup.make("admin").add(
   }),
   /** A buffer holding a build for an upgrade, checked against the program. */
   HttpApiEndpoint.get("buffer", "/admin/buffers/:address", { params: { address: Address }, success: AdminBuffer, error: [NotFound, AdminInvalid] }),
-  /** An owner transaction, unsigned, for the owner's wallet to sign and `/transactions/submit` to send. */
+  /** An owner transaction, unsigned, for the owner's wallet to sign (paying its own fee) and `ownerSend` to send. */
   HttpApiEndpoint.post("owner", "/admin/owner", { payload: OwnerAction, success: PreparedTransaction, error: [NotFound, AdminInvalid] }),
+  /** Sends an owner transaction as the owner's wallet signed it, and waits until it lands. */
+  HttpApiEndpoint.post("ownerSend", "/admin/owner/send", {
+    payload: Schema.Struct({ transaction: Schema.String.check(Schema.isMaxLength(4096)) }),
+    success: Submitted,
+    error: [NotFound, AdminInvalid]
+  }),
   /** Bitrefill's refund for a checkout's undelivered cards reached the Pay Wallet, in transaction `tx`. */
   HttpApiEndpoint.post("claimed", "/admin/checkouts/:id/claimed", {
     params: { id: Schema.String },
@@ -907,8 +916,6 @@ export class DepositAddress extends Schema.Class<DepositAddress>("DepositAddress
   waiting: Schema.Number,
   held: Schema.Array(HeldToken)
 }) {}
-
-export class Submitted extends Schema.Class<Submitted>("Submitted")({ signature: Schema.String }) {}
 
 /**
  * The customer's Customer account in the program, amounts in micro-USDC as strings ("No limit" is u64's maximum).

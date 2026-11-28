@@ -8,7 +8,7 @@ Luckout runs on Solana (ADR-0015): one program per environment, a server on our 
 |---|---|---|
 | Branch | `staging` (PRs from feature branches, with CI passing) | `main` (only by PR from `staging`, with CI passing) |
 | Program | `FM2mRU3R8jtCArHTK4fYiSseDmR9vjhJfPa9D5A2sv3F` (build `--features staging`) | `GCeZ67ann5G1hzNijYtqFiHyAJ4dJy2mwFA6g2eQfssr` (build `--features production`) |
-| Owner and upgrade authority | `59i8NfY9b2qkeQUzJSSg3c54PLbfYf4XmKEv2YLZxrJW`, the owner's own wallet; a copy of its key on the operator's Mac for deploys | a key in the owner's own wallet |
+| Owner and upgrade authority | `59i8NfY9b2qkeQUzJSSg3c54PLbfYf4XmKEv2YLZxrJW`, the owner's own wallet; its key isn't on the operator's Mac | a key in the owner's own wallet |
 | Guardian (pause only) | `BcyJnVFpEX3ufMdqWEAuuNJte4TJM7p5q3Ao4Kd5SwVE`, on the operator's Mac | on the operator's Mac |
 | Operator, fee payer | `B6iF2cR8KUeQNS3Gqd6CskP48UZaqbtFa5eHe6KxfuEc`, `Ex44UESieWATsL8JngBeSi8uEKMTBWeMuAH1bPChVQcH`, made on the VM | made on the VM |
 | Pay Wallet | `9vQpDTkUwS8C4o3jpfS1FjdMoyvpbcyfx4UXgNRYq1RP`, made on the VM; Bitrefill tags it | made on the VM; Bitrefill tags it |
@@ -35,7 +35,7 @@ SSH (22) and CloudPanel (8443) are open only to our Tailscale tailnet; only 80 a
 
 | Key | Holds | Lives |
 |---|---|---|
-| Owner (also the upgrade authority) | the pause, the reserve, Proceeds, the caps, the operator, the Pay Wallet, ownership, upgrades | the owner's wallet, never on the VM. The server refuses to start if any of its keys is the owner's. |
+| Owner (also the upgrade authority) | the pause, the reserve, Proceeds, the caps, the operator, the Pay Wallet, ownership, upgrades | the owner's wallet, never on the VM. The server refuses to start if any of its keys is the owner's. The wallet pays its own transactions' fees and signs them alone, so keep a little SOL in it: a wallet that adds its own checks before signing (Phantom's Lighthouse) would break a transaction someone else co-signs. |
 | Guardian | only the pause: it can't resume, move money or change anything else | the operator's Mac (`~/.luckout/solana-<environment>-guardian.json`), never on the VM; about 0.01 SOL for its fees. The owner names or removes it in the Admin panel. |
 | Upload key | writes an upgrade's build to a buffer and hands the buffer to the upgrade authority | the operator's Mac (`~/.luckout/solana-<environment>-upload.json`); holds SOL only during an upgrade |
 | Program keypair | only the program's address, used once by the first deploy | the operator's Mac; worthless after the first deploy |
